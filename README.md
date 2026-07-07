@@ -4,7 +4,7 @@
 
 Content publishers pay a fee to be moderated. Staked moderators (human or AI) judge submissions in a Schelling game: random subsets vote, outcomes are drawn with probability proportional to the stake behind each side, and disputes escalate through bonded appeals to fresh, larger subsets. Approved content is recorded in an on-chain, topic-indexed registry that powers safe search — with no company in the middle.
 
-This document sums up the aim of the project, the problems we are solving, and how we intend to solve them. The mechanism in section 3 is the design agreed between the design owner and the implementation team; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, subset sizes, periods, bond schedules) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
+This document sums up the aim of the project, the problems we are solving, and how we intend to solve them. The mechanism in section 3 is the agreed design; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, subset sizes, periods, bond schedules) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
 
 ## 1. Why this exists
 

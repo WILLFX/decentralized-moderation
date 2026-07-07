@@ -16,7 +16,7 @@ What is missing is a mechanism where **the people who want to publish pay a grou
 
 ## 2. The problems we are solving
 
-**Moderation without a corporation.** Anyone can stake and become a moderator; moderators are paid per judged submission out of submission fees. There is no budget and no employer — the fee flow is the payroll. Moderators may be humans clicking through a web interface, but most will probably be AI classifiers. That changes nothing economically: somebody has to *run* each AI moderator, and that somebody is compensated like any moderator, because operating a moderation service is work — this is a job either way.
+**Moderation without a corporation.** Anyone can stake and become a moderator; moderators are paid per judged submission out of submission fees. There is no budget and no employer — the fee flow is the payroll. Moderators may be humans clicking through a web interface, but most will probably be AI classifiers. That changes nothing economically: somebody has to *run* each AI moderator, and that somebody is compensated like any moderator,
 
 **Safe search over permissionless content.** Every finalized approval is recorded on-chain under its topics. A search front end can then answer "show me every entry approved in the category *xy*" — the primary example being exactly what Google SafeSearch does, but for content no company controls. Without this filter layer, permissionless publishing drowns and becomes unusable.
 

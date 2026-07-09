@@ -4,19 +4,19 @@
 
 Content publishers pay a fee to be moderated. Staked moderators (human or AI) judge submissions in a Schelling game: random subsets vote, outcomes are drawn with probability proportional to the stake behind each side, and disputes escalate through bonded appeals to fresh, larger subsets. Approved content is recorded in an on-chain, topic-indexed registry that powers safe search — with no company in the middle.
 
-This document sums up the aim of the project, the problems we are solving, and how we intend to solve them. The mechanism in section 3 is the agreed design; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, subset sizes, periods, bond schedules) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
+This document sums up the aim of the project, the problems we are solving, and how we intend to solve them. The mechanism in section 3 is the design agreed between the design owner and the implementation team; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, subset sizes, periods, bond schedules) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
 
 ## 1. Why this exists
 
 Swarm **feeds** make permissionless publishing trivial. A feed is defined by an owner key and a 32-byte topic. In the *anythread* pattern, any URL (or any string) is hashed to derive both a feed owner key and a topic — and because anyone who knows the string can derive the same key, anyone can write to the feed and anyone can read it. The result is commenting, blogging, and annotation on top of any subject, with no user registry, no server, and no operator.
 
-The flip side of "anyone can write" is that anyone can write anything. Centralized platforms (Facebook, YouTube, Meta at large) solve this by employing moderators in large numbers, increasingly assisted by AI — paid out of a corporate budget. A decentralized system has **no corporation and no budget**. Consuming unmoderated feeds means consuming out-of-control filth, which makes the whole publishing layer unusable for ordinary applications.
+The flip side of "anyone can write" is that anyone can write anything;Centralized platforms (Facebook, YouTube, Meta at large) solve this by employing moderators in large numbers, increasingly assisted by AI — paid out of a corporate budget. A decentralized system has **no corporation and no budget**. Consuming unmoderated feeds means consuming out-of-control filth, which makes the whole publishing layer unusable for ordinary applications.
 
 What is missing is a mechanism where **the people who want to publish pay a group of moderators — a group anyone can join as a form of work** — to certify that content is (1) safe (SFW, in the spirit of common community guidelines or what a safe-search filter would pass) and (2) relevant to the topics it claims. That mechanism turns moderation from a corporate cost center into an open, paid job that requires nothing but a smart contract. And its by-product is something the decentralized web currently lacks entirely: **safe search**.
 
 ## 2. The problems we are solving
 
-**Moderation without a corporation.** Anyone can stake and become a moderator; moderators are paid per judged submission out of submission fees. There is no budget and no employer — the fee flow is the payroll. Moderators may be humans clicking through a web interface, but most will probably be AI classifiers. That changes nothing economically: somebody has to *run* each AI moderator, and that somebody is compensated like any moderator,
+**Moderation without a corporation.** Anyone can stake and become a moderator; moderators are paid per judged submission out of submission fees. There is no budget and no employer — the fee flow is the payroll. Moderators may be humans clicking through a web interface, but most will probably be AI classifiers. That changes nothing economically: somebody has to *run* each AI moderator, and that somebody is compensated like any moderator, because operating a moderation service is work — this is a job either way.
 
 **Safe search over permissionless content.** Every finalized approval is recorded on-chain under its topics. A search front end can then answer "show me every entry approved in the category *xy*" — the primary example being exactly what Google SafeSearch does, but for content no company controls. Without this filter layer, permissionless publishing drowns and becomes unusable.
 
@@ -98,7 +98,14 @@ MVP: `block.prevrandao` on Gnosis, snapshotted by the first transaction after th
 
 Search has an easy way and a hard way; **we take the easy way first to reach an MVP**, and optimize later.
 
-**Easy way (MVP):** when an approval becomes final, the (content hash, metadata hash) pair is appended to an **in-contract map: topic → vector of approved entries**. A submission with multiple topics costs proportionally more, since more contract storage is written. The search dapp then serves queries entirely from **contract view functions against the latest state** — no scraping of historical logs, no off-chain indexer infrastructure.
+**Easy way (MVP):** when round one approves an entry, it is written to an **in-contract map: topic → vector of approved entries**. Each entry carries four fields: the content hash, the metadata hash, the **time of approval**, and an **`uncontested` boolean**. The boolean starts `true` only if no reject votes were revealed, and is **cleared by any contest** — a reject vote or an appeal — so a contested entry can never sneak back into the safe view by merely surviving a draw. If an appeal ends in rejection, the entry is removed at settlement. A submission with multiple topics costs proportionally more, since more contract storage is written (the timestamp and flag pack into a single extra storage word). The search dapp then serves queries entirely from **contract view functions against the latest state** — no scraping of historical logs, no off-chain indexer infrastructure.
+
+**Two views of the index.** The system has probabilistic outcomes, and a safe-search product must be honest about that. The two extra fields split the index into:
+
+- the **superset** — everything currently approved by the system, including entries that won contested, probabilistic draws; and
+- the **supersafe subset** — the startpage mode: `uncontested == true && now − approvalTime ≥ 96h`. Judged safe with not a single dissenting vote, and sat through the first appeal window with nobody in public objecting — as close to certainty as a decentralized system gets, computed entirely client-side from the same two fields.
+
+The voting system stays meaningful for everything contested; the supersafe view simply gives cautious front ends (a default startpage, a kids-mode client) a subset that never depended on luck.
 
 **Hard way (later):** publishing the index into Swarm feeds for a more economical, chain-light structure once the MVP proves the mechanism — without changing the moderation game.
 
@@ -120,7 +127,7 @@ Making the money flows explicit, since this is the heart of the design:
 | 1 | **Moderation contract** | Staking, submissions, stake-weighted subset draws, commit-reveal voting, probabilistic outcomes, bonded appeals, track-record bookkeeping, freeze accounting, fee/bond pots, topic → approvals index | Solidity on Gnosis Chain |
 | 2 | **Moderator interface** | Web GUI making contract interaction easy for working moderators: eligible cases, content/metadata fetch from Swarm, commit/reveal voting, appealing, claiming, stake and freeze status | Rust → WebAssembly |
 | 3 | **Submit interface** | Web GUI for content creators: compose submission (content hash, metadata JSON validated against the schema, topics), pay fee, track status, appeal rejections | Rust → WebAssembly |
-| 4 | **Search dapp** | Safe-search front end: query the approved index by topic via contract view functions; ranking and presentation live client-side and are replaceable | Rust → WebAssembly |
+| 4 | **Search dapp** | Safe-search front end: query the approved index by topic via contract view functions; supersafe startpage mode (uncontested + seasoned entries) and full superset view; ranking and presentation live client-side and are replaceable | Rust → WebAssembly |
 
 **Gnosis Chain** is chosen deliberately: Bee already depends on it for xBZZ, and its minimal transaction fees are essential for a system built on many small votes, appeals, and fee payments.
 
@@ -146,7 +153,7 @@ Reviewed by the design owner and delegated to implementation discretion; treated
 
 **P6 — Governance, minimal and honest.** Core logic immutable; only bounded numeric parameters (subset fraction, vote counts, windows, bond schedule, freeze base and cap, track-record decay, fee floor) adjustable behind a multisig with a timelock; withdrawals can never be paused. A "decentralized moderation" contract with an admin backdoor would be a contradiction, so the trust assumptions are stated rather than hidden.
 
-**P7 — Latency honesty and optimistic display.** Unappealed content finalizes in ~24 hours plus one appeal window — days, not minutes. That suits durable content (posts, videos, articles, anything where SEO matters) and does not suit real-time chat. Deep disputes take weeks, but they are rare and self-funding. The search dapp can display round-one-approved entries flagged *provisional*, with the final badge at finalization.
+**P7 — Latency honesty and optimistic display.** Unappealed content finalizes in ~24 hours plus one appeal window — days, not minutes. That suits durable content (posts, videos, articles, anything where SEO matters) and does not suit real-time chat. Deep disputes take weeks, but they are rare and self-funding. Optimistic display now falls out of the index fields directly (3.8): entries younger than 96 hours or contested render as *provisional*; entries passing the supersafe filter render with the final badge. No dapp-side case tracking needed.
 
 **P8 — Fee floor and a natural priority market.** The contract enforces `minFee = base + perTopic × nTopics` (covering storage and minimum voter pay). Submitters may overpay; moderators see fees and rationally prioritize high-fee cases — a priority market with zero extra protocol.
 
@@ -174,4 +181,3 @@ Also open: long-term topic-namespace governance; who maintains the guidelines do
 
 ---
 
-*Status: v3 — mechanism agreed between the design owner and the implementation team; ready for wider review. Improvement proposals remain welcome at any point: the aim of this document is to keep the mechanism and its open problems explicit enough to be attacked.*

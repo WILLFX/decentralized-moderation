@@ -168,6 +168,29 @@ def test_modest_farm_buys_little_freeze_power():
     assert res["farm_freeze_multiplier"] < 1.25, res["farm_freeze_multiplier"]
 
 
+def test_fee_floor_lets_moderators_clear_costs():
+    """At the derived fee floor, honest moderators net positive after op costs.
+
+    Validates the fee-floor model (costs.py): minFee = voter-pay + gas at a 1.5x
+    margin keeps honest moderators profitable even on harder content, across a
+    range of assumed per-vote operating costs (spec §11.5).
+    """
+    for diff in (0.0, 0.5):
+        rows = sc.fee_floor(op_costs=(0.01, 0.05, 0.2), margin=1.5,
+                            difficulty=diff, trials=1500, seed=7)
+        for r in rows:
+            assert r["moderators_clear_costs"], (diff, r)
+            assert r["honest_net_per_case_xbzz"] > 0, (diff, r)
+
+
+def test_fee_floor_gas_is_negligible():
+    """The fee floor is dominated by voter pay, not Gnosis gas."""
+    from moderation_sim.costs import CostModel
+    for c in (0.005, 0.05, 0.25):
+        bd = CostModel(op_cost_per_vote_xbzz=c).breakdown(1)
+        assert bd["gas_share_of_fee"] < 0.05, bd
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

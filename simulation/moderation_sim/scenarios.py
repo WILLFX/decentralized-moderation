@@ -228,6 +228,44 @@ def honest_earnings(p: Params, difficulty: float = 0.0, trials: int = 3000,
     return m
 
 
+def fee_floor(op_costs=(0.005, 0.02, 0.05, 0.1, 0.25), margin: float = 1.5,
+              difficulty: float = 0.0, trials: int = 3000, seed: int = 7) -> list:
+    """Derive the fee floor from the per-vote operating cost, and validate it.
+
+    For each assumed per-judgment operating cost ``c`` (the real-world unknown),
+    build the fee floor via :class:`CostModel` (gas + minimum voter pay at
+    ``margin`` over cost), then run the honest, no-attacker scenario at exactly
+    that floor with moderators charged ``c`` per judgment. Reports whether honest
+    moderators clear their costs (``honest_net_per_case`` > 0) at the floor, and
+    how little of the fee is gas.
+    """
+    from .costs import CostModel
+
+    rows = []
+    for c in op_costs:
+        cm = CostModel(op_cost_per_vote_xbzz=c, voter_pay_margin=margin)
+        p = Params()
+        p.fee_base = cm.fee_base()
+        p.fee_per_topic = cm.fee_per_topic()
+        p.op_cost_per_vote = c
+        rng = random.Random(seed)
+        m = Metrics()
+        for _ in range(trials):
+            pop = build_population(rng)
+            label = Outcome.APPROVE if rng.random() < 0.5 else Outcome.REJECT
+            case = _make_case("submission", label, difficulty, None)  # fee defaults to min_fee
+            r = run_case(pop, p, case, rng)
+            m.add(r)
+        bd = cm.breakdown(1)
+        rows.append({
+            **bd,
+            "honest_net_per_case_xbzz": round(m.faction_net("honest") / m.n, 5),
+            "correctness": round(m.correctness(), 4),
+            "moderators_clear_costs": m.faction_net("honest") > 0,
+        })
+    return rows
+
+
 def copy_voting(p: Params, lazy_frac: float = 0.5, difficulty: float = 0.1,
                 trials: int = 3000, seed: int = 5) -> Metrics:
     """First-come racing / copy-voting: correctness as copy-voter share grows."""

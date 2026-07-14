@@ -55,6 +55,10 @@ class Params:
     fee_base: float = 1.0              # FEE_BASE
     fee_per_topic: float = 0.5         # FEE_PER_TOPIC
     max_topics: int = 5                # MAX_TOPICS
+    # Operating cost a moderator pays per judgment (per case it votes in) —
+    # e.g. an AI classifier call. Default 0 leaves existing scenarios unchanged;
+    # the fee-floor model (costs.py) sets it to price the fee floor.
+    op_cost_per_vote: float = 0.0
 
     # --- randomness / latency (informational in the sim) ---
     supersafe_age_hours: float = 96.0  # SUPERSAFE_AGE

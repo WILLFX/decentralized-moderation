@@ -59,6 +59,9 @@ as a mental model and directly testable in M2.
 | `SUPERSAFE_AGE` | Age an uncontested entry must reach for supersafe view | 96 h |
 
 `minFee = FEE_BASE + FEE_PER_TOPIC * nTopics` (P8). Submitters MAY overpay.
+`FEE_BASE` covers the depth-0 panel's minimum voter pay (`COMMIT_TARGET[0] ·
+margin · c`, for per-judgment cost `c`) plus fixed gas; `FEE_PER_TOPIC` covers one
+index write's gas. Derivation and calibration: `simulation/costs.py`, FINDINGS §2b.
 
 ---
 
@@ -468,15 +471,19 @@ resolving. See `simulation/FINDINGS.md` for the evidence behind each.
 - **§11.6 per-case stake benefit (the double-count)** — **stake-weighted seat
   selection with replacement + flat voting** (reviewer decision); §5.3, invariant
   10. Bonds scale with the pot; §5.2.
+- **fee-floor structure** — `minFee = COMMIT_TARGET[0] · (margin · c) + gasCost`,
+  where `c` is the operator's per-judgment cost and `margin ≈ 1.5–2`
+  (`simulation/costs.py`). Gnosis gas is negligible in the floor; moderators clear
+  costs at the derived floor (FINDINGS §2b).
 
-**Still open (calibration, not structure):**
+**Still open (magnitudes bound to real inputs, not structure):**
 
 1. `SUBSET_FRACTION(N)` curve, and `COMMIT_TARGET` (seat counts) per depth.
 2. `BOND_MULTIPLIER` magnitude (structure fixed: bond ≥ `BOND_MULTIPLIER × pot`).
 3. `FREEZE_BASE` and `FREEZE_CAP` magnitudes; `TRACK_SAT`/`TRACK_DECAY` fine-tuning.
 4. Per-round reward weighting (do later, larger rounds count more? §6.2).
-5. `FEE_BASE`, `FEE_PER_TOPIC` floor — needs an external cost-of-a-moderation-call
-   model before it can be fixed (FINDINGS §2).
+5. Fee-floor inputs: `margin` and the operator cost `c` — `c` is an operator
+   input, and final gas terms come from the M2 contract's measured `SSTORE` costs.
 6. `REVEAL_WINDOW`, under-participation retry bound, `MIN_REVEALS` under
    correlated (bursty) offline behaviour.
 

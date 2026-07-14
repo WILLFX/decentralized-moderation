@@ -88,6 +88,20 @@ def cmd_honest(p: Params, args) -> dict:
     return out
 
 
+def cmd_fee_floor(p: Params, args) -> dict:
+    rows = sc.fee_floor(margin=args.margin, trials=args.trials, seed=args.seed)
+    print("\n=== fee_floor: minimum fee derived from per-vote operating cost ===")
+    print(f"  (voter_pay = {args.margin}x op cost; Gnosis gas at CostModel defaults)")
+    print(f"  {'op_cost':>9} {'min_fee':>9} {'fee_usd':>8} {'gas_share':>10} "
+          f"{'honest_net/case':>16} {'clears?':>8}")
+    for r in rows:
+        print(f"  {r['op_cost_per_vote_xbzz']:>9.4f} {r['min_fee_xbzz']:>9.4f} "
+              f"{r['min_fee_usd']:>8.4f} {r['gas_share_of_fee']:>10.5f} "
+              f"{r['honest_net_per_case_xbzz']:>16.5f} "
+              f"{'yes' if r['moderators_clear_costs'] else 'NO':>8}")
+    return {"rows": rows}
+
+
 def cmd_copy(p: Params, args) -> dict:
     out = {}
     print("\n=== copy_voting: correctness vs copy-voter share (difficulty=0.1) ===")
@@ -116,6 +130,7 @@ def cmd_all(p: Params, args) -> dict:
         "whale_sweep": cmd_whale_sweep(p, args),
         "track_farming": cmd_track_farming(p, args),
         "honest_earnings": cmd_honest(p, args),
+        "fee_floor": cmd_fee_floor(p, args),
         "copy_voting": cmd_copy(p, args),
         "underparticipation": cmd_underparticipation(p, args),
     }
@@ -127,6 +142,7 @@ COMMANDS = {
     "bond-war": cmd_bond_war,
     "track-farming": cmd_track_farming,
     "honest": cmd_honest,
+    "fee-floor": cmd_fee_floor,
     "copy": cmd_copy,
     "underparticipation": cmd_underparticipation,
     "all": cmd_all,
@@ -143,6 +159,8 @@ def main(argv=None) -> int:
     ap.add_argument("--track", type=float, default=0.0, help="honest track record")
     ap.add_argument("--difficulty", type=float, default=0.0)
     ap.add_argument("--farm-cases", type=int, default=30)
+    ap.add_argument("--margin", type=float, default=1.5,
+                    help="voter pay as a multiple of per-vote op cost (fee-floor)")
     ap.add_argument("--json", type=str, default=None, help="write results as JSON")
     ap.add_argument("--track-saturation", type=float, default=None,
                     help="override Params.track_saturation (freeze calibration)")

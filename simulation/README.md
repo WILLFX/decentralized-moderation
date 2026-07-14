@@ -59,6 +59,7 @@ simulation/
     params.py                  Params dataclass — every spec §1 symbol
     protocol.py                case engine: rounds, draws, appeals, settlement
     agents.py                  voting strategies (honest, attacker, copy-voter)
+    costs.py                   fee-floor cost model (gas + voter pay)
     scenarios.py               the README §7 attack experiments
     metrics.py                 Monte-Carlo aggregation
   tests/test_protocol.py       invariant + sanity tests
@@ -72,7 +73,8 @@ simulation/
 | `whale` / `whale-sweep` | §3.6, §4 | A stake majority cannot force an outcome with certainty and earns nothing internally; cost = fees + forfeited bonds + freeze drag. |
 | `bond-war` | §3.6 | Honest challengers re-litigate whale wins up the appeal ladder; who funds whom. |
 | `track-farming` | §7 | Cost of manufacturing freezing power via innocuous self-submissions vs the power gained. |
-| `honest` | principle 1 | Honest-moderator ROI on clear vs borderline content; losing a borderline draw is annoying, never ruinous. |
+| `honest` | principle 1 | Honest-moderator ROI on clear vs borderline content; losing a borderline draw is an inconvenience, not a loss. |
+| `fee-floor` | P8, §11.5 | Derives the fee floor from per-vote operating cost; shows gas is negligible and moderators clear costs at a 1.5× margin. |
 | `copy` | §7 | First-come racing / copy-voting degrades correctness only as independence breaks — quantifies why commit-reveal matters. |
 | `underparticipation` | §5.2 | Offline moderators trigger subset widening; effect on liveness and correctness. |
 

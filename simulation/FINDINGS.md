@@ -80,10 +80,40 @@ freezing is deterrence, not confiscation (a frozen moderator keeps its
 principal). Correctness under flat voting is *higher* than under the old
 stake-weighted tally, because no single large voter can drag a clear case.
 
-**Open (§11.5).** `honest_net/case ≈ the fee floor`. Whether that clears the real
-cost of running an AI classifier needs an external cost-of-a-moderation-call
-model, which this sim does not yet include. Add one before fixing `FEE_BASE`/
-`FEE_PER_TOPIC`.
+## 2b. The fee floor — derived from operating cost, and gas is negligible
+
+`python3 run.py fee-floor`
+
+The fee floor must cover two costs (README P8): protocol gas and minimum voter
+pay. `costs.py` models both; the one real unknown is the **per-vote operating
+cost** `c` (running one judgment / AI-classifier call), which we sweep. The floor
+is `minFee = COMMIT_TARGET[0] · (margin · c) + gas`, at a working `margin = 1.5`.
+
+| op cost `c` (xBZZ) | min fee (xBZZ) | min fee (USD) | gas share of fee | honest net/case | clears? |
+|---|---|---|---|---|---|
+| 0.005 | 0.038 | $0.008 | 2.2% | +0.012 | yes |
+| 0.02  | 0.151 | $0.030 | 0.5% | +0.044 | yes |
+| 0.05  | 0.376 | $0.075 | 0.2% | +0.110 | yes |
+| 0.10  | 0.751 | $0.150 | 0.1% | +0.219 | yes |
+| 0.25  | 1.876 | $0.375 | 0.04%| +0.545 | yes |
+
+**Reading.** Two clear results:
+
+1. **Gnosis gas is negligible** — 0.04–2% of the fee. The floor is, to first
+   order, `nSeats · voter_pay`. Storage/gas is a rounding error next to paying
+   the voters, which is exactly why Gnosis was chosen (README §5).
+2. **Moderators clear their costs at a 1.5× margin.** At the derived floor,
+   honest net/case is positive across the whole cost range, and it holds on
+   harder content too (still positive at difficulty 0.5, thinner because more
+   voters are incoherent — paid but unrewarded). `margin = 1.5` is therefore a
+   viable minimum; `margin ≈ 2` gives a comfortable cushion on borderline
+   content. (`test_fee_floor_lets_moderators_clear_costs`.)
+
+**Assumption made explicit.** The floor scales linearly with `c`, so no single
+fee is baked in — the operator picks `c` for their real classifier cost and reads
+off the floor. The USD column assumes `xBZZ = $0.20`; both `c` and the xBZZ price
+are `CostModel` knobs. Submitters may overpay for priority (P8); this is only the
+floor.
 
 ## 3. Track-record farming — resolved (was the main flagged weakness)
 
@@ -155,17 +185,19 @@ liveness.
 | **Per-case stake benefit (double-count)** | **Decided:** stake-weighted seat selection (with replacement) + flat voting. §5.3. |
 | **Freezing-power formula** | **Decided:** saturating curve over seat-weighted **mean** winning-side track. §6.4. |
 | **Track-record anti-farming** | **Decided:** mean-not-sum + accrual gated on undisputed/coherent/min-stake. §6.5. |
+| **`FEE_BASE`/`FEE_PER_TOPIC` structure** | **Decided:** `minFee = nSeats·(margin·c) + gas` (`costs.py`); gas negligible, moderators clear costs at margin 1.5. §2b. |
 | Subset fraction / `COMMIT_TARGET` (seats) | Open: 5→11→23 keeps rounds decisive; revisit with correlated liveness. |
 | `BOND_MULTIPLIER` magnitude | Open: 2× makes honest re-litigation self-funding; structure (bond ≥ 2×pot) fixed. |
 | `FREEZE_BASE`/`FREEZE_CAP`, `TRACK_SAT`/`TRACK_DECAY` magnitudes | Open: current defaults defensible; fine-tune with `--track-saturation`/`--track-decay`. |
 | Per-round reward weighting | Open: not yet differentiated; needs a variant weighting larger rounds more. |
-| `FEE_BASE`/`FEE_PER_TOPIC` | Open: needs an external cost-of-a-moderation-call model. |
+| Fee-floor `margin` and op-cost `c` magnitude | Open: `margin ≈ 1.5–2` validated; `c` is an operator input, not a protocol constant. |
 | `REVEAL_WINDOW` / under-participation | Open: 3-reveal minimum robust to ~15% online; test correlated offline. |
 
 **Bottom line.** The structural security claims — *no certain attack*, *no
 internal attack profit*, *Sybil-neutral selection* — hold in the model and are
-test-guarded. Both design questions that were open at first pass (the stake
-double-count and track-record farming) are now closed with justified formulas and
-before/after numbers. What remains is magnitude calibration, which is exactly the
-kind of thing that should stay open until M2 has a gas/cost model to calibrate
-against.
+test-guarded. The design questions open at first pass (the stake double-count,
+track-record farming, and the fee-floor structure) are now closed with justified
+formulas, before/after numbers, and a cost model. What remains is magnitude
+calibration bound to real inputs (operator classifier cost, xBZZ price, final gas
+measurements from the M2 contract) — the right things to leave open until M2
+exists to measure them.

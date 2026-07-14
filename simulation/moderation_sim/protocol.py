@@ -108,6 +108,7 @@ class CaseResult:
     rewards_earned: Dict[str, float] = field(default_factory=dict)
     freeze_stake_days: Dict[str, float] = field(default_factory=dict)
     n_frozen: Dict[str, int] = field(default_factory=dict)
+    op_costs: Dict[str, float] = field(default_factory=dict)  # operating cost of judging
     uncontested: bool = False          # index field: no reject vote and never appealed
 
 
@@ -374,6 +375,17 @@ def _settle(case: Case, p: Params, pot: float, result: CaseResult) -> None:
             m.track = m.track * p.track_decay + 1.0
         else:
             m.track *= p.track_decay
+
+    # 3b. operating cost: every moderator that judged the case pays its per-vote
+    #     cost once per round it was drawn into (it evaluates the content to
+    #     vote). Reduces its earnings; tracked for the fee-floor model (costs.py).
+    if p.op_cost_per_vote > 0:
+        for r in case.rounds:
+            for mid in r.seats:
+                if r.votes.get(mid) is not None:
+                    m = r.mods[mid]
+                    m.earnings -= p.op_cost_per_vote
+                    _bump(result.op_costs, m.faction, p.op_cost_per_vote)
 
     # 4. freeze incoherent voters (spec §6.4). No stake transfer — locked only.
     power = freezing_power(winners_mean_track, p)

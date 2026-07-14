@@ -22,6 +22,7 @@ class Metrics:
     bonds_forfeited: Dict[str, float] = field(default_factory=dict)
     freeze_stake_days: Dict[str, float] = field(default_factory=dict)
     frozen_counts: Dict[str, int] = field(default_factory=dict)
+    op_costs: Dict[str, float] = field(default_factory=dict)
 
     def add(self, r: CaseResult, attacker_target: Outcome | None = None) -> None:
         self.n += 1
@@ -41,6 +42,8 @@ class Metrics:
             self.freeze_stake_days[k] = self.freeze_stake_days.get(k, 0.0) + v
         for k, v in r.n_frozen.items():
             self.frozen_counts[k] = self.frozen_counts.get(k, 0) + v
+        for k, v in r.op_costs.items():
+            self.op_costs[k] = self.op_costs.get(k, 0.0) + v
 
     # --- derived ---
     def correctness(self) -> float:
@@ -56,15 +59,17 @@ class Metrics:
         return mean(self.latencies) if self.latencies else 0.0
 
     def faction_net(self, faction: str) -> float:
-        """Net external money for a faction: rewards - fees - forfeited bonds.
+        """Net money for a faction: rewards - fees - forfeited bonds - op costs.
 
-        Positive means the faction was paid by the system; negative means it
-        funded the system. Frozen stake is NOT counted here (no stake is
-        transferred) -- see ``freeze_stake_days`` for the freeze drag.
+        Positive means the faction came out ahead; negative means it funded the
+        system. Operating cost (running each judgment) is included so honest
+        moderator economics are net of their real costs. Frozen stake is NOT
+        counted here (no stake is transferred) -- see ``freeze_stake_days``.
         """
         return (self.rewards.get(faction, 0.0)
                 - self.fees.get(faction, 0.0)
-                - self.bonds_forfeited.get(faction, 0.0))
+                - self.bonds_forfeited.get(faction, 0.0)
+                - self.op_costs.get(faction, 0.0))
 
     def summary(self) -> Dict[str, float]:
         return {

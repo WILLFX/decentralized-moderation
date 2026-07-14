@@ -38,13 +38,12 @@ is **APPROVED** only if the answer to all three is *yes*; otherwise it is
 
 That single line is the v1 safety standard. If a mainstream safe-search filter,
 tuned for a general audience including minors, would return the content, it is
-safe. If it would be filtered out, it is not.
+safe. If it would be filtered out, it is not. The standard deliberately defers
+the boundary to a well-understood external reference rather than restating a
+catalogue of prohibited material here.
 
-This covers, non-exhaustively, the categories a reasonable person expects a
-safe-search filter to remove: sexually explicit content, graphic violence and
-gore, content that sexualizes minors (an absolute line — always reject), and
-content whose primary purpose is to harass, threaten, or incite violence against
-a person or group.
+One category is stated explicitly because it admits no ambiguity: content that
+sexualizes minors is rejected without exception.
 
 When in genuine doubt about safety, **reject**. The index exists to be trusted;
 a false approval costs the index its credibility, while a false rejection costs
@@ -63,24 +62,25 @@ content, so a dishonest description is itself a safety failure.
 
 The submission declares a list of topics. Each declared topic must be **accurate**
 — the content is genuinely about that topic — and **itself acceptable** as an
-index category (not spam, not an attempt to pollute an unrelated topic's results,
-not a slur or an unsafe label). A submission that is safe and honestly described
-but filed under topics it has nothing to do with should be **rejected**: topic
-spam degrades the search product for everyone.
+index category: it must not be used to place content under an unrelated topic,
+and must not itself be a slur or an otherwise unacceptable label. A submission
+that is safe and honestly described but filed under topics it does not concern
+should be **rejected**, since misfiled topics degrade the quality of the index
+for all users.
 
 ---
 
 ## 2. What you are *not* judging
 
 - **Quality, popularity, or usefulness.** These guidelines are a safety and
-  honesty filter, not an editorial one. Dull, low-effort, or niche content that
-  is safe, honestly described, and correctly filed is **APPROVED**. Ranking and
-  curation live client-side in the search dapps and are explicitly replaceable;
-  they are not your job.
+  honesty filter, not an editorial one. Low-effort or niche content that is safe,
+  honestly described, and correctly filed is **APPROVED**. Ranking and curation
+  live client-side in the search dapps and are explicitly replaceable; they are
+  outside the scope of moderation.
 - **Legality in any specific jurisdiction.** You are applying a single global
-  safe-search standard, not the law of any one country. (Content that later
-  proves illegal is handled by the removal-request path, P1, not by asking
-  moderators to be lawyers.)
+  safe-search standard, not the law of any one country; moderators are not asked
+  to make legal determinations. Content later shown to be illegal is handled by
+  the removal-request path (P1).
 - **The submitter's identity or motive.** Judge the content and its metadata,
   not who sent it.
 
@@ -97,21 +97,22 @@ fails any part of the test — for example the content has been shown to be
 unsafe, the metadata has been shown to be bait, or the underlying Swarm content
 is gone so the entry points at nothing. Vote to **keep** (coherent with
 rejecting the removal request) if the entry still passes. A removal request is
-not a second bite at a fair approval; frivolous removals fund the moderators who
-correctly vote to keep, exactly as frivolous submissions do.
+not a mechanism for re-litigating a sound approval; frivolous removals fund the
+moderators who correctly vote to keep, exactly as frivolous submissions do.
 
 ## 4. Practical notes for moderators
 
 - **Fetch before you vote.** Both the content chunk and the metadata JSON are
   content-addressed (CAC), so what you fetch is exactly what was submitted and
   exactly what stays approved. Never vote on the metadata alone.
-- **Borderline is allowed to be borderline.** Hard cases exist. If a call is
-  genuinely borderline you may lose the probabilistic draw and be frozen for a
-  while; that is annoying but never ruinous (design principle 1). Judge honestly
-  anyway — over many cases, honest judgment is the only strategy that pays.
-- **Appeal wrong outcomes.** If you believe a finalized-looking outcome is wrong,
-  the appeal path exists for you: a correct appeal is reimbursed with a bonus. A
-  wrong outcome left unappealed is nobody's fault but the network's.
+- **Borderline cases will occur.** On a genuinely borderline judgment you may
+  lose the probabilistic draw and be frozen for a period; this is an
+  inconvenience, not a material loss (design principle 1). Judge honestly
+  regardless — over many cases, honest judgment is the only strategy that is
+  profitable in the long run.
+- **Appeal incorrect outcomes.** If you believe a provisional outcome is wrong,
+  the appeal path is available: a correct appeal is reimbursed with a bonus. An
+  incorrect outcome that no one appeals will simply stand.
 - **Use a fresh address per moderator identity.** Addresses are permanently
   linked on-chain to the decisions they make. Treat moderator addresses as
   disposable identities, not as your primary wallet. (Open question in the

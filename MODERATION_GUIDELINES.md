@@ -38,13 +38,12 @@ is **APPROVED** only if the answer to all three is *yes*; otherwise it is
 
 That single line is the v1 safety standard. If a mainstream safe-search filter,
 tuned for a general audience including minors, would return the content, it is
-safe. If it would be filtered out, it is not.
+safe. If it would be filtered out, it is not. The standard deliberately defers
+the boundary to a well-understood external reference rather than restating a
+catalogue of prohibited material here.
 
-This covers, without limitation, the categories a general-audience safe-search
-filter is expected to remove: sexually explicit material; graphic violence;
-content that sexualizes minors (an absolute prohibition — always reject); and
-content whose primary purpose is to harass, threaten, or incite violence against
-a person or group.
+One category is stated explicitly because it admits no ambiguity: content that
+sexualizes minors is rejected without exception.
 
 When in genuine doubt about safety, **reject**. The index exists to be trusted;
 a false approval costs the index its credibility, while a false rejection costs

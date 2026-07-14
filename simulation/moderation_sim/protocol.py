@@ -1,30 +1,38 @@
 """Core protocol engine: the case lifecycle from ``specs/state-machine.md`` §5.
 
-The engine plays one full case (submission or removal) through commit -> reveal
--> tally -> probabilistic draw -> appeal ladder -> settlement, over a population
-of moderators. It records everything a scenario needs to price an attack:
-who won, whether the outcome matched honest judgment, how much every faction
-spent (fees + forfeited bonds), how much honest moderators earned, and how much
-attacker capital got frozen and for how long.
+The engine plays one full case (submission or removal) through selection ->
+commit-reveal -> tally -> probabilistic draw -> appeal ladder -> settlement, over
+a population of moderators. It records everything a scenario needs to price an
+attack: who won, whether the outcome matched honest judgment, how much every
+faction spent (fees + forfeited bonds), how much honest moderators earned, and
+how much attacker capital got frozen and for how long.
+
+Selection / voting model (post-review decision — see design log). Stake buys a
+moderator *one* benefit, not two:
+
+  * SELECTION is stake-weighted **with replacement**: the round has N counted
+    seats, and each seat is drawn in proportion to stake, so a large stake can
+    hold several seats (Kleros sortition). Splitting a stake into many identities
+    is neutral — expected seats track total stake however it is sliced.
+  * VOTING is **flat**: every seat is worth exactly one vote. The outcome is
+    drawn with probability proportional to the *seat counts* behind each side.
+
+This removes the earlier double-count (stake-weighted selection AND a
+stake-weighted tally), which over-represented and over-weighted the same whale.
+Stake now matters exactly once, through how many seats it wins.
 
 Faithfulness notes (where the sim abstracts the chain):
   * Commit-reveal is modeled by its effect: votes are independent and hidden
-    until tally. Copy-voting is modeled explicitly as a strategy, not via
-    leaked commits.
-  * Subset eligibility (1-10%) followed by "first-N-commits-count" collapses,
-    under the assumption that response speed is independent of stake, to a
-    single stake-weighted draw of the counted voters. That is what we sample.
-  * Identity splitting is neutral by protocol design (stake-weighted draws), so
-    each faction's attacker capital is modeled as its total stake rather than a
-    number of identities. ``tests/`` asserts the neutrality we rely on.
-  * "Stake behind each side" is configurable via ``Params.weight_policy``
-    (spec open question §11.6).
+    until tally. Copy-voting is modeled explicitly as a strategy (agents.py).
+  * A drawn seat whose holder does not reveal is dropped (liveness); if too few
+    seats reveal, the panel is re-drawn larger (spec §5.2 widen path).
 """
 
 from __future__ import annotations
 
 import math
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Callable, Dict, List, Optional
@@ -56,22 +64,19 @@ class Moderator:
     def is_frozen(self, now: float) -> bool:
         return self.frozen_until > now
 
-    def available_stake(self, now: float) -> float:
-        return 0.0 if self.is_frozen(now) else self.stake
-
 
 @dataclass
 class _Round:
     depth: int
-    counted: List[Moderator] = field(default_factory=list)
-    votes: Dict[int, Outcome] = field(default_factory=dict)  # mod id -> revealed vote
-    approve_weight: float = 0.0
-    reject_weight: float = 0.0
+    seats: Dict[int, int] = field(default_factory=dict)      # mod id -> seat count
+    mods: Dict[int, Moderator] = field(default_factory=dict)  # mod id -> Moderator
+    votes: Dict[int, Outcome] = field(default_factory=dict)   # mod id -> revealed vote
+    approve_seats: int = 0
+    reject_seats: int = 0
     outcome: Optional[Outcome] = None
     bond: float = 0.0                 # bond that opened this round (0 at depth 0)
     appellant: Optional[Moderator] = None
     appellant_for: Optional[Outcome] = None  # the outcome the appellant argued for
-    total_reward: float = 0.0         # basis for next bond floor
 
 
 @dataclass
@@ -97,11 +102,10 @@ class CaseResult:
     depth_reached: int
     pot: float
     latency_days: float
-    # money flows, keyed by faction
+    disputed: bool = False             # any appeal opened
     fees_paid: Dict[str, float] = field(default_factory=dict)
     bonds_forfeited: Dict[str, float] = field(default_factory=dict)
     rewards_earned: Dict[str, float] = field(default_factory=dict)
-    # freeze pressure applied, keyed by faction: sum of stake*days frozen
     freeze_stake_days: Dict[str, float] = field(default_factory=dict)
     n_frozen: Dict[str, int] = field(default_factory=dict)
     uncontested: bool = False          # index field: no reject vote and never appealed
@@ -111,47 +115,37 @@ class CaseResult:
 # helpers
 # ---------------------------------------------------------------------------
 
-def freezing_power(track_sum: float, p: Params) -> float:
+def freezing_power(mean_track: float, p: Params) -> float:
     """Winning side's freeze multiplier from its aggregate track record.
 
-    Saturating curve from 1 (newcomers) up to FREEZE_CAP (established veterans),
-    realizing design principle 4. Exact shape is a simulation deliverable; this
-    is a defensible default (spec §6.4, §11.3).
+    Takes the **seat-weighted mean** track of the winning side, not the sum, so
+    it is neutral to identity-splitting: dividing one moderator's history across
+    many identities cannot inflate an average. Saturating curve from 1
+    (newcomers) up to FREEZE_CAP (established veterans), realizing design
+    principle 4 (spec §6.4). Curve shape and saturation chosen by simulation.
     """
-    if track_sum <= 0:
+    if mean_track <= 0:
         return 1.0
-    frac = 1.0 - math.exp(-track_sum / p.track_saturation)
+    frac = 1.0 - math.exp(-mean_track / p.track_saturation)
     return 1.0 + (p.freeze_cap - 1.0) * frac
 
 
-def _weight(mod: Moderator, p: Params) -> float:
-    if p.weight_policy == "whole":
-        return mod.stake
-    if p.weight_policy == "fixed":
-        return p.fixed_weight
-    if p.weight_policy == "capped":
-        return min(mod.stake, p.weight_cap)
-    raise ValueError(f"unknown weight_policy {p.weight_policy!r}")
+def _draw_seats(pool: List[Moderator], k: int, rng: random.Random) -> Counter:
+    """Draw k seats stake-weighted WITH replacement. Returns mod.id -> seat count.
 
-
-def _weighted_sample_without_replacement(
-    pool: List[Moderator], k: int, rng: random.Random
-) -> List[Moderator]:
-    """Efraimidis-Spirakis A-Res: draw k items with prob proportional to stake."""
-    if k >= len(pool):
-        return list(pool)
-    keyed = []
-    for m in pool:
-        w = max(m.stake, 1e-12)
-        # key = u^(1/w); larger stake -> key closer to 1 -> more likely selected
-        key = rng.random() ** (1.0 / w)
-        keyed.append((key, m.id, m))
-    keyed.sort(reverse=True)
-    return [m for _, _, m in keyed[:k]]
+    A moderator may win several seats in proportion to stake. Splitting a stake
+    into many identities is neutral in expectation: total selection weight is the
+    summed stake either way.
+    """
+    if not pool or k <= 0:
+        return Counter()
+    weights = [max(m.stake, 1e-12) for m in pool]
+    drawn = rng.choices(pool, weights=weights, k=k)
+    return Counter(m.id for m in drawn)
 
 
 def _draw_outcome(approve_w: float, reject_w: float, rng: random.Random) -> Outcome:
-    """Stake-proportional probabilistic outcome (spec §0)."""
+    """Seat-proportional probabilistic outcome (spec §0)."""
     total = approve_w + reject_w
     if total <= 0:
         return Outcome.REJECT
@@ -169,34 +163,38 @@ def _run_round(case: Case, pop: List[Moderator], depth: int,
     widen = 0
     while True:
         eligible = [m for m in pop if not m.is_frozen(case.now)]
-        k = target + widen * target  # widening enlarges the counted set
-        counted = _weighted_sample_without_replacement(eligible, k, rng)
-        # commit -> reveal: some committers fail to reveal (liveness)
-        revealed = [m for m in counted if rng.random() < m.reveal_prob]
-        if len(revealed) >= p.min_reveals or widen >= p.max_widen:
+        by_id = {m.id: m for m in eligible}
+        k = target + widen * target  # widening enlarges the counted panel
+        seat_counts = _draw_seats(eligible, k, rng)
+        # commit -> reveal: a seat's holder reveals with reveal_prob; unrevealed
+        # seats are dropped (liveness).
+        revealed_seats: Dict[int, int] = {}
+        for mid, cnt in seat_counts.items():
+            if rng.random() < by_id[mid].reveal_prob:
+                revealed_seats[mid] = cnt
+        total_revealed = sum(revealed_seats.values())
+        if total_revealed >= p.min_reveals or widen >= p.max_widen:
+            r.seats = revealed_seats
+            r.mods = {mid: by_id[mid] for mid in revealed_seats}
             break
         widen += 1
         case.now += p.appeal_window_days[0] / 4.0  # small delay per widen
 
-    r.counted = revealed
-    # Votes are processed in arrival order so that strategies modeling a broken
-    # commit-reveal (copy-voting / racing, README §7) can read the running tally
-    # via ``case.partial_votes``. Honest strategies ignore it, matching the
-    # independence that a working commit-reveal guarantees.
+    # Votes are processed in seat-draw order so strategies modeling a broken
+    # commit-reveal (copy-voting / racing) can read the running tally via
+    # ``case.partial_votes``. Honest strategies ignore it, matching the
+    # independence a working commit-reveal guarantees.
     case.partial_votes = []
-    for m in revealed:
+    for mid, cnt in r.seats.items():
+        m = r.mods[mid]
         vote = (m.vote_fn or honest_vote)(m, case, rng)
+        r.votes[mid] = vote
         case.partial_votes.append(vote)
-        r.votes[m.id] = vote
-        w = _weight(m, p)
         if vote == Outcome.APPROVE:
-            r.approve_weight += w
+            r.approve_seats += cnt
         else:
-            r.reject_weight += w
-    r.outcome = _draw_outcome(r.approve_weight, r.reject_weight, rng)
-    # A round's "reward" basis (for the next bond floor) is the pot it would
-    # distribute; approximated here by the winning-side stake in the round.
-    r.total_reward = r.approve_weight if r.outcome == Outcome.APPROVE else r.reject_weight
+            r.reject_seats += cnt
+    r.outcome = _draw_outcome(r.approve_seats, r.reject_seats, rng)
     return r
 
 
@@ -224,12 +222,7 @@ def run_case(
     appeal_policy: Optional[Callable[[Case, _Round, List[Moderator], Params, random.Random],
                                      Optional[Moderator]]] = None,
 ) -> CaseResult:
-    """Play one case to settlement and return the accounting.
-
-    ``appeal_policy`` decides who (if anyone) appeals a round's provisional
-    outcome, returning the appellant Moderator or None. Defaults to
-    :func:`default_appeal_policy`.
-    """
+    """Play one case to settlement and return the accounting."""
     if appeal_policy is None:
         appeal_policy = default_appeal_policy
 
@@ -241,9 +234,10 @@ def run_case(
     r0 = _run_round(case, pop, 0, p, rng)
     case.rounds.append(r0)
     case.now += p.appeal_window_days[0]
-    uncontested = (r0.reject_weight == 0.0)
+    uncontested = (r0.reject_seats == 0)
+    disputed = False
 
-    # appeal ladder
+    # appeal ladder — bonds escalate with the pot (>= bond_multiplier x pot).
     depth = 0
     while depth < p.max_depth:
         r = case.rounds[-1]
@@ -251,14 +245,14 @@ def run_case(
         if appellant is None:
             break
         uncontested = False
-        bond = max(p.bond_multiplier * r.total_reward, p.min_fee(case.n_topics))
+        disputed = True
+        bond = max(p.bond_multiplier * pot, p.min_fee(case.n_topics))
         pot += bond
         depth += 1
         nr = _run_round(case, pop, depth, p, rng)
         nr.bond = bond
         nr.appellant = appellant
-        # the appellant argues for the opposite of the outcome being appealed
-        nr.appellant_for = Outcome(1 - int(r.outcome))
+        nr.appellant_for = Outcome(1 - int(r.outcome))  # argues against the appealed outcome
         case.rounds.append(nr)
         case.now += p.appeal_window_days[min(depth, len(p.appeal_window_days) - 1)]
 
@@ -272,6 +266,7 @@ def run_case(
         depth_reached=len(case.rounds) - 1,
         pot=pot,
         latency_days=case.now,
+        disputed=disputed,
         fees_paid=fees_paid,
         uncontested=uncontested,
     )
@@ -283,24 +278,23 @@ def default_appeal_policy(case: Case, r: _Round, pop: List[Moderator],
                           p: Params, rng: random.Random) -> Optional[Moderator]:
     """Rational, EV-aware re-appeals of an overturnable wrong outcome.
 
-    An appellant only bonds when its own side actually showed strength in the
-    round just decided — measured by that side's revealed stake share. Appealing
-    an outcome your side barely contested is negative expected value: the bond is
-    just forfeited to the winners. This is why a dominant whale earns *nothing*
-    from honest appellants — they rationally decline to appeal a round they were
-    crushed in, so no bonds flow to the attacker (README §3.6, §4).
+    An appellant bonds only when its own side showed real strength in the round
+    just decided, measured by that side's **seat share**. Appealing a round your
+    side was crushed in is negative expected value: the bond is just forfeited to
+    the winners. This is why a dominant whale earns *nothing* from honest
+    appellants — they rationally decline to appeal a lost cause (README §3.6, §4).
     """
     outcome = r.outcome
-    bond = max(p.bond_multiplier * r.total_reward, p.min_fee(case.n_topics))
-    total_w = r.approve_weight + r.reject_weight
-    if total_w <= 0:
+    total = r.approve_seats + r.reject_seats
+    if total <= 0:
         return None
+    # bond floor matches run_case: escalates with the current pot
+    bond = max(p.bond_multiplier * _pot_so_far(case), p.min_fee(case.n_topics))
 
     def side_share(side: Outcome) -> float:
-        w = r.approve_weight if side == Outcome.APPROVE else r.reject_weight
-        return w / total_w
+        s = r.approve_seats if side == Outcome.APPROVE else r.reject_seats
+        return s / total
 
-    # honest side wants the honest label; appeals only if it looks overturnable
     if outcome != case.honest_label and side_share(case.honest_label) >= p.honest_appeal_threshold:
         challengers = [m for m in pop
                        if m.faction == "honest" and not m.is_frozen(case.now)
@@ -308,7 +302,6 @@ def default_appeal_policy(case: Case, r: _Round, pop: List[Moderator],
         if challengers:
             return max(challengers, key=lambda m: m.stake)
 
-    # attacker pushes its target; same EV gate on its own revealed strength
     tgt = case.attacker_target
     if tgt is not None and outcome != tgt and side_share(tgt) >= p.attacker_appeal_threshold:
         attackers = [m for m in pop
@@ -320,6 +313,10 @@ def default_appeal_policy(case: Case, r: _Round, pop: List[Moderator],
     return None
 
 
+def _pot_so_far(case: Case) -> float:
+    return case.fee + sum(rr.bond for rr in case.rounds)
+
+
 # ---------------------------------------------------------------------------
 # settlement (spec §6)
 # ---------------------------------------------------------------------------
@@ -329,9 +326,6 @@ def _settle(case: Case, p: Params, pot: float, result: CaseResult) -> None:
     assert final is not None
 
     # 1. winning/losing appellants: refund+bonus, or forfeit into the pot.
-    #    A vindicated appellant gets its bond back (its own capital, not a
-    #    reward) plus a bonus; its bond must therefore leave the distributable
-    #    pot. A losing appellant's bond stays in the pot and is its cost.
     winning_appellant_bonus = 0.0
     refunded_bonds = 0.0
     for r in case.rounds:
@@ -344,57 +338,57 @@ def _settle(case: Case, p: Params, pot: float, result: CaseResult) -> None:
             r.appellant.earnings += bonus
             _bump(result.rewards_earned, r.appellant.faction, bonus)
         else:
-            # bond forfeited into the pot (already added to pot at appeal time)
             _bump(result.bonds_forfeited, r.appellant.faction, r.bond)
 
     # 2. claim bounty off the top
     claim_bounty = p.claim_bounty_frac * pot
     distributable = max(pot - refunded_bonds - winning_appellant_bonus - claim_bounty, 0.0)
 
-    # 3. coherent voters split the remaining pot in proportion to coherent stake
-    coherent_weight_by_mod: Dict[int, float] = {}
+    # 3. coherent voters split the pot in proportion to their COHERENT SEATS
+    #    (flat per seat — no stake weighting; stake already paid off in selection).
+    coherent_seats: Dict[int, int] = {}
     coherent_mods: Dict[int, Moderator] = {}
-    winners_track_sum = 0.0
-    total_coherent = 0.0
     for r in case.rounds:
-        for m in r.counted:
-            v = r.votes.get(m.id)
-            if v is None:
-                continue
-            if v == final:
-                w = _weight(m, p)
-                coherent_weight_by_mod[m.id] = coherent_weight_by_mod.get(m.id, 0.0) + w
-                coherent_mods[m.id] = m
-                total_coherent += w
-    for mid, w in coherent_weight_by_mod.items():
-        m = coherent_mods[mid]
-        winners_track_sum += m.track
+        for mid, cnt in r.seats.items():
+            if r.votes.get(mid) == final:
+                coherent_seats[mid] = coherent_seats.get(mid, 0) + cnt
+                coherent_mods[mid] = r.mods[mid]
+    total_coherent = sum(coherent_seats.values())
+
+    # winners' aggregate track = seat-weighted mean (split-resistant, spec §6.4)
     if total_coherent > 0:
-        for mid, w in coherent_weight_by_mod.items():
-            m = coherent_mods[mid]
-            reward = distributable * (w / total_coherent)
-            m.earnings += reward
-            _bump(result.rewards_earned, m.faction, reward)
-            # track record: coherent + undisputed (approximate: coherent overall)
+        winners_mean_track = sum(coherent_mods[mid].track * s
+                                 for mid, s in coherent_seats.items()) / total_coherent
+    else:
+        winners_mean_track = 0.0
+
+    undisputed = not result.disputed
+    for mid, s in coherent_seats.items():
+        m = coherent_mods[mid]
+        reward = distributable * (s / total_coherent) if total_coherent else 0.0
+        m.earnings += reward
+        _bump(result.rewards_earned, m.faction, reward)
+        # track accrues only on coherent + undisputed + at/above stake floor
+        # participations (anti-farming, spec §6.5). Others just decay.
+        if undisputed and m.stake >= p.min_stake:
             m.track = m.track * p.track_decay + 1.0
+        else:
+            m.track *= p.track_decay
 
     # 4. freeze incoherent voters (spec §6.4). No stake transfer — locked only.
-    power = freezing_power(winners_track_sum, p)
+    power = freezing_power(winners_mean_track, p)
     freeze_days = p.freeze_base_days * power
     seen = set()
     for r in case.rounds:
-        for m in r.counted:
-            if m.id in seen:
+        for mid in r.seats:
+            if mid in seen:
                 continue
-            v = r.votes.get(m.id)
-            if v is None:
-                continue
-            if v != final:
-                seen.add(m.id)
+            if r.votes.get(mid) is not None and r.votes[mid] != final:
+                seen.add(mid)
+                m = r.mods[mid]
                 m.frozen_until = max(m.frozen_until, case.now + freeze_days)
                 _bump(result.freeze_stake_days, m.faction, m.stake * freeze_days)
                 result.n_frozen[m.faction] = result.n_frozen.get(m.faction, 0) + 1
-                # incoherent: decay track, no increment
                 m.track *= p.track_decay
 
 

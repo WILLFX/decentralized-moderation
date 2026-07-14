@@ -117,11 +117,55 @@ def test_uncontested_flag_semantics():
 
 
 def test_attacker_never_nets_large_profit():
-    """The whale earns nothing internally: net stays ~<=0 across stake shares."""
+    """The whale earns nothing internally: net stays ~<=0 across stake shares.
+
+    A small positive residue at high stake is honest appeal-variance bonds
+    (external money), never a stake transfer -- bounded by the honest appeal
+    threshold. It must stay near zero.
+    """
     for frac in (0.5, 0.75, 0.9):
-        m = sc.whale(Params(), attacker_frac=frac, trials=800, seed=11)
+        m = sc.whale(Params(), attacker_frac=frac, trials=1000, seed=11)
         per_case = m.faction_net("attacker") / m.n
-        assert per_case < 0.5, (frac, per_case)
+        assert per_case < 0.25, (frac, per_case)
+
+
+def test_first_round_outcome_tracks_stake_share():
+    """No double-count: a faction's win probability equals its STAKE SHARE, once.
+
+    With stake-weighted selection + flat voting, the depth-0 approve rate should
+    track the attacker's stake fraction -- not exceed it (which a second,
+    stake-weighted, tally benefit would cause).
+    """
+    from moderation_sim.protocol import Case, _run_round, honest_vote
+    p = Params()
+    for frac in (0.3, 0.5, 0.7):
+        rng = random.Random(100 + int(frac * 10))
+        approve = 0
+        trials = 2500
+        for _ in range(trials):
+            pop = sc.build_population(
+                rng, honest_total_stake=4000.0,
+                attacker_total_stake=4000.0 * frac / (1 - frac),
+                attacker_target=Outcome.APPROVE)
+            case = Case(kind="submission", honest_label=Outcome.REJECT, difficulty=0.0)
+            case.attacker_target = Outcome.APPROVE
+            r = _run_round(case, pop, 0, p, rng)
+            approve += int(r.outcome == Outcome.APPROVE)
+        rate = approve / trials
+        assert abs(rate - frac) < 0.06, (frac, rate)
+
+
+def test_modest_farm_buys_little_freeze_power():
+    """Split-resistant (mean-track) freezing power: a cheap farm is near-useless.
+
+    30 innocuous self-submissions must not approach the freeze cap, and must not
+    materially raise the freeze an equal-stake non-farmed attacker already
+    inflicts. Guards the anti-farming hardening (README §7 threat).
+    """
+    res = sc.track_farming(Params(), farm_cases=30, attacker_frac=0.5,
+                           trials=300, seed=3)
+    assert res["freezing_power_gained"] < 2.0, res["freezing_power_gained"]
+    assert res["farm_freeze_multiplier"] < 1.25, res["farm_freeze_multiplier"]
 
 
 def _run_all():

@@ -33,21 +33,22 @@ independent votes), not by hashing. Key abstractions, and where they diverge
 from the chain, are documented at the top of `protocol.py`. The load-bearing
 ones:
 
-- **Counted voters** are drawn stake-weighted without replacement
-  (Efraimidis–Spirakis). Subset eligibility (1–10%) followed by
-  "first-N-commits-count" collapses to this single draw under the assumption
-  that response speed is independent of stake.
-- **Outcomes** are drawn with probability proportional to the stake behind each
-  side (`_draw_outcome`).
-- **Vote weight** — how much stake a counted voter puts behind its side — is a
-  policy knob (`Params.weight_policy`: `whole` / `fixed` / `capped`), because it
-  is an open spec question (§11.6).
-- **Appeals** are EV-gated: an appellant bonds only when its own side showed
-  real strength in the round just decided. This is why a dominant whale earns
-  nothing from honest appellants (they rationally decline to fund a lost cause).
+- **Seats, not weighted voters** (post-review decision, spec §5.3). Each round
+  has N counted **seats** drawn stake-weighted **with replacement** — a large
+  stake can win several. Every seat is one **flat vote**, and the outcome is
+  drawn ∝ the seat counts behind each side (`_draw_seats`, `_draw_outcome`).
+  Stake buys selection frequency, not vote weight — resolving the earlier
+  double-count (stake-weighted selection *and* a stake-weighted tally). There is
+  no `weight_policy` knob.
+- **Appeals** are EV-gated: an appellant bonds only when its own side showed real
+  strength (seat share) in the round just decided. This is why a dominant whale
+  earns nothing from honest appellants (they rationally decline to fund a lost
+  cause).
+- **Freezing power** comes from the **seat-weighted mean** track of the winning
+  side (not the sum), which is identity-split resistant (`freezing_power`).
 - **No internal transfer:** settlement moves only external money (fees +
-  forfeited bonds) to coherent voters; principal is never touched. Enforced by
-  `tests/test_no_internal_stake_transfer`.
+  forfeited bonds) to coherent voters, split by coherent **seats**; principal is
+  never touched. Enforced by `tests/test_no_internal_stake_transfer`.
 
 ## Layout
 

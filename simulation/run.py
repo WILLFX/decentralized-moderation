@@ -144,13 +144,17 @@ def main(argv=None) -> int:
     ap.add_argument("--difficulty", type=float, default=0.0)
     ap.add_argument("--farm-cases", type=int, default=30)
     ap.add_argument("--json", type=str, default=None, help="write results as JSON")
-    # parameter overrides
-    ap.add_argument("--weight-policy", choices=["whole", "fixed", "capped"], default=None)
+    ap.add_argument("--track-saturation", type=float, default=None,
+                    help="override Params.track_saturation (freeze calibration)")
+    ap.add_argument("--track-decay", type=float, default=None,
+                    help="override Params.track_decay (freeze calibration)")
     args = ap.parse_args(argv)
 
     p = Params()
-    if args.weight_policy:
-        p.weight_policy = args.weight_policy
+    if args.track_saturation is not None:
+        p.track_saturation = args.track_saturation
+    if args.track_decay is not None:
+        p.track_decay = args.track_decay
 
     result = COMMANDS[args.command](p, args)
 

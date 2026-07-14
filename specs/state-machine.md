@@ -21,10 +21,11 @@ as a mental model and directly testable in M2.
 - **Time** is measured in block timestamps (seconds). Durations are `uint`
   seconds. All "days"/"hours" below are working values expressed as durations.
 - **Randomness** is `block.prevrandao` snapshotted per §7.
-- **Probabilistic draw** means: given two non-negative stake weights `a` (approve)
-  and `b` (reject) with `a + b > 0`, the outcome is `APPROVE` with probability
+- **Probabilistic draw** means: given two non-negative weights `a` (approve) and
+  `b` (reject) with `a + b > 0`, the outcome is `APPROVE` with probability
   `a / (a + b)` and `REJECT` otherwise, realized by comparing a uniform random
-  draw in `[0, a+b)` against `a`.
+  draw in `[0, a+b)` against `a`. Here `a` and `b` are **seat counts** (§5.3),
+  not stake — stake influences the outcome only through how many seats it wins.
 - `H(x)` is keccak-256.
 - A **coherent** voter in a case is one whose revealed vote equals the case's
   **final** outcome. **Incoherent** = revealed a vote ≠ final outcome. A voter who
@@ -40,7 +41,7 @@ as a mental model and directly testable in M2.
 | `EXIT_COOLDOWN` | Delay from withdrawal request to free-stake release | 7 days |
 | `ACTIVATION_DELAY` | Delay before newly staked xBZZ is eligible for subset draws | 7 days |
 | `SUBSET_FRACTION(N)` | Fraction of moderator set drawn eligible, tightening as set size `N` grows | 1–10% |
-| `COMMIT_TARGET[d]` | Commits that close the commit phase at depth `d` | `d0:5, d1:11, d2:23` |
+| `COMMIT_TARGET[d]` | Counted **seats** at depth `d` (flat votes; drawn stake-weighted with replacement, §5.3) | `d0:5, d1:11, d2:23` |
 | `COMMIT_TIMEOUT` | Max commit-phase duration if target not reached | 24 h |
 | `REVEAL_WINDOW` | Reveal-phase duration | *(working)* 24 h |
 | `MIN_REVEALS` | Minimum reveals to tally; below this the subset widens | 3 |
@@ -199,18 +200,46 @@ Case {
 
 Round {
   uint8    depth
-  uint     targetCommits    // COMMIT_TARGET[depth]
-  bytes32  seed             // realized randomness for eligibility+draw
+  uint     nSeats           // COMMIT_TARGET[depth] — counted seats this round
+  bytes32  seed             // realized randomness for the seat draw
+  mapping(address => uint)    seats     // voter -> seats won (see §5.3)
   mapping(address => bytes32) commits
-  mapping(address => Vote)    reveals   // Vote { bool approve; uint weight }
-  uint     approveStake
-  uint     rejectStake
-  int8     outcome          // drawn probabilistically
+  mapping(address => bool)    reveals   // revealed vote (approve/reject); flat, unweighted
+  uint     approveSeats     // Σ seats voting approve
+  uint     rejectSeats      // Σ seats voting reject
+  int8     outcome          // drawn probabilistically ∝ seat counts
   uint     bond             // bond that opened THIS round (0 for depth 0)
   address  appellant        // who bonded to open this round (0 for depth 0)
-  uint     totalReward      // basis for next bond floor
 }
 ```
+
+### 5.3 Selection and voting — one benefit from stake, not two
+
+Stake grants a moderator exactly one advantage: it is drawn onto panels more
+often. It does **not** additionally weight the verdict. This resolves a
+double-count (stake-weighted selection *and* a stake-weighted tally over-
+represented and over-weighted the same large stake); see the design review and
+open question §11.6, now closed.
+
+- **Seats.** A round has `nSeats = COMMIT_TARGET[depth]` counted seats. Each seat
+  is drawn **stake-weighted, with replacement**, from the activated, unfrozen
+  moderator set (the sortition tree, §2). A large stake may win several seats in
+  proportion to its size; splitting a stake into many identities is neutral —
+  expected seats track total stake however it is sliced (the anti-Sybil property
+  of README §3.3).
+- **Flat voting.** Every seat is worth exactly **one vote**. A voter holding `k`
+  seats casts one commit-reveal vote that counts as `k` toward its chosen side.
+- **Outcome.** Drawn probabilistically ∝ `approveSeats : rejectSeats` (§0). A
+  50%-stake side therefore wins ≈ 50% of the time — never with certainty, and
+  never more than its stake share (which a second, stake-weighted, tally would
+  have granted).
+
+This refines README §3.3/§3.4's "stake-weighted eligibility subset + first-five-
+commits + stake-weighted tally" into the Kleros-style seat draw the README
+already proposes reusing (§5). Commit-reveal still applies to the drawn seats;
+under-participation (a drawn seat's holder offline) is handled by the widen /
+re-draw path (§5.2). `SUBSET_FRACTION` bounds the eligible pool the seats are
+drawn from for liveness and may, at small set sizes, be the whole activated set.
 
 ### 5.2 Phases and transitions
 
@@ -245,11 +274,11 @@ Phase enum: `COMMIT, REVEAL, TALLY, APPEAL_WINDOW, FINALIZED, SETTLED`.
 | From | To | Trigger | Guard / effect |
 |---|---|---|---|
 | (none) | COMMIT (depth 0) | `submit(content,meta,topics,fee)` | `fee ≥ minFee`; `nTopics ≤ MAX_TOPICS`; `!submissionExists[key]` (P3); pull fee → `pot`; `snapshotBlock = block + k`; set `phaseDeadline = now + COMMIT_TIMEOUT`. |
-| COMMIT | REVEAL | `commitVote` makes commits reach `COMMIT_TARGET[depth]` **or** `now ≥ phaseDeadline` | Seed realized from `snapshotBlock`'s prevrandao (§7). Eligibility = membership in stake-weighted subset for `seed`. `phaseDeadline = now + REVEAL_WINDOW`. |
+| COMMIT | REVEAL | `commitVote` makes commits reach `COMMIT_TARGET[depth]` **or** `now ≥ phaseDeadline` | Seed realized from `snapshotBlock`'s prevrandao (§7). Seats drawn stake-weighted with replacement for `seed` (§5.3). `phaseDeadline = now + REVEAL_WINDOW`. |
 | REVEAL | TALLY | `now ≥ phaseDeadline` (or all committers revealed) | Atomic. |
 | TALLY | COMMIT (same depth) | reveals `< MIN_REVEALS` | Widen subset (larger fraction / re-seed), reopen commit; bounded retries. |
-| TALLY | APPEAL_WINDOW | reveals `≥ MIN_REVEALS` | Draw outcome ∝ stake (§0). Update provisional index (§8.1). `phaseDeadline = now + APPEAL_WINDOW[depth]`. |
-| APPEAL_WINDOW | COMMIT (depth+1) | `appeal(caseId){bond}` with `bond ≥ BOND_MULTIPLIER × rounds[depth].totalReward` and `depth < MAX_DEPTH` | `bond → pot`; `depth++`; new `snapshotBlock`; `targetCommits = COMMIT_TARGET[depth]`; record appellant. |
+| TALLY | APPEAL_WINDOW | reveals `≥ MIN_REVEALS` | Draw outcome ∝ seat counts (§0, §5.3). Update provisional index (§8.1). `phaseDeadline = now + APPEAL_WINDOW[depth]`. |
+| APPEAL_WINDOW | COMMIT (depth+1) | `appeal(caseId){bond}` with `bond ≥ BOND_MULTIPLIER × pot` and `depth < MAX_DEPTH` | `bond → pot`; `depth++`; new `snapshotBlock`; `nSeats = COMMIT_TARGET[depth]`; record appellant. |
 | APPEAL_WINDOW | FINALIZED | `now ≥ phaseDeadline` (no valid appeal) **or** `depth == MAX_DEPTH` window closes | `finalOutcome = rounds[last].outcome`. |
 | FINALIZED | SETTLED | `claim()` | Anyone; pays `CLAIM_BOUNTY`; runs §6/§8. Idempotent guard: only once. |
 
@@ -268,8 +297,9 @@ Runs atomically inside `claim()` after `finalOutcome` is set. Order matters.
 
 For each `Round r` in the case, and each address that revealed a vote in `r`:
 - **coherent** iff `reveal.approve == (finalOutcome == APPROVE)`.
-- A round is **undisputed** iff it was never appealed past (i.e. it is the last
-  round, or... ) — see 6.2 for the reward set.
+- A **case** is **undisputed** iff no appeal was ever opened (it finalized at
+  depth 0). Track record accrues only on undisputed cases (§6.5); the pot is
+  split across coherent seats of **all** rounds (§6.2).
 
 ### 6.2 The pot → coherent voters (no transfers between moderators)
 
@@ -282,13 +312,15 @@ An appellant **loses** their bond iff the outcome they were appealing *for*
 appeal flipped the case toward `finalOutcome`) gets their bond returned **plus a
 bonus** from the pot (appealing a wrong outcome is a paid service).
 
-Reward distribution:
-- Compute `winnersStake` = total revealed stake, across all rounds, that is
-  coherent with `finalOutcome`.
-- Each coherent voter receives `pot_remaining × (theirCoherentStake /
-  winnersStake)`, credited to their `free` balance. (Exact per-round weighting —
+Reward distribution (by **coherent seats**, flat — consistent with §5.3; stake
+already paid off in selection, so it is not re-counted here):
+- Compute `winnersSeats` = total seats, across all rounds, whose vote is coherent
+  with `finalOutcome`.
+- Each coherent voter receives `pot_remaining × (theirCoherentSeats /
+  winnersSeats)`, credited to their `free` balance. (Exact per-round weighting —
   whether later rounds count more — is a simulation deliverable; §11.)
-- `CLAIM_BOUNTY` and winning-appellant bonuses come off the top of `pot` first.
+- `CLAIM_BOUNTY` and winning-appellant bonuses come off the top of `pot` first;
+  a winning appellant's bond is refunded (its own capital) before distribution.
 - **No moderator's principal is ever paid to another moderator.** Every credit
   above is external money (fee + forfeited bonds).
 
@@ -304,28 +336,36 @@ An address that committed but did not reveal in a round:
 
 For each incoherent voter `v` (revealed ≠ finalOutcome):
 ```
-power         = freezingPower(winning side's aggregate track record)   // 1 .. FREEZE_CAP
+meanTrack     = Σ(seats_i × track_i) / Σ seats_i   over coherent voters   // seat-weighted MEAN
+power         = 1 + (FREEZE_CAP − 1) × (1 − exp(−meanTrack / TRACK_SAT))  // 1 .. FREEZE_CAP
 freezeDur     = FREEZE_BASE × power
 v.frozen     += v.committedInCase
 v.committed  -= v.committedInCase
 v.frozenUntil = max(v.frozenUntil, now + freezeDur)
 ```
-`freezingPower` is a decayed, capped function of the *winners'* track records
-(principle 4). Exact formula: simulation deliverable. No stake leaves `v` — it is
-locked, not taken.
+`freezingPower` uses the **seat-weighted mean** of the winning side's track
+records, *not the sum* — this is what makes it **identity-split resistant**:
+dividing one moderator's history across many identities cannot inflate an
+average (principle 4). The saturating curve above is the chosen shape; `TRACK_SAT`
+is calibrated so a cheap farm cannot approach the cap (§11.3, now closed; see
+`simulation/FINDINGS.md` §3). No stake leaves `v` — it is locked, not taken.
 
 ### 6.5 Track-record update
 
-Coherent voters in **undisputed** participations increment their `track` (subject
-to decay + saturation, anti-farming). Incoherent voters do not. Formula:
-simulation deliverable (README §7, "Track-record farming").
+A coherent voter increments its `track` only on a participation that is
+**undisputed** (the case drew no appeal) **and** whose stake is at/above the
+`MIN_STAKE` floor — so a min-stake identity farm accrues slowly and a disputed
+case grants no history. Everyone else's `track` only **decays**
+(`track ← track × TRACK_DECAY`). Together with the seat-weighted-mean freezing
+power above, this bounds track-record farming (README §7); `TRACK_DECAY`/
+`TRACK_SAT` are calibrated in `simulation/FINDINGS.md` §3.
 
 ---
 
 ## 7. Randomness
 
 - Seed source: `block.prevrandao` on Gnosis.
-- **Snapshot rule:** the seed for a round's subset draw *and* outcome draw is the
+- **Snapshot rule:** the seed for a round's seat draw *and* outcome draw is the
   `prevrandao` of `snapshotBlock`, where `snapshotBlock` is set a few blocks *after*
   the phase boundary (submission / appeal). It is realized (read and stored in
   `Round.seed`) by the **first transaction after** `snapshotBlock`.
@@ -394,6 +434,11 @@ Entry{ contentHash, metaHash, approvalTime = now, uncontested = (rejectStake == 
    block's gas (bounded by `MAX_TOPICS` and subset sizes) — no stranded pots.
 9. **Governance bound (P6):** only the parameters in §1 are mutable, only via
    multisig+timelock; core transitions in §3/§5 are immutable.
+10. **Single stake benefit (no double-count):** stake affects a case only through
+    seat selection (§5.3); the tally and reward are by flat seat counts. No path
+    weights a vote or a reward by stake. A faction's expected influence and payout
+    are proportional to its stake exactly once. *(Test:
+    `test_first_round_outcome_tracks_stake_share`.)*
 
 ---
 
@@ -408,21 +453,34 @@ Entry{ contentHash, metaHash, approvalTime = now, uncontested = (rejectStake == 
 
 ---
 
-## 11. What the M1 simulation must resolve before M2
+## 11. Simulation status — resolved vs still open
 
-These are the parameters and formula choices this spec deliberately leaves open,
-to be fixed by the agent-based simulation (README §7, M1):
+Parameters and formula choices the agent-based simulation (README §7, M1) is
+resolving. See `simulation/FINDINGS.md` for the evidence behind each.
 
-1. `SUBSET_FRACTION(N)` curve, and `COMMIT_TARGET` per depth.
-2. `BOND_MULTIPLIER` and whether bonds should scale on pot vs. previous reward.
-3. `FREEZE_BASE`, `FREEZE_CAP`, and the `freezingPower(trackRecord)` shape.
-4. `TRACK_DECAY`, `TRACK_SAT`, and anti-farming of the track-record counter.
-5. Per-round reward weighting (do later, larger rounds count more? §6.2).
-6. Per-case at-risk stake: fixed amount vs. whole stake vs. eligibility-only.
-7. `FEE_BASE`, `FEE_PER_TOPIC` floor covering storage + minimum voter pay.
-8. `REVEAL_WINDOW`, under-participation retry bound, `MIN_REVEALS`.
+**Resolved (decided; reflected above):**
 
-Each must be validated against the attack scenarios: probability-buying whales,
-bond wars up the appeal ladder, track-record farming, first-come racing /
-copy-voting, subset under-participation, and honest-moderator earnings across the
-fee/bond/freeze values.
+- **§11.3 freezing-power shape** — saturating curve `1 + (CAP−1)(1 − e^(−mean/SAT))`
+  over the **seat-weighted mean** winning-side track (split-resistant); §6.4.
+- **§11.4 anti-farming** — mean (not sum) track, plus accrual gated on
+  undisputed + coherent + `MIN_STAKE`; §6.5. Sim shows a cheap 30-case farm buys
+  ~1.6× power and no real freeze advantage (FINDINGS §3).
+- **§11.6 per-case stake benefit (the double-count)** — **stake-weighted seat
+  selection with replacement + flat voting** (reviewer decision); §5.3, invariant
+  10. Bonds scale with the pot; §5.2.
+
+**Still open (calibration, not structure):**
+
+1. `SUBSET_FRACTION(N)` curve, and `COMMIT_TARGET` (seat counts) per depth.
+2. `BOND_MULTIPLIER` magnitude (structure fixed: bond ≥ `BOND_MULTIPLIER × pot`).
+3. `FREEZE_BASE` and `FREEZE_CAP` magnitudes; `TRACK_SAT`/`TRACK_DECAY` fine-tuning.
+4. Per-round reward weighting (do later, larger rounds count more? §6.2).
+5. `FEE_BASE`, `FEE_PER_TOPIC` floor — needs an external cost-of-a-moderation-call
+   model before it can be fixed (FINDINGS §2).
+6. `REVEAL_WINDOW`, under-participation retry bound, `MIN_REVEALS` under
+   correlated (bursty) offline behaviour.
+
+Each is validated against the attack scenarios: probability-buying whales, bond
+wars up the appeal ladder, track-record farming, first-come racing / copy-voting,
+under-participation, and honest-moderator earnings across the fee/bond/freeze
+values.

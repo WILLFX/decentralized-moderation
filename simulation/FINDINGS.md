@@ -1,50 +1,65 @@
-# M1 Simulation — Findings (first pass)
+# M1 Simulation — Findings
 
-Interpreted results from the agent-based model, with the parameter directions
-they point to. Numbers below are from the default `Params` at 1000 trials/seed=1
-(`python3 run.py all`); they are **orders of magnitude and directions**, not
-final constants. Reproduce with the commands shown.
+Interpreted results from the agent-based model, with the parameter decisions they
+drove. Numbers are from the default `Params` (`python3 run.py all`, 1200–1500
+trials, seed 1); they are **orders of magnitude and directions**, not final
+constants. Reproduce with the commands shown.
 
-> Status: first-generation model. It confirms the qualitative security claims
-> and ranks parameter regimes; it does not yet emit protocol constants. Each
-> finding lists what to harden before M2.
+> Status: the model confirms the structural security claims, is test-guarded, and
+> has resolved the two design questions that were open at first pass — the
+> stake **double-count** and **track-record farming**. Remaining open items are
+> calibration magnitudes, not structure (spec §11).
 
 ---
 
-## 1. The whale cannot buy a *certain* outcome, and profits nothing internally
+## 0. Headline decision — stake buys one benefit, not two
+
+A design review caught that the first model let stake help the *same* moderator
+twice in a case: stake-weighted **selection** put a large stake on the panel more
+often, and a stake-weighted **tally** then let it swing the verdict harder once
+there. The protocol now grants stake exactly one benefit:
+
+- **Selection** is stake-weighted **with replacement** — a round has N seats and
+  a large stake can win several, in proportion to its size (Kleros sortition).
+- **Voting is flat** — every seat is one vote; the outcome is drawn ∝ the seat
+  counts behind each side.
+
+The alternative (uniform selection + stake-weighted vote) was rejected on Sybil
+grounds: with a `MIN_STAKE` floor, splitting capital into floor-sized identities
+maximises panel presence under uniform selection, re-introducing stake-weighting
+through identity count and *rewarding* Sybils. Stake-weighted selection is what
+keeps splitting neutral (spec §5.3, invariant 10; `test_first_round_outcome_
+tracks_stake_share`).
+
+**Effect (whale sweep, below): minority attackers got much weaker.** A 20%-stake
+whale's success fell from 0.39 (old double-count) to **0.047**; a 35% whale from
+0.59 to 0.26. Removing the second, stake-weighted, benefit is what stops a
+minority from buying outsized influence — a strict improvement for a safe-search
+index, where a minority should not be able to force approvals.
+
+## 1. The whale cannot buy a certain outcome, and profits nothing internally
 
 `python3 run.py whale-sweep`
 
-| attacker stake share | attack success (newcomer) | attacker net | attacker capital frozen (stake·days) |
+| attacker stake share | attack success | attacker net / case | attacker capital frozen (stake·days) |
 |---|---|---|---|
-| 20% | 0.39 | −1017 | 1.41M |
-| 35% | 0.59 | −498 | 1.78M |
-| 50% | 0.79 | −997 | 1.97M |
-| 75% | 0.93 | −169 | 0.87M |
-| 90% | 0.98 | +66 (≈0/case) | 0.24M |
+| 20% | 0.05 | −1.91 | 7.8M |
+| 35% | 0.26 | −2.28 | 15.5M |
+| 50% | 0.66 | −1.05 | 12.5M |
+| 60% | 0.89 | −0.12 | 5.7M |
+| 75% | 0.98 | +0.10 | 1.3M |
+| 90% | 1.00 | +0.01 | 0.01M |
 
-**Reading.** Attack success rises smoothly with stake share — there is *no*
-threshold at which the attacker becomes certain, and *no* threshold below which
-it is powerless. This is the probabilistic-outcome design working: every attack
-is a priced gamble (README §3.6 "Why not deterministic majority?").
-
-Crucially, **attacker net is ≤ ~0 everywhere**. The only regime where it is
-mildly positive is ~90% stake — and there it is +0.07/case, the residue of
-occasional mis-timed honest appeals, not a farmable internal transfer. The
-mechanism never pays the attacker; the sole prize is the listing itself (README
-§4), which remains re-litigable. `tests/test_attacker_never_nets_large_profit`
-guards this.
-
-**Freeze drag is the real cost.** A sub-majority whale loses most rounds and has
-its capital frozen for 1–2M stake·days per 1000 attacks. Against **veteran**
-honest moderators the freeze is longer still (principle 4) — the `veteran`
-columns of the sweep show larger per-round freeze duration at equal stake.
-
-**Direction:** the security claim holds under the default `weight_policy="capped"`.
-Before M2, re-run the sweep under `--weight-policy whole` and `fixed` to choose
-§11.6: `whole` lets a whale dominate a single small round (higher success at
-mid stake), `fixed` is egalitarian but re-opens identity-splitting pressure.
-Recommend documenting the chosen policy as a first-class protocol parameter.
+**Reading.** Success is a smooth S-curve in stake share — no threshold of
+certainty, no threshold of powerlessness (README §3.6 "Why not deterministic
+majority?"). **Attacker net is ≤ ~0 everywhere.** Below 60% it is firmly negative
+(bonds forfeited + fees) and the capital is frozen for millions of stake·days;
+above 75% it approaches zero, the tiny positive residue being honest
+appeal-variance bonds (external money from honest players who appeal an
+overturnable-looking round and lose), never a stake transfer. It is bounded by
+the honest appeal threshold and is test-guarded to stay near zero
+(`test_attacker_never_nets_large_profit`). The only prize is the listing itself
+(README §4), which stays re-litigable.
 
 ## 2. Honest moderators are paid, and losing a borderline draw is not ruinous
 
@@ -52,52 +67,48 @@ Recommend documenting the chosen policy as a first-class protocol parameter.
 
 | content difficulty | correctness | honest net / case | honest frozen (stake·days/1000) |
 |---|---|---|---|
-| 0.0 (clear) | 0.99 | +1.51 | 21.9k |
-| 0.25 | 0.94 | +1.76 | 169k |
-| 0.50 | 0.84 | +1.83 | 290k |
-| 0.75 (borderline) | 0.74 | +1.86 | 373k |
+| 0.0 (clear) | 1.00 | +1.48 | 29k |
+| 0.25 | 0.99 | +1.53 | 188k |
+| 0.50 | 0.93 | +1.59 | 392k |
+| 0.75 (borderline) | 0.85 | +1.63 | 608k |
 
-**Reading.** Clear content finalizes correctly ~99% of the time and pays
-moderators the fee with negligible freezing (principle 1: near risk-free on the
-easy majority of cases). Borderline content produces more freezing, but honest
-net stays **positive** — the fee/bond flow rewards honest judgment even where a
-share of honest voters lose the draw. Freezing is deterrence, not confiscation,
-so a frozen honest moderator keeps its principal.
+**Reading.** Clear content finalizes correctly ~100% of the time with little
+freezing (principle 1: near risk-free on the easy majority of cases). Borderline
+content freezes more honest voters, but honest net stays **positive** throughout
+— honest judgment is paid even where a share of honest voters lose the draw, and
+freezing is deterrence, not confiscation (a frozen moderator keeps its
+principal). Correctness under flat voting is *higher* than under the old
+stake-weighted tally, because no single large voter can drag a clear case.
 
-**Direction.** `honest_net/case` is currently ≈ the fee floor. Whether that
-clears the real cost of running an AI classifier is the `FEE_BASE`/`FEE_PER_TOPIC`
-calibration (§11.7) — it needs a cost model of a moderation call, which this
-sim does not yet include. Add one before fixing the fee floor.
+**Open (§11.5).** `honest_net/case ≈ the fee floor`. Whether that clears the real
+cost of running an AI classifier needs an external cost-of-a-moderation-call
+model, which this sim does not yet include. Add one before fixing `FEE_BASE`/
+`FEE_PER_TOPIC`.
 
-## 3. Track-record farming is currently **too cheap** — hardening required
+## 3. Track-record farming — resolved (was the main flagged weakness)
 
 `python3 run.py track-farming`
 
-- Farming 30 innocuous self-submissions cost the attacker **~13 xBZZ net**
-  (45 in fees, 32 recovered as coherent rewards).
-- That bought **freezing power 7.7 of a cap of 8** — near maximum.
-- Post-farm, a 50%-stake attack froze honest moderators for **~2.5k stake·days
-  per attack** while still netting the attacker nothing (−1100 over 1000
-  attacks).
+| farm effort | net cost (xBZZ) | mean track | freezing power | freeze vs non-farmed attacker |
+|---|---|---|---|---|
+| 30 cases | ~21 | 1.8 | **1.6×** | **1.05×** (no advantage) |
+| 200 cases | ~150 | 10.4 | 3.8× | 1.49× |
 
-**Reading.** This is the README §7 open threat, quantified: with the default
-`track_saturation=20` and `track_decay=0.98`, freezing power saturates far too
-cheaply, and because `freezing_power` reads the *summed* track of the winning
-side, **identity-splitting inflates it** (many modest-track identities sum to a
-high aggregate). Farming does not help the attacker *win* (win-rate is unchanged
-from the base whale), but it lets a determined attacker turn losses into long
-honest freezes — a griefing vector.
+**Reading.** The earlier model derived freezing power from the *summed* track of
+the winning side, so a cheap 30-case farm (~13 xBZZ) bought **7.7×** power and,
+worse, identity-splitting inflated the sum. Two changes fixed it (spec §6.4–6.5):
 
-**Direction (before M2):**
-1. Base freezing power on a **split-resistant** aggregate of the winning side's
-   track (e.g. stake-weighted mean, or max, not raw sum). Re-run this scenario
-   under each and pick the one where split vs unsplit farming gives equal power.
-2. Raise `track_saturation` and/or steepen `track_decay` so 30 cheap cases do
-   not approach the cap. Sweep both and report farm-net-cost to reach power = 4×
-   and 8×; target a farm cost that exceeds the freeze damage it can inflict.
-3. Consider gating track increments on *undisputed* participations only (already
-   the intent in spec §6.5; the model currently approximates it) and on a
-   minimum stake, so min-stake identity farms accrue slowly.
+1. **Seat-weighted mean, not sum** — splitting a history across identities cannot
+   inflate an average, so Sybil farming buys nothing. (`test_modest_farm_buys_
+   little_freeze_power` guards this.)
+2. **Accrual gated** on undisputed + coherent + `MIN_STAKE` participations, so a
+   min-stake identity farm accrues slowly.
+
+Now a 30-case farm buys ~1.6× power and **no measurable freeze advantage** over
+an equal-stake attacker that never farmed; reaching even ~3.8× costs ~150 xBZZ
+over 200 cases (which the honest side collects as fees). Farming never helped the
+attacker *win* (win-rate matches the base whale), and now it barely helps it
+grief either. `TRACK_SAT=20`, `TRACK_DECAY=0.98` hold up as calibrated defaults.
 
 ## 4. Copy-voting / first-come racing is mild until independence badly breaks
 
@@ -105,20 +116,15 @@ honest freezes — a griefing vector.
 
 | copy-voter share | correctness (difficulty 0.1) |
 |---|---|
-| 0% | 0.97 |
-| 50% | 0.97 |
-| 75% | 0.96 |
-| 95% | 0.93 |
+| 0% | 1.00 |
+| 50% | 0.96 |
+| 75% | 0.94 |
+| 95% | 0.94 |
 
-**Reading.** Correctness is robust to a moderate share of copy-voters and only
-degrades meaningfully near 95%. This quantifies *why commit-reveal matters*: its
-job is to keep votes independent, and the cost of losing that independence is
-bounded but real. Accepted for MVP (README §7 "First-come voting dynamics").
-
-**Direction.** Keep commit-reveal; no parameter change indicated. If a future
-model adds correlated AI-classifier errors (a realistic form of accidental
-"copying"), re-check — correlated honest error is a more likely path to this
-regime than deliberate copy-voting under working commit-reveal.
+**Reading.** Robust to a moderate share of copy-voters; it degrades only as
+independence is largely lost. This quantifies *why commit-reveal matters* — its
+job is to keep the seat votes independent — and the cost of losing it is bounded.
+Accepted for MVP (README §7). No parameter change indicated.
 
 ## 5. Liveness holds until moderators are very scarce online
 
@@ -126,39 +132,40 @@ regime than deliberate copy-voting under working commit-reveal.
 
 | online share | correctness | avg latency (days) |
 |---|---|---|
-| 100% | 0.99 | 4.0 |
-| 50% | 0.99 | 4.6 |
-| 30% | 1.00 | 5.2 |
+| 100% | 1.00 | 4.1 |
+| 50% | 1.00 | 4.6 |
+| 30% | 1.00 | 5.3 |
 | 15% | 0.99 | 6.3 |
-| 8% | 0.90 | 6.8 |
+| 8% | 0.92 | 6.9 |
 
-**Reading.** The widen-on-under-participation path (spec §5.2) keeps cases both
-correct and roughly on-schedule down to ~15% of committers online; only at 8%
-does correctness dip and latency stretch. This supports the README's liveness
-argument for eligibility-over-a-subset (§3.3).
+**Reading.** The widen / re-draw path (spec §5.2) keeps cases correct and roughly
+on schedule down to ~15% of drawn seats online; only at 8% does correctness dip
+and latency stretch. Supports the liveness argument of README §3.3.
 
-**Direction.** Confirm `MIN_REVEALS=3` and `max_widen` against a larger and more
-realistically bursty online distribution; the current model uses an i.i.d.
-`reveal_prob`, which understates correlated offline periods.
+**Open (§11.6).** The model uses an i.i.d. `reveal_prob`, which understates
+correlated offline periods; re-check `MIN_REVEALS`/`max_widen` against bursty
+liveness.
 
 ---
 
-## Parameter directions summary (for spec §11 / M2)
+## Parameter decisions and remaining calibration (spec §11)
 
-| Spec §11 item | First-pass direction from this model |
+| Item | Status |
 |---|---|
-| Subset fraction / `COMMIT_TARGET` | 5→11→23 keeps rounds decisive; revisit with correlated liveness. |
-| `BOND_MULTIPLIER` | 2× makes honest re-litigation self-funding; not the binding constraint. |
-| **Freeze `FREEZE_CAP` / `freezingPower` shape** | **Make split-resistant; raise cost to reach the cap — current default is farmable.** |
-| **`TRACK_DECAY` / `TRACK_SAT` / anti-farming** | **Harden: 30 cases must not approach cap; gate on undisputed + min stake.** |
-| Per-round reward weighting | Not yet differentiated; needs a variant that weights larger rounds more. |
-| Per-case at-risk stake / `weight_policy` | Choose `whole`/`fixed`/`capped` deliberately; each shifts whale-in-one-round dynamics. |
-| `FEE_BASE` / `FEE_PER_TOPIC` | Needs an external cost-of-a-moderation-call model before calibration. |
-| `REVEAL_WINDOW` / under-participation | 3-reveal minimum robust to ~15% online; test correlated offline. |
+| **Per-case stake benefit (double-count)** | **Decided:** stake-weighted seat selection (with replacement) + flat voting. §5.3. |
+| **Freezing-power formula** | **Decided:** saturating curve over seat-weighted **mean** winning-side track. §6.4. |
+| **Track-record anti-farming** | **Decided:** mean-not-sum + accrual gated on undisputed/coherent/min-stake. §6.5. |
+| Subset fraction / `COMMIT_TARGET` (seats) | Open: 5→11→23 keeps rounds decisive; revisit with correlated liveness. |
+| `BOND_MULTIPLIER` magnitude | Open: 2× makes honest re-litigation self-funding; structure (bond ≥ 2×pot) fixed. |
+| `FREEZE_BASE`/`FREEZE_CAP`, `TRACK_SAT`/`TRACK_DECAY` magnitudes | Open: current defaults defensible; fine-tune with `--track-saturation`/`--track-decay`. |
+| Per-round reward weighting | Open: not yet differentiated; needs a variant weighting larger rounds more. |
+| `FEE_BASE`/`FEE_PER_TOPIC` | Open: needs an external cost-of-a-moderation-call model. |
+| `REVEAL_WINDOW` / under-participation | Open: 3-reveal minimum robust to ~15% online; test correlated offline. |
 
-**Bottom line.** The two structural security claims — *no certain attack* and
-*no internal attack profit* — hold in the model and are test-guarded. The one
-parameter family that is clearly unsafe at its working defaults is the
-**track-record / freezing-power** machinery, which is exactly the sub-system the
-README already flags as unresolved. That is the priority to harden before the
-Solidity in M2.
+**Bottom line.** The structural security claims — *no certain attack*, *no
+internal attack profit*, *Sybil-neutral selection* — hold in the model and are
+test-guarded. Both design questions that were open at first pass (the stake
+double-count and track-record farming) are now closed with justified formulas and
+before/after numbers. What remains is magnitude calibration, which is exactly the
+kind of thing that should stay open until M2 has a gas/cost model to calibrate
+against.

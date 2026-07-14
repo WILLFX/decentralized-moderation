@@ -168,36 +168,49 @@ def track_farming(p: Params, farm_cases: int = 30, attacker_frac: float = 0.5,
         farm_fee_cost += r.fees_paid.get("attacker", 0.0)
         farm_reward += r.rewards_earned.get("attacker", 0.0)
 
-    attacker_track_sum = sum(mod.track for mod in pop if mod.faction == "attacker")
-    power_gained = freezing_power(attacker_track_sum, p)
+    # Freezing power is computed from the split-resistant MEAN track of the
+    # winning side (spec §6.4), so report the mean the engine actually uses —
+    # not the sum, which splitting would inflate.
+    atk = [mod for mod in pop if mod.faction == "attacker"]
+    mean_track = sum(mod.track for mod in atk) / max(len(atk), 1)
+    power_gained = freezing_power(mean_track, p)
 
-    # restore attack behaviour; keep the farmed attacker identities (with their
-    # earned track) but face a FRESH honest cohort each attack, so we measure the
-    # freeze-power the farm bought — not a freeze-out artifact from reusing one
-    # honest set whose members get progressively locked out.
-    farmed_attackers = [mod for mod in pop if mod.faction == "attacker"]
-    for mod in farmed_attackers:
+    def _attack_freeze(cohort, n):
+        """Run n attacks with `cohort` as the attacker set; return honest freeze
+        drag (stake-days) and attack success. Fresh honest cohort each attack."""
+        mm = Metrics()
+        for _ in range(n):
+            honest_pop = build_population(rng, honest_total_stake=honest_total,
+                                          attacker_total_stake=0.0)
+            for a in cohort:
+                a.frozen_until = 0.0
+            case = _make_case("submission", Outcome.REJECT, 0.0, Outcome.APPROVE)
+            r = run_case(honest_pop + cohort, p, case, rng)
+            mm.add(r, attacker_target=Outcome.APPROVE)
+        return mm
+
+    # restore attack behaviour on the farmed cohort
+    for mod in atk:
         mod.vote_fn = mod._farm_vote
+    farmed = _attack_freeze(atk, trials)
 
-    m = Metrics()
-    for _ in range(trials):
-        honest_pop = build_population(rng, honest_total_stake=honest_total,
-                                      attacker_total_stake=0.0)
-        for a in farmed_attackers:
-            a.frozen_until = 0.0        # attacker capital available each fresh attack
-        trial_pop = honest_pop + farmed_attackers
-        case = _make_case("submission", Outcome.REJECT, 0.0, Outcome.APPROVE)
-        r = run_case(trial_pop, p, case, rng)
-        m.add(r, attacker_target=Outcome.APPROVE)
+    # control: an identical-stake attacker that never farmed (track = 0)
+    control_cohort = build_population(rng, n_honest=0, honest_total_stake=0.0,
+                                      attacker_total_stake=attacker_total,
+                                      attacker_target=Outcome.APPROVE)
+    control = _attack_freeze(control_cohort, trials)
 
+    f_honest = farmed.freeze_stake_days.get("honest", 0.0) / max(farmed.n, 1)
+    c_honest = control.freeze_stake_days.get("honest", 0.0) / max(control.n, 1)
     return {
         "farm_cases": farm_cases,
-        "farm_fee_cost": round(farm_fee_cost, 3),
-        "farm_reward": round(farm_reward, 3),
-        "farm_net_cost": round(farm_fee_cost - farm_reward, 3),
-        "attacker_track_sum": round(attacker_track_sum, 2),
-        "freezing_power_gained": round(power_gained, 3),
-        "post_farm_attack": m.summary(),
+        "farm_net_cost_xbzz": round(farm_fee_cost - farm_reward, 3),
+        "attacker_mean_track": round(mean_track, 3),
+        "freezing_power_gained": round(power_gained, 3),   # 1.0 = none, cap = max
+        "honest_freeze_per_attack_farmed": round(f_honest, 1),
+        "honest_freeze_per_attack_control": round(c_honest, 1),
+        "farm_freeze_multiplier": round(f_honest / c_honest, 3) if c_honest else None,
+        "post_farm_attack": farmed.summary(),
     }
 
 

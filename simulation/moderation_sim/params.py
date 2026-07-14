@@ -23,22 +23,19 @@ class Params:
     min_reveals: int = 3               # MIN_REVEALS
     max_widen: int = 3                 # bounded widen retries on under-participation
 
-    # Vote weighting policy: how much stake a counted voter puts behind its side
-    # when the tally is computed. This is open question §11.6 in the spec.
-    #   "whole"  -> the voter's full stake (whales dominate a round)
-    #   "fixed"  -> a flat amount (outcome ~ vote counts; egalitarian)
-    #   "capped" -> min(stake, weight_cap)
-    weight_policy: str = "capped"
-    weight_cap: float = 100.0          # used when weight_policy == "capped"
-    fixed_weight: float = 10.0         # used when weight_policy == "fixed"
+    # Voting is FLAT: every counted seat is worth one vote, and the outcome is
+    # drawn in proportion to the seat counts behind each side. Stake buys
+    # selection frequency (with-replacement seat draws), not vote weight —
+    # resolving the double-count that stake-weighted selection plus a
+    # stake-weighted tally produced (spec §11.6, design review). No weight knob.
 
     # --- appeals ---
     max_depth: int = 3                 # MAX_DEPTH
     bond_multiplier: float = 2.0       # BOND_MULTIPLIER (bond >= 2x prev reward)
     # A rational appellant only bonds when the outcome looks overturnable, judged
-    # by its own side's revealed stake share in the round just decided. Appealing
+    # by its own side's revealed seat share in the round just decided. Appealing
     # a round its side barely showed up in is -EV: it just funds the winners.
-    honest_appeal_threshold: float = 0.35
+    honest_appeal_threshold: float = 0.50
     attacker_appeal_threshold: float = 0.40
     # Appeal windows per depth (days). Only used for latency accounting.
     appeal_window_days: List[float] = field(default_factory=lambda: [4.0, 3.0, 3.0])

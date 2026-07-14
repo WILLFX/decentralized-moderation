@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/willfx/decentralized-moderation/specs/metadata-v1.json",
+  "title": "Decentralized Moderation — Submission Metadata v1",
+  "description": "Schema for the metadata JSON object referenced by a submission's metadata CAC hash. Validated in the submit interface before submission, and checked by moderators against the actual content ('metadata honestly describes the content'). See README P4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "type", "title", "topics", "contentType"],
+  "properties": {
+    "schemaVersion": {
+      "description": "Metadata schema version. Must be 1 for this schema.",
+      "type": "integer",
+      "const": 1
+    },
+    "type": {
+      "description": "The kind of entry this is. Coarse object type used for filtering and display in search front ends.",
+      "type": "string",
+      "enum": ["article", "post", "comment", "image", "video", "audio", "document", "dataset", "link", "other"]
+    },
+    "title": {
+      "description": "Human-readable title. Must honestly describe the content.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "description": "Longer human-readable description of the content. Optional but recommended; must honestly describe the content when present.",
+      "type": "string",
+      "maxLength": 5000
+    },
+    "topics": {
+      "description": "Topics this entry claims to be about. MUST match the on-chain topic string list submitted alongside the fee. Normalized form: lowercase, trimmed, Unicode NFC. Capped to keep finalization gas bounded (README P2).",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "$comment": "Normalized topic string: lowercase, trimmed, NFC. The contract stores keccak256(topic) as the index key; this pattern rejects leading/trailing whitespace and uppercase ASCII so 'Biology' and 'biology ' cannot fragment the index. Full NFC normalization is enforced by the submit interface before hashing.",
+        "pattern": "^[^\\sA-Z](.*[^\\sA-Z])?$|^[^\\sA-Z]$"
+      }
+    },
+    "language": {
+      "description": "Primary language of the content as a BCP-47 tag (e.g. 'en', 'en-US', 'sw', 'zh-Hans'). Optional; omit for language-neutral content such as images without text.",
+      "type": "string",
+      "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "maxLength": 35
+    },
+    "contentType": {
+      "description": "IANA media type of the content addressed by the content CAC hash (e.g. 'text/html', 'image/png', 'video/mp4', 'application/pdf'). Must match the actual content.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9!#$&^_.+-]{0,126})?/[a-z0-9]([a-z0-9!#$&^_.+-]{0,126})?(;\\s*[^\\s;]+=[^\\s;]+)*$",
+      "maxLength": 255
+    },
+    "source": {
+      "description": "Optional origin reference for the content — e.g. the Swarm feed, URL, or anythread string this entry annotates or was published from. Informational only; not verified on-chain.",
+      "type": "string",
+      "maxLength": 2048
+    }
+  }
+}

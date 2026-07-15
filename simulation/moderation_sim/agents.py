@@ -7,7 +7,7 @@ to price:
   * honest       -- judge the guidelines, erring more on borderline content
   * attacker     -- always vote the attacker's target outcome
   * lazy_copy    -- copy the running plurality (models broken commit-reveal /
-                    copy-voting and first-come racing, README §7)
+                    copy-voting: votes ceasing to be independent)
   * always       -- a constant-vote agent, for stress tests
 """
 
@@ -32,8 +32,9 @@ def lazy_copy(mod: Moderator, case: Case, rng: random.Random) -> Outcome:
     """Copy the running plurality of votes already cast this round.
 
     With no prior votes to copy, falls back to an honest read. This models the
-    copy-voting / first-come racing failure mode that commit-reveal is meant to
-    prevent: if independence breaks, the first vote can cascade.
+    copy-voting failure mode that commit-reveal is meant to prevent: if vote
+    independence breaks, an early vote can cascade. (Panels are drawn by
+    sortition, so there is no first-come race at the protocol level.)
     """
     partial = case.partial_votes
     if not partial:

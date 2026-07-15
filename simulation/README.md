@@ -33,22 +33,30 @@ independent votes), not by hashing. Key abstractions, and where they diverge
 from the chain, are documented at the top of `protocol.py`. The load-bearing
 ones:
 
-- **Seats, not weighted voters** (post-review decision, spec §5.3). Each round
-  has N counted **seats** drawn stake-weighted **with replacement** — a large
-  stake can win several. Every seat is one **flat vote**, and the outcome is
-  drawn ∝ the seat counts behind each side (`_draw_seats`, `_draw_outcome`).
-  Stake buys selection frequency, not vote weight — resolving the earlier
-  double-count (stake-weighted selection *and* a stake-weighted tally). There is
-  no `weight_policy` knob.
-- **Appeals** are EV-gated: an appellant bonds only when its own side showed real
-  strength (seat share) in the round just decided. This is why a dominant whale
-  earns nothing from honest appellants (they rationally decline to fund a lost
-  cause).
+- **Seats, not weighted voters** (spec §5.2). Each round has N counted **seats**
+  drawn stake-weighted **with replacement** — a large stake can win several. Every
+  seat is one **flat vote**; the outcome is drawn ∝ seat counts (`_draw_seats`,
+  `_draw_outcome`). Stake buys selection frequency, not vote weight (no
+  double-count). No `weight_policy` knob.
+- **Solvent settlement:** refunds first, bounty/bonus from the residual, so no
+  case mints money (`test_settlement_conserves_funds`).
 - **Freezing power** comes from the **seat-weighted mean** track of the winning
-  side (not the sum), which is identity-split resistant (`freezing_power`).
-- **No internal transfer:** settlement moves only external money (fees +
-  forfeited bonds) to coherent voters, split by coherent **seats**; principal is
-  never touched. Enforced by `tests/test_no_internal_stake_transfer`.
+  side (split-resistant), and only *bites* in **campaign mode** (below).
+- **Appeals are configurable, not assumed benign.** `Params.honest_appeal_threshold`
+  (EV-gate) and `Params.naive_appeal_frac` (a caring honest side that appeals
+  regardless) both drive results — the attacker's profit is a function of them,
+  not a constant. Likewise `error_correlation` (shared honest blind spots).
+- **No internal transfer:** settlement moves only external money (fees + forfeited
+  bonds) to coherent voters; principal is untouched (`test_no_internal_stake_transfer`).
+
+### Campaign mode (freeze must persist to matter)
+
+`campaign.py::run_campaign` drives a persistent population on an absolute clock so
+a frozen moderator is actually absent from later draws. The single-case scenarios
+rebuild the population each trial, under which freezing is inert. All freeze,
+farming, and veteran-effect results come from campaign mode; it is a sequential
+approximation of overlapping cases (documented in `campaign.py`). Campaign
+outcomes are high-variance, so they are averaged over several seeds with ±sd.
 
 ## Layout
 
@@ -57,36 +65,42 @@ simulation/
   run.py                       CLI: scenarios, sweeps, JSON output
   moderation_sim/
     params.py                  Params dataclass — every spec §1 symbol
-    protocol.py                case engine: rounds, draws, appeals, settlement
+    protocol.py                case engine: draw→commit→reveal→tally→appeal→settle
+    campaign.py                persistent-population campaigns (freeze bites)
     agents.py                  voting strategies (honest, attacker, copy-voter)
     costs.py                   fee-floor cost model (gas + voter pay)
-    scenarios.py               the README §7 attack experiments
-    metrics.py                 Monte-Carlo aggregation
+    scenarios.py               the attack experiments + sweeps
+    metrics.py                 Monte-Carlo aggregation (± sd, per-case units)
   tests/test_protocol.py       invariant + sanity tests
-  FINDINGS.md                  what the runs show + parameter recommendations
+  FINDINGS.md                  interpreted results, stated with their conditions
 ```
 
 ## Scenarios
 
-| Command | README ref | Demonstrates |
-|---|---|---|
-| `whale` / `whale-sweep` | §3.6, §4 | A stake majority cannot force an outcome with certainty and earns nothing internally; cost = fees + forfeited bonds + freeze drag. |
-| `bond-war` | §3.6 | Honest challengers re-litigate whale wins up the appeal ladder; who funds whom. |
-| `track-farming` | §7 | Cost of manufacturing freezing power via innocuous self-submissions vs the power gained. |
-| `honest` | principle 1 | Honest-moderator ROI on clear vs borderline content; losing a borderline draw is an inconvenience, not a loss. |
-| `fee-floor` | P8, §11.5 | Derives the fee floor from per-vote operating cost; shows gas is negligible and moderators clear costs at a 1.5× margin. |
-| `copy` | §7 | First-come racing / copy-voting degrades correctness only as independence breaks — quantifies why commit-reveal matters. |
-| `underparticipation` | §5.2 | Offline moderators trigger subset widening; effect on liveness and correctness. |
+| Command | Demonstrates (see FINDINGS for numbers + conditions) |
+|---|---|
+| `whale` / `whale-sweep` | Attack success vs (stake, difficulty, honest liveness). A minority whale is not powerless on borderline content with honest offline. |
+| `naive` | Attacker net/case as a function of the honest side's appeal rationality — "attacker profits nothing" is conditional. |
+| `track-farming` | Campaign-mode farming: bounded, not eliminated; split and concentrated both give no reliable attack-success uplift. Reports honest freeze p95. |
+| `honest` | Honest ROI and correctness by difficulty (± sd); plus correlated-error rows. |
+| `fee-floor` | Fee floor from per-vote op cost; gas negligible; margin ~2 clears borderline. |
+| `copy` | Copy/correlated voting degrades correctness only as independence breaks; whale × copy helps the attacker. |
+| `underparticipation` | Widen path holds correctness down to ~15% online. |
 
-See `FINDINGS.md` for the interpreted results and the parameter directions they
-point to. The parameters this simulation exists to resolve are enumerated in
-`../specs/state-machine.md` §11.
+See `FINDINGS.md` for interpreted results **with their conditions and confidence
+bands**, and `../specs/state-machine.md` §11 for the open-parameter list.
 
 ## Caveats
 
 This is a first-generation model built to expose *directions and orders of
-magnitude*, not to emit final constants. It abstracts network timing, gas,
-proposer/randomness manipulation, and heterogeneous AI-classifier error
-correlation. Extending it toward those is future M1 work; the current model is
-enough to falsify the qualitative claims (and it does confirm them) and to rank
-parameter regimes against each other.
+magnitude*, not to emit final constants. It abstracts network timing, exact gas,
+proposer/randomness manipulation, and the *cost of acquiring* a stake majority
+(the real external defense against supermajority capture, which the model does
+not price). Campaign mode is a sequential approximation of concurrent cases, and
+liveness/honest-error are modeled as i.i.d. where reality is correlated.
+
+Crucially, the model is set up to **falsify** claims, not just confirm them: an
+adversarial review showed several first-pass headlines depended on
+defender-favorable assumptions, and the scenarios now relax those (content
+difficulty, honest liveness, appeal rationality, correlated error). FINDINGS
+reports what survives and what does not.

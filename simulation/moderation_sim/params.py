@@ -57,11 +57,12 @@ class Params:
     claim_bounty_frac: float = 0.01    # CLAIM_BOUNTY as fraction of pot
     winning_appellant_bonus_frac: float = 0.10  # bonus to a vindicated appellant
 
-    # --- freezing ---
+    # --- freezing (recalibrated WO-6: lower cap, slower/decaying track accrual so
+    #     even a concentrated farm cannot reach high freezing power cheaply) ---
     freeze_base_days: float = 7.0      # FREEZE_BASE
-    freeze_cap: float = 8.0            # FREEZE_CAP (max multiplier on base)
-    track_saturation: float = 20.0     # TRACK_SAT (track count for ~cap power)
-    track_decay: float = 0.98          # TRACK_DECAY (per-case multiplicative decay)
+    freeze_cap: float = 4.0            # FREEZE_CAP (max multiplier on base; was 8)
+    track_saturation: float = 60.0     # TRACK_SAT (track for ~cap power; was 20)
+    track_decay: float = 0.95          # TRACK_DECAY (per-case decay; was 0.98)
     failed_reveal_freeze_days: float = 1.0  # brief freeze for commit-and-vanish
 
     # --- fees (P8: minFee = base + perTopic * nTopics) ---

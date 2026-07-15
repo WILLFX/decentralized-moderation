@@ -244,6 +244,21 @@ def test_settlement_conserves_funds():
         assert abs(inflow - outflow) < 1e-6, (inflow, outflow, r.depth_reached)
 
 
+def test_concentrated_farm_bounded():
+    """The recalibrated freeze params (WO-6) bound the CONCENTRATED farm too.
+
+    Mean-track freezing power defends against split identities; concentration is
+    the mirror-image stress (one identity is drawn into nearly every case). With
+    FREEZE_CAP=4, TRACK_SAT=60, TRACK_DECAY=0.95, an all-in-one 30-case farm must
+    stay under freezing power 2.0 and give no real freeze multiplier over an
+    unfarmed control.
+    """
+    res = sc.track_farming(Params(), farm_cases=30, attack_cases=150,
+                           attacker_frac=0.5, identity_stake=4000.0, seeds=6)
+    assert res["freezing_power_gained"] < 2.0, res
+    assert res["farm_freeze_multiplier"] is None or res["farm_freeze_multiplier"] < 1.3, res
+
+
 def test_fee_floor_lets_moderators_clear_costs():
     """At the derived fee floor, honest moderators net positive after op costs.
 

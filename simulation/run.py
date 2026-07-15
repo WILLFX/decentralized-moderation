@@ -104,6 +104,11 @@ def cmd_track_farming(p: Params, args) -> dict:
               f"{res['attacker_mean_track']:>11.2f} {res['freezing_power_gained']:>7.2f} "
               f"{res['attack_success_farmed']:>10.3f} {res['attack_success_control']:>10.3f} "
               f"{res['success_uplift']:>+9.3f} {res['success_uplift_sd']:>7.3f}")
+    fz = sc.honest_freeze_duration_stats(p)
+    out["honest_freeze_duration_days"] = fz
+    print(f"\n  honest freeze duration on borderline content, veteran network (principle-1):")
+    print(f"    mean={fz['mean_days']}d  p95={fz['p95_days']}d  max={fz['max_days']}d  "
+          f"({'OK: p95 <= 21d' if fz['p95_days'] <= 21 else 'FLAG: p95 > 21d'})")
     return out
 
 

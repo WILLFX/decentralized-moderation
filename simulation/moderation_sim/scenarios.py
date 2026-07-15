@@ -224,7 +224,7 @@ def track_farming(p: Params, farm_cases: int = 30, attack_cases: int = 200,
     """
     from .protocol import freezing_power
 
-    upl, sf, sc_, mt, fn = [], [], [], [], []
+    upl, sf, sc_, mt, fn, frz_f, frz_c = [], [], [], [], [], [], []
     for s in range(seeds):
         farmed, mean_track, farm_net = _farm_then_attack(
             p, True, farm_cases, attack_cases, attacker_frac, identity_stake,
@@ -237,6 +237,9 @@ def track_farming(p: Params, farm_cases: int = 30, attack_cases: int = 200,
         upl.append(farmed.attack_success_rate() - control.attack_success_rate())
         mt.append(mean_track)
         fn.append(farm_net)
+        frz_f.append(farmed.freeze_per_case("honest"))
+        frz_c.append(control.freeze_per_case("honest"))
+    mult = (mean(frz_f) / mean(frz_c)) if mean(frz_c) else None
     return {
         "farm_cases": farm_cases,
         "identity_stake": identity_stake,
@@ -248,6 +251,40 @@ def track_farming(p: Params, farm_cases: int = 30, attack_cases: int = 200,
         "attack_success_control": round(mean(sc_), 4),
         "success_uplift": round(mean(upl), 4),
         "success_uplift_sd": round(pstdev(upl) if len(upl) > 1 else 0.0, 4),
+        "honest_freeze_per_case_farmed": round(mean(frz_f), 2),
+        "farm_freeze_multiplier": round(mult, 3) if mult is not None else None,
+    }
+
+
+def honest_freeze_duration_stats(p: Params, honest_track: float = 15.0,
+                                 difficulty: float = 0.5, n_cases: int = 600,
+                                 seeds: int = 4, seed0: int = 200) -> dict:
+    """Distribution of freeze DURATIONS inflicted on honest moderators on
+    borderline content in a mature (veteran) network — the principle-1 tension
+    (honest coin-flip losers frozen by honest winners). Reports mean/p95/max days
+    so it can be checked against the 'annoying, never ruinous' bar.
+    """
+    durations = []
+    for s in range(seeds):
+        rng = random.Random(seed0 + s)
+        pop = build_population(rng, honest_total_stake=4000.0, honest_track=honest_track)
+
+        def factory(i, r):
+            label = Outcome.APPROVE if r.random() < 0.5 else Outcome.REJECT
+            return _make_case("submission", label, difficulty, None)
+
+        for res in run_campaign(pop, p, factory, n_cases, rng):
+            nf = res.n_frozen.get("honest", 0)
+            if nf > 0 and res.freeze_days_applied > 0:
+                durations.extend([res.freeze_days_applied] * nf)
+    durations.sort()
+    n = len(durations)
+    p95 = durations[min(int(0.95 * n), n - 1)] if n else 0.0
+    return {
+        "n_honest_freezes": n,
+        "mean_days": round(mean(durations), 2) if durations else 0.0,
+        "p95_days": round(p95, 2),
+        "max_days": round(durations[-1], 2) if durations else 0.0,
     }
 
 

@@ -113,6 +113,7 @@ class CaseResult:
     op_costs: Dict[str, float] = field(default_factory=dict)  # operating cost of judging
     claim_bounty_paid: float = 0.0     # bounty to the finalization claimant
     refunded_bonds: float = 0.0        # winning appellants' bonds returned (own capital)
+    freeze_days_applied: float = 0.0   # freeze duration used this case (0 if none frozen)
     uncontested: bool = False          # index field: no reject vote and never appealed
 
 
@@ -444,6 +445,7 @@ def _settle(case: Case, p: Params, pot: float, result: CaseResult) -> None:
     # 4. freeze incoherent voters (spec §6.4). No stake transfer — locked only.
     power = freezing_power(winners_mean_track, p)
     freeze_days = p.freeze_base_days * power
+    result.freeze_days_applied = freeze_days   # duration used this case (for p95 report)
     seen = set()
     for r in case.rounds:
         for mid in r.seats:

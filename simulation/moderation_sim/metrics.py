@@ -71,6 +71,15 @@ class Metrics:
                 - self.bonds_forfeited.get(faction, 0.0)
                 - self.op_costs.get(faction, 0.0))
 
+    def freeze_per_case(self, faction: str) -> float:
+        """Freeze pressure as stake-days PER CASE (not summed over trials — a
+        summed figure over thousands of independent one-shot cases reads as a
+        campaign total it is not)."""
+        return self.freeze_stake_days.get(faction, 0.0) / self.n if self.n else 0.0
+
+    def net_per_case(self, faction: str) -> float:
+        return self.faction_net(faction) / self.n if self.n else 0.0
+
     def summary(self) -> Dict[str, float]:
         return {
             "trials": self.n,
@@ -78,8 +87,8 @@ class Metrics:
             "attack_success_rate": round(self.attack_success_rate(), 4),
             "avg_depth": round(self.avg_depth(), 3),
             "avg_latency_days": round(self.avg_latency(), 2),
-            "attacker_net": round(self.faction_net("attacker"), 3),
-            "honest_net": round(self.faction_net("honest"), 3),
-            "attacker_freeze_stake_days": round(self.freeze_stake_days.get("attacker", 0.0), 1),
-            "honest_freeze_stake_days": round(self.freeze_stake_days.get("honest", 0.0), 1),
+            "attacker_net_per_case": round(self.net_per_case("attacker"), 4),
+            "honest_net_per_case": round(self.net_per_case("honest"), 4),
+            "attacker_freeze_per_case": round(self.freeze_per_case("attacker"), 2),
+            "honest_freeze_per_case": round(self.freeze_per_case("honest"), 2),
         }

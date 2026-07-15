@@ -37,8 +37,19 @@ class Params:
     # a round its side barely showed up in is -EV: it just funds the winners.
     honest_appeal_threshold: float = 0.50
     attacker_appeal_threshold: float = 0.40
+    # Fraction of honest challengers who are "naive": they appeal ANY wrong
+    # approval of unsafe content regardless of their seat share (they care about
+    # the index, not their own EV). Their forfeited bonds can flow to a winning
+    # attacker, so the "attacker profit ~ 0" result is a function of this. Default
+    # 0 = fully EV-rational honest side.
+    naive_appeal_frac: float = 0.0
     # Appeal windows per depth (days). Only used for latency accounting.
     appeal_window_days: List[float] = field(default_factory=lambda: [4.0, 3.0, 3.0])
+
+    # Correlated honest error: probability that a round uses a SHARED error draw
+    # (all honest voters err together, a common blind spot) instead of i.i.d.
+    # per-voter error. Default 0 = independent errors (washed out by plurality).
+    error_correlation: float = 0.0
 
     # --- settlement ---
     claim_bounty_frac: float = 0.01    # CLAIM_BOUNTY as fraction of pot

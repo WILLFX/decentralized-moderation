@@ -92,6 +92,8 @@ class Case:
     now: float = 0.0                   # sim-day clock, advanced per phase
     attacker_target: Optional[Outcome] = None  # outcome an attacker faction pushes
     partial_votes: List[Outcome] = field(default_factory=list)  # votes so far this round
+    correlated_round: bool = False     # this round uses a shared honest error draw
+    shared_flip: bool = False          # if correlated, honest side flips together
 
 
 @dataclass
@@ -193,6 +195,13 @@ def _run_round(case: Case, pop: List[Moderator], depth: int,
         widen += 1
         case.now += p.appeal_window_days[0] / 4.0  # small delay per widen
 
+    # Correlated honest error (spec/model knob): with prob error_correlation this
+    # round shares a single error event across the honest side (a common blind
+    # spot), instead of i.i.d. per-voter error that a plurality washes out.
+    case.correlated_round = rng.random() < p.error_correlation
+    if case.correlated_round:
+        case.shared_flip = rng.random() < (0.02 + 0.4 * case.difficulty)
+
     # Votes are processed in seat-draw order so strategies modeling a broken
     # commit-reveal (copy-voting / racing) can read the running tally via
     # ``case.partial_votes``. Honest strategies ignore it, matching the
@@ -216,7 +225,15 @@ def _run_round(case: Case, pop: List[Moderator], depth: int,
 # ---------------------------------------------------------------------------
 
 def honest_vote(mod: Moderator, case: Case, rng: random.Random) -> Outcome:
-    """Vote the honest label, with an error rate that grows with difficulty."""
+    """Vote the honest label, with an error rate that grows with difficulty.
+
+    In a correlated round (case.correlated_round) the honest side shares one error
+    event, so they all flip together (case.shared_flip) or all stay correct — a
+    common blind spot that a plurality cannot wash out. Otherwise each voter errs
+    independently.
+    """
+    if case.correlated_round:
+        return Outcome(1 - int(case.honest_label)) if case.shared_flip else case.honest_label
     err = 0.02 + 0.4 * case.difficulty      # clear-cut ~2%, fully borderline ~42%
     if rng.random() < err:
         return Outcome(1 - int(case.honest_label))
@@ -308,12 +325,19 @@ def default_appeal_policy(case: Case, r: _Round, pop: List[Moderator],
         s = r.approve_seats if side == Outcome.APPROVE else r.reject_seats
         return s / total
 
-    if outcome != case.honest_label and side_share(case.honest_label) >= p.honest_appeal_threshold:
-        challengers = [m for m in pop
-                       if m.faction == "honest" and not m.is_frozen(case.now)
-                       and m.stake >= bond]
-        if challengers:
-            return max(challengers, key=lambda m: m.stake)
+    # Honest challengers appeal a wrong outcome when EITHER the outcome looks
+    # overturnable (rational, seat-share gate) OR a naive challenger decides to
+    # appeal regardless — they care about keeping unsafe content out of the index,
+    # not their own EV (fraction naive_appeal_frac).
+    if outcome != case.honest_label:
+        rational = side_share(case.honest_label) >= p.honest_appeal_threshold
+        naive = rng.random() < p.naive_appeal_frac
+        if rational or naive:
+            challengers = [m for m in pop
+                           if m.faction == "honest" and not m.is_frozen(case.now)
+                           and m.stake >= bond]
+            if challengers:
+                return max(challengers, key=lambda m: m.stake)
 
     tgt = case.attacker_target
     if tgt is not None and outcome != tgt and side_share(tgt) >= p.attacker_appeal_threshold:

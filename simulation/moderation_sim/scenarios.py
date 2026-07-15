@@ -18,8 +18,9 @@ Design intent, mapped to what each scenario is meant to demonstrate:
                           gained. README §7 "Track-record farming".
   honest_earnings      -- an honest moderator's ROI on clear vs borderline
                           content with no attacker present. Principle 1.
-  copy_voting          -- first-come racing / copy-voting degrades correctness
-                          only if commit-reveal independence breaks. README §7.
+  copy_voting          -- copy-voting / correlated voting degrades correctness
+                          only if commit-reveal independence breaks. (Panels are
+                          drawn by sortition, so there is no first-come race.)
   underparticipation   -- offline moderators trigger subset widening; effect on
                           liveness and correctness. Spec §5.2 widen path.
 """
@@ -101,12 +102,15 @@ def _make_case(kind: str, honest_label: Outcome, difficulty: float,
 # ---------------------------------------------------------------------------
 
 def whale(p: Params, attacker_frac: float = 0.5, honest_track: float = 0.0,
-          difficulty: float = 0.0, trials: int = 2000, seed: int = 1) -> Metrics:
+          difficulty: float = 0.0, honest_online: float = 1.0, lazy_frac: float = 0.0,
+          trials: int = 2000, seed: int = 1) -> Metrics:
     """Probability-buying whale forcing APPROVE on unsafe content.
 
-    ``attacker_frac`` is the attacker's share of total stake. ``honest_track``
-    lets us contrast a newcomer-whale against established veterans (principle 4:
-    veterans freeze the attacker far longer).
+    ``attacker_frac`` is the attacker's share of total stake. A rational attacker
+    chooses ``difficulty`` (plausibly-borderline content is easier to push) and
+    stays online while honest liveness (``honest_online``) fluctuates — the
+    attacker's own reveal probability is always 1.0. ``lazy_frac`` seeds
+    copy-voters into the honest side.
     """
     rng = random.Random(seed)
     m = Metrics()
@@ -117,11 +121,29 @@ def whale(p: Params, attacker_frac: float = 0.5, honest_track: float = 0.0,
         pop = build_population(
             rng, honest_total_stake=honest_total, honest_track=honest_track,
             attacker_total_stake=attacker_total, attacker_target=Outcome.APPROVE,
+            honest_reveal_prob=honest_online, lazy_frac=lazy_frac,
         )
         case = _make_case("submission", Outcome.REJECT, difficulty, Outcome.APPROVE)
         r = run_case(pop, p, case, rng)
         m.add(r, attacker_target=Outcome.APPROVE)
     return m
+
+
+def whale_multiseed(p: Params, attacker_frac=0.5, difficulty=0.0, honest_online=1.0,
+                    lazy_frac=0.0, honest_track=0.0, trials=800, seeds=5, seed0=1):
+    """Run :func:`whale` across several seeds; return (mean, sd) of attack success
+    and attacker net/case, so headline numbers carry a confidence band."""
+    succ, net = [], []
+    for s in range(seeds):
+        m = whale(p, attacker_frac=attacker_frac, difficulty=difficulty,
+                  honest_online=honest_online, lazy_frac=lazy_frac,
+                  honest_track=honest_track, trials=trials, seed=seed0 + s)
+        succ.append(m.attack_success_rate())
+        net.append(m.faction_net("attacker") / m.n)
+    return {
+        "success_mean": mean(succ), "success_sd": pstdev(succ) if seeds > 1 else 0.0,
+        "attacker_net_mean": mean(net), "attacker_net_sd": pstdev(net) if seeds > 1 else 0.0,
+    }
 
 
 def bond_war(p: Params, attacker_frac: float = 0.55, trials: int = 2000,
@@ -305,7 +327,11 @@ def fee_floor(op_costs=(0.005, 0.02, 0.05, 0.1, 0.25), margin: float = 1.5,
 
 def copy_voting(p: Params, lazy_frac: float = 0.5, difficulty: float = 0.1,
                 trials: int = 3000, seed: int = 5) -> Metrics:
-    """First-come racing / copy-voting: correctness as copy-voter share grows."""
+    """Copy-voting / correlated voting: correctness as copy-voter share grows.
+
+    Panels are drawn by sortition (no first-come race); this isolates the effect
+    of votes ceasing to be independent, which commit-reveal exists to prevent.
+    """
     rng = random.Random(seed)
     m = Metrics()
     for _ in range(trials):

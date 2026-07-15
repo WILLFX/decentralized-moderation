@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
+from statistics import mean, pstdev
 
 from moderation_sim import Params
 from moderation_sim import scenarios as sc
@@ -34,24 +36,50 @@ def cmd_whale(p: Params, args) -> dict:
     m = sc.whale(p, attacker_frac=args.frac, honest_track=args.track,
                  difficulty=args.difficulty, trials=args.trials, seed=args.seed)
     s = m.summary()
-    _print_summary(f"whale (attacker_frac={args.frac}, honest_track={args.track})", s)
+    _print_summary(f"whale (attacker_frac={args.frac}, difficulty={args.difficulty})", s)
     return s
 
 
 def cmd_whale_sweep(p: Params, args) -> dict:
     out = {}
-    print("\n=== whale sweep: attack success & attacker net vs stake share ===")
-    print(f"  {'frac':>6} | {'newcomer_success':>16} {'net':>9} | "
-          f"{'veteran_success':>15} {'net':>9} {'frz(k·d)':>10}")
+    tr = args.trials
+    print("\n=== whale sweep: attack success (mean±sd, 5 seeds) vs stake share ===")
+    print("  clear content (difficulty 0), full honest liveness")
+    print(f"  {'frac':>6} {'success':>16} {'attacker_net/case':>20}")
     for frac in (0.2, 0.35, 0.5, 0.6, 0.75, 0.9):
-        newc = sc.whale(p, attacker_frac=frac, honest_track=0.0,
-                        trials=args.trials, seed=args.seed).summary()
-        vet = sc.whale(p, attacker_frac=frac, honest_track=15.0,
-                       trials=args.trials, seed=args.seed + 1).summary()
-        out[f"frac_{frac}"] = {"newcomer": newc, "veteran": vet}
-        print(f"  {frac:>6.2f} | {newc['attack_success_rate']:>16.3f} "
-              f"{newc['attacker_net']:>9.2f} | {vet['attack_success_rate']:>15.3f} "
-              f"{vet['attacker_net']:>9.2f} {vet['attacker_freeze_stake_days']:>10.0f}")
+        r = sc.whale_multiseed(p, attacker_frac=frac, trials=tr, seeds=5)
+        out[f"frac_{frac}"] = r
+        print(f"  {frac:>6.2f}   {r['success_mean']:.3f}±{r['success_sd']:.3f}      "
+              f"{r['attacker_net_mean']:>+8.3f}±{r['attacker_net_sd']:.3f}")
+
+    print("\n  a MINORITY whale (frac 0.35) is not powerless: success rises with")
+    print("  content difficulty (attacker picks borderline) and honest offline share")
+    print(f"  {'difficulty':>10} | {'online 1.0':>11} {'online 0.5':>11} {'online 0.3':>11}")
+    grid = {}
+    for diff in (0.0, 0.25, 0.5):
+        row = []
+        for onl in (1.0, 0.5, 0.3):
+            r = sc.whale_multiseed(p, attacker_frac=0.35, difficulty=diff,
+                                   honest_online=onl, trials=tr, seeds=5)
+            row.append(r["success_mean"])
+            grid[f"d{diff}_o{onl}"] = r
+        print(f"  {diff:>10.2f} | {row[0]:>11.3f} {row[1]:>11.3f} {row[2]:>11.3f}")
+    out["liveness_difficulty_grid"] = grid
+    return out
+
+
+def cmd_naive(p: Params, args) -> dict:
+    out = {}
+    print("\n=== naive appellants: attacker net/case vs share of naive honest challengers ===")
+    print("  frac-0.6 whale on clear content; a naive honest challenger appeals any")
+    print("  wrong approval regardless of seat share, so its lost bonds can feed the whale")
+    print(f"  {'naive_frac':>10} {'attacker_net/case':>20} {'attack_success':>15}")
+    for nf in (0.0, 0.25, 0.5, 1.0):
+        pp = replace(p, naive_appeal_frac=nf)
+        r = sc.whale_multiseed(pp, attacker_frac=0.6, trials=args.trials, seeds=5)
+        out[f"naive_{nf}"] = r
+        print(f"  {nf:>10.2f}   {r['attacker_net_mean']:>+8.3f}±{r['attacker_net_sd']:.3f} "
+              f"    {r['success_mean']:>11.3f}")
     return out
 
 
@@ -79,17 +107,34 @@ def cmd_track_farming(p: Params, args) -> dict:
     return out
 
 
+def _seed_stats(fn, seeds, seed0, metric):
+    vals = [metric(fn(seed0 + s)) for s in range(seeds)]
+    return mean(vals), (pstdev(vals) if seeds > 1 else 0.0)
+
+
 def cmd_honest(p: Params, args) -> dict:
     out = {}
-    print("\n=== honest_earnings: net reward per case, by difficulty ===")
+    tr = max(args.trials // 2, 400)
+    print("\n=== honest_earnings: net/case & correctness by difficulty (mean±sd, 5 seeds) ===")
+    print(f"  {'difficulty':>10} {'correctness':>16} {'honest_net/case':>18} {'frz/case':>10}")
     for d in (0.0, 0.25, 0.5, 0.75):
-        m = sc.honest_earnings(p, difficulty=d, trials=args.trials, seed=args.seed)
-        s = m.summary()
-        per_case = round(s["honest_net"] / s["trials"], 4)
-        out[f"difficulty_{d}"] = {**s, "honest_net_per_case": per_case}
-        print(f"  difficulty={d:<4}  correctness={s['correctness']:.3f}  "
-              f"honest_net_per_case={per_case:+.4f}  "
-              f"honest_frozen_stake_days={s['honest_freeze_stake_days']:.1f}")
+        runs = [sc.honest_earnings(p, difficulty=d, trials=tr, seed=args.seed + s)
+                for s in range(5)]
+        cm, cs = mean(m.correctness() for m in runs), pstdev(m.correctness() for m in runs)
+        nm, ns = mean(m.net_per_case("honest") for m in runs), pstdev(m.net_per_case("honest") for m in runs)
+        frz = mean(m.freeze_per_case("honest") for m in runs)
+        out[f"difficulty_{d}"] = {"correctness": (cm, cs), "honest_net_per_case": (nm, ns),
+                                  "honest_freeze_per_case": frz}
+        print(f"  {d:>10.2f}   {cm:.3f}±{cs:.3f}    {nm:>+8.4f}±{ns:.4f}   {frz:>10.1f}")
+
+    print("\n  correlated honest error (difficulty 0.3): correctness vs error_correlation")
+    print("  (i.i.d. errors wash out in a plurality; a shared blind spot does not)")
+    for ec in (0.0, 0.25, 0.5):
+        pp = replace(p, error_correlation=ec)
+        cm, cs = _seed_stats(lambda s: sc.honest_earnings(pp, difficulty=0.3, trials=tr, seed=s),
+                             5, args.seed, lambda m: m.correctness())
+        out[f"error_correlation_{ec}"] = (cm, cs)
+        print(f"  error_correlation={ec:<4} correctness={cm:.3f}±{cs:.3f}")
     return out
 
 
@@ -109,12 +154,18 @@ def cmd_fee_floor(p: Params, args) -> dict:
 
 def cmd_copy(p: Params, args) -> dict:
     out = {}
-    print("\n=== copy_voting: correctness vs copy-voter share (difficulty=0.1) ===")
+    print("\n=== copy/correlated voting ===")
+    print("  no attacker: correctness vs copy-voter share (difficulty 0.1)")
     for lf in (0.0, 0.25, 0.5, 0.75, 0.95):
         m = sc.copy_voting(p, lazy_frac=lf, trials=args.trials, seed=args.seed)
-        s = m.summary()
-        out[f"lazy_frac_{lf}"] = s
-        print(f"  copy_frac={lf:<5} correctness={s['correctness']:.3f}")
+        out[f"lazy_frac_{lf}"] = {"correctness": m.correctness()}
+        print(f"    copy_frac={lf:<5} correctness={m.correctness():.3f}")
+    print("\n  whale x copy: does a copy-voting honest side help a 20% attacker? (success)")
+    for lf in (0.0, 0.5, 0.9):
+        r = sc.whale_multiseed(p, attacker_frac=0.2, difficulty=0.1, lazy_frac=lf,
+                               trials=args.trials, seeds=5)
+        out[f"whale_copy_{lf}"] = r
+        print(f"    copy_frac={lf:<5} attack_success={r['success_mean']:.3f}±{r['success_sd']:.3f}")
     return out
 
 
@@ -133,6 +184,7 @@ def cmd_underparticipation(p: Params, args) -> dict:
 def cmd_all(p: Params, args) -> dict:
     return {
         "whale_sweep": cmd_whale_sweep(p, args),
+        "naive_appellants": cmd_naive(p, args),
         "track_farming": cmd_track_farming(p, args),
         "honest_earnings": cmd_honest(p, args),
         "fee_floor": cmd_fee_floor(p, args),
@@ -144,6 +196,7 @@ def cmd_all(p: Params, args) -> dict:
 COMMANDS = {
     "whale": cmd_whale,
     "whale-sweep": cmd_whale_sweep,
+    "naive": cmd_naive,
     "bond-war": cmd_bond_war,
     "track-farming": cmd_track_farming,
     "honest": cmd_honest,

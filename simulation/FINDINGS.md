@@ -172,7 +172,7 @@ Accepted for MVP (README §7). No parameter change indicated.
 on schedule down to ~15% of drawn seats online; only at 8% does correctness dip
 and latency stretch. Supports the liveness argument of README §3.3.
 
-**Open (§11.6).** The model uses an i.i.d. `reveal_prob`, which understates
+**Open (§11 still-open item 6).** The model uses an i.i.d. `reveal_prob`, which understates
 correlated offline periods; re-check `MIN_REVEALS`/`max_widen` against bursty
 liveness.
 

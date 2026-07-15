@@ -18,8 +18,10 @@ class Params:
     min_stake: float = 10.0            # MIN_STAKE (xBZZ)
 
     # --- subset / voting ---
-    # Counted votes per depth (COMMIT_TARGET). Index = appeal depth.
-    commit_target: List[int] = field(default_factory=lambda: [5, 11, 23])
+    # Counted seats per depth (COMMIT_TARGET). Index = appeal depth. MAX_DEPTH=3
+    # permits rounds at depths 0..3, so a depth-3 size is defined (was missing;
+    # the engine used to silently clamp to the last value).
+    commit_target: List[int] = field(default_factory=lambda: [5, 11, 23, 47])
     min_reveals: int = 3               # MIN_REVEALS
     max_widen: int = 3                 # bounded widen retries on under-participation
 
@@ -31,7 +33,7 @@ class Params:
 
     # --- appeals ---
     max_depth: int = 3                 # MAX_DEPTH
-    bond_multiplier: float = 2.0       # BOND_MULTIPLIER (bond >= 2x prev reward)
+    bond_multiplier: float = 2.0       # BOND_MULTIPLIER (bond >= 2x pot)
     # A rational appellant only bonds when the outcome looks overturnable, judged
     # by its own side's revealed seat share in the round just decided. Appealing
     # a round its side barely showed up in is -EV: it just funds the winners.

@@ -53,20 +53,24 @@ def build_population(
     attacker_target: Optional[Outcome] = None,
     honest_reveal_prob: float = 1.0,
     lazy_frac: float = 0.0,
+    min_stake: float = 10.0,
 ) -> List[Moderator]:
     """Construct a moderator population.
 
     Honest stake is spread with mild dispersion around the mean so the set is
-    not perfectly uniform. Attacker capital is split into ``attacker_identity_stake``
-    sized identities (splitting is protocol-neutral for stake-weighted draws;
-    see tests). ``lazy_frac`` of honest moderators use the copy-voting strategy.
+    not perfectly uniform, and clamped to the ``min_stake`` floor so every
+    moderator would be valid on-chain (MIN_STAKE = 10). Attacker capital is split
+    into ``attacker_identity_stake`` sized identities (splitting is
+    protocol-neutral for stake-weighted draws; see tests). ``lazy_frac`` of honest
+    moderators use the copy-voting strategy.
     """
     pop: List[Moderator] = []
     mean_stake = honest_total_stake / max(n_honest, 1)
     next_id = 0
     for _ in range(n_honest):
-        # log-normal-ish spread, clamped to >= min stake, preserving the mean
-        s = max(1.0, rng.lognormvariate(math.log(max(mean_stake, 1.0)) - 0.18, 0.6))
+        # log-normal-ish spread, clamped to the MIN_STAKE floor (not 1.0), so no
+        # sub-minimum-stake moderators exist that the contract would reject.
+        s = max(min_stake, rng.lognormvariate(math.log(max(mean_stake, 1.0)) - 0.18, 0.6))
         is_lazy = rng.random() < lazy_frac
         pop.append(Moderator(
             id=next_id, stake=s, faction="honest", track=honest_track,

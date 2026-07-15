@@ -168,19 +168,55 @@ def test_modest_farm_buys_little_freeze_power():
     assert res["farm_freeze_multiplier"] < 1.25, res["farm_freeze_multiplier"]
 
 
+def test_settlement_conserves_funds():
+    """Invariant 1 (spec §9): every case pays out exactly what came in.
+
+    Across many DISPUTED cases (appeals opened, outcomes flipping up the ladder),
+    the pot (fee + all bonds) must equal refunds + claim bounty + all rewards
+    credited. Guards the flip-flop insolvency (WO-1): no path may mint money.
+    """
+    from moderation_sim.protocol import Case, run_case
+    rng = random.Random(123)
+    p = Params()   # op_cost_per_vote == 0, so the pot is the only money in play
+
+    def force_appeal(case, r, pop, pp, rng_):
+        """Appeal EVERY round to max depth, so outcomes flip-flop and multiple
+        appellants end up vindicated — the exact insolvency case WO-1 fixes."""
+        bond = max(pp.bond_multiplier * (case.fee + sum(rr.bond for rr in case.rounds)),
+                   pp.min_fee(case.n_topics))
+        cands = [m for m in pop if not m.is_frozen(case.now) and m.stake >= bond]
+        return max(cands, key=lambda m: m.stake) if cands else None
+
+    n = 2500
+    for _ in range(n):
+        pop = sc.build_population(rng, attacker_total_stake=5000.0,
+                                  attacker_target=Outcome.APPROVE)
+        case = Case(kind="submission", honest_label=Outcome.REJECT, difficulty=0.4)
+        case.attacker_target = Outcome.APPROVE
+        r = run_case(pop, p, case, rng, appeal_policy=force_appeal)
+        assert r.disputed, "forcing policy must produce a disputed case"
+        inflow = case.fee + sum(rr.bond for rr in case.rounds)
+        outflow = (r.refunded_bonds + r.claim_bounty_paid
+                   + sum(r.rewards_earned.values()))
+        assert abs(inflow - outflow) < 1e-6, (inflow, outflow, r.depth_reached)
+
+
 def test_fee_floor_lets_moderators_clear_costs():
     """At the derived fee floor, honest moderators net positive after op costs.
 
-    Validates the fee-floor model (costs.py): minFee = voter-pay + gas at a 1.5x
-    margin keeps honest moderators profitable even on harder content, across a
-    range of assumed per-vote operating costs (spec §11.5).
+    With SOLVENT settlement (WO-1), a 1.5x margin clears costs on clear content;
+    covering borderline content too needs ~2x. Both are asserted so the guarantee
+    is stated honestly rather than assumed (spec §11.5, FINDINGS §2b).
     """
+    # margin 1.5 clears on clear content (the bulk of submissions)
+    for r in sc.fee_floor(op_costs=(0.01, 0.05, 0.2), margin=1.5,
+                          difficulty=0.0, trials=1500, seed=7):
+        assert r["moderators_clear_costs"] and r["honest_net_per_case_xbzz"] > 0, r
+    # margin 2.0 clears across content difficulty, including borderline
     for diff in (0.0, 0.5):
-        rows = sc.fee_floor(op_costs=(0.01, 0.05, 0.2), margin=1.5,
-                            difficulty=diff, trials=1500, seed=7)
-        for r in rows:
-            assert r["moderators_clear_costs"], (diff, r)
-            assert r["honest_net_per_case_xbzz"] > 0, (diff, r)
+        for r in sc.fee_floor(op_costs=(0.01, 0.05, 0.2), margin=2.0,
+                              difficulty=diff, trials=1500, seed=7):
+            assert r["moderators_clear_costs"] and r["honest_net_per_case_xbzz"] > 0, (diff, r)
 
 
 def test_fee_floor_gas_is_negligible():

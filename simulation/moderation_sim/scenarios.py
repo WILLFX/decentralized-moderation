@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import math
 import random
+from statistics import mean, pstdev
 from typing import Callable, List, Optional
 
 from .agents import attacker_for, honest, lazy_copy
+from .campaign import run_campaign
 from .metrics import Metrics
 from .params import Params
 from .protocol import Case, Moderator, Outcome, run_case
@@ -132,86 +134,121 @@ def bond_war(p: Params, attacker_frac: float = 0.55, trials: int = 2000,
                  difficulty=0.0, trials=trials, seed=seed)
 
 
-def track_farming(p: Params, farm_cases: int = 30, attacker_frac: float = 0.5,
-                  trials: int = 500, seed: int = 3) -> dict:
-    """Manufacture freezing power via innocuous self-submissions, then attack.
+def _farm_then_attack(p: Params, do_farm: bool, farm_cases: int, attack_cases: int,
+                      attacker_frac: float, identity_stake: float,
+                      cases_per_day: float, seed: int):
+    """One CAMPAIGN: an attacker cohort optionally farms track on innocuous
+    self-submissions, then attacks unsafe content, on ONE persistent population
+    and clock. Because freeze is absolute-time and the population persists, a
+    farm that lets the attacker freeze honest voters longer actually removes that
+    honest capacity from later draws — the real payoff campaign mode can measure.
+    Returns (attack Metrics, attacker seat-weighted mean track, farm net cost).
+    """
+    rng = random.Random(seed)
+    honest_total = 4000.0
+    attacker_total = honest_total * attacker_frac / max(1e-9, 1.0 - attacker_frac)
+    pop = build_population(rng, honest_total_stake=honest_total,
+                           attacker_total_stake=attacker_total,
+                           attacker_identity_stake=identity_stake,
+                           attacker_target=Outcome.APPROVE)
+    atk = [m for m in pop if m.faction == "attacker"]
+    for m in atk:
+        m._atk_vote = m.vote_fn
+    clock, dt, farm_net = 0.0, 1.0 / cases_per_day, 0.0
 
-    Returns the cost of the farm (fees spent), the freezing power gained, and the
-    attack outcome afterwards. The farm is only worthwhile if the extra freeze
-    drag it buys exceeds its fee cost -- which the cap+decay are meant to prevent.
+    if do_farm:
+        for m in atk:
+            m.vote_fn = honest                      # judge innocuous content honestly
+        for _ in range(farm_cases):
+            case = _make_case("submission", Outcome.APPROVE, 0.0, None)
+            case.submitter_faction = "attacker"
+            case.now = clock
+            r = run_case(pop, p, case, rng, appeal_policy=lambda *a, **k: None)
+            farm_net += (r.fees_paid.get("attacker", 0.0)
+                         - r.rewards_earned.get("attacker", 0.0))
+            clock += dt
+        for m in atk:
+            m.vote_fn = m._atk_vote
+
+    mm = Metrics()
+    for _ in range(attack_cases):
+        case = _make_case("submission", Outcome.REJECT, 0.0, Outcome.APPROVE)
+        case.now = clock                            # persistent clock: farmed freeze carries
+        r = run_case(pop, p, case, rng)
+        mm.add(r, attacker_target=Outcome.APPROVE)
+        clock += dt
+    mean_track = (sum(m.track * m.stake for m in atk) / sum(m.stake for m in atk)
+                  if atk else 0.0)
+    return mm, mean_track, farm_net
+
+
+def track_farming(p: Params, farm_cases: int = 30, attack_cases: int = 200,
+                  attacker_frac: float = 0.5, identity_stake: float = 100.0,
+                  cases_per_day: float = 2.0, seeds: int = 8, seed0: int = 100) -> dict:
+    """Manufacture freezing power via innocuous self-submissions, then attack —
+    in campaign mode, so the farm's real payoff (freezing honest capacity out of
+    later draws, raising the attacker's success over time) is measured, not just
+    a passive stake-days number. Compares a farmed attacker against an
+    identical-stake control that skipped the farm.
+
+    Freeze creates a compounding positive-feedback loop, so a single campaign is a
+    high-variance random walk; results are AVERAGED over ``seeds`` independent
+    campaigns and reported with a standard deviation. This is essential — a single
+    seed is not interpretable.
     """
     from .protocol import freezing_power
 
-    rng = random.Random(seed)
-    # A single persistent attacker cohort farms track over `farm_cases` honest
-    # self-submissions (they judge their own innocuous content coherently).
-    honest_total = 4000.0
-    attacker_total = honest_total * attacker_frac / max(1e-9, 1.0 - attacker_frac)
-
-    farm_fee_cost = 0.0
-    farm_reward = 0.0
-    # Build a persistent population so track accumulates.
-    pop = build_population(rng, honest_total_stake=honest_total,
-                           attacker_total_stake=attacker_total,
-                           attacker_target=Outcome.APPROVE)
-    # During farming the attacker votes honestly on genuinely safe content, so
-    # temporarily give attacker identities the honest strategy.
-    for mod in pop:
-        if mod.faction == "attacker":
-            mod._farm_vote = mod.vote_fn
-            mod.vote_fn = honest
-
-    for _ in range(farm_cases):
-        case = _make_case("submission", Outcome.APPROVE, 0.0, None)
-        case.submitter_faction = "attacker"
-        r = run_case(pop, p, case, rng, appeal_policy=lambda *a, **k: None)
-        farm_fee_cost += r.fees_paid.get("attacker", 0.0)
-        farm_reward += r.rewards_earned.get("attacker", 0.0)
-
-    # Freezing power is computed from the split-resistant MEAN track of the
-    # winning side (spec §6.4), so report the mean the engine actually uses —
-    # not the sum, which splitting would inflate.
-    atk = [mod for mod in pop if mod.faction == "attacker"]
-    mean_track = sum(mod.track for mod in atk) / max(len(atk), 1)
-    power_gained = freezing_power(mean_track, p)
-
-    def _attack_freeze(cohort, n):
-        """Run n attacks with `cohort` as the attacker set; return honest freeze
-        drag (stake-days) and attack success. Fresh honest cohort each attack."""
-        mm = Metrics()
-        for _ in range(n):
-            honest_pop = build_population(rng, honest_total_stake=honest_total,
-                                          attacker_total_stake=0.0)
-            for a in cohort:
-                a.frozen_until = 0.0
-            case = _make_case("submission", Outcome.REJECT, 0.0, Outcome.APPROVE)
-            r = run_case(honest_pop + cohort, p, case, rng)
-            mm.add(r, attacker_target=Outcome.APPROVE)
-        return mm
-
-    # restore attack behaviour on the farmed cohort
-    for mod in atk:
-        mod.vote_fn = mod._farm_vote
-    farmed = _attack_freeze(atk, trials)
-
-    # control: an identical-stake attacker that never farmed (track = 0)
-    control_cohort = build_population(rng, n_honest=0, honest_total_stake=0.0,
-                                      attacker_total_stake=attacker_total,
-                                      attacker_target=Outcome.APPROVE)
-    control = _attack_freeze(control_cohort, trials)
-
-    f_honest = farmed.freeze_stake_days.get("honest", 0.0) / max(farmed.n, 1)
-    c_honest = control.freeze_stake_days.get("honest", 0.0) / max(control.n, 1)
+    upl, sf, sc_, mt, fn = [], [], [], [], []
+    for s in range(seeds):
+        farmed, mean_track, farm_net = _farm_then_attack(
+            p, True, farm_cases, attack_cases, attacker_frac, identity_stake,
+            cases_per_day, seed0 + s)
+        control, _, _ = _farm_then_attack(
+            p, False, farm_cases, attack_cases, attacker_frac, identity_stake,
+            cases_per_day, seed0 + s)
+        sf.append(farmed.attack_success_rate())
+        sc_.append(control.attack_success_rate())
+        upl.append(farmed.attack_success_rate() - control.attack_success_rate())
+        mt.append(mean_track)
+        fn.append(farm_net)
     return {
         "farm_cases": farm_cases,
-        "farm_net_cost_xbzz": round(farm_fee_cost - farm_reward, 3),
-        "attacker_mean_track": round(mean_track, 3),
-        "freezing_power_gained": round(power_gained, 3),   # 1.0 = none, cap = max
-        "honest_freeze_per_attack_farmed": round(f_honest, 1),
-        "honest_freeze_per_attack_control": round(c_honest, 1),
-        "farm_freeze_multiplier": round(f_honest / c_honest, 3) if c_honest else None,
-        "post_farm_attack": farmed.summary(),
+        "identity_stake": identity_stake,
+        "seeds": seeds,
+        "farm_net_cost_xbzz": round(mean(fn), 3),
+        "attacker_mean_track": round(mean(mt), 3),
+        "freezing_power_gained": round(freezing_power(mean(mt), p), 3),  # 1=none..cap
+        "attack_success_farmed": round(mean(sf), 4),
+        "attack_success_control": round(mean(sc_), 4),
+        "success_uplift": round(mean(upl), 4),
+        "success_uplift_sd": round(pstdev(upl) if len(upl) > 1 else 0.0, 4),
     }
+
+
+def whale_campaign(p: Params, attacker_frac: float = 0.5, honest_track: float = 0.0,
+                   n_cases: int = 400, cases_per_day: float = 2.0,
+                   seed: int = 1) -> Metrics:
+    """A whale attacking unsafe content across a persistent-population CAMPAIGN.
+
+    Unlike the single-case `whale`, freeze bites here: an attacker that loses a
+    round is frozen out of later draws, and honest VETERANS (high `honest_track`)
+    freeze it for longer (principle 4), so veteran and newcomer honest populations
+    now diverge — which they could not in the freeze-inert single-case model.
+    """
+    rng = random.Random(seed)
+    honest_total = 4000.0
+    attacker_total = honest_total * attacker_frac / max(1e-9, 1.0 - attacker_frac)
+    pop = build_population(rng, honest_total_stake=honest_total, honest_track=honest_track,
+                           attacker_total_stake=attacker_total,
+                           attacker_target=Outcome.APPROVE)
+
+    def factory(i, r):
+        return _make_case("submission", Outcome.REJECT, 0.0, Outcome.APPROVE)
+
+    m = Metrics()
+    for res in run_campaign(pop, p, factory, n_cases, rng, cases_per_day=cases_per_day):
+        m.add(res, attacker_target=Outcome.APPROVE)
+    return m
 
 
 def honest_earnings(p: Params, difficulty: float = 0.0, trials: int = 3000,

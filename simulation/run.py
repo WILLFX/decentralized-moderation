@@ -63,15 +63,20 @@ def cmd_bond_war(p: Params, args) -> dict:
 
 
 def cmd_track_farming(p: Params, args) -> dict:
-    res = sc.track_farming(p, farm_cases=args.farm_cases, attacker_frac=args.frac,
-                           trials=args.trials, seed=args.seed)
-    print("\n=== track_farming ===")
-    for k, v in res.items():
-        if isinstance(v, dict):
-            _print_summary(k, v)
-        else:
-            print(f"  {k} : {v}")
-    return res
+    print("\n=== track_farming (campaign mode: farm then attack, freeze bites) ===")
+    print(f"  (averaged over 8 campaign seeds; uplift = farmed − control attack success)")
+    print(f"  {'identity_stake':>14} {'farm_cost':>10} {'mean_track':>11} "
+          f"{'power':>7} {'succ_farm':>10} {'succ_ctrl':>10} {'uplift':>9} {'±sd':>7}")
+    out = {}
+    for ident in (100.0, 1000.0, args.frac * 8000.0):  # split .. concentrated
+        res = sc.track_farming(p, farm_cases=args.farm_cases, attacker_frac=args.frac,
+                               identity_stake=ident, seeds=8)
+        out[f"identity_{ident:.0f}"] = res
+        print(f"  {ident:>14.0f} {res['farm_net_cost_xbzz']:>10.2f} "
+              f"{res['attacker_mean_track']:>11.2f} {res['freezing_power_gained']:>7.2f} "
+              f"{res['attack_success_farmed']:>10.3f} {res['attack_success_control']:>10.3f} "
+              f"{res['success_uplift']:>+9.3f} {res['success_uplift_sd']:>7.3f}")
+    return out
 
 
 def cmd_honest(p: Params, args) -> dict:

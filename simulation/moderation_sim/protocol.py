@@ -179,6 +179,16 @@ def _run_round(case: Case, pop: List[Moderator], depth: int,
         if total_revealed >= p.min_reveals or widen >= p.max_widen:
             r.seats = revealed_seats
             r.mods = {mid: by_id[mid] for mid in revealed_seats}
+            # brief freeze for drawn seat-holders who did not reveal — the
+            # commit-and-vanish deterrent (spec §6.3), previously defined but
+            # never applied. Absolute-time, so in campaign mode it removes them
+            # from the eligible pool for subsequent cases too.
+            if p.failed_reveal_freeze_days > 0:
+                for mid in seat_counts:
+                    if mid not in revealed_seats:
+                        m = by_id[mid]
+                        m.frozen_until = max(m.frozen_until,
+                                             case.now + p.failed_reveal_freeze_days)
             break
         widen += 1
         case.now += p.appeal_window_days[0] / 4.0  # small delay per widen

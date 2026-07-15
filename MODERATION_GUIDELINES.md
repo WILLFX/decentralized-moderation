@@ -42,6 +42,15 @@ safe. If it would be filtered out, it is not. The standard deliberately defers
 the boundary to a well-understood external reference rather than restating a
 catalogue of prohibited material here.
 
+The reference is to the **genre** of mainstream, general-audience safe-search
+filtering as it is commonly understood at this guidelines version's date — not a
+live query against any particular product (moderators cannot query one for
+unpublished Swarm content, and such products are proprietary, regional, and
+change continuously). Moderators judge the fetched content directly against that
+shared understanding; the point being predicted is *whether general-audience
+safe search would exclude this*, on safety grounds, not whether some specific
+engine happens to index the URL.
+
 One category is stated explicitly because it admits no ambiguity: content that
 sexualizes minors is rejected without exception.
 
@@ -116,7 +125,10 @@ moderators who correctly vote to keep, exactly as frivolous submissions do.
 - **Use a fresh address per moderator identity.** Addresses are permanently
   linked on-chain to the decisions they make. Treat moderator addresses as
   disposable identities, not as your primary wallet. (Open question in the
-  README; recommended practice here.)
+  README; recommended practice here.) Note the trade-off: track record — and
+  the freezing power it confers — accrues per address and does not transfer, so
+  rotating an address resets you to a newcomer's freezing power. Each moderator
+  weighs privacy against the standing they have built.
 
 ---
 

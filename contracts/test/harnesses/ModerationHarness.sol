@@ -44,4 +44,68 @@ contract ModerationHarness is Moderation {
     function eligibleWeightInternal(address moderator) external view returns (uint256) {
         return _eligibleWeight(moderators[moderator]);
     }
+
+    // --- differential-vector injection (M2-8, D10) ---------------------------
+    // Build a fully-specified FINALIZED case directly in storage so the exact
+    // settlement arithmetic can be replayed against a Python integer reference.
+    // The test funds the contract (pot + committed backing) before claim().
+
+    function __injectFinalized(uint8 kind, Outcome finalOutcome, uint256 pot) external returns (uint256 caseId) {
+        caseId = nextCaseId++;
+        Case storage c = cases[caseId];
+        c.id = caseId;
+        c.kind = Kind(kind);
+        c.finalOutcome = finalOutcome;
+        c.phase = Phase.FINALIZED;
+        c.pot = pot;
+        openPotsTotal += pot;
+    }
+
+    function __injectRound(uint256 caseId) external {
+        cases[caseId].rounds.push();
+    }
+
+    /// revealCode: 0 = None (committed but failed to reveal), 1 = Approve, 2 = Reject.
+    function __injectSeat(uint256 caseId, uint256 depth, address voter, uint256 seats, uint256 committedAmt, uint8 revealCode)
+        external
+    {
+        Round storage r = cases[caseId].rounds[depth];
+        if (r.seats[voter] == 0) r.seatHolders.push(voter);
+        r.seats[voter] += seats;
+        if (committedAmt > 0) {
+            r.committed[voter] = true;
+            r.committedAmt[voter] = committedAmt;
+            moderators[voter].committed += committedAmt;
+            totalCommittedStake += committedAmt;
+            r.committedCount++;
+        }
+        Vote v = Vote(revealCode);
+        r.reveals[voter] = v;
+        if (v == Vote.Approve) {
+            r.approveSeats += seats;
+            r.revealedSeats += seats;
+            r.revealedCount++;
+        } else if (v == Vote.Reject) {
+            r.rejectSeats += seats;
+            r.revealedSeats += seats;
+            r.revealedCount++;
+        }
+    }
+
+    function __injectBond(uint256 caseId, uint256 depth, Outcome appealFor, bool bondInPot) external {
+        Round storage r = cases[caseId].rounds[depth];
+        r.appealFor = appealFor;
+        r.bondInPot = bondInPot;
+    }
+
+    function __injectBondContrib(uint256 caseId, uint256 depth, address contributor, uint256 amount) external {
+        Round storage r = cases[caseId].rounds[depth];
+        if (r.bondContribs[contributor] == 0) r.bondContributors.push(contributor);
+        r.bondContribs[contributor] += amount;
+        r.bond += amount;
+    }
+
+    function __setTrack(address voter, uint256 track) external {
+        moderators[voter].track = track;
+    }
 }

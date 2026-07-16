@@ -16,6 +16,9 @@ optimizer = true
 optimizer_runs = 200
 via_ir = false                  # keep off for faster iteration; revisit at M2-9 if gas-bound
 
+# Differential vectors are read from disk (M2-8, D10).
+fs_permissions = [{ access = "read", path = "./test/vectors" }]
+
 # Integer-only accounting contract: no unchecked surprises we didn't write.
 # Deterministic test RNG so distribution/statistical tests are reproducible.
 [fuzz]

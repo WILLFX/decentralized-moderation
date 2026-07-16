@@ -92,6 +92,8 @@ class Case:
     now: float = 0.0                   # sim-day clock, advanced per phase
     attacker_target: Optional[Outcome] = None  # outcome an attacker faction pushes
     partial_votes: List[Outcome] = field(default_factory=list)  # votes so far this round
+    correlated_round: bool = False     # this round uses a shared honest error draw
+    shared_flip: bool = False          # if correlated, honest side flips together
 
 
 @dataclass
@@ -108,6 +110,10 @@ class CaseResult:
     rewards_earned: Dict[str, float] = field(default_factory=dict)
     freeze_stake_days: Dict[str, float] = field(default_factory=dict)
     n_frozen: Dict[str, int] = field(default_factory=dict)
+    op_costs: Dict[str, float] = field(default_factory=dict)  # operating cost of judging
+    claim_bounty_paid: float = 0.0     # bounty to the finalization claimant
+    refunded_bonds: float = 0.0        # winning appellants' bonds returned (own capital)
+    freeze_days_applied: float = 0.0   # freeze duration used this case (0 if none frozen)
     uncontested: bool = False          # index field: no reject vote and never appealed
 
 
@@ -176,9 +182,26 @@ def _run_round(case: Case, pop: List[Moderator], depth: int,
         if total_revealed >= p.min_reveals or widen >= p.max_widen:
             r.seats = revealed_seats
             r.mods = {mid: by_id[mid] for mid in revealed_seats}
+            # brief freeze for drawn seat-holders who did not reveal — the
+            # commit-and-vanish deterrent (spec §6.3), previously defined but
+            # never applied. Absolute-time, so in campaign mode it removes them
+            # from the eligible pool for subsequent cases too.
+            if p.failed_reveal_freeze_days > 0:
+                for mid in seat_counts:
+                    if mid not in revealed_seats:
+                        m = by_id[mid]
+                        m.frozen_until = max(m.frozen_until,
+                                             case.now + p.failed_reveal_freeze_days)
             break
         widen += 1
         case.now += p.appeal_window_days[0] / 4.0  # small delay per widen
+
+    # Correlated honest error (spec/model knob): with prob error_correlation this
+    # round shares a single error event across the honest side (a common blind
+    # spot), instead of i.i.d. per-voter error that a plurality washes out.
+    case.correlated_round = rng.random() < p.error_correlation
+    if case.correlated_round:
+        case.shared_flip = rng.random() < (0.02 + 0.4 * case.difficulty)
 
     # Votes are processed in seat-draw order so strategies modeling a broken
     # commit-reveal (copy-voting / racing) can read the running tally via
@@ -203,7 +226,15 @@ def _run_round(case: Case, pop: List[Moderator], depth: int,
 # ---------------------------------------------------------------------------
 
 def honest_vote(mod: Moderator, case: Case, rng: random.Random) -> Outcome:
-    """Vote the honest label, with an error rate that grows with difficulty."""
+    """Vote the honest label, with an error rate that grows with difficulty.
+
+    In a correlated round (case.correlated_round) the honest side shares one error
+    event, so they all flip together (case.shared_flip) or all stay correct — a
+    common blind spot that a plurality cannot wash out. Otherwise each voter errs
+    independently.
+    """
+    if case.correlated_round:
+        return Outcome(1 - int(case.honest_label)) if case.shared_flip else case.honest_label
     err = 0.02 + 0.4 * case.difficulty      # clear-cut ~2%, fully borderline ~42%
     if rng.random() < err:
         return Outcome(1 - int(case.honest_label))
@@ -295,12 +326,19 @@ def default_appeal_policy(case: Case, r: _Round, pop: List[Moderator],
         s = r.approve_seats if side == Outcome.APPROVE else r.reject_seats
         return s / total
 
-    if outcome != case.honest_label and side_share(case.honest_label) >= p.honest_appeal_threshold:
-        challengers = [m for m in pop
-                       if m.faction == "honest" and not m.is_frozen(case.now)
-                       and m.stake >= bond]
-        if challengers:
-            return max(challengers, key=lambda m: m.stake)
+    # Honest challengers appeal a wrong outcome when EITHER the outcome looks
+    # overturnable (rational, seat-share gate) OR a naive challenger decides to
+    # appeal regardless — they care about keeping unsafe content out of the index,
+    # not their own EV (fraction naive_appeal_frac).
+    if outcome != case.honest_label:
+        rational = side_share(case.honest_label) >= p.honest_appeal_threshold
+        naive = rng.random() < p.naive_appeal_frac
+        if rational or naive:
+            challengers = [m for m in pop
+                           if m.faction == "honest" and not m.is_frozen(case.now)
+                           and m.stake >= bond]
+            if challengers:
+                return max(challengers, key=lambda m: m.stake)
 
     tgt = case.attacker_target
     if tgt is not None and outcome != tgt and side_share(tgt) >= p.attacker_appeal_threshold:
@@ -325,27 +363,39 @@ def _settle(case: Case, p: Params, pot: float, result: CaseResult) -> None:
     final = case.final_outcome
     assert final is not None
 
-    # 1. winning/losing appellants: refund+bonus, or forfeit into the pot.
-    winning_appellant_bonus = 0.0
+    # Payout order matters — see spec §6.2 / work order WO-1. Refund each winning
+    # appellant its OWN bond first, then take the claim bounty and winning-appellant
+    # bonuses from the SOLVENT residual (pot minus refunds), so total payouts can
+    # never exceed the pot. This is what guarantees funds conservation (invariant
+    # 1) even on flip-flop cases where the outcome reverses up the appeal ladder.
+    #   residual = fee + forfeited (losing) bonds  >=  fee  >  0
+    # distributable = residual·(1 − claim_bounty_frac − n_winners·bonus_frac) >= 0,
+    # which holds because bonus_frac·MAX_DEPTH + claim_bounty_frac < 1.
     refunded_bonds = 0.0
     for r in case.rounds:
         if r.appellant is None:
             continue
         if r.appellant_for == final:
-            refunded_bonds += r.bond               # returned to appellant, off-pot
-            bonus = p.winning_appellant_bonus_frac * pot
-            winning_appellant_bonus += bonus
-            r.appellant.earnings += bonus
-            _bump(result.rewards_earned, r.appellant.faction, bonus)
+            refunded_bonds += r.bond                # returned to appellant (own capital)
         else:
             _bump(result.bonds_forfeited, r.appellant.faction, r.bond)
+    result.refunded_bonds = refunded_bonds
 
-    # 2. claim bounty off the top
-    claim_bounty = p.claim_bounty_frac * pot
-    distributable = max(pot - refunded_bonds - winning_appellant_bonus - claim_bounty, 0.0)
+    residual = pot - refunded_bonds
+    claim_bounty = p.claim_bounty_frac * residual
 
-    # 3. coherent voters split the pot in proportion to their COHERENT SEATS
-    #    (flat per seat — no stake weighting; stake already paid off in selection).
+    total_bonus = 0.0
+    for r in case.rounds:
+        if r.appellant is not None and r.appellant_for == final:
+            bonus = p.winning_appellant_bonus_frac * residual
+            total_bonus += bonus
+            r.appellant.earnings += bonus
+            _bump(result.rewards_earned, r.appellant.faction, bonus)
+
+    distributable = residual - claim_bounty - total_bonus
+
+    # coherent voters split `distributable` in proportion to their COHERENT SEATS
+    # (flat per seat — no stake weighting; stake already paid off in selection).
     coherent_seats: Dict[int, int] = {}
     coherent_mods: Dict[int, Moderator] = {}
     for r in case.rounds:
@@ -362,22 +412,40 @@ def _settle(case: Case, p: Params, pot: float, result: CaseResult) -> None:
     else:
         winners_mean_track = 0.0
 
-    undisputed = not result.disputed
-    for mid, s in coherent_seats.items():
-        m = coherent_mods[mid]
-        reward = distributable * (s / total_coherent) if total_coherent else 0.0
-        m.earnings += reward
-        _bump(result.rewards_earned, m.faction, reward)
-        # track accrues only on coherent + undisputed + at/above stake floor
-        # participations (anti-farming, spec §6.5). Others just decay.
-        if undisputed and m.stake >= p.min_stake:
-            m.track = m.track * p.track_decay + 1.0
-        else:
-            m.track *= p.track_decay
+    if total_coherent > 0:
+        undisputed = not result.disputed
+        for mid, s in coherent_seats.items():
+            m = coherent_mods[mid]
+            reward = distributable * (s / total_coherent)
+            m.earnings += reward
+            _bump(result.rewards_earned, m.faction, reward)
+            # track accrues only on coherent + undisputed participations
+            # (anti-farming, spec §6.5). Others just decay.
+            if undisputed:
+                m.track = m.track * p.track_decay + 1.0
+            else:
+                m.track *= p.track_decay
+    else:
+        # degenerate all-offline case: nobody coherent to pay, so the
+        # distributable stays with the finalization claimant (keeps conservation).
+        claim_bounty += distributable
+    result.claim_bounty_paid = claim_bounty
+
+    # 3b. operating cost: every moderator that judged the case pays its per-vote
+    #     cost once per round it was drawn into (it evaluates the content to
+    #     vote). Reduces its earnings; tracked for the fee-floor model (costs.py).
+    if p.op_cost_per_vote > 0:
+        for r in case.rounds:
+            for mid in r.seats:
+                if r.votes.get(mid) is not None:
+                    m = r.mods[mid]
+                    m.earnings -= p.op_cost_per_vote
+                    _bump(result.op_costs, m.faction, p.op_cost_per_vote)
 
     # 4. freeze incoherent voters (spec §6.4). No stake transfer — locked only.
     power = freezing_power(winners_mean_track, p)
     freeze_days = p.freeze_base_days * power
+    result.freeze_days_applied = freeze_days   # duration used this case (for p95 report)
     seen = set()
     for r in case.rounds:
         for mid in r.seats:

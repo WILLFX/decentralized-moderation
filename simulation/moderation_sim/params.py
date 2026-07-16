@@ -18,8 +18,10 @@ class Params:
     min_stake: float = 10.0            # MIN_STAKE (xBZZ)
 
     # --- subset / voting ---
-    # Counted votes per depth (COMMIT_TARGET). Index = appeal depth.
-    commit_target: List[int] = field(default_factory=lambda: [5, 11, 23])
+    # Counted seats per depth (COMMIT_TARGET). Index = appeal depth. MAX_DEPTH=3
+    # permits rounds at depths 0..3, so a depth-3 size is defined (was missing;
+    # the engine used to silently clamp to the last value).
+    commit_target: List[int] = field(default_factory=lambda: [5, 11, 23, 47])
     min_reveals: int = 3               # MIN_REVEALS
     max_widen: int = 3                 # bounded widen retries on under-participation
 
@@ -31,30 +33,46 @@ class Params:
 
     # --- appeals ---
     max_depth: int = 3                 # MAX_DEPTH
-    bond_multiplier: float = 2.0       # BOND_MULTIPLIER (bond >= 2x prev reward)
+    bond_multiplier: float = 2.0       # BOND_MULTIPLIER (bond >= 2x pot)
     # A rational appellant only bonds when the outcome looks overturnable, judged
     # by its own side's revealed seat share in the round just decided. Appealing
     # a round its side barely showed up in is -EV: it just funds the winners.
     honest_appeal_threshold: float = 0.50
     attacker_appeal_threshold: float = 0.40
+    # Fraction of honest challengers who are "naive": they appeal ANY wrong
+    # approval of unsafe content regardless of their seat share (they care about
+    # the index, not their own EV). Their forfeited bonds can flow to a winning
+    # attacker, so the "attacker profit ~ 0" result is a function of this. Default
+    # 0 = fully EV-rational honest side.
+    naive_appeal_frac: float = 0.0
     # Appeal windows per depth (days). Only used for latency accounting.
     appeal_window_days: List[float] = field(default_factory=lambda: [4.0, 3.0, 3.0])
+
+    # Correlated honest error: probability that a round uses a SHARED error draw
+    # (all honest voters err together, a common blind spot) instead of i.i.d.
+    # per-voter error. Default 0 = independent errors (washed out by plurality).
+    error_correlation: float = 0.0
 
     # --- settlement ---
     claim_bounty_frac: float = 0.01    # CLAIM_BOUNTY as fraction of pot
     winning_appellant_bonus_frac: float = 0.10  # bonus to a vindicated appellant
 
-    # --- freezing ---
+    # --- freezing (recalibrated WO-6: lower cap, slower/decaying track accrual so
+    #     even a concentrated farm cannot reach high freezing power cheaply) ---
     freeze_base_days: float = 7.0      # FREEZE_BASE
-    freeze_cap: float = 8.0            # FREEZE_CAP (max multiplier on base)
-    track_saturation: float = 20.0     # TRACK_SAT (track count for ~cap power)
-    track_decay: float = 0.98          # TRACK_DECAY (per-case multiplicative decay)
+    freeze_cap: float = 4.0            # FREEZE_CAP (max multiplier on base; was 8)
+    track_saturation: float = 60.0     # TRACK_SAT (track for ~cap power; was 20)
+    track_decay: float = 0.95          # TRACK_DECAY (per-case decay; was 0.98)
     failed_reveal_freeze_days: float = 1.0  # brief freeze for commit-and-vanish
 
     # --- fees (P8: minFee = base + perTopic * nTopics) ---
     fee_base: float = 1.0              # FEE_BASE
     fee_per_topic: float = 0.5         # FEE_PER_TOPIC
     max_topics: int = 5                # MAX_TOPICS
+    # Operating cost a moderator pays per judgment (per case it votes in) —
+    # e.g. an AI classifier call. Default 0 leaves existing scenarios unchanged;
+    # the fee-floor model (costs.py) sets it to price the fee floor.
+    op_cost_per_vote: float = 0.0
 
     # --- randomness / latency (informational in the sim) ---
     supersafe_age_hours: float = 96.0  # SUPERSAFE_AGE

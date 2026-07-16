@@ -155,17 +155,134 @@ def test_first_round_outcome_tracks_stake_share():
         assert abs(rate - frac) < 0.06, (frac, rate)
 
 
-def test_modest_farm_buys_little_freeze_power():
-    """Split-resistant (mean-track) freezing power: a cheap farm is near-useless.
+def test_modest_split_farm_buys_little_attack_advantage():
+    """A cheap split-identity farm does not buy the attacker success (campaign).
 
-    30 innocuous self-submissions must not approach the freeze cap, and must not
-    materially raise the freeze an equal-stake non-farmed attacker already
-    inflicts. Guards the anti-farming hardening (README §7 threat).
+    In campaign mode the real payoff of farming would be freezing honest capacity
+    out of later draws to raise attack success. A modest split-identity 30-case
+    farm must not approach the freeze cap and must not materially raise the
+    attacker's success over an unfarmed control. (Concentration is guarded
+    separately in WO-6.)
     """
-    res = sc.track_farming(Params(), farm_cases=30, attacker_frac=0.5,
-                           trials=300, seed=3)
-    assert res["freezing_power_gained"] < 2.0, res["freezing_power_gained"]
-    assert res["farm_freeze_multiplier"] < 1.25, res["farm_freeze_multiplier"]
+    res = sc.track_farming(Params(), farm_cases=30, attack_cases=150,
+                           attacker_frac=0.5, identity_stake=100.0, seeds=6)
+    # averaged over seeds: a split farm buys no meaningful attack-success uplift.
+    # (The freeze-power magnitude bound is guarded, post-recalibration, by
+    # test_concentrated_farm_bounded in WO-6 — it is the concentrated strategy,
+    # not the split one, that stresses freeze power.)
+    assert res["success_uplift"] < 0.2, res
+
+
+def test_freeze_excludes_from_draws():
+    """A frozen moderator must not be drawn into any panel until it thaws.
+
+    Guards the campaign-mode fix (WO-2): freezing is only a deterrent if a frozen
+    moderator is actually absent from the eligible pool of later cases. Drives a
+    persistent population on an absolute clock and checks a moderator frozen until
+    day 10 is never seated before day 10, and is seated again afterward.
+    """
+    from moderation_sim.protocol import Case, run_case
+    from moderation_sim.campaign import run_campaign
+    rng = random.Random(5)
+    p = Params()
+    pop = sc.build_population(rng, n_honest=40, honest_total_stake=1200.0)
+    victim = pop[0]
+    victim.frozen_until = 10.0
+    clock, seen_frozen, seen_thawed = 0.0, 0, 0
+    for _ in range(80):
+        case = Case(kind="submission", honest_label=Outcome.APPROVE, difficulty=0.0)
+        case.now = clock
+        run_case(pop, p, case, rng)
+        appeared = any(victim.id in r.seats for r in case.rounds)
+        if clock < 10.0 and appeared:
+            seen_frozen += 1
+        elif clock >= 10.0 and appeared and not victim.is_frozen(clock):
+            seen_thawed += 1
+        clock += 0.5
+    assert seen_frozen == 0, "a frozen moderator was drawn into a panel"
+    assert seen_thawed > 0, "moderator was never re-eligible after thawing"
+
+    # smoke: run_campaign drives the same mechanism end to end
+    pop2 = sc.build_population(random.Random(6), n_honest=50)
+    res = run_campaign(pop2, p,
+                       lambda i, r: Case(kind="submission",
+                                         honest_label=Outcome.APPROVE, difficulty=0.0),
+                       n_cases=30, rng=random.Random(6))
+    assert len(res) == 30
+
+
+def test_settlement_conserves_funds():
+    """Invariant 1 (spec §9): every case pays out exactly what came in.
+
+    Across many DISPUTED cases (appeals opened, outcomes flipping up the ladder),
+    the pot (fee + all bonds) must equal refunds + claim bounty + all rewards
+    credited. Guards the flip-flop insolvency (WO-1): no path may mint money.
+    """
+    from moderation_sim.protocol import Case, run_case
+    rng = random.Random(123)
+    p = Params()   # op_cost_per_vote == 0, so the pot is the only money in play
+
+    def force_appeal(case, r, pop, pp, rng_):
+        """Appeal EVERY round to max depth, so outcomes flip-flop and multiple
+        appellants end up vindicated — the exact insolvency case WO-1 fixes."""
+        bond = max(pp.bond_multiplier * (case.fee + sum(rr.bond for rr in case.rounds)),
+                   pp.min_fee(case.n_topics))
+        cands = [m for m in pop if not m.is_frozen(case.now) and m.stake >= bond]
+        return max(cands, key=lambda m: m.stake) if cands else None
+
+    n = 2500
+    for _ in range(n):
+        pop = sc.build_population(rng, attacker_total_stake=5000.0,
+                                  attacker_target=Outcome.APPROVE)
+        case = Case(kind="submission", honest_label=Outcome.REJECT, difficulty=0.4)
+        case.attacker_target = Outcome.APPROVE
+        r = run_case(pop, p, case, rng, appeal_policy=force_appeal)
+        assert r.disputed, "forcing policy must produce a disputed case"
+        inflow = case.fee + sum(rr.bond for rr in case.rounds)
+        outflow = (r.refunded_bonds + r.claim_bounty_paid
+                   + sum(r.rewards_earned.values()))
+        assert abs(inflow - outflow) < 1e-6, (inflow, outflow, r.depth_reached)
+
+
+def test_concentrated_farm_bounded():
+    """The recalibrated freeze params (WO-6) bound the CONCENTRATED farm too.
+
+    Mean-track freezing power defends against split identities; concentration is
+    the mirror-image stress (one identity is drawn into nearly every case). With
+    FREEZE_CAP=4, TRACK_SAT=60, TRACK_DECAY=0.95, an all-in-one 30-case farm must
+    stay under freezing power 2.0 and give no real freeze multiplier over an
+    unfarmed control.
+    """
+    res = sc.track_farming(Params(), farm_cases=30, attack_cases=150,
+                           attacker_frac=0.5, identity_stake=4000.0, seeds=6)
+    assert res["freezing_power_gained"] < 2.0, res
+    assert res["farm_freeze_multiplier"] is None or res["farm_freeze_multiplier"] < 1.3, res
+
+
+def test_fee_floor_lets_moderators_clear_costs():
+    """At the derived fee floor, honest moderators net positive after op costs.
+
+    With SOLVENT settlement (WO-1), a 1.5x margin clears costs on clear content;
+    covering borderline content too needs ~2x. Both are asserted so the guarantee
+    is stated honestly rather than assumed (spec §11.5, FINDINGS §2b).
+    """
+    # margin 1.5 clears on clear content (the bulk of submissions)
+    for r in sc.fee_floor(op_costs=(0.01, 0.05, 0.2), margin=1.5,
+                          difficulty=0.0, trials=1500, seed=7):
+        assert r["moderators_clear_costs"] and r["honest_net_per_case_xbzz"] > 0, r
+    # margin 2.0 clears across content difficulty, including borderline
+    for diff in (0.0, 0.5):
+        for r in sc.fee_floor(op_costs=(0.01, 0.05, 0.2), margin=2.0,
+                              difficulty=diff, trials=1500, seed=7):
+            assert r["moderators_clear_costs"] and r["honest_net_per_case_xbzz"] > 0, (diff, r)
+
+
+def test_fee_floor_gas_is_negligible():
+    """The fee floor is dominated by voter pay, not Gnosis gas."""
+    from moderation_sim.costs import CostModel
+    for c in (0.005, 0.05, 0.25):
+        bd = CostModel(op_cost_per_vote_xbzz=c).breakdown(1)
+        assert bd["gas_share_of_fee"] < 0.05, bd
 
 
 def _run_all():

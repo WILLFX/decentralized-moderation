@@ -15,6 +15,7 @@ mechanism.
 
 from .params import Params
 from .protocol import Moderator, Case, CaseResult, run_case, Outcome
+from .campaign import run_campaign
 
 __all__ = [
     "Params",
@@ -23,4 +24,5 @@ __all__ = [
     "CaseResult",
     "run_case",
     "Outcome",
+    "run_campaign",
 ]

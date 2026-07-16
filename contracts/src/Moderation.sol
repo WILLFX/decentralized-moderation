@@ -327,7 +327,8 @@ contract Moderation is ReentrancyGuard {
         bytes32 seatSeed;
         bytes32 outcomeSeed;
         address[] seatHolders; // unique drawn addresses
-        mapping(address => uint256) seats; // seat-holder -> seat count
+        mapping(address => uint256) seats; // seat-holder -> seat count (may grow on widen)
+        mapping(address => uint256) talliedSeats; // seats counted for THIS voter at reveal (frozen; F2)
         mapping(address => bytes32) commits; // seat-holder -> commit hash
         mapping(address => Vote) reveals; // seat-holder -> revealed vote
         mapping(address => bool) committed; // has committed
@@ -555,6 +556,10 @@ contract Moderation is ReentrancyGuard {
 
         r.reveals[msg.sender] = vote;
         uint256 s = r.seats[msg.sender];
+        // Freeze the seat count credited to this voter at reveal time: a later
+        // widen re-draw can add seats to r.seats[voter], but settlement must pay
+        // (and mean-track) only the seats actually tallied here (F2).
+        r.talliedSeats[msg.sender] = s;
         if (vote == Vote.Approve) r.approveSeats += s;
         else r.rejectSeats += s;
         r.revealedSeats += s;
@@ -772,7 +777,7 @@ contract Moderation is ReentrancyGuard {
                 address a = r.seatHolders[i];
                 if (!r.committed[a] || r.reveals[a] == Vote.None) continue;
                 if (_coherent(r.reveals[a], v.finalOutcome)) {
-                    uint256 s = r.seats[a];
+                    uint256 s = r.talliedSeats[a]; // F2: reveal-time count, not post-widen
                     v.winnersSeats += s;
                     v.meanTrackNum += s * moderators[a].track;
                     v.meanTrackDen += s;
@@ -803,7 +808,8 @@ contract Moderation is ReentrancyGuard {
                     m.free += amt;
                     totalCommittedStake -= amt;
                     totalFreeStake += amt;
-                    uint256 reward = v.winnersSeats == 0 ? 0 : (v.distributable * r.seats[a]) / v.winnersSeats;
+                    uint256 reward =
+                        v.winnersSeats == 0 ? 0 : (v.distributable * r.talliedSeats[a]) / v.winnersSeats;
                     if (reward > 0) {
                         m.free += reward;
                         totalFreeStake += reward;

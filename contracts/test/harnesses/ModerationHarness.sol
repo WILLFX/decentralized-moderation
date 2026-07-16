@@ -82,10 +82,12 @@ contract ModerationHarness is Moderation {
         Vote v = Vote(revealCode);
         r.reveals[voter] = v;
         if (v == Vote.Approve) {
+            r.talliedSeats[voter] += seats; // F2: reveal-time count (no widen in injection)
             r.approveSeats += seats;
             r.revealedSeats += seats;
             r.revealedCount++;
         } else if (v == Vote.Reject) {
+            r.talliedSeats[voter] += seats;
             r.rejectSeats += seats;
             r.revealedSeats += seats;
             r.revealedCount++;
@@ -111,5 +113,12 @@ contract ModerationHarness is Moderation {
 
     function __injectTopic(uint256 caseId, bytes32 topicKey) external {
         cases[caseId].topicKeys.push(topicKey);
+    }
+
+    /// Model a widen re-draw landing `extra` seats on an already-revealed voter:
+    /// bumps r.seats (post-widen) without touching talliedSeats (reveal-time).
+    /// Settlement must ignore the inflation (F2).
+    function __injectWidenSeats(uint256 caseId, uint256 depth, address voter, uint256 extra) external {
+        cases[caseId].rounds[depth].seats[voter] += extra;
     }
 }

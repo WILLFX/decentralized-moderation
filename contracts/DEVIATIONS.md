@@ -166,3 +166,21 @@ of invariant 9. Withdrawals have no admin gate anywhere (§9.5).
 **Threat model.** Governance cannot touch mechanism, cannot pause withdrawals, and
 cannot rewrite guidelines history — only append. The timelock gives moderators warning
 to exit before any parameter change takes effect.
+
+### D-12. Widen re-draw onto an already-revealed voter is inert (spec §5.3, F2)
+
+**What.** A widen draws additional seats from the live tree and can land them on a
+voter that has already committed and revealed this round. The extra seats bump
+`Round.seats[voter]` but **not** `Round.talliedSeats[voter]` (frozen at reveal), and
+settlement (rewards, winners' seats, mean-track) reads `talliedSeats`. So the
+re-drawn seats are drawn but **uncounted**.
+
+**Why.** The voter's reward and mean-track weight must reflect what they were tallied
+for, not seats they never re-committed to. The alternative — excluding
+already-committed voters from the widen draw — is rejection sampling with unbounded
+gas.
+
+**Threat model.** Closes a reward-siphon: without this, a high-stake early revealer in
+an under-participating (widened) round would collect extra reward-lottery weight per
+widen at its co-winners' expense, and skew the freeze-power mean-track input. The
+phantom seats now change nothing.

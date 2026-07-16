@@ -5,20 +5,6 @@ import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 
 contract AppealsTest is ModerationTestBase {
-    function _fund(address who, uint256 amount) internal {
-        bzz.mint(who, amount);
-        vm.prank(who);
-        bzz.approve(address(mod), type(uint256).max);
-    }
-
-    /// Fund `who` and contribute the full current floor, advancing one depth.
-    function _appeal(uint256 caseId, address who) internal {
-        uint256 floor = mod.appealFloor(caseId);
-        _fund(who, floor);
-        vm.prank(who);
-        mod.contributeAppealBond(caseId, floor);
-    }
-
     function _outcome(uint256 caseId, uint256 depth) internal view returns (Moderation.Outcome o) {
         (,,,,,,, o,,) = mod.roundInfo(caseId, depth);
     }

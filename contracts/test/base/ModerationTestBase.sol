@@ -133,12 +133,41 @@ abstract contract ModerationTestBase is Test {
         _realizeOutcome(caseId);
     }
 
+    function _fund(address who, uint256 amount) internal {
+        bzz.mint(who, amount);
+        vm.prank(who);
+        bzz.approve(address(mod), type(uint256).max);
+    }
+
+    /// Fund `who` and contribute the full current appeal floor, advancing one depth.
+    function _appeal(uint256 caseId, address who) internal {
+        uint256 floor = mod.appealFloor(caseId);
+        _fund(who, floor);
+        vm.prank(who);
+        mod.contributeAppealBond(caseId, floor);
+    }
+
+    /// Close the appeal window with no appeal and finalize.
+    function _finalize(uint256 caseId) internal {
+        (,,,,, uint256 deadline,) = mod.caseInfo(caseId);
+        vm.warp(deadline);
+        mod.finalize(caseId);
+    }
+
+    /// Submit an undisputed case, run round 0 with `vote`, and finalize it.
+    function _runUndisputed(address submitter, Moderation.Vote vote) internal returns (uint256 caseId) {
+        caseId = _submit(submitter);
+        _realizeSeats(caseId);
+        _runRoundToAppealWindow(caseId, 0, vote);
+        _finalize(caseId);
+    }
+
     function _assertConservation() internal view {
         uint256 buckets = mod.totalFreeStake() + mod.totalCommittedStake() + mod.totalFrozenStake();
         assertEq(
             bzz.balanceOf(address(mod)),
-            buckets + mod.openPotsTotal() + mod.totalPendingBond(),
-            "conservation: balance == staked buckets + live pots + pending bond"
+            buckets + mod.openPotsTotal() + mod.totalPendingBond() + mod.totalPendingPayout(),
+            "conservation: balance == staked buckets + live pots + pending bond + pending payout"
         );
     }
 }

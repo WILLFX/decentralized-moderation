@@ -1029,7 +1029,21 @@ contract Moderation is ReentrancyGuard {
     function _void(Case storage c) internal {
         c.phase = Phase.VOID;
         c.finalOutcome = Outcome.Void;
-        _releaseRound(_cur(c)); // return committed stake (brief-freeze refinement: M2-5)
+
+        // A VOID happens only on zero reveals after MAX_WIDEN, so every committer
+        // in the round is a commit-and-vanish actor: each takes the §6.3 brief
+        // freeze (committed -> frozen), never a free release. Otherwise a
+        // coordinated panel could grief submissions to VOID at no cost.
+        Round storage r = _cur(c);
+        uint256 len = r.seatHolders.length;
+        for (uint256 i; i < len; ++i) {
+            address a = r.seatHolders[i];
+            uint256 amt = r.committedAmt[a];
+            if (amt > 0) {
+                r.committedAmt[a] = 0;
+                _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
+            }
+        }
 
         uint256 pot = c.pot;
         uint256 bounty = (pot * params.claimBountyFrac) / WAD;
@@ -1067,23 +1081,6 @@ contract Moderation is ReentrancyGuard {
         totalFreeStake -= amount;
         totalCommittedStake += amount;
         _syncTree(moderator, m);
-    }
-
-    function _releaseRound(Round storage r) internal {
-        uint256 len = r.seatHolders.length;
-        for (uint256 i; i < len; ++i) {
-            address a = r.seatHolders[i];
-            uint256 amt = r.committedAmt[a];
-            if (amt > 0) {
-                r.committedAmt[a] = 0;
-                Moderator storage m = moderators[a];
-                m.committed -= amt;
-                m.free += amt;
-                totalCommittedStake -= amt;
-                totalFreeStake += amt;
-                _syncTree(a, m);
-            }
-        }
     }
 
     function _clearDedup(Case storage c) internal {

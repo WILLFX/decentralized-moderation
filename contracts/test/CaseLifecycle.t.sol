@@ -189,6 +189,72 @@ contract CaseLifecycleTest is ModerationTestBase {
         assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.APPEAL_WINDOW));
     }
 
+    // --- VOID applies the §6.3 brief freeze to commit-and-vanish (F1) --------
+
+    function test_void_freezes_commit_and_vanish() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+
+        // Cycle-1 seat-holders commit, then nobody ever reveals.
+        (, uint256 sh0,,,,,,,,) = mod.roundInfo(caseId, 0);
+        address[] memory committers = new address[](sh0);
+        bytes32 h = keccak256(abi.encode(uint8(Moderation.Vote.Approve), SALT));
+        for (uint256 i = 0; i < sh0; i++) {
+            committers[i] = mod.seatHolderAt(caseId, 0, i);
+            vm.prank(committers[i]);
+            mod.commitVote(caseId, h);
+        }
+
+        uint256 guard;
+        while (_phase(caseId) != Moderation.Phase.VOID) {
+            require(guard++ < 12, "did not void");
+            Moderation.Phase p = _phase(caseId);
+            if (p == Moderation.Phase.COMMIT) {
+                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                mod.closeCommit(caseId);
+            } else if (p == Moderation.Phase.REVEAL) {
+                vm.warp(block.timestamp + REVEAL_WINDOW);
+                mod.closeReveal(caseId);
+            } else {
+                revert("unexpected phase");
+            }
+        }
+
+        // Every committer that vanished is frozen for the brief duration and
+        // excluded from the tree — the deterrent is present in the VOID path.
+        for (uint256 i = 0; i < committers.length; i++) {
+            (,,, uint256 frozen, uint256 frozenUntil,,,,) = mod.moderatorInfo(committers[i]);
+            assertGt(frozen, 0, "vanisher's stake frozen, not released");
+            assertGt(frozenUntil, block.timestamp, "vanisher frozen");
+            assertLe(frozenUntil - block.timestamp, 1 days, "brief freeze only");
+            assertEq(mod.eligibleWeightOf(committers[i]), 0, "frozen -> excluded");
+        }
+        _assertConservation();
+    }
+
+    /// The zero-commit VOID (nobody ever committed) still freezes nothing — there
+    /// was no stake to lock.
+    function test_void_with_no_commits_freezes_nothing() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        uint256 guard;
+        while (_phase(caseId) != Moderation.Phase.VOID) {
+            require(guard++ < 12, "did not void");
+            Moderation.Phase p = _phase(caseId);
+            if (p == Moderation.Phase.COMMIT) {
+                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                mod.closeCommit(caseId);
+            } else if (p == Moderation.Phase.REVEAL) {
+                vm.warp(block.timestamp + REVEAL_WINDOW);
+                mod.closeReveal(caseId);
+            } else {
+                revert("unexpected phase");
+            }
+        }
+        assertEq(mod.totalFrozenStake(), 0, "no commits -> nothing frozen");
+        _assertConservation();
+    }
+
     // --- conservation across a lifecycle -------------------------------------
 
     function test_conservation_holds_through_lifecycle() public {

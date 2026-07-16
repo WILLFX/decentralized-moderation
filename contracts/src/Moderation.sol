@@ -298,8 +298,9 @@ contract Moderation is ReentrancyGuard {
         uint256 rejectSeats; // Σ seats revealing Reject
         uint256 revealedSeats; // approveSeats + rejectSeats
         Outcome outcome; // drawn ∝ seat counts
-        Outcome appealFor; // outcome this round's appeal argues for (M2-4)
-        uint256 bond; // flip-bond opened this round (M2-4)
+        Outcome appealFor; // the outcome an appeal against THIS round argues for
+        uint256 bond; // flip-bond accumulated to appeal this round's outcome
+        bool bondInPot; // true once the floor was met and the bond moved to the pot
         address[] bondContributors;
         mapping(address => uint256) bondContribs;
     }
@@ -315,7 +316,8 @@ contract Moderation is ReentrancyGuard {
         uint256 guidelinesVersion; // pinned at submit (governance in M2-7)
         Phase phase;
         uint256 depth;
-        uint256 pot; // fee + forfeited bonds
+        uint256 pot; // fee + appeal bonds moved in (§6.2)
+        uint256 appealBondTotal; // Σ appeal bonds that met their floor and joined the pot
         uint256 phaseDeadline;
         Outcome finalOutcome;
         Round[] rounds; // one per depth reached
@@ -324,6 +326,7 @@ contract Moderation is ReentrancyGuard {
     mapping(uint256 => Case) internal cases;
     uint256 public nextCaseId;
     uint256 public openPotsTotal; // Σ live case pots (§9.1)
+    uint256 public totalPendingBond; // Σ appeal contributions collected but not yet flooring a round
     mapping(bytes32 => bool) public submissionExists; // dedup: H(content, meta, topicKey) (P3, §9.7)
 
     // --- case events ---------------------------------------------------------
@@ -342,6 +345,11 @@ contract Moderation is ReentrancyGuard {
     event AppealWindowOpened(uint256 indexed caseId, uint256 indexed depth, uint256 deadline);
     event Finalized(uint256 indexed caseId, Outcome finalOutcome);
     event Voided(uint256 indexed caseId);
+    event AppealBondContributed(
+        uint256 indexed caseId, uint256 indexed depth, address indexed contributor, uint256 accepted, uint256 bondTotal
+    );
+    event Appealed(uint256 indexed caseId, uint256 indexed fromDepth, Outcome appealFor);
+    event BondReclaimed(uint256 indexed caseId, uint256 indexed depth, address indexed contributor, uint256 amount);
 
     // --- case errors ---------------------------------------------------------
 
@@ -359,6 +367,12 @@ contract Moderation is ReentrancyGuard {
     error DeadlineNotReached();
     error NoEligibleModerators();
     error InsufficientEligibleFree();
+    error AppealsClosed();
+    error AppealWindowClosed();
+    error AppealAlreadyFull();
+    error CaseNotTerminal();
+    error BondLocked();
+    error NothingToReclaim();
 
     // --- submit --------------------------------------------------------------
 
@@ -536,6 +550,77 @@ contract Moderation is ReentrancyGuard {
         emit Finalized(caseId, c.finalOutcome);
     }
 
+    // --- appeals (§5.4) ------------------------------------------------------
+
+    /// @notice Contribute toward the flip-bond that appeals the current round's
+    ///         outcome. Anyone may contribute during the appeal window (§5.4) —
+    ///         it is a directional flip request, not a first-come slot.
+    ///         Contributions are capped exactly at the floor (BOND_MULTIPLIER ×
+    ///         pot); the contributor that reaches it takes a partial fill, and
+    ///         only the accepted amount is pulled. When the floor is met the bond
+    ///         joins the pot and the next-depth round opens.
+    /// @return accepted The amount actually taken (<= amount).
+    function contributeAppealBond(uint256 caseId, uint256 amount) external nonReentrant returns (uint256 accepted) {
+        if (amount == 0) revert AmountZero();
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.APPEAL_WINDOW) revert WrongPhase();
+        if (c.depth >= params.maxDepth) revert AppealsClosed();
+        if (block.timestamp >= c.phaseDeadline) revert AppealWindowClosed();
+
+        Round storage r = _cur(c);
+        if (r.appealFor == Outcome.Unset) r.appealFor = _opposite(r.outcome);
+
+        uint256 floor = params.bondMultiplier * c.pot;
+        uint256 room = floor - r.bond;
+        if (room == 0) revert AppealAlreadyFull();
+        accepted = amount < room ? amount : room;
+
+        address(token).safeTransferFrom(msg.sender, address(this), accepted);
+        if (r.bondContribs[msg.sender] == 0) r.bondContributors.push(msg.sender);
+        r.bondContribs[msg.sender] += accepted;
+        r.bond += accepted;
+        totalPendingBond += accepted;
+        emit AppealBondContributed(caseId, c.depth, msg.sender, accepted, r.bond);
+
+        if (r.bond == floor) {
+            // Floor met: the bond joins the pot and a fresh round opens at the
+            // next depth, arguing for the flipped outcome.
+            uint256 fromDepth = c.depth;
+            totalPendingBond -= r.bond;
+            c.pot += r.bond;
+            openPotsTotal += r.bond;
+            c.appealBondTotal += r.bond;
+            r.bondInPot = true;
+            _openRound(c, fromDepth + 1);
+            emit Appealed(caseId, fromDepth, r.appealFor);
+        }
+    }
+
+    /// @notice Reclaim an appeal contribution to a bond that never met its floor
+    ///         (so no round opened from it) after the case reaches a terminal
+    ///         state. Bonds that DID meet their floor joined the pot and are
+    ///         settled in claim() (refund + bonus if the appeal won, forfeit if
+    ///         it lost) — those cannot be reclaimed here.
+    function reclaimBond(uint256 caseId, uint256 depth) external nonReentrant {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.FINALIZED && c.phase != Phase.SETTLED && c.phase != Phase.VOID) {
+            revert CaseNotTerminal();
+        }
+        Round storage r = c.rounds[depth];
+        if (r.bondInPot) revert BondLocked();
+        uint256 amt = r.bondContribs[msg.sender];
+        if (amt == 0) revert NothingToReclaim();
+
+        r.bondContribs[msg.sender] = 0;
+        totalPendingBond -= amt;
+        address(token).safeTransfer(msg.sender, amt);
+        emit BondReclaimed(caseId, depth, msg.sender, amt);
+    }
+
+    function _opposite(Outcome o) internal pure returns (Outcome) {
+        return o == Outcome.Approve ? Outcome.Reject : Outcome.Approve;
+    }
+
     // --- internal transitions ------------------------------------------------
 
     function _openRound(Case storage c, uint256 depth) internal {
@@ -579,13 +664,25 @@ contract Moderation is ReentrancyGuard {
             emit CommitOpened(c.id, c.depth, c.phaseDeadline);
             return;
         }
-        // Widen exhausted: VOID only if nobody revealed; otherwise proceed with
-        // the reveals we have (a case that got participation should still yield
-        // an outcome rather than lose it).
-        if (reveals == 0) {
+        // Widen exhausted with participation: proceed with the reveals we have
+        // (a case that got participation should still yield an outcome).
+        if (reveals != 0) {
+            _armOutcome(c, r);
+            return;
+        }
+        // Zero reveals after the cap. At depth 0 there is no prior outcome, so
+        // VOID. For an appeal round (depth > 0) the flip-bond was already funded
+        // to reach this round, so instead of voiding the whole case the appeal
+        // simply fails and the prior round's outcome stands (the forfeited bond
+        // is settled in claim(), M2-5).
+        if (c.depth == 0) {
             _void(c);
         } else {
-            _armOutcome(c, r);
+            Round storage prev = c.rounds[c.depth - 1];
+            r.outcome = prev.outcome;
+            c.finalOutcome = prev.outcome;
+            c.phase = Phase.FINALIZED;
+            emit Finalized(c.id, c.finalOutcome);
         }
     }
 
@@ -729,6 +826,23 @@ contract Moderation is ReentrancyGuard {
 
     function seatHolderAt(uint256 caseId, uint256 depth, uint256 i) external view returns (address) {
         return cases[caseId].rounds[depth].seatHolders[i];
+    }
+
+    function bondInfo(uint256 caseId, uint256 depth)
+        external
+        view
+        returns (uint256 bond, Outcome appealFor, bool bondInPot)
+    {
+        Round storage r = cases[caseId].rounds[depth];
+        return (r.bond, r.appealFor, r.bondInPot);
+    }
+
+    function bondContribOf(uint256 caseId, uint256 depth, address contributor) external view returns (uint256) {
+        return cases[caseId].rounds[depth].bondContribs[contributor];
+    }
+
+    function appealFloor(uint256 caseId) external view returns (uint256) {
+        return params.bondMultiplier * cases[caseId].pot;
     }
 
     // --- eligibility wiring (D6) ---------------------------------------------

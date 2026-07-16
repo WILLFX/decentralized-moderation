@@ -3,8 +3,41 @@
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
-> Status: **M2 in progress.** Scaffold only (M2-0). Module map and full docs land
-> at M2-10.
+> Status: **M2 complete.** The contract implements the full state machine
+> (staking, sortition, case lifecycle, appeals, settlement, index, governance)
+> with 86 passing tests including a handler-driven invariant campaign and a
+> differential test against an independent Python reference.
+
+## Module map
+
+| File | Role |
+|---|---|
+| `src/Moderation.sol` | The single deployed contract: moderators + stake, the sortition tree, cases, appeals, settlement, the index, and governance — one token balance for the conservation invariant (§9.1). |
+| `src/lib/SortitionTree.sol` | Stake-weighted draw over a sum tree (clean 0.8.x port of Kleros' MIT `SortitionSumTreeFactory`; see attribution in the file). |
+| `src/lib/FreezeMath.sol` | The §6.4 freezing-power curve `1 + (CAP-1)(1-e^(-meanTrack/SAT))` via solady `expWad`. |
+
+Settlement math (the WO-1 solvent payout order) lives in `Moderation.sol` itself,
+since it touches every part of the state.
+
+## Tests
+
+| Suite | Covers |
+|---|---|
+| `Staking.t.sol` | free/committed/frozen partition, activation, exit floor, freeze exclusion (§3, §9.3, §9.5) |
+| `SortitionTree.t.sol` | draw correctness + distribution + gas |
+| `CaseLifecycle.t.sol` | submit → draw → commit → reveal → tally, widen, VOID, two-seed ordering (§5) |
+| `Appeals.t.sol` | flip-bond aggregation, floor cap, reclaim, self-appeal, MAX_DEPTH (§5.4) |
+| `Settlement.t.sol` + `FreezeMath.t.sol` | WO-1 payout order, flip-flop conservation, freeze, track (§6) |
+| `Index.t.sol` | write-at-settlement, uncontested, removal, supersafe (§8) |
+| `Governance.t.sol` | timelocked params, append-only guidelines, no pause (§9.9) |
+| `Invariant.t.sol` | handler campaign: conservation, partition, no-principal-lost (§9.1/2/3/11) |
+| `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |
+| `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact |
+| `GasBounds.t.sol` | worst-case `claim()` under the 8M ceiling; §10 failure modes |
+
+Spec departures are catalogued in `DEVIATIONS.md`; gas budgets/actuals in
+`GAS_BUDGETS.md`. Regenerate differential vectors with
+`python3 ../simulation/vectors/export_vectors.py > test/vectors/settlement_vectors.json`.
 
 ## Toolchain (pinned)
 

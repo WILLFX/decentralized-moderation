@@ -561,3 +561,44 @@ Each is validated against the attack scenarios: probability-buying whales, bond
 wars up the appeal ladder, track-record farming, copy/correlated voting,
 under-participation, and honest-moderator earnings across the fee/bond/freeze
 values.
+
+---
+
+## 12. M2 implementation deltas (Solidity)
+
+The M2 contract (`contracts/src/Moderation.sol`) implements this specification.
+A handful of places refine or pin what the spec left open, or adapt a mechanism to
+on-chain constraints. Each is documented with rationale and threat-model impact in
+`contracts/DEVIATIONS.md`; in brief:
+
+- **Randomness (§7).** `block.prevrandao` of a *past* block is unreadable on the EVM,
+  so each round snapshots `blockhash(block.number + SEED_LAG)` and **re-arms** if the
+  256-block window lapses. The two-seed discipline is exact: `seatSeed` at round open,
+  `outcomeSeed` only after reveals close.
+- **`activate()` / `thaw()` (§3).** The eager sortition tree must always hold current
+  eligible weight, so activation and freeze-release are explicit **permissionless
+  pokes**, not lazy realization.
+- **`RISK_PER_SEAT` (§1, §3).** New working parameter (= `MIN_STAKE`) for the per-case
+  commit lock the spec left "TBD by simulation"; uncalibrated, flagged for a future M1
+  pass. New stake also carries its activation delay in a `pending` bucket so a top-up
+  cannot be rushed into a target draw.
+- **Appeals (§5.3/§5.4).** Contributions cap **exactly** at the floor (partial fill);
+  a bond that never floors is **pull-reclaimable** once terminal; an appeal round with
+  zero participation **fails to the prior outcome** rather than VOIDing the case (only
+  depth 0 VOIDs).
+- **Settlement (§6).** All pro-rata divisions round down with the **dust swept into the
+  claim bounty**, making funds conservation (invariant 11) an exact integer equality.
+  Rewards credit `free` (internal pull); appeal refunds + bonuses credit a
+  `pendingPayout` pull channel to avoid settlement DoS. Worst-case `claim()` (MAX_DEPTH,
+  86 voters, 5 topics) measures ~2.5M gas, under the 8M single-tx ceiling (Invariant 8).
+- **Index (§8.4).** `TopicCreated` carries the topic **key** (the contract cannot
+  NFC-normalize strings on-chain); clients hold the key→label map.
+- **Governance (§9.9).** A multisig replaces the whole `Params` struct behind a
+  timelock (validated), and appends — never mutates — guidelines versions. No path
+  changes core transitions or pauses withdrawals.
+
+Every structural guarantee this spec asserts is test-guarded in M2: funds conservation
+and no-internal-transfer as Foundry invariants over a 16k-call campaign, the settlement
+arithmetic as a 52-vector differential test against an independent Python integer
+reference, and the single-stake-benefit property (§5.2, invariant 10) as a statistical
+test.

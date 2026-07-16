@@ -168,6 +168,45 @@ contract AppealsTest is ModerationTestBase {
         assertEq(uint256(fo), uint256(Moderation.Outcome.Approve), "prior outcome stands");
     }
 
+    // --- F3: floor underflow guarded across a mid-window governance change ---
+
+    function test_appeal_floor_underflow_guarded_after_governance() public {
+        // Queue lowering bondMultiplier 2 -> 1 (timelock 7 days).
+        Moderation.Params memory p = mod.getParams();
+        p.bondMultiplier = 1;
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+        mod.proposeParameters(p, cts, aws);
+        uint256 eta = block.timestamp + 7 days;
+
+        // Open the case ~3.5 days before eta so the 4-day appeal window is still
+        // open when the timelock fires.
+        vm.warp(block.timestamp + 3 days + 12 hours);
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+
+        (,,,, uint256 pot,,) = mod.caseInfo(caseId);
+        uint256 partialBond = pot + pot / 2; // 1.5x pot: below the current 2x floor
+        address c = makeAddr("c");
+        _fund(c, partialBond);
+        vm.prank(c);
+        mod.contributeAppealBond(caseId, partialBond);
+        (uint256 bond,,) = mod.bondInfo(caseId, 0);
+        assertEq(bond, partialBond, "partial bond aggregated, window still open");
+
+        // Governance executes mid-window; the floor drops to 1x pot < the bond.
+        vm.warp(eta);
+        mod.executeParameters();
+        assertEq(mod.getParams().bondMultiplier, 1);
+
+        // A further contribution reverts cleanly (not an arithmetic panic).
+        _fund(c, pot);
+        vm.prank(c);
+        vm.expectRevert(Moderation.AppealAlreadyFull.selector);
+        mod.contributeAppealBond(caseId, 1);
+    }
+
     // --- appeals close at MAX_DEPTH ------------------------------------------
 
     function test_appeals_closed_at_max_depth() public {

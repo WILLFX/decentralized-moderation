@@ -636,8 +636,10 @@ contract Moderation is ReentrancyGuard {
         if (r.appealFor == Outcome.Unset) r.appealFor = _opposite(r.outcome);
 
         uint256 floor = params.bondMultiplier * c.pot;
+        // Guard underflow: a governance parameter change (lower bondMultiplier) can
+        // execute mid-window and drop the floor below the already-aggregated bond.
+        if (floor <= r.bond) revert AppealAlreadyFull();
         uint256 room = floor - r.bond;
-        if (room == 0) revert AppealAlreadyFull();
         accepted = amount < room ? amount : room;
 
         address(token).safeTransferFrom(msg.sender, address(this), accepted);

@@ -18,9 +18,20 @@ Budgets the Foundry suite asserts against (D9 of `specs/m2-work-order.md`).
 
 | Path | Budget | Kind | Actual | Test |
 |---|---|---|---|---|
-| `claim()` worst case — MAX_DEPTH (86 seats), all reveal, 5 topics, 3 winning appeals | **8,000,000** | **hard ceiling** | **~2,506,000** ✓ | `GasBoundsTest::test_worst_case_claim_under_hard_ceiling` |
-| `submit` (5 topics) | 500,000 | soft | ~476,000 | `test_measure_common_path_gas` |
-| `commitVote` | 200,000 | soft | ~175,000 | `test_measure_common_path_gas` |
+| `claim()` worst case — MAX_DEPTH (86 seats), all reveal, 5 topics, 3 winning appeals | **8,000,000** | **hard ceiling** | **~2,506,000** ✓ | `test_worst_case_claim_under_hard_ceiling` |
+| seat-draw poke — 47-seat panel over 1000 moderators | 3,500,000 | soft | ~2,778,000 | `test_measure_draw_poke_1000_mods` |
+| `submit` (5 topics) | 550,000 | soft | ~517,000 | `test_measure_common_path_gas` |
+| `commitVote` | 200,000 | soft | ~173,000 | `test_measure_common_path_gas` |
+| `revealVote` | 150,000 | soft | ~113,000 | `test_measure_common_path_gas` |
+| `contributeAppealBond` | 160,000 | soft | ~126,000 | `test_measure_common_path_gas` |
+
+> Seat-draw poke note. The deepest panel (depth 3, 47 seats) draws over the full
+> tree AND performs 47 cold seat-holder storage writes (`seats` mapping +
+> `seatHolders` array), so it costs ~2.78M — more than a naive `47 × single-draw`
+> estimate, which counts only the read-only tree descent. It is a one-off poke per
+> round, well under the block limit, and only the rarest depth-3 round pays it;
+> depth-0 (5 seats) is ~300k. Budget adjusted from the initial optimistic 2M to
+> measured reality per work order D9.
 
 **Hard ceiling result — PASS.** Worst-case `claim()` settles the full MAX_DEPTH
 case (5+11+23+47 = 86 voters, five index writes, three winning appeals with

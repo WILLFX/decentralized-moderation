@@ -115,6 +115,12 @@ contract ModerationHarness is Moderation {
         cases[caseId].topicKeys.push(topicKey);
     }
 
+    /// Draw a panel of `count` seats over the live tree (isolates the seat-draw
+    /// cost of the realizeSeats poke for gas measurement).
+    function __drawPanel(uint256 caseId, uint256 depth, uint256 count, bytes32 seed) external {
+        _drawSeats(cases[caseId].rounds[depth], count, seed, 0);
+    }
+
     /// Model a widen re-draw landing `extra` seats on an already-revealed voter:
     /// bumps r.seats (post-widen) without touching talliedSeats (reveal-time).
     /// Settlement must ignore the inflation (F2).

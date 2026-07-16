@@ -60,15 +60,6 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         try mod.activate(a) {} catch {}
     }
 
-    function hRequestExit(uint256 actorSeed, uint256 amount) external {
-        address a = _actor(actorSeed);
-        (uint256 free,,,,,, uint256 exitAmount,,) = mod.moderatorInfo(a);
-        if (exitAmount != 0 || free == 0) return;
-        amount = bound(amount, 1, free);
-        try mod.requestExit(amount) {} catch {}
-        // (called by handler, not the actor: requestExit uses msg.sender, so prank)
-    }
-
     function hRequestExitPranked(uint256 actorSeed, uint256 amount) external {
         address a = _actor(actorSeed);
         (uint256 free,,,,,, uint256 exitAmount,,) = mod.moderatorInfo(a);

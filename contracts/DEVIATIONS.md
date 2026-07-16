@@ -184,3 +184,26 @@ gas.
 an under-participating (widened) round would collect extra reward-lottery weight per
 widen at its co-winners' expense, and skew the freeze-power mean-track input. The
 phantom seats now change nothing.
+
+---
+
+## Accepted liveness edges (M2; no code change — flagged for M4)
+
+### L-1. A DRAW over an empty sortition tree has no timeout
+
+If every activated moderator has exited/frozen, a case sitting in DRAW cannot
+realize seats (`realizeSeats` reverts `NoEligibleModerators`), and there is no
+timeout that VOIDs it — the fee stays in the pot until someone stakes, activates,
+and the poke succeeds. Accepted for M2 (a live network always has an eligible set).
+The obvious M4 remedy if it ever matters is a DRAW-age → VOID (refund) path, the
+same shape as the reveal-phase VOID.
+
+### L-2. Removal `targetCaseId` is not validated at submit
+
+`submit` stores a REMOVAL case's `targetCaseId` without checking it names a real,
+approved submission. A bogus or already-removed target simply settles as a clean
+no-op at `_removeTarget` (per spec §10). This is intentional — validating index
+membership at submit would duplicate the settlement-time lookup and could race a
+concurrent removal — but it means a removal case can be spun up (and pays its fee)
+against a target that will never delete anything. No safety impact; the fee is the
+griefing cost.

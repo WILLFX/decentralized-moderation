@@ -56,6 +56,7 @@ contract Moderation is ReentrancyGuard {
         uint256 trackSat; // TRACK_SAT (WAD)
         uint256 trackDecay; // TRACK_DECAY per-case decay (WAD fraction, < 1e18)
         uint256 failedRevealFreeze; // brief freeze for commit-and-vanish (seconds)
+        uint256 supersafeAge; // SUPERSAFE_AGE (seconds)
     }
 
     Params internal params;
@@ -139,7 +140,8 @@ contract Moderation is ReentrancyGuard {
             freezeCap: 4 * WAD, // FREEZE_CAP = 4 (WO-6 recalibration)
             trackSat: 60 * WAD, // TRACK_SAT = 60
             trackDecay: (WAD * 95) / 100, // TRACK_DECAY = 0.95
-            failedRevealFreeze: 1 days
+            failedRevealFreeze: 1 days,
+            supersafeAge: 96 hours
         });
         commitTargetByDepth = [uint256(5), 11, 23, 47];
         appealWindowByDepth = [uint256(4 days), 3 days, 3 days, 3 days];
@@ -341,6 +343,23 @@ contract Moderation is ReentrancyGuard {
     uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull
     mapping(address => uint256) public pendingPayout; // appeal refunds/bonuses, withdrawn via claimPayout
     mapping(bytes32 => bool) public submissionExists; // dedup: H(content, meta, topicKey) (P3, §9.7)
+
+    // --- index (§8, README 3.8) ----------------------------------------------
+
+    struct Entry {
+        bytes32 contentHash;
+        bytes32 metaHash;
+        uint40 approvalTime; // settlement time; drives the supersafe age filter
+        bool uncontested; // true iff no Reject vote was ever revealed in the case
+        uint256 caseId; // back-reference for removal (§8.2)
+    }
+
+    mapping(bytes32 => Entry[]) internal indexByTopic; // topicKey -> approved entries
+    mapping(bytes32 => bool) internal topicSeen; // first index write emits TopicCreated
+
+    event TopicCreated(bytes32 indexed topicKey);
+    event EntryWritten(uint256 indexed caseId, bytes32 indexed topicKey, bool uncontested);
+    event EntryRemoved(uint256 indexed caseId, bytes32 indexed topicKey);
 
     // --- case events ---------------------------------------------------------
 
@@ -820,12 +839,77 @@ contract Moderation is ReentrancyGuard {
         }
     }
 
+    /// @dev Index side effects at settlement (§8.1, §8.2). Writes happen only
+    ///      here, on a final APPROVE — never provisionally at a depth-0 tally.
     function _settleIndex(Case storage c) internal {
-        // Full index writes/deletions land in M2-6. Dedup lifecycle (§8.2):
-        // a rejected submission is resubmittable.
-        if (c.kind == Kind.SUBMISSION && c.finalOutcome == Outcome.Reject) {
-            _clearDedup(c);
+        if (c.kind == Kind.SUBMISSION) {
+            if (c.finalOutcome == Outcome.Approve) {
+                _writeEntries(c); // dedup kept: content is now in the index
+            } else if (c.finalOutcome == Outcome.Reject) {
+                _clearDedup(c); // resubmittable
+            }
+        } else {
+            // REMOVAL: APPROVE deletes the target's entries; REJECT keeps them.
+            if (c.finalOutcome == Outcome.Approve) {
+                _removeTarget(c);
+            }
         }
+    }
+
+    function _writeEntries(Case storage c) internal {
+        bool uncontested = _noRejectEver(c); // an appeal alone does not clear it (§8.1)
+        uint40 t = uint40(block.timestamp);
+        uint256 n = c.topicKeys.length;
+        for (uint256 i; i < n; ++i) {
+            bytes32 topicKey = c.topicKeys[i];
+            if (!topicSeen[topicKey]) {
+                topicSeen[topicKey] = true;
+                emit TopicCreated(topicKey);
+            }
+            indexByTopic[topicKey].push(
+                Entry({
+                    contentHash: c.contentHash,
+                    metaHash: c.metaHash,
+                    approvalTime: t,
+                    uncontested: uncontested,
+                    caseId: c.id
+                })
+            );
+            emit EntryWritten(c.id, topicKey, uncontested);
+        }
+    }
+
+    function _removeTarget(Case storage c) internal {
+        Case storage target = cases[c.targetCaseId];
+        uint256 n = target.topicKeys.length;
+        for (uint256 i; i < n; ++i) {
+            _deleteEntry(target.topicKeys[i], c.targetCaseId);
+        }
+        _clearDedup(target); // the removed submission is resubmittable
+    }
+
+    /// @dev Swap-and-pop the entry for `caseId` under `topicKey`. No-op if absent
+    ///      (already removed): removal of a missing entry settles cleanly (§10).
+    function _deleteEntry(bytes32 topicKey, uint256 caseId) internal {
+        Entry[] storage arr = indexByTopic[topicKey];
+        uint256 len = arr.length;
+        for (uint256 i; i < len; ++i) {
+            if (arr[i].caseId == caseId) {
+                arr[i] = arr[len - 1];
+                arr.pop();
+                emit EntryRemoved(caseId, topicKey);
+                return;
+            }
+        }
+    }
+
+    /// @dev uncontested iff no Reject vote was revealed in ANY round (§8.1).
+    function _noRejectEver(Case storage c) internal view returns (bool) {
+        uint256 n = c.rounds.length;
+        for (uint256 d; d < n; ++d) {
+            if (c.rounds[d].rejectSeats != 0) return false;
+        }
+        return true;
     }
 
     function _freezeSlice(address a, uint256 amt, uint256 until) internal {
@@ -1065,6 +1149,36 @@ contract Moderation is ReentrancyGuard {
 
     function appealFloor(uint256 caseId) external view returns (uint256) {
         return params.bondMultiplier * cases[caseId].pot;
+    }
+
+    // --- index views (§8.3) --------------------------------------------------
+
+    /// Superset: number of current entries under a topic.
+    function entryCount(bytes32 topicKey) external view returns (uint256) {
+        return indexByTopic[topicKey].length;
+    }
+
+    function entryAt(bytes32 topicKey, uint256 i) external view returns (Entry memory) {
+        return indexByTopic[topicKey][i];
+    }
+
+    /// Supersafe subset (§8.3): uncontested and aged past SUPERSAFE_AGE.
+    function supersafeEntries(bytes32 topicKey) external view returns (Entry[] memory out) {
+        Entry[] storage arr = indexByTopic[topicKey];
+        uint256 len = arr.length;
+        uint256 count;
+        for (uint256 i; i < len; ++i) {
+            if (_isSupersafe(arr[i])) count++;
+        }
+        out = new Entry[](count);
+        uint256 j;
+        for (uint256 i; i < len; ++i) {
+            if (_isSupersafe(arr[i])) out[j++] = arr[i];
+        }
+    }
+
+    function _isSupersafe(Entry storage e) internal view returns (bool) {
+        return e.uncontested && block.timestamp - e.approvalTime >= params.supersafeAge;
     }
 
     // --- eligibility wiring (D6) ---------------------------------------------

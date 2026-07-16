@@ -66,6 +66,30 @@ contract Moderation is ReentrancyGuard {
     /// APPEAL_WINDOW[depth]: appeal window duration per depth.
     uint256[] internal appealWindowByDepth;
 
+    // --- governance (§9.9, P6) -----------------------------------------------
+
+    address public governance; // multisig
+    uint256 public timelockDelay; // delay between proposal and execution
+    uint256 public guidelinesVersion; // current guidelines version
+    mapping(uint256 => bytes32) public guidelinesHashByVersion; // append-only history (invariant 9)
+
+    struct PendingParams {
+        uint256 eta;
+        bool exists;
+        Params p;
+        uint256[] commitTargets;
+        uint256[] appealWindows;
+    }
+
+    struct PendingGuidelines {
+        uint256 eta;
+        bool exists;
+        bytes32 hash;
+    }
+
+    PendingParams internal pendingParams;
+    PendingGuidelines internal pendingGuidelines;
+
     // --- moderator state (§2) ------------------------------------------------
 
     struct Moderator {
@@ -145,6 +169,9 @@ contract Moderation is ReentrancyGuard {
         });
         commitTargetByDepth = [uint256(5), 11, 23, 47];
         appealWindowByDepth = [uint256(4 days), 3 days, 3 days, 3 days];
+
+        governance = msg.sender;
+        timelockDelay = 7 days;
     }
 
     // --- staking (§3) --------------------------------------------------------
@@ -447,6 +474,7 @@ contract Moderation is ReentrancyGuard {
             c.topicKeys.push(topicKeys[i]);
         }
         c.targetCaseId = targetCaseId;
+        c.guidelinesVersion = guidelinesVersion; // pinned at submit; never changes (§9.6)
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
@@ -1181,6 +1209,109 @@ contract Moderation is ReentrancyGuard {
         return e.uncontested && block.timestamp - e.approvalTime >= params.supersafeAge;
     }
 
+    function caseGuidelinesVersion(uint256 caseId) external view returns (uint256) {
+        return cases[caseId].guidelinesVersion;
+    }
+
+    // =========================================================================
+    // Governance (§9.9, P6) — a multisig may change only the §1 numeric
+    // parameters and append (never mutate) guidelines versions, both behind a
+    // timelock. Core transitions (§3, §5) are code and have no mutation path, and
+    // no function anywhere pauses withdrawals (§9.5).
+    // =========================================================================
+
+    event ParametersProposed(uint256 eta);
+    event ParametersExecuted();
+    event ParametersCancelled();
+    event GuidelinesProposed(bytes32 hash, uint256 eta);
+    event GuidelinesExecuted(uint256 indexed version, bytes32 hash);
+    event GovernanceTransferred(address indexed newGovernance);
+
+    error NotGovernance();
+    error NoPendingProposal();
+    error TimelockNotElapsed();
+    error BadParams();
+
+    modifier onlyGovernance() {
+        if (msg.sender != governance) revert NotGovernance();
+        _;
+    }
+
+    /// @notice Queue a full replacement of the numeric parameters (validated for
+    ///         solvency/liveness sanity). Only these numbers are mutable.
+    function proposeParameters(
+        Params calldata p,
+        uint256[] calldata commitTargets,
+        uint256[] calldata appealWindows
+    ) external onlyGovernance {
+        _validateParams(p, commitTargets, appealWindows);
+        PendingParams storage pp = pendingParams;
+        pp.eta = block.timestamp + timelockDelay;
+        pp.exists = true;
+        pp.p = p;
+        pp.commitTargets = commitTargets;
+        pp.appealWindows = appealWindows;
+        emit ParametersProposed(pp.eta);
+    }
+
+    function executeParameters() external onlyGovernance {
+        PendingParams storage pp = pendingParams;
+        if (!pp.exists) revert NoPendingProposal();
+        if (block.timestamp < pp.eta) revert TimelockNotElapsed();
+        params = pp.p;
+        commitTargetByDepth = pp.commitTargets;
+        appealWindowByDepth = pp.appealWindows;
+        delete pendingParams;
+        emit ParametersExecuted();
+    }
+
+    function cancelParameters() external onlyGovernance {
+        delete pendingParams;
+        emit ParametersCancelled();
+    }
+
+    /// @notice Queue a new guidelines version. Execution appends a new version
+    ///         entry; existing versions are never overwritten (invariant 9).
+    function proposeGuidelines(bytes32 hash) external onlyGovernance {
+        pendingGuidelines = PendingGuidelines({eta: block.timestamp + timelockDelay, exists: true, hash: hash});
+        emit GuidelinesProposed(hash, block.timestamp + timelockDelay);
+    }
+
+    function executeGuidelines() external onlyGovernance {
+        PendingGuidelines storage pg = pendingGuidelines;
+        if (!pg.exists) revert NoPendingProposal();
+        if (block.timestamp < pg.eta) revert TimelockNotElapsed();
+        guidelinesVersion += 1;
+        guidelinesHashByVersion[guidelinesVersion] = pg.hash;
+        emit GuidelinesExecuted(guidelinesVersion, pg.hash);
+        delete pendingGuidelines;
+    }
+
+    function transferGovernance(address next) external onlyGovernance {
+        governance = next;
+        emit GovernanceTransferred(next);
+    }
+
+    function _validateParams(Params calldata p, uint256[] calldata commitTargets, uint256[] calldata appealWindows)
+        internal
+        pure
+    {
+        if (commitTargets.length == 0 || appealWindows.length == 0) revert BadParams();
+        if (p.minStake == 0 || p.riskPerSeat == 0) revert BadParams();
+        if (p.minReveals == 0) revert BadParams();
+        if (p.bondMultiplier == 0) revert BadParams();
+        if (p.freezeCap < WAD) revert BadParams(); // power multiplier >= 1
+        if (p.trackDecay > WAD) revert BadParams(); // decay is a fraction
+        if (p.claimBountyFrac + p.bonusFrac > WAD) revert BadParams(); // distributable stays >= 0
+        for (uint256 i; i < commitTargets.length; ++i) {
+            if (commitTargets[i] == 0) revert BadParams();
+        }
+    }
+
+    function pendingParamsEta() external view returns (uint256 eta, bool exists) {
+        return (pendingParams.eta, pendingParams.exists);
+    }
+
     // --- eligibility wiring (D6) ---------------------------------------------
 
     /// @dev The draw-eligible weight the tree should hold for `m`: zero while the
@@ -1247,5 +1378,17 @@ contract Moderation is ReentrancyGuard {
 
     function getParams() external view returns (Params memory) {
         return params;
+    }
+
+    function getCommitTargets() external view returns (uint256[] memory) {
+        return commitTargetByDepth;
+    }
+
+    function getAppealWindows() external view returns (uint256[] memory) {
+        return appealWindowByDepth;
+    }
+
+    function commitTargetAt(uint256 depth) external view returns (uint256) {
+        return _commitTarget(depth);
     }
 }

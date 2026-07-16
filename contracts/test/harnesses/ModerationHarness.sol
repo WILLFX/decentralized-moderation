@@ -108,4 +108,8 @@ contract ModerationHarness is Moderation {
     function __setTrack(address voter, uint256 track) external {
         moderators[voter].track = track;
     }
+
+    function __injectTopic(uint256 caseId, bytes32 topicKey) external {
+        cases[caseId].topicKeys.push(topicKey);
+    }
 }

@@ -9,3 +9,9 @@ venv/
 # Simulation outputs
 simulation/results*.json
 *.log
+
+# Foundry (contracts/)
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/.gas-snapshot.tmp

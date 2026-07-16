@@ -107,3 +107,30 @@ The unpranked variant is not in the invariant selector set and calls
 Order: F1, F2, F3 (code, each with tests), then F4, F5, F6 (docs/cleanup, can be
 one commit). Update `contracts/DEVIATIONS.md` where noted. Full suite green at
 every step; push after the last item.
+
+---
+
+## Resolution (Fable 5 re-audit, 2026-07-16)
+
+All six findings fixed and verified in commits `6b8f899..0304aa6`; suite green at
+91 tests on an independent re-run (includes the invariant campaign and the
+bit-exact differential vectors).
+
+- **F1 ✓** `_void` now freezes every committer's slice for the brief §6.3
+  duration via `_freezeSlice`; `_releaseRound` deleted with no dangling
+  references. Commit-and-vanish to VOID now costs the freeze.
+- **F2 ✓** `talliedSeats` frozen at reveal and read at every settlement site
+  (winners' seats, mean-track, reward numerator); phantom widen seats inert
+  (D-12); differential vectors unchanged and still exact. *Residual (benign,
+  noted):* a voter who commits pre-widen and reveals post-widen is tallied and
+  rewarded at the widened count with the lock at the pre-widen count — tally and
+  reward stay consistent; only the (uncalibrated, D-3) griefing deposit lags.
+  Folded into D-3's calibration TODO.
+- **F3 ✓** floor ≤ bond guard; regression drives a real timelock-vs-window
+  overlap.
+- **F4 ✓** all D9 rows measured and recorded; the 47-seat draw poke's real cost
+  (~2.78M — 47 cold seat-holder writes, not just tree descent) honestly
+  documented with an adjusted soft budget.
+- **F5 ✓ / F6 ✓** dead handler code removed; L-1/L-2 documented.
+
+M2 is closed.

@@ -33,6 +33,9 @@ contract Moderation is ReentrancyGuard {
 
     /// WAD scale for fractional parameters (1e18 = 100%).
     uint256 internal constant WAD = 1e18;
+    // H-06: randomness domain-separation purpose tags.
+    uint8 internal constant SEED_SEATS = 1;
+    uint8 internal constant SEED_OUTCOME = 2;
 
     struct Params {
         uint256 minStake; // MIN_STAKE
@@ -599,8 +602,11 @@ contract Moderation is ReentrancyGuard {
         }
         if (stakeTree.total() == 0) revert NoEligibleModerators();
 
-        r.seatSeed = bh;
-        _drawSeats(r, r.nSeats, bh, 0);
+        // H-06: domain-separate the raw blockhash so two cases snapshotting the
+        // same block (or the same case at different depths) never draw identical
+        // panels. The purpose tag keeps seat vs outcome entropy independent.
+        r.seatSeed = _domainSeed(caseId, c.depth, SEED_SEATS, bh);
+        _drawSeats(r, r.nSeats, r.seatSeed, 0);
 
         c.phase = Phase.COMMIT;
         c.phaseDeadline = block.timestamp + params.commitTimeout;
@@ -694,9 +700,9 @@ contract Moderation is ReentrancyGuard {
             emit SeedRearmed(caseId, c.depth, true, r.outcomeSnapshotBlock);
             return;
         }
-        r.outcomeSeed = bh;
+        r.outcomeSeed = _domainSeed(caseId, c.depth, SEED_OUTCOME, bh); // H-06
         uint256 tot = r.approveSeats + r.rejectSeats; // >= 1 by construction
-        uint256 rand = uint256(bh) % tot;
+        uint256 rand = uint256(r.outcomeSeed) % tot;
         r.outcome = rand < r.approveSeats ? Outcome.Approve : Outcome.Reject;
 
         c.phase = Phase.APPEAL_WINDOW;
@@ -1253,6 +1259,16 @@ contract Moderation is ReentrancyGuard {
 
     function _cur(Case storage c) internal view returns (Round storage) {
         return c.rounds[c.rounds.length - 1];
+    }
+
+    /// @dev H-06: bind randomness to (chain, contract, case, depth, purpose) so
+    ///      no two draws share a seed derived from the same blockhash.
+    function _domainSeed(uint256 caseId, uint256 depth, uint8 purpose, bytes32 entropy)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(block.chainid, address(this), caseId, depth, purpose, entropy));
     }
 
     function _drawSeats(Round storage r, uint256 count, bytes32 seed, uint256 offset) internal {

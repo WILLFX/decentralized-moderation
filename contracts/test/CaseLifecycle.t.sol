@@ -265,4 +265,29 @@ contract CaseLifecycleTest is ModerationTestBase {
         _realizeOutcome(caseId);
         _assertConservation();
     }
+
+    // H-06: two cases opened in the SAME block share a snapshot block (hence the
+    // same blockhash entropy), but domain separation by caseId must give them
+    // distinct seat seeds — otherwise a batch of same-block submissions would be
+    // judged by one identical panel.
+    function test_H06_same_block_cases_get_distinct_seeds() public {
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[0], fee);
+        vm.prank(mods[0]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[0]);
+        uint256 a = mod.submit(Moderation.Kind.SUBMISSION, keccak256("A"), META, _topics(), 0, fee);
+
+        bzz.mint(mods[1], fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[1]);
+        uint256 b = mod.submit(Moderation.Kind.SUBMISSION, keccak256("B"), META, _topics(), 0, fee);
+
+        // Both were submitted in the same block -> identical seatSnapshotBlock.
+        vm.roll(block.number + SEED_LAG + 1);
+        mod.realizeSeats(a);
+        mod.realizeSeats(b);
+        assertTrue(mod.__seatSeed(a, 0) != mod.__seatSeed(b, 0), "domain separation -> distinct seat seeds");
+    }
 }

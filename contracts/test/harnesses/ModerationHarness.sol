@@ -161,4 +161,8 @@ contract ModerationHarness is Moderation {
     function __setBondRefundOnly(uint256 caseId, uint256 depth) external {
         cases[caseId].rounds[depth].bondRefundOnly = true;
     }
+
+    function __seatSeed(uint256 caseId, uint256 depth) external view returns (bytes32) {
+        return cases[caseId].rounds[depth].seatSeed;
+    }
 }

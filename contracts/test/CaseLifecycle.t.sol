@@ -150,6 +150,27 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
     }
 
+    // M-02: reveal is a hard-deadline window. Past the reveal deadline (but before
+    // anyone closes the phase) a reveal must revert, so a late voter cannot watch
+    // the tally and front-run the closing transaction.
+    function test_M02_reveal_after_deadline_reverts() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        _commitAll(caseId, 0, Moderation.Vote.Approve);
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+        }
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.REVEAL));
+
+        (,,,,, uint256 deadline,) = mod.caseInfo(caseId);
+        vm.warp(deadline); // exactly at the deadline: window is [open, deadline)
+        address sh = mod.seatHolderAt(caseId, 0, 0);
+        vm.prank(sh);
+        vm.expectRevert(Moderation.PhaseDeadlinePassed.selector);
+        mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+    }
+
     // --- two-seed ordering ---------------------------------------------------
 
     function test_outcome_seed_armed_after_reveals_close() public {

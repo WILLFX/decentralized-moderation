@@ -481,6 +481,7 @@ contract Moderation is ReentrancyGuard {
     error CaseNotTerminal();
     error BondLocked();
     error NothingToReclaim();
+    error PhaseDeadlinePassed(); // M-02: commit/reveal after the window has elapsed
     error BadKind(); // submit() is submissions-only; removals go through submitRemoval
     error TargetNotRemovable(); // removal target must be a settled, approved, indexed submission
 
@@ -619,6 +620,7 @@ contract Moderation is ReentrancyGuard {
     function commitVote(uint256 caseId, bytes32 commitHash) external {
         Case storage c = cases[caseId];
         if (c.phase != Phase.COMMIT) revert WrongPhase();
+        if (block.timestamp >= c.phaseDeadline) revert PhaseDeadlinePassed(); // M-02: hard window
         Round storage r = _cur(c);
         uint256 s = r.seats[msg.sender];
         if (s == 0) revert NotSeatHolder();
@@ -660,6 +662,7 @@ contract Moderation is ReentrancyGuard {
     function revealVote(uint256 caseId, Vote vote, bytes32 salt) external {
         Case storage c = cases[caseId];
         if (c.phase != Phase.REVEAL) revert WrongPhase();
+        if (block.timestamp >= c.phaseDeadline) revert PhaseDeadlinePassed(); // M-02: hard window
         if (vote != Vote.Approve && vote != Vote.Reject) revert BadVote();
         Round storage r = _cur(c);
         if (!r.committed[msg.sender]) revert NotCommitted();

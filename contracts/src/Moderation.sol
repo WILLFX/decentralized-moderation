@@ -219,10 +219,12 @@ contract Moderation is ReentrancyGuard {
         if (amount == 0) revert AmountZero();
         Moderator storage m = moderators[msg.sender];
 
-        if (!m.exists) {
-            if (amount < params.minStake) revert BelowMinStake();
-            m.exists = true;
-        }
+        // H-07: the min-stake floor is checked against CURRENT total, not a
+        // one-time `exists` flag. A full exit leaves total == 0, so re-staking
+        // below the floor (stake -> full exit -> stake 1 wei) is rejected — no
+        // more sub-minimum identities splitting into the sortition tree.
+        if (_total(m) == 0 && amount < params.minStake) revert BelowMinStake();
+        m.exists = true;
 
         address(token).safeTransferFrom(msg.sender, address(this), amount);
 

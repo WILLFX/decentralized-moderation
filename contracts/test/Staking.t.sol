@@ -48,6 +48,30 @@ contract StakingTest is Test {
         mod.stake(MIN_STAKE - 1);
     }
 
+    // H-07: the min-stake floor binds on CURRENT total, not a one-time flag. After
+    // a full exit, re-staking below the floor must revert — closing the
+    // stake -> full-exit -> stake-1-wei sub-minimum-identity split.
+    function test_restake_below_min_after_full_exit_reverts() public {
+        _fund(alice, MIN_STAKE);
+        vm.prank(alice);
+        mod.stake(MIN_STAKE);
+
+        // Full exit and withdraw.
+        vm.prank(alice);
+        mod.requestExit(MIN_STAKE);
+        vm.warp(block.timestamp + 8 days);
+        vm.prank(alice);
+        mod.withdraw();
+        assertEq(mod.totalStakeOf(alice), 0, "fully exited");
+
+        // Re-staking below the floor is now rejected (was allowed via the stale
+        // `exists` flag).
+        _fund(alice, 1);
+        vm.prank(alice);
+        vm.expectRevert(Moderation.BelowMinStake.selector);
+        mod.stake(1);
+    }
+
     function test_stake_is_pending_until_activated() public {
         _fund(alice, 100 * XBZZ);
         vm.prank(alice);

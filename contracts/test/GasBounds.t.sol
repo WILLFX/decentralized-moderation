@@ -409,6 +409,19 @@ contract GasBoundsTest is ModerationTestBase {
 
     // --- §10 failure modes ---------------------------------------------------
 
+    function test_duplicate_topics_rejected() public {
+        bytes32[] memory dup = new bytes32[](2);
+        dup[0] = keccak256("same");
+        dup[1] = keccak256("same");
+        uint256 fee = mod.minFee(2);
+        bzz.mint(mods[0], fee);
+        vm.prank(mods[0]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[0]);
+        vm.expectRevert(Moderation.DuplicateTopic.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, dup, 0, fee);
+    }
+
     function test_over_max_topics_reverts() public {
         bytes32[] memory six = new bytes32[](6);
         uint256 fee = 100 * XBZZ;

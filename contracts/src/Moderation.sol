@@ -464,6 +464,7 @@ contract Moderation is ReentrancyGuard {
     error BadTopicCount();
     error FeeTooLow();
     error DuplicateSubmission();
+    error DuplicateTopic(); // M-04: a submission's topic keys must be distinct
     error WrongPhase();
     error SeedNotReady();
     error NotSeatHolder();
@@ -517,6 +518,13 @@ contract Moderation is ReentrancyGuard {
         if (n == 0 || n > params.maxTopics) revert BadTopicCount();
         if (fee < minFee(n)) revert FeeTooLow();
 
+        // M-04: topic keys must be distinct (n <= maxTopics is small). Duplicates
+        // would double-write the entry and corrupt the O(1) position map (H-03).
+        for (uint256 i; i < n; ++i) {
+            for (uint256 j; j < i; ++j) {
+                if (topicKeys[i] == topicKeys[j]) revert DuplicateTopic();
+            }
+        }
         for (uint256 i; i < n; ++i) {
             if (dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] != 0) revert DuplicateSubmission();
         }

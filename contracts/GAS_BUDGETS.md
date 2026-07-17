@@ -18,7 +18,9 @@ Budgets the Foundry suite asserts against (D9 of `specs/m2-work-order.md`).
 
 | Path | Budget | Kind | Actual | Test |
 |---|---|---|---|---|
-| `claim()` worst case — MAX_DEPTH (86 seats), all reveal, 5 topics, 3 winning appeals | **8,000,000** | **hard ceiling** | **~2,506,000** ✓ | `test_worst_case_claim_under_hard_ceiling` |
+| `claim(caseId, maxSteps)` — one settlement batch (H-04) | **8,000,000** | **hard ceiling** | **~3,694,000** ✓ | `test_maximal_case_settles_in_bounded_batches` |
+| one-shot `claim()` — MAX_DEPTH, all reveal, 5 topics, 3 winning appeals (86 seats) | 8,000,000 | soft | ~2,506,000 | `test_worst_case_claim_under_hard_ceiling` |
+| one-shot `claim()` — REACHABLE worst case (344 seats, mostly failed reveals) | — | measured | ~30,290,000 (**must batch**) | `test_maximal_case_oneshot_gas_measurement` |
 | seat-draw poke — 47-seat panel over 1000 moderators | 3,500,000 | soft | ~2,778,000 | `test_measure_draw_poke_1000_mods` |
 | `submit` (5 topics) | 550,000 | soft | ~517,000 | `test_measure_common_path_gas` |
 | `commitVote` | 200,000 | soft | ~173,000 | `test_measure_common_path_gas` |

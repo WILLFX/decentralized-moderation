@@ -301,6 +301,7 @@ contract Moderation is ReentrancyGuard {
         TALLY,
         APPEAL_WINDOW,
         FINALIZED,
+        SETTLING, // H-04: settlement in progress across batched claim() calls
         VOID,
         SETTLED
     }
@@ -337,6 +338,11 @@ contract Moderation is ReentrancyGuard {
         uint256 revealedCount; // # committers revealed
         uint256 approveSeats; // Σ seats revealing Approve
         uint256 rejectSeats; // Σ seats revealing Reject
+        // H-04/M-03: Σ talliedSeats × track (snapshotted at reveal) per side, so
+        // settlement derives mean-track in O(rounds) and freeze durations no
+        // longer depend on when the case is claimed relative to track mutations.
+        uint256 approveTrackNum;
+        uint256 rejectTrackNum;
         uint256 revealedSeats; // approveSeats + rejectSeats
         Outcome outcome; // drawn ∝ seat counts
         Outcome appealFor; // the outcome an appeal against THIS round argues for
@@ -380,6 +386,25 @@ contract Moderation is ReentrancyGuard {
     uint256 public openPotsTotal; // Σ live case pots (§9.1)
     uint256 public totalPendingBond; // Σ appeal contributions collected but not yet flooring a round
     uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull (per (case,depth), pulled via claimAppealPayout)
+    uint256 public totalSettling; // H-04: pot value in flight during batched settlement (rewards not yet credited + unpaid bounty); 0 outside an in-progress claim
+
+    // H-04: per-case batched-settlement working state. The aggregate scalars are
+    // computed once (O(rounds)) when settlement starts; the (round, idx) cursor
+    // walks seat-holders across batched claim() calls so no single transaction
+    // must dispose all of a maximal case's ~344 committed seats at once.
+    struct SettleState {
+        uint256 winnersSeats;
+        uint256 distributable;
+        uint256 freezeDur;
+        uint256 bounty; // base claim bounty (reward-channel dust added at finish)
+        uint256 pot; // original pot, for the Settled event
+        uint256 distributed; // Σ rewards credited so far (across batches)
+        uint256 round; // cursor: current round
+        uint256 idx; // cursor: next seat-holder index in that round
+    }
+
+    mapping(uint256 => SettleState) internal settleState;
+    mapping(uint256 => mapping(address => bool)) internal trackDecayed; // caseId -> participant -> track already decayed (dedup, O(1))
     // Dedup (P3, §9.7): H(content, meta, topicKey) -> owning caseId + 1 (0 = free).
     // H-02: keyed by OWNER, not a bare bool, so an obsolete case (e.g. a stale
     // removal) can never clear a reservation a newer resubmission now holds.
@@ -627,8 +652,14 @@ contract Moderation is ReentrancyGuard {
         // widen re-draw can add seats to r.seats[voter], but settlement must pay
         // (and mean-track) only the seats actually tallied here (F2).
         r.talliedSeats[msg.sender] = s;
-        if (vote == Vote.Approve) r.approveSeats += s;
-        else r.rejectSeats += s;
+        uint256 trackContrib = s * moderators[msg.sender].track; // snapshot track now (M-03)
+        if (vote == Vote.Approve) {
+            r.approveSeats += s;
+            r.approveTrackNum += trackContrib;
+        } else {
+            r.rejectSeats += s;
+            r.rejectTrackNum += trackContrib;
+        }
         r.revealedSeats += s;
         r.revealedCount++;
 
@@ -736,7 +767,10 @@ contract Moderation is ReentrancyGuard {
     ///         it lost) — those cannot be reclaimed here.
     function reclaimBond(uint256 caseId, uint256 depth) external nonReentrant {
         Case storage c = cases[caseId];
-        if (c.phase != Phase.FINALIZED && c.phase != Phase.SETTLED && c.phase != Phase.VOID) {
+        if (
+            c.phase != Phase.FINALIZED && c.phase != Phase.SETTLING && c.phase != Phase.SETTLED
+                && c.phase != Phase.VOID
+        ) {
             revert CaseNotTerminal();
         }
         Round storage r = c.rounds[depth];
@@ -762,77 +796,173 @@ contract Moderation is ReentrancyGuard {
     // claim bounty, so funds conservation (invariant 11) is an exact equality.
     // =========================================================================
 
-    struct SettleVars {
-        Outcome finalOutcome;
-        uint256 pot;
-        uint256 winnersSeats; // Σ coherent seats across all rounds
-        uint256 meanTrackNum; // Σ seats*track over coherent voters (WAD)
-        uint256 meanTrackDen; // Σ coherent seats
-        uint256 refunds; // Σ winning-appeal bonds (own capital returned first)
-        uint256 winningContribTot; // Σ winning-appeal contributions (bonus pro-rata base)
-        uint256 residual; // pot − refunds
-        uint256 bounty; // base claim bounty (before dust)
-        uint256 bonusPool; // winning-appellant bonus pool
-        uint256 distributable; // residual − bounty − bonusPool -> coherent seats
-        uint256 distributed; // Σ rewards actually credited (floor)
-        uint256 freezeDur; // freeze duration for incoherent voters (seconds)
-    }
-
     event Settled(uint256 indexed caseId, Outcome finalOutcome, uint256 pot, uint256 claimBounty);
+    event SettleProgressed(uint256 indexed caseId, uint256 round, uint256 idx);
     event PayoutClaimed(address indexed who, uint256 amount);
 
     error CaseNotFinalized();
 
-    /// @notice Settle a FINALIZED case: pay out the pot in the solvent order,
-    ///         freeze incoherent voters, update track, and run index effects.
-    ///         Permissionless; pays the caller the claim bounty (plus all rounding
-    ///         dust). Idempotent — a case settles once.
+    /// @notice Settle a FINALIZED case in a single call (unbounded work). Suitable
+    ///         for any realistic case; for a maximal adversarial case that would
+    ///         not fit one block, use claim(caseId, maxSteps) to settle it in
+    ///         batches. Permissionless; the caller that completes settlement earns
+    ///         the claim bounty (plus reward-channel rounding dust).
     function claim(uint256 caseId) external nonReentrant {
+        _settle(caseId, type(uint256).max);
+    }
+
+    /// @notice Settle up to `maxSteps` seat-holders of a FINALIZED/SETTLING case,
+    ///         advancing a persistent cursor (H-04). The first call computes the
+    ///         O(rounds) aggregates and moves the case to SETTLING; subsequent
+    ///         calls dispose seat-holders in bounded batches; the call that
+    ///         processes the last seat-holder runs the index effects, pays the
+    ///         bounty, and moves the case to SETTLED. So no single transaction
+    ///         must dispose all of a maximal case's ~344 committed seats at once.
+    function claim(uint256 caseId, uint256 maxSteps) external nonReentrant {
+        _settle(caseId, maxSteps);
+    }
+
+    function _settle(uint256 caseId, uint256 maxSteps) internal {
         Case storage c = cases[caseId];
-        if (c.phase != Phase.FINALIZED) revert CaseNotFinalized();
-        c.phase = Phase.SETTLED;
+        if (c.phase == Phase.FINALIZED) _settleInit(c);
+        if (c.phase != Phase.SETTLING) revert CaseNotFinalized();
+        _settleStep(c, maxSteps);
+    }
 
-        SettleVars memory v;
-        v.finalOutcome = c.finalOutcome;
-        v.pot = c.pot;
+    /// @dev O(rounds) aggregate + money bookkeeping, run once when settlement
+    ///      starts. Winners' seats and mean-track are read from the per-round,
+    ///      per-side accumulators frozen at reveal (no O(participants) scan).
+    function _settleInit(Case storage c) internal {
+        Outcome fo = c.finalOutcome;
+        uint256 nRounds = c.rounds.length;
+        uint256 winnersSeats;
+        uint256 meanTrackNum;
+        uint256 refunds;
+        uint256 winningContribTot;
+        for (uint256 d; d < nRounds; ++d) {
+            Round storage r = c.rounds[d];
+            if (fo == Outcome.Approve) {
+                winnersSeats += r.approveSeats;
+                meanTrackNum += r.approveTrackNum;
+            } else {
+                winnersSeats += r.rejectSeats;
+                meanTrackNum += r.rejectTrackNum;
+            }
+            if (r.bondInPot && r.appealFor == fo) {
+                refunds += r.bond;
+                winningContribTot += r.bond;
+            }
+        }
 
-        _aggregate(c, v);
+        uint256 pot = c.pot;
+        uint256 residual = pot - refunds; // WO-1: refund winning bond capital first
+        uint256 bounty = (residual * params.claimBountyFrac) / WAD;
+        uint256 bonusPool = winningContribTot == 0 ? 0 : (residual * params.bonusFrac) / WAD;
+        uint256 distributable = residual - bounty - bonusPool;
 
-        // Amounts (D7/D8), all rounding down.
-        v.residual = v.pot - v.refunds;
-        v.bounty = (v.residual * params.claimBountyFrac) / WAD;
-        v.bonusPool = v.winningContribTot == 0 ? 0 : (v.residual * params.bonusFrac) / WAD;
-        v.distributable = v.residual - v.bounty - v.bonusPool;
-        v.freezeDur = FreezeMath.freezeDuration(
-            v.meanTrackDen == 0 ? 0 : v.meanTrackNum / v.meanTrackDen,
-            params.trackSat,
-            params.freezeCap,
-            params.freezeBase
+        // Winning-appeal refunds + bonuses become pull-based (C-01); the reward
+        // pool + bounty are held in `totalSettling` while the batched disposition
+        // credits them out, so conservation is exact at every intermediate state.
+        openPotsTotal -= pot;
+        c.apBonusPoolLeft = bonusPool;
+        c.apContribTotLeft = winningContribTot;
+        totalPendingPayout += refunds + bonusPool;
+        totalSettling += residual - bonusPool; // = bounty + distributable, in flight
+
+        SettleState storage s = settleState[c.id];
+        s.winnersSeats = winnersSeats;
+        s.distributable = distributable;
+        s.freezeDur = FreezeMath.freezeDuration(
+            winnersSeats == 0 ? 0 : meanTrackNum / winnersSeats, params.trackSat, params.freezeCap, params.freezeBase
         );
+        s.bounty = bounty;
+        s.pot = pot;
+        c.phase = Phase.SETTLING;
+    }
 
-        _settleRounds(c, v);
-        _updateTracks(c, v);
+    /// @dev Dispose up to `maxSteps` seat-holders from the cursor, then finish if
+    ///      the last round is complete. Every seat-holder visit counts toward the
+    ///      budget so a batch's gas is bounded regardless of non-committers.
+    function _settleStep(Case storage c, uint256 maxSteps) internal {
+        SettleState storage s = settleState[c.id];
+        Outcome fo = c.finalOutcome;
+        uint256 nRounds = c.rounds.length;
+        uint256 round = s.round;
+        uint256 idx = s.idx;
+        uint256 steps;
+        while (round < nRounds) {
+            Round storage r = c.rounds[round];
+            uint256 nsh = r.seatHolders.length;
+            while (idx < nsh) {
+                if (steps >= maxSteps) {
+                    s.round = round;
+                    s.idx = idx;
+                    emit SettleProgressed(c.id, round, idx);
+                    return;
+                }
+                address a = r.seatHolders[idx];
+                idx++;
+                steps++;
+                if (r.committed[a]) _disposeSeat(c, r, a, fo, s);
+            }
+            round++;
+            idx = 0;
+        }
+        s.round = round;
+        s.idx = 0;
+        _settleFinish(c, s);
+    }
 
-        // C-01: winning-appeal refunds (own capital) and bonuses are pulled by
-        // each contributor via claimAppealPayout — settlement no longer loops the
-        // (attacker-inflatable) contributor set. Record the running totals and
-        // count the whole owed amount as pending so conservation stays exact.
-        c.apBonusPoolLeft = v.bonusPool;
-        c.apContribTotLeft = v.winningContribTot;
-        totalPendingPayout += v.refunds + v.bonusPool;
+    /// @dev Return or freeze one seat-holder's committed stake, credit its reward
+    ///      if coherent, and decay its track once per case.
+    function _disposeSeat(Case storage c, Round storage r, address a, Outcome fo, SettleState storage s) internal {
+        uint256 amt = r.committedAmt[a];
+        Vote vote = r.reveals[a];
+        if (vote == Vote.None) {
+            _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
+        } else if (_coherent(vote, fo)) {
+            Moderator storage m = moderators[a];
+            m.committed -= amt;
+            m.free += amt;
+            totalCommittedStake -= amt;
+            totalFreeStake += amt;
+            uint256 reward = s.winnersSeats == 0 ? 0 : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
+            if (reward > 0) {
+                m.free += reward;
+                totalFreeStake += reward;
+                s.distributed += reward;
+                totalSettling -= reward;
+            }
+            _syncTree(a, m);
+        } else {
+            _freezeSlice(a, amt, block.timestamp + s.freezeDur);
+        }
+        _touchTrack(c, r, a, fo);
+    }
 
-        // Sweep reward-channel dust into the claim bounty so the pot is exactly
-        // consumed. The bonus-channel dust is not swept here (it would require
-        // iterating contributors); the final appeal-claimer absorbs it instead.
-        uint256 claimBounty = v.bounty + (v.distributable - v.distributed);
+    /// @dev Decay a participant's track exactly once per case (O(1) dedup, no more
+    ///      O(participants²) scan), with the coherent-undisputed +1 for a single
+    ///      round case (§6.5).
+    function _touchTrack(Case storage c, Round storage r, address a, Outcome fo) internal {
+        if (trackDecayed[c.id][a]) return;
+        trackDecayed[c.id][a] = true;
+        Moderator storage m = moderators[a];
+        m.track = (m.track * params.trackDecay) / WAD;
+        if (c.rounds.length == 1 && r.reveals[a] != Vote.None && _coherent(r.reveals[a], fo)) {
+            m.track += WAD; // +1 for a coherent, undisputed participation
+        }
+    }
 
-        openPotsTotal -= v.pot;
+    /// @dev Complete settlement: sweep reward-channel dust into the claim bounty,
+    ///      run index effects, pay the finisher, and mark SETTLED.
+    function _settleFinish(Case storage c, SettleState storage s) internal {
+        uint256 claimBounty = s.bounty + (s.distributable - s.distributed);
+        totalSettling -= claimBounty; // drains this case's in-flight amount to 0
         c.pot = 0;
-
         _settleIndex(c);
-
+        c.phase = Phase.SETTLED;
         if (claimBounty > 0) address(token).safeTransfer(msg.sender, claimBounty);
-        emit Settled(caseId, v.finalOutcome, v.pot, claimBounty);
+        emit Settled(c.id, c.finalOutcome, s.pot, claimBounty);
     }
 
     /// @notice Withdraw a winning appeal contribution's refund (own capital) plus
@@ -877,100 +1007,6 @@ contract Moderation is ReentrancyGuard {
             if (contrib == 0) continue;
             uint256 bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
             owed += contrib + bonus;
-        }
-    }
-
-    function _aggregate(Case storage c, SettleVars memory v) internal view {
-        uint256 nRounds = c.rounds.length;
-        for (uint256 d; d < nRounds; ++d) {
-            Round storage r = c.rounds[d];
-            uint256 nsh = r.seatHolders.length;
-            for (uint256 i; i < nsh; ++i) {
-                address a = r.seatHolders[i];
-                if (!r.committed[a] || r.reveals[a] == Vote.None) continue;
-                if (_coherent(r.reveals[a], v.finalOutcome)) {
-                    uint256 s = r.talliedSeats[a]; // F2: reveal-time count, not post-widen
-                    v.winnersSeats += s;
-                    v.meanTrackNum += s * moderators[a].track;
-                    v.meanTrackDen += s;
-                }
-            }
-            if (r.bondInPot && r.appealFor == v.finalOutcome) {
-                v.refunds += r.bond;
-                v.winningContribTot += r.bond;
-            }
-        }
-    }
-
-    function _settleRounds(Case storage c, SettleVars memory v) internal {
-        uint256 nRounds = c.rounds.length;
-        for (uint256 d; d < nRounds; ++d) {
-            Round storage r = c.rounds[d];
-            uint256 nsh = r.seatHolders.length;
-            for (uint256 i; i < nsh; ++i) {
-                address a = r.seatHolders[i];
-                if (!r.committed[a]) continue; // drawn but never committed: nothing locked
-                uint256 amt = r.committedAmt[a];
-                Vote vote = r.reveals[a];
-                if (vote == Vote.None) {
-                    _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
-                } else if (_coherent(vote, v.finalOutcome)) {
-                    Moderator storage m = moderators[a];
-                    m.committed -= amt;
-                    m.free += amt;
-                    totalCommittedStake -= amt;
-                    totalFreeStake += amt;
-                    uint256 reward =
-                        v.winnersSeats == 0 ? 0 : (v.distributable * r.talliedSeats[a]) / v.winnersSeats;
-                    if (reward > 0) {
-                        m.free += reward;
-                        totalFreeStake += reward;
-                        v.distributed += reward;
-                    }
-                    _syncTree(a, m);
-                } else {
-                    _freezeSlice(a, amt, block.timestamp + v.freezeDur);
-                }
-            }
-            // Winning-appeal refunds + bonuses are pulled per contributor in
-            // claimAppealPayout (C-01) — no per-contributor loop at settlement.
-        }
-    }
-
-    function _updateTracks(Case storage c, SettleVars memory v) internal {
-        uint256 nRounds = c.rounds.length;
-        uint256 maxP;
-        for (uint256 d; d < nRounds; ++d) {
-            maxP += c.rounds[d].seatHolders.length;
-        }
-        address[] memory parts = new address[](maxP);
-        uint256 pc;
-        for (uint256 d; d < nRounds; ++d) {
-            Round storage r = c.rounds[d];
-            uint256 nsh = r.seatHolders.length;
-            for (uint256 i; i < nsh; ++i) {
-                address a = r.seatHolders[i];
-                if (!r.committed[a]) continue;
-                bool seen;
-                for (uint256 k; k < pc; ++k) {
-                    if (parts[k] == a) {
-                        seen = true;
-                        break;
-                    }
-                }
-                if (!seen) parts[pc++] = a;
-            }
-        }
-
-        bool undisputed = nRounds == 1;
-        Round storage r0 = c.rounds[0];
-        for (uint256 i; i < pc; ++i) {
-            address a = parts[i];
-            Moderator storage m = moderators[a];
-            m.track = (m.track * params.trackDecay) / WAD;
-            if (undisputed && r0.reveals[a] != Vote.None && _coherent(r0.reveals[a], v.finalOutcome)) {
-                m.track += WAD; // +1 for a coherent, undisputed participation (§6.5)
-            }
         }
     }
 

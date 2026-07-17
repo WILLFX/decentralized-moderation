@@ -81,14 +81,17 @@ contract ModerationHarness is Moderation {
         }
         Vote v = Vote(revealCode);
         r.reveals[voter] = v;
+        uint256 trackContrib = seats * moderators[voter].track; // set track before injecting for a nonzero mean
         if (v == Vote.Approve) {
             r.talliedSeats[voter] += seats; // F2: reveal-time count (no widen in injection)
             r.approveSeats += seats;
+            r.approveTrackNum += trackContrib;
             r.revealedSeats += seats;
             r.revealedCount++;
         } else if (v == Vote.Reject) {
             r.talliedSeats[voter] += seats;
             r.rejectSeats += seats;
+            r.rejectTrackNum += trackContrib;
             r.revealedSeats += seats;
             r.revealedCount++;
         }

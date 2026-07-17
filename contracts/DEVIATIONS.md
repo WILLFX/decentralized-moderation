@@ -207,6 +207,33 @@ an under-participating (widened) round would collect extra reward-lottery weight
 widen at its co-winners' expense, and skew the freeze-power mean-track input. The
 phantom seats now change nothing.
 
+### D-13. Batched settlement with a persistent cursor (spec §6, H-04)
+
+**What.** `claim()` no longer settles a whole case in one transaction. Settlement
+computes its aggregates once in O(rounds) — winners' seats, mean-track, refunds
+are read from per-round, per-side accumulators frozen at reveal — then disposes
+seat-holders through a `(round, idx)` cursor. `claim(caseId)` settles unbounded in
+one call (fine for any realistic case); `claim(caseId, maxSteps)` settles in
+bounded batches. The case moves FINALIZED → SETTLING → SETTLED; in-flight pot value
+sits in `totalSettling` (0 outside an active settlement) so conservation is exact
+at every intermediate state. Track decay is deduplicated in O(1) via a per-case
+`trackDecayed` map, replacing the old O(participants²) scan.
+
+**Why.** The documented "86-voter worst case" was not the reachable worst case. With
+`MAX_WIDEN = 3` each depth can draw 4× its target, so a maximal case reaches
+20+44+92+188 = 344 committed seats. One-shot settlement of that case costs ~30.3M
+gas — over any real block limit — which would leave the pot and all committed stake
+permanently stranded (Invariant 8 violated). Batching makes settlement's per-call
+gas bounded (measured max batch ~3.7M) and independent of case size.
+
+**Threat model.** Closes the finalizability failure behind H-04 (an adversary
+widening every depth and mostly failing to reveal could push settlement past the
+block limit). The mean-track accumulators are snapshotted at reveal, so freeze
+durations no longer depend on the order in which finalized cases are claimed
+(folds in audit M-03). The batch finisher receives the whole claim bounty; a
+proportional split across batchers is a possible future refinement (in practice one
+keeper settles all batches).
+
 ---
 
 ## Accepted liveness edges (M2; no code change — flagged for M4)

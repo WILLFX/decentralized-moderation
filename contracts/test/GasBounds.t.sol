@@ -49,8 +49,8 @@ contract GasBoundsTest is ModerationTestBase {
                 m.stake(20 * XBZZ);
 
                 uint256 camt = 10 * XBZZ;
+                m.__setTrack(voter, (v % 50) * 1e18); // varied track (set before inject: reveal-time snapshot)
                 m.__injectSeat(caseId, d, voter, 1, camt, 1); // 1 seat, Approve (coherent)
-                m.__setTrack(voter, (v % 50) * 1e18); // varied track -> exercises FreezeMath meanTrack
                 b.mint(address(m), camt);
             }
             // Non-final rounds carry a winning appeal (appealFor == Approve) with
@@ -195,6 +195,87 @@ contract GasBoundsTest is ModerationTestBase {
         vm.prank(first);
         vm.expectRevert(Moderation.NothingToReclaim.selector);
         m.claimAppealPayout(caseId, 0);
+    }
+
+    // --- H-04: the REACHABLE worst case settles in bounded batches -----------
+
+    /// Build the true adversarial maximum: 4 depths, each panel widened to
+    /// 4×target (20+44+92+188 = 344 seats), almost all committed-but-failed
+    /// (frozen at settlement), a handful coherent, winning appeals with
+    /// contributors at every non-final depth, and 5 topics. This is the case the
+    /// M2 "86-voter" gas test omitted.
+    function _buildMaximalCase(ModerationHarness m, MockBZZ b) internal returns (uint256 caseId, uint256 nSeats) {
+        uint256 pot = 100000 * XBZZ;
+        caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, pot);
+        b.mint(address(m), pot);
+        for (uint256 tI = 0; tI < 5; tI++) {
+            m.__injectTopic(caseId, keccak256(abi.encode("mtopic", tI)));
+        }
+
+        uint256[4] memory sizes = [uint256(20), 44, 92, 188]; // target × (1 + MAX_WIDEN=3)
+        uint256 v;
+        for (uint256 d = 0; d < 4; d++) {
+            m.__injectRound(caseId);
+            for (uint256 sI = 0; sI < sizes[d]; sI++) {
+                address voter = address(uint160(uint256(keccak256(abi.encode("maxv", v)))));
+                uint256 camt = 10 * XBZZ;
+                // ~1 in 8 reveals coherently (Approve == final); the rest committed
+                // and failed to reveal (frozen) — the adversarial widen pattern.
+                uint8 rc = (v % 8 == 0) ? 1 : 0;
+                m.__injectSeat(caseId, d, voter, 1, camt, rc);
+                b.mint(address(m), camt);
+                v++;
+            }
+            if (d < 3) {
+                m.__injectBond(caseId, d, Moderation.Outcome.Approve, true);
+                m.__injectBondContrib(caseId, d, address(uint160(0xBEEF + d * 2)), 5 * XBZZ);
+                m.__injectBondContrib(caseId, d, address(uint160(0xBEEF + d * 2 + 1)), 5 * XBZZ);
+            }
+        }
+        nSeats = v; // 344
+    }
+
+    function test_maximal_case_settles_in_bounded_batches() public {
+        MockBZZ b = new MockBZZ();
+        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (uint256 caseId, uint256 nSeats) = _buildMaximalCase(m, b);
+        assertEq(nSeats, 344, "reachable worst case is 344 seats, not 86");
+
+        // Settle in bounded batches; every batch must fit well under the ceiling.
+        uint256 batch = 40;
+        uint256 rounds;
+        uint256 maxBatchGas;
+        while (_phaseOf(m, caseId) != Moderation.Phase.SETTLED) {
+            uint256 g = gasleft();
+            m.claim(caseId, batch);
+            uint256 used = g - gasleft();
+            if (used > maxBatchGas) maxBatchGas = used;
+            require(rounds++ < 100, "did not converge");
+        }
+        emit log_named_uint("max_batch_gas", maxBatchGas);
+        emit log_named_uint("num_batches", rounds);
+        assertLt(maxBatchGas, HARD_CEILING, "every settlement batch fits under the 8M ceiling");
+
+        // Conservation holds exactly after full settlement (totalSettling back to 0).
+        uint256 buckets = m.totalFreeStake() + m.totalCommittedStake() + m.totalFrozenStake();
+        assertEq(
+            b.balanceOf(address(m)),
+            buckets + m.openPotsTotal() + m.totalPendingBond() + m.totalPendingPayout() + m.totalSettling(),
+            "conservation after batched settlement"
+        );
+        assertEq(m.totalSettling(), 0, "no value left in flight");
+    }
+
+    /// The batched path exists because one-shot settlement of the maximal case is
+    /// far heavier than the old 86-voter measurement implied. Logged for contrast.
+    function test_maximal_case_oneshot_gas_measurement() public {
+        MockBZZ b = new MockBZZ();
+        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (uint256 caseId,) = _buildMaximalCase(m, b);
+        uint256 g = gasleft();
+        m.claim(caseId); // unbounded
+        emit log_named_uint("maximal_oneshot_claim_gas", g - gasleft());
+        assertEq(uint256(_phaseOf(m, caseId)), uint256(Moderation.Phase.SETTLED));
     }
 
     // --- H-03: index deletion must be O(1) in the topic-array size -----------

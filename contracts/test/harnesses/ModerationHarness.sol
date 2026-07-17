@@ -126,4 +126,23 @@ contract ModerationHarness is Moderation {
     function __injectWidenSeats(uint256 caseId, uint256 depth, address voter, uint256 extra) external {
         cases[caseId].rounds[depth].seats[voter] += extra;
     }
+
+    /// Directly push an index entry (with its position-map slot) so a large topic
+    /// array can be built cheaply for the H-03 O(1)-deletion gas test.
+    function __pushEntry(bytes32 topicKey, uint256 caseId) external {
+        indexByTopic[topicKey].push(
+            Entry({
+                contentHash: bytes32(caseId),
+                metaHash: bytes32(caseId),
+                approvalTime: uint40(block.timestamp),
+                uncontested: true,
+                caseId: caseId
+            })
+        );
+        entryPosPlusOne[topicKey][caseId] = indexByTopic[topicKey].length;
+    }
+
+    function __deleteEntry(bytes32 topicKey, uint256 caseId) external {
+        _deleteEntry(topicKey, caseId);
+    }
 }

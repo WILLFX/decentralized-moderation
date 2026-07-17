@@ -397,6 +397,10 @@ contract Moderation is ReentrancyGuard {
 
     mapping(bytes32 => Entry[]) internal indexByTopic; // topicKey -> approved entries
     mapping(bytes32 => bool) internal topicSeen; // first index write emits TopicCreated
+    // H-03: topicKey -> caseId -> (index in indexByTopic[topicKey]) + 1, so entry
+    // removal is O(1) swap-pop instead of an unbounded linear scan that could grow
+    // past the block gas limit and make a removal unclaimable.
+    mapping(bytes32 => mapping(uint256 => uint256)) internal entryPosPlusOne;
 
     event TopicCreated(bytes32 indexed topicKey);
     event EntryWritten(uint256 indexed caseId, bytes32 indexed topicKey, bool uncontested);
@@ -1006,6 +1010,7 @@ contract Moderation is ReentrancyGuard {
                     caseId: c.id
                 })
             );
+            entryPosPlusOne[topicKey][c.id] = indexByTopic[topicKey].length; // 1-based position (H-03)
             emit EntryWritten(c.id, topicKey, uncontested);
         }
         c.isIndexed = true; // now live in the index (H-01 generation signal)
@@ -1025,19 +1030,23 @@ contract Moderation is ReentrancyGuard {
         _clearDedup(target); // the removed submission is resubmittable
     }
 
-    /// @dev Swap-and-pop the entry for `caseId` under `topicKey`. No-op if absent
-    ///      (already removed): removal of a missing entry settles cleanly (§10).
+    /// @dev O(1) swap-and-pop of the entry for `caseId` under `topicKey` via the
+    ///      position map (H-03). No-op if absent (already removed): removal of a
+    ///      missing entry settles cleanly (§10).
     function _deleteEntry(bytes32 topicKey, uint256 caseId) internal {
+        uint256 p = entryPosPlusOne[topicKey][caseId];
+        if (p == 0) return; // not present
         Entry[] storage arr = indexByTopic[topicKey];
-        uint256 len = arr.length;
-        for (uint256 i; i < len; ++i) {
-            if (arr[i].caseId == caseId) {
-                arr[i] = arr[len - 1];
-                arr.pop();
-                emit EntryRemoved(caseId, topicKey);
-                return;
-            }
+        uint256 idx = p - 1;
+        uint256 last = arr.length - 1;
+        if (idx != last) {
+            Entry storage moved = arr[last];
+            arr[idx] = moved;
+            entryPosPlusOne[topicKey][moved.caseId] = idx + 1; // relocate the moved entry
         }
+        arr.pop();
+        delete entryPosPlusOne[topicKey][caseId];
+        emit EntryRemoved(caseId, topicKey);
     }
 
     /// @dev uncontested iff no Reject vote was revealed in ANY round (§8.1).

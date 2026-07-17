@@ -197,6 +197,36 @@ contract GasBoundsTest is ModerationTestBase {
         m.claimAppealPayout(caseId, 0);
     }
 
+    // --- H-03: index deletion must be O(1) in the topic-array size -----------
+
+    /// Build a topic array of `n` entries and delete the FIRST-inserted one (the
+    /// worst case for the old linear scan). Returns the gas the deletion used.
+    function _buildAndDeleteFront(uint256 n) internal returns (uint256 used) {
+        MockBZZ b = new MockBZZ();
+        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        bytes32 topic = keccak256("bigtopic");
+        for (uint256 i = 0; i < n; i++) {
+            m.__pushEntry(topic, i);
+        }
+        assertEq(m.entryCount(topic), n);
+        uint256 g = gasleft();
+        m.__deleteEntry(topic, 0); // front entry -> swap-pop with the last
+        used = g - gasleft();
+        assertEq(m.entryCount(topic), n - 1, "entry removed");
+    }
+
+    /// The H-03 finding: removal linear-scanned the topic array, so as a topic
+    /// grew the deletion (inside atomic settlement) could exceed the block limit
+    /// and permanently strand a removal case. Deletion must now cost the same
+    /// regardless of topic size.
+    function test_index_deletion_gas_independent_of_topic_size() public {
+        uint256 gasSmall = _buildAndDeleteFront(8);
+        uint256 gasBig = _buildAndDeleteFront(2000);
+        emit log_named_uint("delete_front_of_8", gasSmall);
+        emit log_named_uint("delete_front_of_2000", gasBig);
+        assertApproxEqRel(gasBig, gasSmall, 0.05e18, "index deletion must not scale with topic-array size");
+    }
+
     // --- soft-budget measurements (recorded, not gated tightly) --------------
 
     function test_measure_common_path_gas() public {

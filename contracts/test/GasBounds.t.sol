@@ -316,16 +316,18 @@ contract GasBoundsTest is ModerationTestBase {
         uint256 caseId = _submit(mods[0]);
         _realizeSeats(caseId);
         (, uint256 shc,,,,,,,,) = mod.roundInfo(caseId, 0);
-        bytes32 h = keccak256(abi.encode(uint8(Moderation.Vote.Approve), SALT));
 
-        // commitVote (measure the first, then commit the rest).
+        // commitVote (measure the first, then commit the rest). Compute the bound
+        // hash BEFORE the prank — an external call in the arg list eats the prank.
         address sh0 = mod.seatHolderAt(caseId, 0, 0);
+        bytes32 h0 = mod.computeCommit(caseId, 0, sh0, Moderation.Vote.Approve, SALT);
         uint256 g = gasleft();
         vm.prank(sh0);
-        mod.commitVote(caseId, h);
+        mod.commitVote(caseId, h0);
         emit log_named_uint("commitVote_gas", g - gasleft());
         for (uint256 i = 1; i < shc; i++) {
             address sh = mod.seatHolderAt(caseId, 0, i);
+            bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
             vm.prank(sh);
             mod.commitVote(caseId, h);
         }

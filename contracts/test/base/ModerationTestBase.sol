@@ -91,9 +91,9 @@ abstract contract ModerationTestBase is Test {
 
     function _commitAll(uint256 caseId, uint256 depth, Moderation.Vote vote) internal {
         (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, depth);
-        bytes32 commitHash = keccak256(abi.encode(uint8(vote), SALT));
         for (uint256 i = 0; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, depth, i);
+            bytes32 commitHash = mod.computeCommit(caseId, depth, sh, vote, SALT); // M-01: bound per voter
             vm.prank(sh);
             mod.commitVote(caseId, commitHash);
         }

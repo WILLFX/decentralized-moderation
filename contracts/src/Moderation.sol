@@ -635,6 +635,17 @@ contract Moderation is ReentrancyGuard {
         if (r.committedCount == r.seatHolders.length) _toReveal(c);
     }
 
+    /// @notice The commit hash a voter must submit: bound to chain, contract,
+    ///         case, depth, voter, vote, and salt (M-01). Binding prevents copying
+    ///         another voter's commitment or replaying one across cases/depths.
+    function computeCommit(uint256 caseId, uint256 depth, address voter, Vote vote, bytes32 salt)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(block.chainid, address(this), caseId, depth, voter, uint8(vote), salt));
+    }
+
     /// @notice COMMIT -> REVEAL once the commit window elapses (also triggered
     ///         automatically when every seat-holder has committed).
     function closeCommit(uint256 caseId) external {
@@ -653,7 +664,7 @@ contract Moderation is ReentrancyGuard {
         Round storage r = _cur(c);
         if (!r.committed[msg.sender]) revert NotCommitted();
         if (r.reveals[msg.sender] != Vote.None) revert AlreadyRevealed();
-        if (keccak256(abi.encode(uint8(vote), salt)) != r.commits[msg.sender]) revert BadReveal();
+        if (computeCommit(caseId, c.depth, msg.sender, vote, salt) != r.commits[msg.sender]) revert BadReveal();
 
         r.reveals[msg.sender] = vote;
         uint256 s = r.seats[msg.sender];

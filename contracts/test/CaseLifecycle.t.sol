@@ -123,6 +123,33 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.revealVote(caseId, Moderation.Vote.Approve, keccak256("wrong"));
     }
 
+    // M-01: a commitment is bound to its voter, so copying another voter's commit
+    // hash is useless — the copier cannot reveal it.
+    function test_M01_copied_commitment_cannot_be_revealed() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        (, uint256 shc,,,,,,,,) = mod.roundInfo(caseId, 0);
+        require(shc >= 2, "need two distinct seat-holders");
+        address a = mod.seatHolderAt(caseId, 0, 0);
+        address b = mod.seatHolderAt(caseId, 0, 1);
+
+        bytes32 hA = mod.computeCommit(caseId, 0, a, Moderation.Vote.Approve, SALT);
+        vm.prank(a);
+        mod.commitVote(caseId, hA);
+        vm.prank(b);
+        mod.commitVote(caseId, hA); // b copies a's commitment
+
+        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        mod.closeCommit(caseId);
+
+        // a reveals its own vote fine; b cannot reveal the copied commitment.
+        vm.prank(a);
+        mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+        vm.prank(b);
+        vm.expectRevert(Moderation.BadReveal.selector);
+        mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+    }
+
     // --- two-seed ordering ---------------------------------------------------
 
     function test_outcome_seed_armed_after_reveals_close() public {

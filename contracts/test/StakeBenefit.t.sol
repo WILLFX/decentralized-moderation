@@ -30,10 +30,12 @@ contract StakeBenefitTest is ModerationTestBase {
         for (uint256 i = 0; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, 0, i);
             Moderation.Vote v = isFactionA[sh] ? Moderation.Vote.Approve : Moderation.Vote.Reject;
-            vm.prank(sh);
             if (commit) {
-                mod.commitVote(caseId, keccak256(abi.encode(uint8(v), SALT)));
+                bytes32 h = mod.computeCommit(caseId, 0, sh, v, SALT); // before prank
+                vm.prank(sh);
+                mod.commitVote(caseId, h);
             } else {
+                vm.prank(sh);
                 mod.revealVote(caseId, v, SALT);
             }
         }

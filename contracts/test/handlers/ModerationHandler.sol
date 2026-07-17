@@ -167,7 +167,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         for (uint256 i; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, depth, i);
             Moderation.Vote v = ((voteSeed + i) % 2 == 0) ? Moderation.Vote.Approve : Moderation.Vote.Reject;
-            bytes32 h = keccak256(abi.encode(uint8(v), bytes32(uint256(0xabc))));
+            bytes32 h = mod.computeCommit(caseId, depth, sh, v, bytes32(uint256(0xabc))); // M-01
             vm.prank(sh);
             try mod.commitVote(caseId, h) {} catch {}
         }

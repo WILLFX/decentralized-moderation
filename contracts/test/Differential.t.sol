@@ -67,7 +67,7 @@ contract DifferentialTest is Test {
         mod.claim(caseId);
         uint256 gotBounty = bzz.balanceOf(claimant) - balBefore;
 
-        _assertVector(i, mod, bzz, gotBounty);
+        _assertVector(i, mod, bzz, gotBounty, caseId);
     }
 
     function _injectSeats(uint256 i, ModerationHarness mod, MockBZZ bzz, uint256 caseId) internal {
@@ -96,7 +96,7 @@ contract DifferentialTest is Test {
         }
     }
 
-    function _assertVector(uint256 i, ModerationHarness mod, MockBZZ bzz, uint256 gotBounty) internal {
+    function _assertVector(uint256 i, ModerationHarness mod, MockBZZ bzz, uint256 gotBounty, uint256 caseId) internal {
         assertEq(gotBounty, _u(i, "exp_claimBounty"), _msg(i, "claimBounty"));
 
         uint256[] memory fIdx = _ua(i, "exp_free_idx");
@@ -114,7 +114,9 @@ contract DifferentialTest is Test {
         uint256[] memory pIdx = _ua(i, "exp_payout_idx");
         uint256[] memory pAmt = _ua(i, "exp_payout_amt");
         for (uint256 k = 0; k < pIdx.length; k++) {
-            assertEq(mod.pendingPayout(_contrib(pIdx[k])), pAmt[k], _msg(i, "payout"));
+            // C-01: refunds+bonuses are pulled via claimAppealPayout; the pristine
+            // (pre-pull) owed amount equals the reference's exact pro-rata share.
+            assertEq(mod.appealPayoutOwed(caseId, _contrib(pIdx[k])), pAmt[k], _msg(i, "payout"));
         }
 
         uint256 buckets = mod.totalFreeStake() + mod.totalCommittedStake() + mod.totalFrozenStake();

@@ -342,7 +342,6 @@ contract Moderation is ReentrancyGuard {
         Outcome appealFor; // the outcome an appeal against THIS round argues for
         uint256 bond; // flip-bond accumulated to appeal this round's outcome
         bool bondInPot; // true once the floor was met and the bond moved to the pot
-        address[] bondContributors;
         mapping(address => uint256) bondContribs;
     }
 
@@ -362,14 +361,19 @@ contract Moderation is ReentrancyGuard {
         uint256 phaseDeadline;
         Outcome finalOutcome;
         Round[] rounds; // one per depth reached
+        // C-01: winning-appeal refunds+bonuses are pulled (not credited in a loop
+        // at settlement, which was unbounded in contributor count). These running
+        // totals let claimAppealPayout compute each share in O(1); the final
+        // claimer absorbs the pro-rata dust, so the pool is consumed exactly.
+        uint256 apBonusPoolLeft; // bonus pool not yet pulled
+        uint256 apContribTotLeft; // winning-contribution total not yet pulled
     }
 
     mapping(uint256 => Case) internal cases;
     uint256 public nextCaseId;
     uint256 public openPotsTotal; // Σ live case pots (§9.1)
     uint256 public totalPendingBond; // Σ appeal contributions collected but not yet flooring a round
-    uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull
-    mapping(address => uint256) public pendingPayout; // appeal refunds/bonuses, withdrawn via claimPayout
+    uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull (per (case,depth), pulled via claimAppealPayout)
     mapping(bytes32 => bool) public submissionExists; // dedup: H(content, meta, topicKey) (P3, §9.7)
 
     // --- index (§8, README 3.8) ----------------------------------------------
@@ -643,7 +647,6 @@ contract Moderation is ReentrancyGuard {
         accepted = amount < room ? amount : room;
 
         address(token).safeTransferFrom(msg.sender, address(this), accepted);
-        if (r.bondContribs[msg.sender] == 0) r.bondContributors.push(msg.sender);
         r.bondContribs[msg.sender] += accepted;
         r.bond += accepted;
         totalPendingBond += accepted;
@@ -709,7 +712,6 @@ contract Moderation is ReentrancyGuard {
         uint256 bonusPool; // winning-appellant bonus pool
         uint256 distributable; // residual − bounty − bonusPool -> coherent seats
         uint256 distributed; // Σ rewards actually credited (floor)
-        uint256 bonusPaid; // Σ bonuses actually credited (floor)
         uint256 freezeDur; // freeze duration for incoherent voters (seconds)
     }
 
@@ -748,8 +750,18 @@ contract Moderation is ReentrancyGuard {
         _settleRounds(c, v);
         _updateTracks(c, v);
 
-        // Sweep all dust into the claim bounty so the pot is exactly consumed.
-        uint256 claimBounty = v.bounty + (v.distributable - v.distributed) + (v.bonusPool - v.bonusPaid);
+        // C-01: winning-appeal refunds (own capital) and bonuses are pulled by
+        // each contributor via claimAppealPayout — settlement no longer loops the
+        // (attacker-inflatable) contributor set. Record the running totals and
+        // count the whole owed amount as pending so conservation stays exact.
+        c.apBonusPoolLeft = v.bonusPool;
+        c.apContribTotLeft = v.winningContribTot;
+        totalPendingPayout += v.refunds + v.bonusPool;
+
+        // Sweep reward-channel dust into the claim bounty so the pot is exactly
+        // consumed. The bonus-channel dust is not swept here (it would require
+        // iterating contributors); the final appeal-claimer absorbs it instead.
+        uint256 claimBounty = v.bounty + (v.distributable - v.distributed);
 
         openPotsTotal -= v.pot;
         c.pot = 0;
@@ -760,14 +772,49 @@ contract Moderation is ReentrancyGuard {
         emit Settled(caseId, v.finalOutcome, v.pot, claimBounty);
     }
 
-    /// @notice Withdraw appeal refunds and bonuses credited during settlement.
-    function claimPayout() external nonReentrant {
-        uint256 amt = pendingPayout[msg.sender];
-        if (amt == 0) revert NothingToReclaim();
-        pendingPayout[msg.sender] = 0;
+    /// @notice Withdraw a winning appeal contribution's refund (own capital) plus
+    ///         its pro-rata bonus, after the case has SETTLED. Pull-based and O(1)
+    ///         (C-01): settlement never iterates the contributor set, so an
+    ///         attacker cannot brick claim() by funding a bond from many
+    ///         addresses. The final claimer of a case's pool absorbs the rounding
+    ///         dust, so the pool is consumed to the wei.
+    function claimAppealPayout(uint256 caseId, uint256 depth) external nonReentrant {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.SETTLED) revert CaseNotFinalized();
+        if (depth >= c.rounds.length) revert NothingToReclaim();
+        Round storage r = c.rounds[depth];
+        // Only a round whose bond joined the pot AND matched the final outcome
+        // refunds capital + bonus; a losing bond was forfeited into the rewards.
+        if (!r.bondInPot || r.appealFor != c.finalOutcome) revert NothingToReclaim();
+        uint256 contrib = r.bondContribs[msg.sender];
+        if (contrib == 0) revert NothingToReclaim();
+
+        r.bondContribs[msg.sender] = 0;
+        uint256 bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
+        c.apBonusPoolLeft -= bonus;
+        c.apContribTotLeft -= contrib;
+
+        uint256 amt = contrib + bonus;
         totalPendingPayout -= amt;
         address(token).safeTransfer(msg.sender, amt);
         emit PayoutClaimed(msg.sender, amt);
+    }
+
+    /// @notice The amount `who` can pull from a winning appeal contribution to
+    ///         `caseId`, summed across winning rounds. Pristine (pre-pull) it
+    ///         equals the exact pro-rata refund+bonus; it shrinks as pulls occur.
+    function appealPayoutOwed(uint256 caseId, address who) external view returns (uint256 owed) {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.SETTLED) return 0;
+        uint256 nRounds = c.rounds.length;
+        for (uint256 d; d < nRounds; ++d) {
+            Round storage r = c.rounds[d];
+            if (!r.bondInPot || r.appealFor != c.finalOutcome) continue;
+            uint256 contrib = r.bondContribs[who];
+            if (contrib == 0) continue;
+            uint256 bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
+            owed += contrib + bonus;
+        }
     }
 
     function _aggregate(Case storage c, SettleVars memory v) internal view {
@@ -822,19 +869,8 @@ contract Moderation is ReentrancyGuard {
                     _freezeSlice(a, amt, block.timestamp + v.freezeDur);
                 }
             }
-            // Winning-appeal payouts: refund own capital + bonus pro-rata (pull).
-            if (r.bondInPot && r.appealFor == v.finalOutcome) {
-                uint256 nc = r.bondContributors.length;
-                for (uint256 j; j < nc; ++j) {
-                    address cAddr = r.bondContributors[j];
-                    uint256 contrib = r.bondContribs[cAddr];
-                    if (contrib == 0) continue;
-                    uint256 bonus = v.winningContribTot == 0 ? 0 : (v.bonusPool * contrib) / v.winningContribTot;
-                    pendingPayout[cAddr] += contrib + bonus;
-                    totalPendingPayout += contrib + bonus;
-                    v.bonusPaid += bonus;
-                }
-            }
+            // Winning-appeal refunds + bonuses are pulled per contributor in
+            // claimAppealPayout (C-01) — no per-contributor loop at settlement.
         }
     }
 

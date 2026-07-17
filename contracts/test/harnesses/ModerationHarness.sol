@@ -102,7 +102,6 @@ contract ModerationHarness is Moderation {
 
     function __injectBondContrib(uint256 caseId, uint256 depth, address contributor, uint256 amount) external {
         Round storage r = cases[caseId].rounds[depth];
-        if (r.bondContribs[contributor] == 0) r.bondContributors.push(contributor);
         r.bondContribs[contributor] += amount;
         r.bond += amount;
     }

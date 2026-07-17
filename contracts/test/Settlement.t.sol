@@ -169,11 +169,12 @@ contract SettlementTest is ModerationTestBase {
         mod.claim(caseId);
 
         // Winner's appeal matched the final outcome: refund (capital) + bonus.
-        uint256 owed = mod.pendingPayout(winner);
+        // The bond is stored on the round it appealed against (depth 0).
+        uint256 owed = mod.appealPayoutOwed(caseId, winner);
         assertGt(owed, floor, "winning appellant gets capital back plus a bonus");
         uint256 balBefore = bzz.balanceOf(winner);
         vm.prank(winner);
-        mod.claimPayout();
+        mod.claimAppealPayout(caseId, 0);
         assertEq(bzz.balanceOf(winner) - balBefore, owed);
         _assertConservation();
     }
@@ -190,7 +191,10 @@ contract SettlementTest is ModerationTestBase {
         mod.claim(caseId);
 
         // Losing appeal: nothing owed back; the bond was distributed as rewards.
-        assertEq(mod.pendingPayout(loser), 0, "losing appellant forfeits the bond");
+        assertEq(mod.appealPayoutOwed(caseId, loser), 0, "losing appellant forfeits the bond");
+        vm.prank(loser);
+        vm.expectRevert(Moderation.NothingToReclaim.selector);
+        mod.claimAppealPayout(caseId, 0);
         _assertConservation();
     }
 

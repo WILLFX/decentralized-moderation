@@ -80,5 +80,12 @@ def settle(case: dict) -> dict:
                 payout[ci] = payout.get(ci, 0) + amt + bonus
                 bonus_paid += bonus
 
-    claim_bounty = bounty + (distributable - distributed) + (bonus_pool - bonus_paid)
+    # C-01: winning-appeal refunds+bonuses are pulled per contributor
+    # (claimAppealPayout), not credited in an unbounded settlement loop. Only the
+    # reward-channel dust is swept into the claim bounty; the bonus-channel dust
+    # stays in the pull pool and is absorbed by the final claimer, so the claim
+    # bounty no longer includes ``bonus_pool - bonus_paid``. ``payout`` here is the
+    # pristine (pre-pull) per-contributor amount the on-chain view reports.
+    _ = bonus_paid  # retained for clarity; not swept to the bounty
+    claim_bounty = bounty + (distributable - distributed)
     return {"free": free, "frozen": frozen, "payout": payout, "claimBounty": claim_bounty}

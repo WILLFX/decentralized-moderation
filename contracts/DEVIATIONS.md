@@ -101,12 +101,23 @@ settling caller.
 bounty — economically irrelevant, and it is the same party the protocol already pays
 to finalize. No new incentive.
 
+**C-01 refinement.** The *bonus-channel* dust is no longer swept into the claim
+bounty. Bonuses (and their refunds) are now pulled per contributor
+(`claimAppealPayout`, see D-7), and computing the exact bonus dust at settlement
+would require iterating the contributor set — the very unboundedness C-01 removes.
+Instead the whole bonus pool is booked as pending at settlement and the **final
+appeal-claimer absorbs the pro-rata dust** (a running `apBonusPoolLeft /
+apContribTotLeft` pair drains to zero exactly). Conservation stays an exact
+equality, and the dust stays *retrievable* rather than stranded — the point the
+senior audit pressed (conservation ≠ retrievability). Reward-channel dust still
+sweeps to the bounty as above.
+
 ### D-7. Reward vs. payout channels (spec §6.2, implementation choice)
 
 **What.** Voter rewards and returned committed stake are credited to the moderator's
 `free` balance (an internal pull — they withdraw via the normal exit path). Appeal
-refunds + bonuses to non-moderator contributors are credited to a `pendingPayout`
-mapping, withdrawn via `claimPayout`.
+refunds + bonuses to contributors are pulled per contribution via
+`claimAppealPayout(caseId, depth)`.
 
 **Why.** Avoids looping token transfers to arbitrary addresses inside `claim()` — a
 reverting recipient contract could otherwise brick settlement (DoS). Everything is a
@@ -114,6 +125,17 @@ pull.
 
 **Threat model.** Removes a settlement-DoS vector. No recipient can block another's
 payout or the case's settlement.
+
+**C-01 update.** The original design credited each contributor eagerly into a
+`pendingPayout` mapping *inside* `claim()`, which still iterated the whole
+contributor list — an attacker funding a winning bond from thousands of addresses
+could push that loop past the block gas limit and **permanently strand the pot and
+all committed stake** (conservation held; retrievability did not). Settlement no
+longer touches the contributor set at all: it records only two case-level running
+totals (`apBonusPoolLeft`, `apContribTotLeft`), and each contributor pulls its
+refund+bonus later via `claimAppealPayout`, O(1) and independent of contributor
+count (measured: identical 232,714 gas for 2 vs. 2,000 contributors). The
+`pendingPayout` mapping / `claimPayout` are removed.
 
 ### D-8. Seat draw over the live tree (spec §7)
 

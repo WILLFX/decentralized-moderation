@@ -82,6 +82,121 @@ contract GasBoundsTest is ModerationTestBase {
         (,, p,,,,) = m.caseInfo(caseId);
     }
 
+    // --- C-01: settlement must be O(1) in appeal contributors ----------------
+
+    /// Inject a FINALIZED case with one coherent voter and a WINNING appeal bond
+    /// split across `nContrib` addresses that all sum to `totalBond`. Everything
+    /// except the contributor count is held identical, so two cases built with
+    /// different `nContrib` isolate exactly the settlement cost of the
+    /// contributor set. Returns the caseId.
+    function _injectWinningAppeal(ModerationHarness m, MockBZZ b, uint256 nContrib, uint256 totalBond)
+        internal
+        returns (uint256 caseId)
+    {
+        uint256 baseFee = 1000 * XBZZ;
+        uint256 pot = baseFee + totalBond; // the winning bond joined the pot
+        caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, pot);
+        b.mint(address(m), pot);
+
+        m.__injectRound(caseId);
+        // one coherent voter so the reward channel is exercised
+        address voter = address(uint160(uint256(keccak256(abi.encode("c01v", nContrib)))));
+        b.mint(voter, 100 * XBZZ);
+        vm.prank(voter);
+        b.approve(address(m), type(uint256).max);
+        vm.prank(voter);
+        m.stake(20 * XBZZ);
+        uint256 camt = 10 * XBZZ;
+        m.__injectSeat(caseId, 0, voter, 1, camt, 1); // Approve == final
+        b.mint(address(m), camt);
+
+        // winning appeal on depth 0 (appealFor == final outcome)
+        m.__injectBond(caseId, 0, Moderation.Outcome.Approve, true);
+        uint256 each = totalBond / nContrib;
+        uint256 acc;
+        for (uint256 k = 0; k < nContrib; k++) {
+            uint256 amt = (k == nContrib - 1) ? (totalBond - acc) : each; // last takes remainder
+            address contrib = address(uint160(uint256(keccak256(abi.encode("c01c", nContrib, k)))));
+            m.__injectBondContrib(caseId, 0, contrib, amt);
+            acc += amt;
+        }
+    }
+
+    /// The C-01 finding: a winning appeal funded from thousands of addresses used
+    /// to make claim() iterate them all and exceed the block limit, permanently
+    /// stranding the pot. Settlement must now cost the same regardless of the
+    /// contributor count.
+    function test_claim_gas_independent_of_appeal_contributors() public {
+        uint256 totalBond = 900 * XBZZ;
+
+        MockBZZ bFew = new MockBZZ();
+        ModerationHarness mFew = new ModerationHarness(IERC20(address(bFew)));
+        uint256 cFew = _injectWinningAppeal(mFew, bFew, 2, totalBond);
+        uint256 g0 = gasleft();
+        mFew.claim(cFew);
+        uint256 gasFew = g0 - gasleft();
+
+        MockBZZ bMany = new MockBZZ();
+        ModerationHarness mMany = new ModerationHarness(IERC20(address(bMany)));
+        uint256 cMany = _injectWinningAppeal(mMany, bMany, 2000, totalBond);
+        g0 = gasleft();
+        mMany.claim(cMany);
+        uint256 gasMany = g0 - gasleft();
+
+        emit log_named_uint("claim_gas_2_contributors", gasFew);
+        emit log_named_uint("claim_gas_2000_contributors", gasMany);
+        assertLt(gasMany, HARD_CEILING, "claim with 2000 bond contributors must fit under the ceiling");
+        // claim() no longer reads the contributor set, so the two settlements do
+        // essentially identical work; allow a small margin for arithmetic on the
+        // (equal) pot totals only.
+        assertApproxEqRel(gasMany, gasFew, 0.02e18, "settlement gas must not scale with contributor count");
+        assertEq(uint256(_phaseOf(mMany, cMany)), uint256(Moderation.Phase.SETTLED));
+    }
+
+    /// The other half of C-01: the whole owed pool (refunds + bonuses) is
+    /// retrievable by pulls, and the final claimer absorbs the pro-rata dust so
+    /// the pool zeroes out exactly — conservation is retrievability, not just
+    /// bookkeeping.
+    function test_appeal_pool_fully_pullable_with_dust_to_last_claimer() public {
+        uint256 nContrib = 47; // prime count -> guarantees pro-rata dust
+        uint256 totalBond = 613 * XBZZ + 4242; // odd total -> dust
+        MockBZZ b = new MockBZZ();
+        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        uint256 caseId = _injectWinningAppeal(m, b, nContrib, totalBond);
+
+        m.claim(caseId);
+
+        // The full owed pool (refunds + bonuses) is booked as pending at
+        // settlement; the sum of pristine per-contributor floors is short by the
+        // pro-rata dust, which the final claimer absorbs.
+        uint256 pool = m.totalPendingPayout();
+        uint256 owedFloors = 0;
+        for (uint256 k = 0; k < nContrib; k++) {
+            address contrib = address(uint160(uint256(keccak256(abi.encode("c01c", nContrib, k)))));
+            owedFloors += m.appealPayoutOwed(caseId, contrib);
+        }
+        assertLe(owedFloors, pool, "pristine floors never exceed the pool");
+        assertLt(pool - owedFloors, nContrib, "dust is bounded by one wei per contributor");
+
+        uint256 pulledTotal;
+        for (uint256 k = 0; k < nContrib; k++) {
+            address contrib = address(uint160(uint256(keccak256(abi.encode("c01c", nContrib, k)))));
+            uint256 before = b.balanceOf(contrib);
+            vm.prank(contrib);
+            m.claimAppealPayout(caseId, 0);
+            pulledTotal += b.balanceOf(contrib) - before;
+        }
+
+        // Everything booked was pulled, to the wei; the pool is drained exactly.
+        assertEq(pulledTotal, pool, "sum of pulls equals the full owed pool");
+        assertEq(m.totalPendingPayout(), 0, "pending payout fully drained");
+        // A second pull by anyone reverts (nothing left).
+        address first = address(uint160(uint256(keccak256(abi.encode("c01c", nContrib, uint256(0))))));
+        vm.prank(first);
+        vm.expectRevert(Moderation.NothingToReclaim.selector);
+        m.claimAppealPayout(caseId, 0);
+    }
+
     // --- soft-budget measurements (recorded, not gated tightly) --------------
 
     function test_measure_common_path_gas() public {

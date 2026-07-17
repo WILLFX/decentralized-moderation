@@ -165,4 +165,16 @@ contract ModerationHarness is Moderation {
     function __seatSeed(uint256 caseId, uint256 depth) external view returns (bytes32) {
         return cases[caseId].rounds[depth].seatSeed;
     }
+
+    function __talliedSeats(uint256 caseId, uint256 depth, address voter) external view returns (uint256) {
+        return cases[caseId].rounds[depth].talliedSeats[voter];
+    }
+
+    function __seats(uint256 caseId, uint256 depth, address voter) external view returns (uint256) {
+        return cases[caseId].rounds[depth].seats[voter];
+    }
+
+    function __committedSeats(uint256 caseId, uint256 depth, address voter) external view returns (uint256) {
+        return cases[caseId].rounds[depth].committedSeats[voter];
+    }
 }

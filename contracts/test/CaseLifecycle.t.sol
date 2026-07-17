@@ -123,6 +123,34 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.revealVote(caseId, Moderation.Vote.Approve, keccak256("wrong"));
     }
 
+    // H-08: seats a widen re-draws onto a voter AFTER it committed are
+    // uncollateralized, so the reveal must tally only the seats collateralized at
+    // commit. Otherwise a voter could withhold, trigger a widen, and get extra
+    // voting weight for free.
+    function test_H08_widen_added_seats_not_tallied() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        address sh = mod.seatHolderAt(caseId, 0, 0);
+
+        // Commit with whatever seat count it holds now.
+        bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
+        vm.prank(sh);
+        mod.commitVote(caseId, h);
+        uint256 collateralized = mod.__committedSeats(caseId, 0, sh);
+
+        // A widen lands 7 extra seats on this already-committed voter.
+        mod.__injectWidenSeats(caseId, 0, sh, 7);
+        assertEq(mod.__seats(caseId, 0, sh), collateralized + 7, "post-widen seat count is inflated");
+
+        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        mod.closeCommit(caseId);
+        vm.prank(sh);
+        mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+
+        // Tally is capped to the collateralized (commit-time) seat count.
+        assertEq(mod.__talliedSeats(caseId, 0, sh), collateralized, "tally == collateralized seats, not inflated");
+    }
+
     // M-01: a commitment is bound to its voter, so copying another voter's commit
     // hash is useless — the copier cannot reveal it.
     function test_M01_copied_commitment_cannot_be_revealed() public {

@@ -362,6 +362,7 @@ contract Moderation is ReentrancyGuard {
         bytes32 outcomeSeed;
         address[] seatHolders; // unique drawn addresses
         mapping(address => uint256) seats; // seat-holder -> seat count (may grow on widen)
+        mapping(address => uint256) committedSeats; // H-08: seats collateralized at commit (tally is capped to this)
         mapping(address => uint256) talliedSeats; // seats counted for THIS voter at reveal (frozen; F2)
         mapping(address => bytes32) commits; // seat-holder -> commit hash
         mapping(address => Vote) reveals; // seat-holder -> revealed vote
@@ -670,6 +671,7 @@ contract Moderation is ReentrancyGuard {
         uint256 lock = _cp(c).riskPerSeat * s;
         _lockStake(msg.sender, lock);
         r.committedAmt[msg.sender] = lock;
+        r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
         r.commits[msg.sender] = commitHash;
         r.committed[msg.sender] = true;
         r.committedCount++;
@@ -711,10 +713,14 @@ contract Moderation is ReentrancyGuard {
         if (computeCommit(caseId, c.depth, msg.sender, vote, salt) != r.commits[msg.sender]) revert BadReveal();
 
         r.reveals[msg.sender] = vote;
+        // Tally is capped to the seats collateralized at commit (H-08): a widen can
+        // add seats to r.seats[voter] AFTER commit, but those are uncollateralized,
+        // so they must not be tallied, rewarded, or mean-track weighted. Combined
+        // with the reveal-time freeze this keeps talliedSeats*riskPerSeat <=
+        // committedAmt (F2 + H-08).
         uint256 s = r.seats[msg.sender];
-        // Freeze the seat count credited to this voter at reveal time: a later
-        // widen re-draw can add seats to r.seats[voter], but settlement must pay
-        // (and mean-track) only the seats actually tallied here (F2).
+        uint256 cs = r.committedSeats[msg.sender];
+        if (s > cs) s = cs;
         r.talliedSeats[msg.sender] = s;
         uint256 trackContrib = s * moderators[msg.sender].track; // snapshot track now (M-03)
         if (vote == Vote.Approve) {

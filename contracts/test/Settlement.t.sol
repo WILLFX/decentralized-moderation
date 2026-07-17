@@ -198,6 +198,45 @@ contract SettlementTest is ModerationTestBase {
         _assertConservation();
     }
 
+    // H-10: an appeal round that draws NO quorum after max widen is a protocol
+    // failure, not a loss on the merits. The prior outcome stands, but the honest
+    // appeal bond's capital is REFUNDED (no bonus), never confiscated to the prior
+    // winners. Built via injection: depth-1 appeal round empty (zero reveals),
+    // round-0 bond marked refund-only as the real finalize-to-prior path does.
+    function test_zero_quorum_appeal_refunds_bond_not_confiscated() public {
+        uint256 bondAmt = 100 * XBZZ;
+        uint256 fee = 1000 * XBZZ;
+        uint256 pot = fee + bondAmt;
+
+        uint256 caseId = mod.__injectFinalized(0, Moderation.Outcome.Reject, pot);
+        bzz.mint(address(mod), pot);
+        mod.__setDepth(caseId, 1);
+
+        // round 0: original Reject outcome, one coherent Reject voter, plus a bond
+        // that appealed FOR Approve (funded the depth-1 round).
+        mod.__injectRound(caseId);
+        address rejVoter = makeAddr("rejVoter");
+        mod.__injectSeat(caseId, 0, rejVoter, 1, 10 * XBZZ, 2); // Reject == final
+        bzz.mint(address(mod), 10 * XBZZ);
+        mod.__injectBond(caseId, 0, Moderation.Outcome.Approve, true);
+        address challenger = makeAddr("honestChallenger");
+        mod.__injectBondContrib(caseId, 0, challenger, bondAmt);
+        mod.__setBondRefundOnly(caseId, 0); // the depth-1 appeal it funded got no quorum
+
+        // round 1: the appeal round, zero reveals.
+        mod.__injectRound(caseId);
+
+        mod.claim(caseId);
+
+        // Capital back, no bonus.
+        assertEq(mod.appealPayoutOwed(caseId, challenger), bondAmt, "refund is capital only, no bonus");
+        uint256 before = bzz.balanceOf(challenger);
+        vm.prank(challenger);
+        mod.claimAppealPayout(caseId, 0);
+        assertEq(bzz.balanceOf(challenger) - before, bondAmt, "honest appellant recovers its bond");
+        _assertConservation();
+    }
+
     // --- idempotence ---------------------------------------------------------
 
     function test_claim_is_idempotent() public {

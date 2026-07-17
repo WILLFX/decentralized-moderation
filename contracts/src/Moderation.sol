@@ -349,6 +349,7 @@ contract Moderation is ReentrancyGuard {
         Outcome appealFor; // the outcome an appeal against THIS round argues for
         uint256 bond; // flip-bond accumulated to appeal this round's outcome
         bool bondInPot; // true once the floor was met and the bond moved to the pot
+        bool bondRefundOnly; // H-10: the appeal this bond funded failed for lack of quorum, not on merits -> refund capital (no bonus, not forfeited)
         mapping(address => uint256) bondContribs;
     }
 
@@ -850,9 +851,16 @@ contract Moderation is ReentrancyGuard {
                 winnersSeats += r.rejectSeats;
                 meanTrackNum += r.rejectTrackNum;
             }
-            if (r.bondInPot && r.appealFor == fo) {
-                refunds += r.bond;
-                winningContribTot += r.bond;
+            if (r.bondInPot) {
+                if (r.appealFor == fo) {
+                    // winning appeal: capital refunded + shares the bonus pool
+                    refunds += r.bond;
+                    winningContribTot += r.bond;
+                } else if (r.bondRefundOnly) {
+                    // quorum-failed appeal (H-10): capital refunded, no bonus, not
+                    // forfeited to winners — excluded from the distributable pot.
+                    refunds += r.bond;
+                }
             }
         }
 
@@ -978,16 +986,20 @@ contract Moderation is ReentrancyGuard {
         if (c.phase != Phase.SETTLED) revert CaseNotFinalized();
         if (depth >= c.rounds.length) revert NothingToReclaim();
         Round storage r = c.rounds[depth];
-        // Only a round whose bond joined the pot AND matched the final outcome
-        // refunds capital + bonus; a losing bond was forfeited into the rewards.
-        if (!r.bondInPot || r.appealFor != c.finalOutcome) revert NothingToReclaim();
+        bool winning = r.bondInPot && r.appealFor == c.finalOutcome;
+        bool refundOnly = r.bondInPot && r.bondRefundOnly && !winning; // H-10: capital back, no bonus
+        // A bond that lost on the merits was forfeited into the rewards — nothing to pull.
+        if (!winning && !refundOnly) revert NothingToReclaim();
         uint256 contrib = r.bondContribs[msg.sender];
         if (contrib == 0) revert NothingToReclaim();
 
         r.bondContribs[msg.sender] = 0;
-        uint256 bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
-        c.apBonusPoolLeft -= bonus;
-        c.apContribTotLeft -= contrib;
+        uint256 bonus;
+        if (winning) {
+            bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
+            c.apBonusPoolLeft -= bonus;
+            c.apContribTotLeft -= contrib;
+        }
 
         uint256 amt = contrib + bonus;
         totalPendingPayout -= amt;
@@ -1004,10 +1016,12 @@ contract Moderation is ReentrancyGuard {
         uint256 nRounds = c.rounds.length;
         for (uint256 d; d < nRounds; ++d) {
             Round storage r = c.rounds[d];
-            if (!r.bondInPot || r.appealFor != c.finalOutcome) continue;
+            if (!r.bondInPot) continue;
+            bool winning = r.appealFor == c.finalOutcome;
+            if (!winning && !r.bondRefundOnly) continue; // forfeited on the merits
             uint256 contrib = r.bondContribs[who];
             if (contrib == 0) continue;
-            uint256 bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
+            uint256 bonus = winning && c.apContribTotLeft != 0 ? (c.apBonusPoolLeft * contrib) / c.apContribTotLeft : 0;
             owed += contrib + bonus;
         }
     }
@@ -1186,7 +1200,12 @@ contract Moderation is ReentrancyGuard {
         if (c.depth == 0) {
             _void(c);
         } else {
+            // The appeal round drew NO quorum after max widen: the adjudication
+            // layer failed, the appeal did not lose on the merits. Restore the
+            // prior outcome for liveness, but refund the funding bond's capital
+            // (no bonus) instead of forfeiting it to the prior winners (H-10).
             Round storage prev = c.rounds[c.depth - 1];
+            prev.bondRefundOnly = true;
             r.outcome = prev.outcome;
             c.finalOutcome = prev.outcome;
             c.phase = Phase.FINALIZED;

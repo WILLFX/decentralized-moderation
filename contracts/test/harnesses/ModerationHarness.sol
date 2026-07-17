@@ -157,4 +157,8 @@ contract ModerationHarness is Moderation {
     function __setUnderQuorum(uint256 caseId, uint256 depth) external {
         cases[caseId].rounds[depth].underQuorum = true;
     }
+
+    function __setBondRefundOnly(uint256 caseId, uint256 depth) external {
+        cases[caseId].rounds[depth].bondRefundOnly = true;
+    }
 }

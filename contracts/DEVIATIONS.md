@@ -220,12 +220,20 @@ and the poke succeeds. Accepted for M2 (a live network always has an eligible se
 The obvious M4 remedy if it ever matters is a DRAW-age → VOID (refund) path, the
 same shape as the reveal-phase VOID.
 
-### L-2. Removal `targetCaseId` is not validated at submit
+### L-2. ~~Removal `targetCaseId` is not validated at submit~~ — RETRACTED (fixed, H-01)
 
-`submit` stores a REMOVAL case's `targetCaseId` without checking it names a real,
-approved submission. A bogus or already-removed target simply settles as a clean
-no-op at `_removeTarget` (per spec §10). This is intentional — validating index
-membership at submit would duplicate the settlement-time lookup and could race a
-concurrent removal — but it means a removal case can be spun up (and pays its fee)
-against a target that will never delete anything. No safety impact; the fee is the
-griefing cost.
+**Struck by the senior audit (H-01).** The original claim — that a lazily-resolved
+removal target is a "harmless no-op" — was wrong. Because `_removeTarget` resolved
+`cases[targetCaseId]` at *claim* time and IDs are sequential, a removal could name a
+*future* case ID, finalize while unclaimed, and then delete whatever case later took
+that ID (a blank-cheque deletion); the caller-supplied payload was also ignored at
+settlement (display/act mismatch).
+
+**Fixed (M2.5-P0-a → P0-c).** REMOVAL now goes through `submitRemoval(targetCaseId,
+fee)`, which requires the target to be a **settled, approved, currently-indexed
+SUBMISSION** and derives content/metadata/topics from it (fee scales with the
+target's real topic count). Each SUBMISSION carries an `isIndexed` generation
+signal (true on write, false on delete); `_removeTarget` no-ops if the target is no
+longer indexed, so two concurrent removals resolve cleanly and a removal can only
+ever delete the exact entries it was approved against. The generic `submit` now
+rejects `REMOVAL` (`BadKind`).

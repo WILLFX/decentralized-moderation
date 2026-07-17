@@ -360,6 +360,12 @@ contract Moderation is ReentrancyGuard {
         uint256 appealBondTotal; // Σ appeal bonds that met their floor and joined the pot
         uint256 phaseDeadline;
         Outcome finalOutcome;
+        // H-01: a SUBMISSION whose entries are currently live in the index. Set
+        // true when its entries are written, false when a removal deletes them.
+        // Serves as the target's "index generation" signal: a removal is bound to
+        // an indexed target at submit and no-ops at settlement if it is no longer
+        // indexed (already removed by a concurrent removal).
+        bool isIndexed;
         Round[] rounds; // one per depth reached
         // C-01: winning-appeal refunds+bonuses are pulled (not credited in a loop
         // at settlement, which was unbounded in contributor count). These running
@@ -437,6 +443,16 @@ contract Moderation is ReentrancyGuard {
     error CaseNotTerminal();
     error BondLocked();
     error NothingToReclaim();
+    error BadKind(); // submit() is submissions-only; removals go through submitRemoval
+    error TargetNotRemovable(); // removal target must be a settled, approved, indexed submission
+
+    event RemovalTargeted(
+        uint256 indexed caseId,
+        uint256 indexed targetCaseId,
+        bytes32 contentHash,
+        bytes32 metaHash,
+        uint256 topicCount
+    );
 
     // --- submit --------------------------------------------------------------
 
@@ -453,17 +469,20 @@ contract Moderation is ReentrancyGuard {
         uint256 targetCaseId,
         uint256 fee
     ) external nonReentrant returns (uint256 caseId) {
+        // H-01: removals no longer accept caller-chosen content/meta/topics/target
+        // (they were ignored at settlement, which resolved the target lazily — a
+        // future-ID or payload-substitution vector). Use submitRemoval instead.
+        if (kind != Kind.SUBMISSION) revert BadKind();
+        targetCaseId; // unused for submissions
         uint256 n = topicKeys.length;
         if (n == 0 || n > params.maxTopics) revert BadTopicCount();
         if (fee < minFee(n)) revert FeeTooLow();
 
-        if (kind == Kind.SUBMISSION) {
-            for (uint256 i; i < n; ++i) {
-                if (submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])]) revert DuplicateSubmission();
-            }
-            for (uint256 i; i < n; ++i) {
-                submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])] = true;
-            }
+        for (uint256 i; i < n; ++i) {
+            if (submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])]) revert DuplicateSubmission();
+        }
+        for (uint256 i; i < n; ++i) {
+            submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])] = true;
         }
 
         address(token).safeTransferFrom(msg.sender, address(this), fee);
@@ -471,21 +490,60 @@ contract Moderation is ReentrancyGuard {
         caseId = nextCaseId++;
         Case storage c = cases[caseId];
         c.id = caseId;
-        c.kind = kind;
+        c.kind = Kind.SUBMISSION;
         c.submitter = msg.sender;
         c.contentHash = contentHash;
         c.metaHash = metaHash;
         for (uint256 i; i < n; ++i) {
             c.topicKeys.push(topicKeys[i]);
         }
-        c.targetCaseId = targetCaseId;
         c.guidelinesVersion = guidelinesVersion; // pinned at submit; never changes (§9.6)
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
 
         _openRound(c, 0);
-        emit CaseSubmitted(caseId, kind, msg.sender, fee);
+        emit CaseSubmitted(caseId, Kind.SUBMISSION, msg.sender, fee);
+    }
+
+    /// @notice Open a REMOVAL case against an existing index entry (§8.2, P1).
+    ///         Unlike the old generic path, the target is bound at submit: it must
+    ///         be a settled, approved SUBMISSION whose entries are currently in the
+    ///         index, and the content/metadata/topics are derived from that target
+    ///         (not caller-supplied), so the removal cannot name a future case ID
+    ///         or display a payload that differs from what settlement acts on
+    ///         (H-01). Fee scales with the target's real topic count.
+    function submitRemoval(uint256 targetCaseId, uint256 fee) external nonReentrant returns (uint256 caseId) {
+        if (targetCaseId >= nextCaseId) revert TargetNotRemovable();
+        Case storage target = cases[targetCaseId];
+        if (target.kind != Kind.SUBMISSION || target.phase != Phase.SETTLED) revert TargetNotRemovable();
+        if (target.finalOutcome != Outcome.Approve || !target.isIndexed) revert TargetNotRemovable();
+
+        uint256 n = target.topicKeys.length;
+        if (fee < minFee(n)) revert FeeTooLow();
+
+        address(token).safeTransferFrom(msg.sender, address(this), fee);
+
+        caseId = nextCaseId++;
+        Case storage c = cases[caseId];
+        c.id = caseId;
+        c.kind = Kind.REMOVAL;
+        c.submitter = msg.sender;
+        // Derived from the bound target so client-displayed payload == settled action.
+        c.contentHash = target.contentHash;
+        c.metaHash = target.metaHash;
+        for (uint256 i; i < n; ++i) {
+            c.topicKeys.push(target.topicKeys[i]);
+        }
+        c.targetCaseId = targetCaseId;
+        c.guidelinesVersion = guidelinesVersion;
+        c.pot = fee;
+        openPotsTotal += fee;
+        c.finalOutcome = Outcome.Unset;
+
+        _openRound(c, 0);
+        emit CaseSubmitted(caseId, Kind.REMOVAL, msg.sender, fee);
+        emit RemovalTargeted(caseId, targetCaseId, target.contentHash, target.metaHash, n);
     }
 
     // --- phase transitions (permissionless pokes) ----------------------------
@@ -949,14 +1007,20 @@ contract Moderation is ReentrancyGuard {
             );
             emit EntryWritten(c.id, topicKey, uncontested);
         }
+        c.isIndexed = true; // now live in the index (H-01 generation signal)
     }
 
     function _removeTarget(Case storage c) internal {
         Case storage target = cases[c.targetCaseId];
+        // H-01: no-op if the target is no longer indexed (a concurrent removal
+        // already deleted it). Bound to a specific caseId at submit, so this can
+        // only ever delete the exact entries the removal was approved against.
+        if (!target.isIndexed) return;
         uint256 n = target.topicKeys.length;
         for (uint256 i; i < n; ++i) {
             _deleteEntry(target.topicKeys[i], c.targetCaseId);
         }
+        target.isIndexed = false;
         _clearDedup(target); // the removed submission is resubmittable
     }
 

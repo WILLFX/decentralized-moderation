@@ -13,7 +13,7 @@ contract IndexTest is ModerationTestBase {
         vm.prank(who);
         bzz.approve(address(mod), type(uint256).max);
         vm.prank(who);
-        caseId = mod.submit(Moderation.Kind.REMOVAL, CONTENT, META, _topics(), targetCaseId, fee);
+        caseId = mod.submitRemoval(targetCaseId, fee);
     }
 
     // --- write happens only at settlement ------------------------------------
@@ -97,24 +97,66 @@ contract IndexTest is ModerationTestBase {
         assertGt(caseId2, rem);
     }
 
-    function test_removal_of_missing_entry_settles_cleanly() public {
+    // H-01: two removals opened against the same still-indexed target. The first
+    // deletes the entry; the second settles as a clean no-op (guarded by the
+    // target's `indexed` generation signal), never reverting or touching a
+    // now-unrelated entry.
+    function test_concurrent_removals_second_settles_as_noop() public {
         uint256 caseId = _runUndisputed(mods[0], Moderation.Vote.Approve);
         mod.claim(caseId);
+        assertEq(mod.entryCount(TK), 1);
 
+        // Both submitted while the target is still indexed.
         uint256 rem1 = _submitRemoval(mods[1], caseId);
+        uint256 rem2 = _submitRemoval(mods[2], caseId);
+
         _realizeSeats(rem1);
         _runRoundToAppealWindow(rem1, 0, Moderation.Vote.Approve);
         _finalize(rem1);
         mod.claim(rem1);
-        assertEq(mod.entryCount(TK), 0);
+        assertEq(mod.entryCount(TK), 0, "first removal deletes the entry");
 
-        // A second removal of the same (already gone) target settles without revert.
-        uint256 rem2 = _submitRemoval(mods[2], caseId);
         _realizeSeats(rem2);
         _runRoundToAppealWindow(rem2, 0, Moderation.Vote.Approve);
         _finalize(rem2);
-        mod.claim(rem2); // no revert
+        mod.claim(rem2); // clean no-op, no revert
         assertEq(uint256(_phase(rem2)), uint256(Moderation.Phase.SETTLED));
+        assertEq(mod.entryCount(TK), 0, "second removal changes nothing");
+    }
+
+    // H-01: a removal can only be opened against a target that is a settled,
+    // approved submission currently in the index. Future IDs, rejected content,
+    // and already-removed entries are rejected at submit — no more lazy target
+    // resolution at claim time.
+    function test_removal_requires_indexed_target() public {
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[1], 3 * fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(mod), type(uint256).max);
+
+        // (a) future / nonexistent case id
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(999, fee);
+
+        // (b) a rejected submission was never indexed
+        uint256 rejected = _runUndisputed(mods[0], Moderation.Vote.Reject);
+        mod.claim(rejected);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(rejected, fee);
+
+        // (c) an approved-then-removed target is no longer indexed
+        uint256 approved = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(approved);
+        uint256 rem = _submitRemoval(mods[2], approved);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Approve);
+        _finalize(rem);
+        mod.claim(rem);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(approved, fee);
     }
 
     // --- supersafe view ------------------------------------------------------

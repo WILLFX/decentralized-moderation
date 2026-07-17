@@ -139,6 +139,7 @@ contract ModerationHarness is Moderation {
                 metaHash: bytes32(caseId),
                 approvalTime: uint40(block.timestamp),
                 uncontested: true,
+                fullQuorum: true,
                 caseId: caseId
             })
         );
@@ -147,5 +148,13 @@ contract ModerationHarness is Moderation {
 
     function __deleteEntry(bytes32 topicKey, uint256 caseId) external {
         _deleteEntry(topicKey, caseId);
+    }
+
+    function __setDepth(uint256 caseId, uint256 depth) external {
+        cases[caseId].depth = depth;
+    }
+
+    function __setUnderQuorum(uint256 caseId, uint256 depth) external {
+        cases[caseId].rounds[depth].underQuorum = true;
     }
 }

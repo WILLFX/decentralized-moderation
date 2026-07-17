@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
+import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
+import {MockBZZ} from "./mocks/MockBZZ.sol";
 
 contract IndexTest is ModerationTestBase {
     bytes32 internal constant TK = keccak256("marine biology");
@@ -205,6 +208,53 @@ contract IndexTest is ModerationTestBase {
         vm.prank(mods[1]);
         vm.expectRevert(Moderation.TargetNotRemovable.selector);
         mod.submitRemoval(approved, fee);
+    }
+
+    // --- H-09: under-quorum approvals never reach the supersafe view ---------
+
+    // A single approving seat (after max widen the outcome arms on `reveals != 0`)
+    // must land in the superset but NEVER the supersafe subset, however long it
+    // ages: supersafe now also requires MIN_REVEALS independent revealers.
+    function test_one_seat_approval_never_supersafe() public {
+        MockBZZ b = new MockBZZ();
+        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(caseId, TK);
+        m.__injectRound(caseId);
+        m.__injectSeat(caseId, 0, makeAddr("solo"), 1, 0, 1); // one Approve revealer
+        m.claim(caseId);
+
+        assertEq(m.entryCount(TK), 1, "one-seat approval is in the superset");
+        Moderation.Entry memory e = m.entryAt(TK, 0);
+        assertTrue(e.uncontested, "no reject -> uncontested");
+        assertFalse(e.fullQuorum, "one independent revealer is not full quorum");
+
+        vm.warp(block.timestamp + 200 hours);
+        assertEq(m.supersafeEntries(TK).length, 0, "under-quorum approval never supersafe, regardless of age");
+    }
+
+    // An appealed case whose EARLIER round was decided under quorum is also barred
+    // from supersafe, even if the final round had a full panel.
+    function test_appealed_case_with_degraded_earlier_round_never_supersafe() public {
+        MockBZZ b = new MockBZZ();
+        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(caseId, TK);
+        m.__setDepth(caseId, 1);
+        // round 0: degraded (armed under quorum), round 1 (final): full panel.
+        m.__injectRound(caseId);
+        m.__injectSeat(caseId, 0, makeAddr("d0a"), 1, 0, 1);
+        m.__setUnderQuorum(caseId, 0);
+        m.__injectRound(caseId);
+        m.__injectSeat(caseId, 1, makeAddr("d1a"), 1, 0, 1);
+        m.__injectSeat(caseId, 1, makeAddr("d1b"), 1, 0, 1);
+        m.__injectSeat(caseId, 1, makeAddr("d1c"), 1, 0, 1);
+        m.claim(caseId);
+
+        Moderation.Entry memory e = m.entryAt(TK, 0);
+        assertFalse(e.fullQuorum, "a degraded earlier round bars supersafe");
+        vm.warp(block.timestamp + 200 hours);
+        assertEq(m.supersafeEntries(TK).length, 0, "not supersafe");
     }
 
     // --- supersafe view ------------------------------------------------------

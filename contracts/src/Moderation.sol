@@ -343,6 +343,7 @@ contract Moderation is ReentrancyGuard {
         // longer depend on when the case is claimed relative to track mutations.
         uint256 approveTrackNum;
         uint256 rejectTrackNum;
+        bool underQuorum; // H-09: outcome armed below MIN_REVEALS after max widen
         uint256 revealedSeats; // approveSeats + rejectSeats
         Outcome outcome; // drawn ∝ seat counts
         Outcome appealFor; // the outcome an appeal against THIS round argues for
@@ -417,6 +418,7 @@ contract Moderation is ReentrancyGuard {
         bytes32 metaHash;
         uint40 approvalTime; // settlement time; drives the supersafe age filter
         bool uncontested; // true iff no Reject vote was ever revealed in the case
+        bool fullQuorum; // H-09: decided at full quorum (no under-quorum fallback, enough independent revealers)
         uint256 caseId; // back-reference for removal (§8.2)
     }
 
@@ -1029,6 +1031,7 @@ contract Moderation is ReentrancyGuard {
 
     function _writeEntries(Case storage c) internal {
         bool uncontested = _noRejectEver(c); // an appeal alone does not clear it (§8.1)
+        bool fullQuorum = _fullQuorum(c);
         uint40 t = uint40(block.timestamp);
         uint256 n = c.topicKeys.length;
         for (uint256 i; i < n; ++i) {
@@ -1043,6 +1046,7 @@ contract Moderation is ReentrancyGuard {
                     metaHash: c.metaHash,
                     approvalTime: t,
                     uncontested: uncontested,
+                    fullQuorum: fullQuorum,
                     caseId: c.id
                 })
             );
@@ -1092,6 +1096,19 @@ contract Moderation is ReentrancyGuard {
             if (c.rounds[d].rejectSeats != 0) return false;
         }
         return true;
+    }
+
+    /// @dev H-09: a case is "full quorum" — the precondition for the supersafe
+    ///      view — iff no round fell back to arming below MIN_REVEALS after max
+    ///      widen, and the deciding (final) round drew at least MIN_REVEALS
+    ///      *independent* revealers (addresses, not seats — one multi-seat voter
+    ///      must not satisfy quorum alone).
+    function _fullQuorum(Case storage c) internal view returns (bool) {
+        uint256 n = c.rounds.length;
+        for (uint256 d; d < n; ++d) {
+            if (c.rounds[d].underQuorum) return false;
+        }
+        return c.rounds[c.depth].revealedCount >= params.minReveals;
     }
 
     function _freezeSlice(address a, uint256 amt, uint256 until) internal {
@@ -1153,8 +1170,11 @@ contract Moderation is ReentrancyGuard {
             return;
         }
         // Widen exhausted with participation: proceed with the reveals we have
-        // (a case that got participation should still yield an outcome).
+        // (a case that got participation should still yield an outcome), but mark
+        // the round under-quorum so its approval can never reach the supersafe
+        // view (H-09).
         if (reveals != 0) {
+            r.underQuorum = true;
             _armOutcome(c, r);
             return;
         }
@@ -1356,7 +1376,8 @@ contract Moderation is ReentrancyGuard {
         return indexByTopic[topicKey][i];
     }
 
-    /// Supersafe subset (§8.3): uncontested and aged past SUPERSAFE_AGE.
+    /// Supersafe subset (§8.3): uncontested, full-quorum (H-09), and aged past
+    /// SUPERSAFE_AGE.
     function supersafeEntries(bytes32 topicKey) external view returns (Entry[] memory out) {
         Entry[] storage arr = indexByTopic[topicKey];
         uint256 len = arr.length;
@@ -1372,7 +1393,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     function _isSupersafe(Entry storage e) internal view returns (bool) {
-        return e.uncontested && block.timestamp - e.approvalTime >= params.supersafeAge;
+        return e.uncontested && e.fullQuorum && block.timestamp - e.approvalTime >= params.supersafeAge;
     }
 
     function caseGuidelinesVersion(uint256 caseId) external view returns (uint256) {

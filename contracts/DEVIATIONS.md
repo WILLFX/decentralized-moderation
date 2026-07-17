@@ -189,6 +189,20 @@ of invariant 9. Withdrawals have no admin gate anywhere (§9.5).
 cannot rewrite guidelines history — only append. The timelock gives moderators warning
 to exit before any parameter change takes effect.
 
+**H-11 update.** Parameter changes no longer affect *in-flight* cases. Executing a
+proposal seals a new immutable **ruleset version**; every case pins the version live
+at submit (`Case.rulesVersion`) and reads all its consensus parameters from that
+pinned ruleset, so a mid-case change can never move an open case's bond floor,
+windows, freeze curve, quorum, etc. Pending exits likewise snapshot their cooldown
+end and min-stake decision at request time (`exitClaimableAt`), so governance can
+neither extend nor invalidate an exit already requested. Governance is additionally
+bounded by immutable protocol **caps** (`MAX_RULE_DEPTH/WIDEN/PANEL/TOPICS/WINDOW/
+FREEZE/BOND_MULT/SEED_LAG/TOTAL_DRAWS`) plus cross-field checks (e.g. minReveals
+reachable within the widened depth-0 panel, total reachable draws ≤ the tested
+settlement bound), so it cannot configure an unsettleable case or an overflowing
+freeze — even by accident. `supersafeAge` and the fee floor stay live (display /
+submit-time only, not consensus).
+
 ### D-12. Widen re-draw onto an already-revealed voter is inert (spec §5.3, F2)
 
 **What.** A widen draws additional seats from the live tree and can land them on a

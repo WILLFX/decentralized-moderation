@@ -36,6 +36,18 @@ contract Moderation is ReentrancyGuard {
     // H-06: randomness domain-separation purpose tags.
     uint8 internal constant SEED_SEATS = 1;
     uint8 internal constant SEED_OUTCOME = 2;
+    // H-11: immutable protocol caps. Governance can tune numbers only WITHIN these
+    // bounds, so it can never configure an unsettleable case or overflowing freeze.
+    uint256 internal constant MAX_RULE_DEPTH = 8;
+    uint256 internal constant MAX_RULE_WIDEN = 8;
+    uint256 internal constant MAX_PANEL = 512; // per-depth commit target
+    uint256 internal constant MAX_RULE_TOPICS = 16;
+    uint256 internal constant MAX_ARRAY_LEN = 16;
+    uint256 internal constant MAX_WINDOW = 30 days;
+    uint256 internal constant MAX_FREEZE = 365 days;
+    uint256 internal constant MAX_BOND_MULT = 100;
+    uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window
+    uint256 internal constant MAX_TOTAL_DRAWS = 4000; // reachable settlement bound
 
     struct Params {
         uint256 minStake; // MIN_STAKE
@@ -62,12 +74,25 @@ contract Moderation is ReentrancyGuard {
         uint256 supersafeAge; // SUPERSAFE_AGE (seconds)
     }
 
-    Params internal params;
+    Params internal params; // live mirror of rulesets[currentRulesVersion].p
 
     /// COMMIT_TARGET[depth]: counted seats per depth (clamped to last at deeper).
     uint256[] internal commitTargetByDepth;
     /// APPEAL_WINDOW[depth]: appeal window duration per depth.
     uint256[] internal appealWindowByDepth;
+
+    // H-11: governance changes create a new immutable ruleset VERSION; each case
+    // pins the version live when it was submitted and reads all its consensus
+    // parameters from that pinned ruleset, so a mid-case parameter change never
+    // alters the rules of an already-open case.
+    struct Ruleset {
+        Params p;
+        uint256[] commitTargets;
+        uint256[] appealWindows;
+    }
+
+    mapping(uint256 => Ruleset) internal rulesets;
+    uint256 public currentRulesVersion;
 
     // --- governance (§9.9, P6) -----------------------------------------------
 
@@ -104,6 +129,7 @@ contract Moderation is ReentrancyGuard {
         uint256 activatesAt; // timestamp `pending` may be activated
         uint256 exitAmount; // amount marked for withdrawal (subset of free; excluded from draws)
         uint256 exitRequestedAt; // 0 if no pending exit
+        uint256 exitClaimableAt; // H-11: cooldown end snapshotted at request; governance can't extend it retroactively
         uint256 track; // decayed coherent-participation record, WAD (used from M2-5)
         bool exists; // has ever staked
     }
@@ -173,6 +199,9 @@ contract Moderation is ReentrancyGuard {
         commitTargetByDepth = [uint256(5), 11, 23, 47];
         appealWindowByDepth = [uint256(4 days), 3 days, 3 days, 3 days];
 
+        // Ruleset version 0 mirrors the initial params (H-11).
+        rulesets[0] = Ruleset({p: params, commitTargets: commitTargetByDepth, appealWindows: appealWindowByDepth});
+
         governance = msg.sender;
         timelockDelay = 7 days;
     }
@@ -237,9 +266,13 @@ contract Moderation is ReentrancyGuard {
 
         m.exitAmount = amount;
         m.exitRequestedAt = block.timestamp;
+        // H-11: snapshot the cooldown end and settle the min-stake decision now, so
+        // a later governance change can neither extend the wait nor invalidate an
+        // already-valid exit.
+        m.exitClaimableAt = block.timestamp + params.exitCooldown;
         _syncTree(msg.sender, m); // remove exiting stake from eligibility
 
-        emit ExitRequested(msg.sender, amount, block.timestamp + params.exitCooldown);
+        emit ExitRequested(msg.sender, amount, m.exitClaimableAt);
     }
 
     /// @notice Claim a previously requested exit after the cooldown. No admin
@@ -249,18 +282,15 @@ contract Moderation is ReentrancyGuard {
         Moderator storage m = moderators[msg.sender];
         uint256 amount = m.exitAmount;
         if (amount == 0) revert NoExitPending();
-        if (block.timestamp < m.exitRequestedAt + params.exitCooldown) revert CooldownNotElapsed();
-
-        // Re-check the floor against current total (committed may have settled
-        // back into free, or nothing changed).
-        uint256 remaining = _total(m) - amount;
-        if (remaining != 0 && remaining < params.minStake) revert MinStakeFloor();
+        // H-11: cooldown end and the min-stake decision were fixed at request time.
+        if (block.timestamp < m.exitClaimableAt) revert CooldownNotElapsed();
 
         m.free -= amount;
         totalFreeStake -= amount;
         if (m.pending > m.free) m.pending = m.free; // keep pending <= free
         m.exitAmount = 0;
         m.exitRequestedAt = 0;
+        m.exitClaimableAt = 0;
         _syncTree(msg.sender, m);
 
         address(token).safeTransfer(msg.sender, amount);
@@ -365,6 +395,7 @@ contract Moderation is ReentrancyGuard {
         bytes32[] topicKeys;
         uint256 targetCaseId; // removal only (§8.2, validated in M2-6)
         uint256 guidelinesVersion; // pinned at submit (governance in M2-7)
+        uint256 rulesVersion; // H-11: consensus ruleset pinned at submit
         Phase phase;
         uint256 depth;
         uint256 pot; // fee + appeal bonds moved in (§6.2)
@@ -543,6 +574,7 @@ contract Moderation is ReentrancyGuard {
             dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] = caseId + 1; // this case owns the reservation
         }
         c.guidelinesVersion = guidelinesVersion; // pinned at submit; never changes (§9.6)
+        c.rulesVersion = currentRulesVersion; // H-11: pin the consensus ruleset
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
@@ -582,6 +614,7 @@ contract Moderation is ReentrancyGuard {
         }
         c.targetCaseId = targetCaseId;
         c.guidelinesVersion = guidelinesVersion;
+        c.rulesVersion = currentRulesVersion; // H-11
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
@@ -605,7 +638,7 @@ contract Moderation is ReentrancyGuard {
 
         bytes32 bh = blockhash(r.seatSnapshotBlock);
         if (bh == 0) {
-            r.seatSnapshotBlock = block.number + params.seedLag;
+            r.seatSnapshotBlock = block.number + _cp(c).seedLag;
             emit SeedRearmed(caseId, c.depth, false, r.seatSnapshotBlock);
             return;
         }
@@ -618,7 +651,7 @@ contract Moderation is ReentrancyGuard {
         _drawSeats(r, r.nSeats, r.seatSeed, 0);
 
         c.phase = Phase.COMMIT;
-        c.phaseDeadline = block.timestamp + params.commitTimeout;
+        c.phaseDeadline = block.timestamp + _cp(c).commitTimeout;
         emit SeatsDrawn(caseId, c.depth, r.nSeats);
         emit CommitOpened(caseId, c.depth, c.phaseDeadline);
     }
@@ -634,7 +667,7 @@ contract Moderation is ReentrancyGuard {
         if (s == 0) revert NotSeatHolder();
         if (r.committed[msg.sender]) revert AlreadyCommitted();
 
-        uint256 lock = params.riskPerSeat * s;
+        uint256 lock = _cp(c).riskPerSeat * s;
         _lockStake(msg.sender, lock);
         r.committedAmt[msg.sender] = lock;
         r.commits[msg.sender] = commitHash;
@@ -718,7 +751,7 @@ contract Moderation is ReentrancyGuard {
 
         bytes32 bh = blockhash(r.outcomeSnapshotBlock);
         if (bh == 0) {
-            r.outcomeSnapshotBlock = block.number + params.seedLag;
+            r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
             emit SeedRearmed(caseId, c.depth, true, r.outcomeSnapshotBlock);
             return;
         }
@@ -728,7 +761,7 @@ contract Moderation is ReentrancyGuard {
         r.outcome = rand < r.approveSeats ? Outcome.Approve : Outcome.Reject;
 
         c.phase = Phase.APPEAL_WINDOW;
-        c.phaseDeadline = block.timestamp + _appealWindow(c.depth);
+        c.phaseDeadline = block.timestamp + _appealWindow(c, c.depth);
         emit OutcomeDrawn(caseId, c.depth, r.outcome);
         emit AppealWindowOpened(caseId, c.depth, c.phaseDeadline);
     }
@@ -758,13 +791,13 @@ contract Moderation is ReentrancyGuard {
         if (amount == 0) revert AmountZero();
         Case storage c = cases[caseId];
         if (c.phase != Phase.APPEAL_WINDOW) revert WrongPhase();
-        if (c.depth >= params.maxDepth) revert AppealsClosed();
+        if (c.depth >= _cp(c).maxDepth) revert AppealsClosed();
         if (block.timestamp >= c.phaseDeadline) revert AppealWindowClosed();
 
         Round storage r = _cur(c);
         if (r.appealFor == Outcome.Unset) r.appealFor = _opposite(r.outcome);
 
-        uint256 floor = params.bondMultiplier * c.pot;
+        uint256 floor = _cp(c).bondMultiplier * c.pot;
         // Guard underflow: a governance parameter change (lower bondMultiplier) can
         // execute mid-window and drop the floor below the already-aggregated bond.
         if (floor <= r.bond) revert AppealAlreadyFull();
@@ -892,10 +925,11 @@ contract Moderation is ReentrancyGuard {
             }
         }
 
+        Params storage p = _cp(c); // cache pinned ruleset (avoids stack pressure)
         uint256 pot = c.pot;
         uint256 residual = pot - refunds; // WO-1: refund winning bond capital first
-        uint256 bounty = (residual * params.claimBountyFrac) / WAD;
-        uint256 bonusPool = winningContribTot == 0 ? 0 : (residual * params.bonusFrac) / WAD;
+        uint256 bounty = (residual * p.claimBountyFrac) / WAD;
+        uint256 bonusPool = winningContribTot == 0 ? 0 : (residual * p.bonusFrac) / WAD;
         uint256 distributable = residual - bounty - bonusPool;
 
         // Winning-appeal refunds + bonuses become pull-based (C-01); the reward
@@ -911,7 +945,7 @@ contract Moderation is ReentrancyGuard {
         s.winnersSeats = winnersSeats;
         s.distributable = distributable;
         s.freezeDur = FreezeMath.freezeDuration(
-            winnersSeats == 0 ? 0 : meanTrackNum / winnersSeats, params.trackSat, params.freezeCap, params.freezeBase
+            winnersSeats == 0 ? 0 : meanTrackNum / winnersSeats, p.trackSat, p.freezeCap, p.freezeBase
         );
         s.bounty = bounty;
         s.pot = pot;
@@ -957,7 +991,7 @@ contract Moderation is ReentrancyGuard {
         uint256 amt = r.committedAmt[a];
         Vote vote = r.reveals[a];
         if (vote == Vote.None) {
-            _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
+            _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
         } else if (_coherent(vote, fo)) {
             Moderator storage m = moderators[a];
             m.committed -= amt;
@@ -985,7 +1019,7 @@ contract Moderation is ReentrancyGuard {
         if (trackDecayed[c.id][a]) return;
         trackDecayed[c.id][a] = true;
         Moderator storage m = moderators[a];
-        m.track = (m.track * params.trackDecay) / WAD;
+        m.track = (m.track * _cp(c).trackDecay) / WAD;
         if (c.rounds.length == 1 && r.reveals[a] != Vote.None && _coherent(r.reveals[a], fo)) {
             m.track += WAD; // +1 for a coherent, undisputed participation
         }
@@ -1150,7 +1184,7 @@ contract Moderation is ReentrancyGuard {
         for (uint256 d; d < n; ++d) {
             if (c.rounds[d].underQuorum) return false;
         }
-        return c.rounds[c.depth].revealedCount >= params.minReveals;
+        return c.rounds[c.depth].revealedCount >= _cp(c).minReveals;
     }
 
     function _freezeSlice(address a, uint256 amt, uint256 until) internal {
@@ -1173,8 +1207,8 @@ contract Moderation is ReentrancyGuard {
     function _openRound(Case storage c, uint256 depth) internal {
         c.rounds.push();
         Round storage r = c.rounds[c.rounds.length - 1];
-        r.nSeats = _commitTarget(depth);
-        r.seatSnapshotBlock = block.number + params.seedLag;
+        r.nSeats = _commitTarget(c, depth);
+        r.seatSnapshotBlock = block.number + _cp(c).seedLag;
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
@@ -1184,7 +1218,7 @@ contract Moderation is ReentrancyGuard {
 
     function _toReveal(Case storage c) internal {
         c.phase = Phase.REVEAL;
-        c.phaseDeadline = block.timestamp + params.revealWindow;
+        c.phaseDeadline = block.timestamp + _cp(c).revealWindow;
         emit RevealOpened(c.id, c.depth, c.phaseDeadline);
     }
 
@@ -1192,21 +1226,21 @@ contract Moderation is ReentrancyGuard {
         Round storage r = _cur(c);
         uint256 reveals = r.revealedSeats;
 
-        if (reveals >= params.minReveals) {
+        if (reveals >= _cp(c).minReveals) {
             _armOutcome(c, r);
             return;
         }
         // Under-participation: widen while retries remain.
-        if (r.widenCount < params.maxWiden) {
+        if (r.widenCount < _cp(c).maxWiden) {
             r.widenCount++;
-            uint256 add = _commitTarget(c.depth);
+            uint256 add = _commitTarget(c, c.depth);
             uint256 offset = r.seatDrawCount;
             bytes32 newSeed = keccak256(abi.encode(r.seatSeed, r.widenCount));
             r.seatSeed = newSeed;
             r.nSeats += add;
             _drawSeats(r, add, newSeed, offset);
             c.phase = Phase.COMMIT;
-            c.phaseDeadline = block.timestamp + params.commitTimeout;
+            c.phaseDeadline = block.timestamp + _cp(c).commitTimeout;
             emit Widened(c.id, c.depth, r.widenCount, r.nSeats);
             emit CommitOpened(c.id, c.depth, c.phaseDeadline);
             return;
@@ -1243,7 +1277,7 @@ contract Moderation is ReentrancyGuard {
 
     function _armOutcome(Case storage c, Round storage r) internal {
         c.phase = Phase.TALLY;
-        r.outcomeSnapshotBlock = block.number + params.seedLag;
+        r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
     }
 
@@ -1262,12 +1296,12 @@ contract Moderation is ReentrancyGuard {
             uint256 amt = r.committedAmt[a];
             if (amt > 0) {
                 r.committedAmt[a] = 0;
-                _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
+                _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
             }
         }
 
         uint256 pot = c.pot;
-        uint256 bounty = (pot * params.claimBountyFrac) / WAD;
+        uint256 bounty = (pot * _cp(c).claimBountyFrac) / WAD;
         c.pot = 0;
         openPotsTotal -= pot;
         _clearDedup(c);
@@ -1341,14 +1375,21 @@ contract Moderation is ReentrancyGuard {
         return v == 0 ? 0 : v - 1;
     }
 
-    function _commitTarget(uint256 depth) internal view returns (uint256) {
-        uint256 len = commitTargetByDepth.length;
-        return commitTargetByDepth[depth < len ? depth : len - 1];
+    /// @dev H-11: consensus params for a case come from its pinned ruleset.
+    function _cp(Case storage c) internal view returns (Params storage) {
+        return rulesets[c.rulesVersion].p;
     }
 
-    function _appealWindow(uint256 depth) internal view returns (uint256) {
-        uint256 len = appealWindowByDepth.length;
-        return appealWindowByDepth[depth < len ? depth : len - 1];
+    function _commitTarget(Case storage c, uint256 depth) internal view returns (uint256) {
+        uint256[] storage arr = rulesets[c.rulesVersion].commitTargets;
+        uint256 len = arr.length;
+        return arr[depth < len ? depth : len - 1];
+    }
+
+    function _appealWindow(Case storage c, uint256 depth) internal view returns (uint256) {
+        uint256[] storage arr = rulesets[c.rulesVersion].appealWindows;
+        uint256 len = arr.length;
+        return arr[depth < len ? depth : len - 1];
     }
 
     function minFee(uint256 nTopics) public view returns (uint256) {
@@ -1419,7 +1460,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     function appealFloor(uint256 caseId) external view returns (uint256) {
-        return params.bondMultiplier * cases[caseId].pot;
+        return _cp(cases[caseId]).bondMultiplier * cases[caseId].pot;
     }
 
     // --- index views (§8.3) --------------------------------------------------
@@ -1505,6 +1546,11 @@ contract Moderation is ReentrancyGuard {
         params = pp.p;
         commitTargetByDepth = pp.commitTargets;
         appealWindowByDepth = pp.appealWindows;
+        // H-11: seal a new immutable ruleset version; open cases keep their pinned
+        // version, only cases submitted after this pick up the new rules.
+        currentRulesVersion += 1;
+        rulesets[currentRulesVersion] =
+            Ruleset({p: pp.p, commitTargets: pp.commitTargets, appealWindows: pp.appealWindows});
         delete pendingParams;
         emit ParametersExecuted();
     }
@@ -1541,15 +1587,36 @@ contract Moderation is ReentrancyGuard {
         pure
     {
         if (commitTargets.length == 0 || appealWindows.length == 0) revert BadParams();
+        if (commitTargets.length > MAX_ARRAY_LEN || appealWindows.length > MAX_ARRAY_LEN) revert BadParams();
         if (p.minStake == 0 || p.riskPerSeat == 0) revert BadParams();
         if (p.minReveals == 0) revert BadParams();
-        if (p.bondMultiplier == 0) revert BadParams();
+        if (p.bondMultiplier == 0 || p.bondMultiplier > MAX_BOND_MULT) revert BadParams();
         if (p.freezeCap < WAD) revert BadParams(); // power multiplier >= 1
         if (p.trackDecay > WAD) revert BadParams(); // decay is a fraction
         if (p.claimBountyFrac + p.bonusFrac > WAD) revert BadParams(); // distributable stays >= 0
+
+        // H-11: hard protocol caps + cross-field sanity so governance cannot brick
+        // active or future cases.
+        if (p.maxDepth > MAX_RULE_DEPTH || p.maxWiden > MAX_RULE_WIDEN) revert BadParams();
+        if (p.maxTopics == 0 || p.maxTopics > MAX_RULE_TOPICS) revert BadParams();
+        if (p.seedLag == 0 || p.seedLag > MAX_SEED_LAG) revert BadParams();
+        if (p.commitTimeout == 0 || p.commitTimeout > MAX_WINDOW) revert BadParams();
+        if (p.revealWindow == 0 || p.revealWindow > MAX_WINDOW) revert BadParams();
+        if (p.activationDelay > MAX_WINDOW || p.exitCooldown > MAX_WINDOW) revert BadParams();
+        if (p.failedRevealFreeze > MAX_FREEZE || p.freezeBase == 0 || p.freezeBase > MAX_FREEZE) revert BadParams();
+        // minReveals must be reachable within the fully-widened depth-0 panel.
+        if (p.minReveals > commitTargets[0] * (1 + p.maxWiden)) revert BadParams();
+
+        uint256 totalDraws;
         for (uint256 i; i < commitTargets.length; ++i) {
-            if (commitTargets[i] == 0) revert BadParams();
+            if (commitTargets[i] == 0 || commitTargets[i] > MAX_PANEL) revert BadParams();
+            // every depth up to maxDepth can widen maxWiden times
+            if (i <= p.maxDepth) totalDraws += (1 + p.maxWiden) * commitTargets[i];
         }
+        for (uint256 i; i < appealWindows.length; ++i) {
+            if (appealWindows[i] == 0 || appealWindows[i] > MAX_WINDOW) revert BadParams();
+        }
+        if (totalDraws > MAX_TOTAL_DRAWS) revert BadParams();
     }
 
     function pendingParamsEta() external view returns (uint256 eta, bool exists) {
@@ -1633,6 +1700,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     function commitTargetAt(uint256 depth) external view returns (uint256) {
-        return _commitTarget(depth);
+        uint256 len = commitTargetByDepth.length;
+        return commitTargetByDepth[depth < len ? depth : len - 1];
     }
 }

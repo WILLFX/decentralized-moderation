@@ -15,6 +15,51 @@ contract GovernanceTest is ModerationTestBase {
         mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
     }
 
+    // --- H-11: immutable protocol caps ---------------------------------------
+
+    function test_param_caps_reject_out_of_bounds() public {
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        Moderation.Params memory p = mod.getParams();
+        p.maxDepth = 100; // > MAX_RULE_DEPTH
+        vm.expectRevert(Moderation.BadParams.selector);
+        mod.proposeParameters(p, cts, aws);
+
+        p = mod.getParams();
+        p.commitTimeout = 60 days; // > MAX_WINDOW
+        vm.expectRevert(Moderation.BadParams.selector);
+        mod.proposeParameters(p, cts, aws);
+
+        p = mod.getParams();
+        p.maxWiden = 50; // total reachable draws would blow past MAX_TOTAL_DRAWS
+        vm.expectRevert(Moderation.BadParams.selector);
+        mod.proposeParameters(p, cts, aws);
+    }
+
+    // H-11: a pending exit's cooldown end and min-stake decision are snapshotted at
+    // request time, so governance cannot extend or invalidate it retroactively.
+    function test_exit_terms_snapshotted_against_governance() public {
+        // mods[0] already staked in setUp; request a full exit.
+        (uint256 free,,,,,,,,) = mod.moderatorInfo(mods[0]);
+        vm.prank(mods[0]);
+        mod.requestExit(free);
+
+        // Governance triples the exit cooldown mid-wait.
+        Moderation.Params memory p = mod.getParams();
+        p.exitCooldown = 21 days;
+        mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
+        vm.warp(block.timestamp + TIMELOCK);
+        mod.executeParameters();
+
+        // The original 7-day cooldown still governs this exit.
+        vm.warp(block.timestamp + 1); // now well past the original claimable time
+        uint256 before = bzz.balanceOf(mods[0]);
+        vm.prank(mods[0]);
+        mod.withdraw();
+        assertEq(bzz.balanceOf(mods[0]) - before, free, "exit honored on its snapshotted terms");
+    }
+
     // --- access control ------------------------------------------------------
 
     function test_only_governance_can_propose() public {

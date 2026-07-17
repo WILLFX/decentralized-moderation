@@ -170,7 +170,10 @@ contract AppealsTest is ModerationTestBase {
 
     // --- F3: floor underflow guarded across a mid-window governance change ---
 
-    function test_appeal_floor_underflow_guarded_after_governance() public {
+    // H-11: an open case's appeal floor is pinned to the ruleset live at submit,
+    // so a mid-window governance change to bondMultiplier does not move it (and the
+    // F3 floor<=bond underflow it used to cause can no longer arise).
+    function test_appeal_floor_pinned_across_governance_change() public {
         // Queue lowering bondMultiplier 2 -> 1 (timelock 7 days).
         Moderation.Params memory p = mod.getParams();
         p.bondMultiplier = 1;
@@ -182,29 +185,33 @@ contract AppealsTest is ModerationTestBase {
         // Open the case ~3.5 days before eta so the 4-day appeal window is still
         // open when the timelock fires.
         vm.warp(block.timestamp + 3 days + 12 hours);
-        uint256 caseId = _submit(mods[0]);
+        uint256 caseId = _submit(mods[0]); // pins ruleset v0 (bondMultiplier 2)
         _realizeSeats(caseId);
         _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
 
         (,,,, uint256 pot,,) = mod.caseInfo(caseId);
-        uint256 partialBond = pot + pot / 2; // 1.5x pot: below the current 2x floor
+        assertEq(mod.appealFloor(caseId), 2 * pot, "pinned 2x floor");
+
+        uint256 partialBond = pot + pot / 2; // 1.5x pot: below the pinned 2x floor
         address c = makeAddr("c");
         _fund(c, partialBond);
         vm.prank(c);
         mod.contributeAppealBond(caseId, partialBond);
-        (uint256 bond,,) = mod.bondInfo(caseId, 0);
-        assertEq(bond, partialBond, "partial bond aggregated, window still open");
 
-        // Governance executes mid-window; the floor drops to 1x pot < the bond.
+        // Governance executes mid-window: the LIVE multiplier drops to 1.
         vm.warp(eta);
         mod.executeParameters();
-        assertEq(mod.getParams().bondMultiplier, 1);
+        assertEq(mod.getParams().bondMultiplier, 1, "live param changed");
 
-        // A further contribution reverts cleanly (not an arithmetic panic).
+        // The open case is unaffected: its floor is still the pinned 2x, so the
+        // 1.5x bond has NOT met the floor and more can still be contributed — no
+        // underflow, no premature AppealAlreadyFull.
+        assertEq(mod.appealFloor(caseId), 2 * pot, "open case keeps its pinned 2x floor");
         _fund(c, pot);
         vm.prank(c);
-        vm.expectRevert(Moderation.AppealAlreadyFull.selector);
-        mod.contributeAppealBond(caseId, 1);
+        mod.contributeAppealBond(caseId, pot / 2); // completes to exactly 2x -> floors
+        (,,, uint256 depth,,,) = mod.caseInfo(caseId);
+        assertEq(depth, 1, "appeal floored at the pinned 2x and opened depth 1");
     }
 
     // --- appeals close at MAX_DEPTH ------------------------------------------

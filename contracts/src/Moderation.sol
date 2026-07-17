@@ -380,7 +380,10 @@ contract Moderation is ReentrancyGuard {
     uint256 public openPotsTotal; // Σ live case pots (§9.1)
     uint256 public totalPendingBond; // Σ appeal contributions collected but not yet flooring a round
     uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull (per (case,depth), pulled via claimAppealPayout)
-    mapping(bytes32 => bool) public submissionExists; // dedup: H(content, meta, topicKey) (P3, §9.7)
+    // Dedup (P3, §9.7): H(content, meta, topicKey) -> owning caseId + 1 (0 = free).
+    // H-02: keyed by OWNER, not a bare bool, so an obsolete case (e.g. a stale
+    // removal) can never clear a reservation a newer resubmission now holds.
+    mapping(bytes32 => uint256) internal dedupOwnerPlusOne;
 
     // --- index (§8, README 3.8) ----------------------------------------------
 
@@ -479,10 +482,7 @@ contract Moderation is ReentrancyGuard {
         if (fee < minFee(n)) revert FeeTooLow();
 
         for (uint256 i; i < n; ++i) {
-            if (submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])]) revert DuplicateSubmission();
-        }
-        for (uint256 i; i < n; ++i) {
-            submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])] = true;
+            if (dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] != 0) revert DuplicateSubmission();
         }
 
         address(token).safeTransferFrom(msg.sender, address(this), fee);
@@ -496,6 +496,7 @@ contract Moderation is ReentrancyGuard {
         c.metaHash = metaHash;
         for (uint256 i; i < n; ++i) {
             c.topicKeys.push(topicKeys[i]);
+            dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] = caseId + 1; // this case owns the reservation
         }
         c.guidelinesVersion = guidelinesVersion; // pinned at submit; never changes (§9.6)
         c.pot = fee;
@@ -1195,12 +1196,27 @@ contract Moderation is ReentrancyGuard {
         if (c.kind != Kind.SUBMISSION) return;
         uint256 len = c.topicKeys.length;
         for (uint256 i; i < len; ++i) {
-            delete submissionExists[_dedupKey(c.contentHash, c.metaHash, c.topicKeys[i])];
+            bytes32 k = _dedupKey(c.contentHash, c.metaHash, c.topicKeys[i]);
+            // H-02: only the current owner may release its reservation, so a stale
+            // case cannot wipe a key a newer resubmission now holds.
+            if (dedupOwnerPlusOne[k] == c.id + 1) delete dedupOwnerPlusOne[k];
         }
     }
 
     function _dedupKey(bytes32 contentHash, bytes32 metaHash, bytes32 topicKey) internal pure returns (bytes32) {
         return keccak256(abi.encode(contentHash, metaHash, topicKey));
+    }
+
+    /// @notice True iff the (content, meta, topic) triple is currently reserved.
+    function submissionExists(bytes32 dedupKey) external view returns (bool) {
+        return dedupOwnerPlusOne[dedupKey] != 0;
+    }
+
+    /// @notice The caseId currently holding a dedup reservation (reverts-free: 0
+    ///         means unreserved; otherwise the owning caseId).
+    function dedupOwner(bytes32 dedupKey) external view returns (uint256) {
+        uint256 v = dedupOwnerPlusOne[dedupKey];
+        return v == 0 ? 0 : v - 1;
     }
 
     function _commitTarget(uint256 depth) internal view returns (uint256) {

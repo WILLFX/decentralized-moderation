@@ -16,6 +16,54 @@ contract IndexTest is ModerationTestBase {
         caseId = mod.submitRemoval(targetCaseId, fee);
     }
 
+    function _settleRemovalApprove(uint256 remId) internal {
+        _realizeSeats(remId);
+        _runRoundToAppealWindow(remId, 0, Moderation.Vote.Approve);
+        _finalize(remId);
+        mod.claim(remId);
+    }
+
+    // H-02: an obsolete removal must never clear a dedup reservation that a newer
+    // resubmission now owns. Dedup is keyed by owner (caseId+1), so only the
+    // current holder can release it.
+    function test_obsolete_removal_cannot_wipe_newer_reservation() public {
+        bytes32 key = keccak256(abi.encode(CONTENT, META, TK));
+
+        uint256 t = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(t);
+        assertEq(mod.dedupOwner(key), t, "T owns the reservation");
+
+        // Two removals opened against T while it is still indexed.
+        uint256 rem1 = _submitRemoval(mods[1], t);
+        uint256 rem2 = _submitRemoval(mods[2], t);
+
+        // First removal frees the reservation.
+        _settleRemovalApprove(rem1);
+        assertEq(mod.entryCount(TK), 0);
+        assertEq(mod.dedupOwner(key), 0, "reservation freed after removal");
+
+        // Same content resubmitted: N now owns the reservation and is indexed.
+        uint256 nCase = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(nCase);
+        assertEq(mod.dedupOwner(key), nCase, "N now owns the reservation");
+        assertEq(mod.entryCount(TK), 1);
+
+        // The obsolete removal (targets T) settles: it must not touch N's
+        // reservation or entry.
+        _settleRemovalApprove(rem2);
+        assertEq(mod.dedupOwner(key), nCase, "obsolete removal leaves N's reservation intact");
+        assertEq(mod.entryCount(TK), 1, "N's entry untouched");
+
+        // Proof the reservation is really held: a duplicate is rejected.
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[3], fee);
+        vm.prank(mods[3]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[3]);
+        vm.expectRevert(Moderation.DuplicateSubmission.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
+    }
+
     // --- write happens only at settlement ------------------------------------
 
     function test_entry_written_only_at_settlement() public {

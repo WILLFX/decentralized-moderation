@@ -30,21 +30,21 @@ contract InvariantTest is StackDeployer {
         for (uint256 i = 0; i < 6; i++) {
             actors.push(makeAddr(string(abi.encodePacked("actor", i))));
         }
-        handler = new ModerationHandler(mod, bzz, actors);
+        handler = new ModerationHandler(mod, stakeReg, bzz, actors);
 
         // Pre-stake and activate everyone so cases can run from the start.
         uint256 seed = 500 * XBZZ;
         for (uint256 i = 0; i < actors.length; i++) {
             bzz.mint(actors[i], 100_000 * XBZZ);
             vm.prank(actors[i]);
-            bzz.approve(address(mod), type(uint256).max);
+            bzz.approve(address(stakeReg), type(uint256).max);
             vm.prank(actors[i]);
-            mod.stake(seed);
+            stakeReg.stake(seed);
             handler.setNetDeposited(actors[i], seed);
         }
         vm.warp(block.timestamp + 7 days);
         for (uint256 i = 0; i < actors.length; i++) {
-            mod.activate(actors[i]);
+            stakeReg.activate(actors[i]);
         }
 
         // Fuzz only the handler's action functions.
@@ -59,14 +59,13 @@ contract InvariantTest is StackDeployer {
         targetContract(address(handler));
     }
 
-    /// §9.1 + §9.11: the token balance equals every accounted bucket exactly.
+    /// §9.1 + §9.11, now spanning two contracts (M2.5 port): the logic contract
+    /// holds exactly the pot money it is accounting for, and the registry holds
+    /// exactly the staked buckets. Neither contract can quietly absorb the
+    /// other's tokens — a reward credited without its transfer, or a transfer
+    /// without its credit, breaks one side of the pair.
     function invariant_conservation() public view {
-        uint256 buckets = mod.totalFreeStake() + mod.totalCommittedStake() + mod.totalFrozenStake();
-        assertEq(
-            bzz.balanceOf(address(mod)),
-            buckets + mod.openPotsTotal() + mod.totalPendingBond() + mod.totalPendingPayout(),
-            "conservation"
-        );
+        _assertStackConservation(mod, stakeReg, bzz);
     }
 
     /// §9.3: aggregate bucket totals equal the sum of per-actor buckets, and
@@ -77,7 +76,7 @@ contract InvariantTest is StackDeployer {
         uint256 sfz;
         for (uint256 i = 0; i < actors.length; i++) {
             (uint256 free, uint256 pending, uint256 committed, uint256 frozen,,, uint256 exitAmount,,) =
-                mod.moderatorInfo(actors[i]);
+                stakeReg.moderatorInfo(actors[i]);
             assertLe(pending, free, "pending <= free");
             assertLe(exitAmount, free, "exit <= free");
             sf += free;
@@ -86,9 +85,9 @@ contract InvariantTest is StackDeployer {
         }
         // Challengers (non-actor appellants) never hold stake, so actor sums are
         // the whole staked supply.
-        assertEq(mod.totalFreeStake(), sf, "free total");
-        assertEq(mod.totalCommittedStake(), sc, "committed total");
-        assertEq(mod.totalFrozenStake(), sfz, "frozen total");
+        assertEq(stakeReg.totalFreeStake(), sf, "free total");
+        assertEq(stakeReg.totalCommittedStake(), sc, "committed total");
+        assertEq(stakeReg.totalFrozenStake(), sfz, "frozen total");
     }
 
     /// §9.2: no actor's stake principal is ever transferred away — their total
@@ -97,7 +96,7 @@ contract InvariantTest is StackDeployer {
     function invariant_no_principal_lost() public view {
         for (uint256 i = 0; i < actors.length; i++) {
             assertGe(
-                mod.totalStakeOf(actors[i]),
+                stakeReg.totalStakeOf(actors[i]),
                 handler.netDeposited(actors[i]),
                 "principal never leaves except via own withdraw"
             );

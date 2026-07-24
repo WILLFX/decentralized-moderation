@@ -90,7 +90,7 @@ contract DifferentialTest is StackDeployer {
         uint256[] memory rc = _ua(i, "seat_rc");
         for (uint256 k = 0; k < voter.length; k++) {
             mod.__injectSeat(caseId, rnd[k], _voter(voter[k]), seats[k], camt[k], uint8(rc[k]));
-            if (camt[k] > 0) bzz.mint(address(mod), camt[k]); // back committed stake
+            if (camt[k] > 0) bzz.mint(address(stakeReg), camt[k]); // committed stake is held by the registry
         }
     }
 
@@ -114,13 +114,13 @@ contract DifferentialTest is StackDeployer {
         uint256[] memory fIdx = _ua(i, "exp_free_idx");
         uint256[] memory fAmt = _ua(i, "exp_free_amt");
         for (uint256 k = 0; k < fIdx.length; k++) {
-            (uint256 free,,,,,,,,) = mod.moderatorInfo(_voter(fIdx[k]));
+            (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(_voter(fIdx[k]));
             assertEq(free, fAmt[k], _msg(i, "free"));
         }
         uint256[] memory zIdx = _ua(i, "exp_frozen_idx");
         uint256[] memory zAmt = _ua(i, "exp_frozen_amt");
         for (uint256 k = 0; k < zIdx.length; k++) {
-            (,,, uint256 frozen,,,,,) = mod.moderatorInfo(_voter(zIdx[k]));
+            (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(_voter(zIdx[k]));
             assertEq(frozen, zAmt[k], _msg(i, "frozen"));
         }
         uint256[] memory pIdx = _ua(i, "exp_payout_idx");
@@ -131,12 +131,13 @@ contract DifferentialTest is StackDeployer {
             assertEq(mod.appealPayoutOwed(caseId, _contrib(pIdx[k])), pAmt[k], _msg(i, "payout"));
         }
 
-        uint256 buckets = mod.totalFreeStake() + mod.totalCommittedStake() + mod.totalFrozenStake();
+        // M2.5 port: conservation is a PAIR of identities now. Both must hold.
         assertEq(
             bzz.balanceOf(address(mod)),
-            buckets + mod.openPotsTotal() + mod.totalPendingBond() + mod.totalPendingPayout(),
-            _msg(i, "conservation")
+            mod.openPotsTotal() + mod.totalPendingBond() + mod.totalPendingPayout() + mod.totalSettling(),
+            _msg(i, "conservation (logic)")
         );
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), _msg(i, "conservation (registry)"));
     }
 
     function _msg(uint256 i, string memory what) internal pure returns (string memory) {

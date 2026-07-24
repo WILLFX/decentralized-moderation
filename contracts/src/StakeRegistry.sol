@@ -83,7 +83,12 @@ contract StakeRegistry {
     uint256 public riskPerSeat;
 
     /// H-05: bumped whenever draw-eligible weight is ADDED, so the logic contract
-    /// can detect an eligibility change between arming a seed and drawing on it.
+    /// can detect an eligibility change between arming a seed and drawing on it
+    /// and re-arm to fresh entropy. Every path that grows the drawable set must
+    /// bump it — `activate` (pending becomes drawable), `thaw` (a frozen
+    /// moderator re-enters), and `setDutyUnits` (capacity is pledged) — or an
+    /// attacker can wait for a seed's blockhash to become public and only then
+    /// reshape the tree in its favour (adaptive-activation grinding).
     uint256 public eligibilityAddVersion;
 
     // --- authorization -------------------------------------------------------
@@ -203,6 +208,7 @@ contract StakeRegistry {
         if (block.timestamp < m.activatesAt) revert NotYetActivatable();
         m.pending = 0;
         _syncTree(moderator, m);
+        eligibilityAddVersion++; // H-05: eligible weight grew
         emit Activated(moderator, _eligibleWeight(m));
     }
 
@@ -272,6 +278,7 @@ contract StakeRegistry {
         m.free += amount;
         totalFreeStake += amount;
         _syncTree(moderator, m);
+        eligibilityAddVersion++; // H-05: eligible weight grew
         emit Thawed(moderator, amount);
     }
 

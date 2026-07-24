@@ -8,6 +8,7 @@ import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
+import {StakeRegistryHarness} from "./harnesses/StakeRegistryHarness.sol";
 
 /// Gas-bound and failure-mode suite (spec §10, work order M2-9). The load-bearing
 /// assertion is that worst-case settlement fits in ONE transaction under the 8M
@@ -21,7 +22,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// APPROVE, and a winning appeal with contributors at every non-final depth.
     function test_worst_case_claim_under_hard_ceiling() public {
         MockBZZ b = new MockBZZ();
-        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
 
         // pot includes the base fee plus the three winning appeal bonds
         // (2 * 5 xBZZ each) that joined it on appeal.
@@ -45,14 +46,14 @@ contract GasBoundsTest is ModerationTestBase {
                 // + activate so the measurement reflects update cost, not insert.
                 b.mint(voter, 100 * XBZZ);
                 vm.prank(voter);
-                b.approve(address(m), type(uint256).max);
+                b.approve(address(sr), type(uint256).max);
                 vm.prank(voter);
-                m.stake(20 * XBZZ);
+                sr.stake(20 * XBZZ);
 
                 uint256 camt = 10 * XBZZ;
                 m.__setTrack(voter, (v % 50) * 1e18); // varied track (set before inject: reveal-time snapshot)
                 m.__injectSeat(caseId, d, voter, 1, camt, 1); // 1 seat, Approve (coherent)
-                b.mint(address(m), camt);
+                b.mint(address(sr), camt);
             }
             // Non-final rounds carry a winning appeal (appealFor == Approve) with
             // two contributors, so settlement runs refunds + bonuses too.
@@ -67,7 +68,7 @@ contract GasBoundsTest is ModerationTestBase {
         // Activate all 86 voters so they hold real tree weight (update, not insert).
         vm.warp(block.timestamp + 7 days);
         for (uint256 j = 0; j < 86; j++) {
-            m.activate(address(uint160(uint256(keccak256(abi.encode("wv", j))))));
+            sr.activate(address(uint160(uint256(keccak256(abi.encode("wv", j))))));
         }
 
         uint256 g0 = gasleft();
@@ -90,7 +91,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// except the contributor count is held identical, so two cases built with
     /// different `nContrib` isolate exactly the settlement cost of the
     /// contributor set. Returns the caseId.
-    function _injectWinningAppeal(ModerationHarness m, MockBZZ b, uint256 nContrib, uint256 totalBond)
+    function _injectWinningAppeal(ModerationHarness m, StakeRegistryHarness sr, MockBZZ b, uint256 nContrib, uint256 totalBond)
         internal
         returns (uint256 caseId)
     {
@@ -104,12 +105,12 @@ contract GasBoundsTest is ModerationTestBase {
         address voter = address(uint160(uint256(keccak256(abi.encode("c01v", nContrib)))));
         b.mint(voter, 100 * XBZZ);
         vm.prank(voter);
-        b.approve(address(m), type(uint256).max);
+        b.approve(address(sr), type(uint256).max);
         vm.prank(voter);
-        m.stake(20 * XBZZ);
+        sr.stake(20 * XBZZ);
         uint256 camt = 10 * XBZZ;
         m.__injectSeat(caseId, 0, voter, 1, camt, 1); // Approve == final
-        b.mint(address(m), camt);
+        b.mint(address(sr), camt);
 
         // winning appeal on depth 0 (appealFor == final outcome)
         m.__injectBond(caseId, 0, Moderation.Outcome.Approve, true);
@@ -131,15 +132,15 @@ contract GasBoundsTest is ModerationTestBase {
         uint256 totalBond = 900 * XBZZ;
 
         MockBZZ bFew = new MockBZZ();
-        (ModerationHarness mFew, StakeRegistry srFew,) = _deployStack(bFew);
-        uint256 cFew = _injectWinningAppeal(mFew, bFew, 2, totalBond);
+        (ModerationHarness mFew, StakeRegistryHarness srFew,) = _deployStack(bFew);
+        uint256 cFew = _injectWinningAppeal(mFew, srFew, bFew, 2, totalBond);
         uint256 g0 = gasleft();
         mFew.claim(cFew);
         uint256 gasFew = g0 - gasleft();
 
         MockBZZ bMany = new MockBZZ();
-        (ModerationHarness mMany, StakeRegistry srMany,) = _deployStack(bMany);
-        uint256 cMany = _injectWinningAppeal(mMany, bMany, 2000, totalBond);
+        (ModerationHarness mMany, StakeRegistryHarness srMany,) = _deployStack(bMany);
+        uint256 cMany = _injectWinningAppeal(mMany, srMany, bMany, 2000, totalBond);
         g0 = gasleft();
         mMany.claim(cMany);
         uint256 gasMany = g0 - gasleft();
@@ -162,8 +163,8 @@ contract GasBoundsTest is ModerationTestBase {
         uint256 nContrib = 47; // prime count -> guarantees pro-rata dust
         uint256 totalBond = 613 * XBZZ + 4242; // odd total -> dust
         MockBZZ b = new MockBZZ();
-        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
-        uint256 caseId = _injectWinningAppeal(m, b, nContrib, totalBond);
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+        uint256 caseId = _injectWinningAppeal(m, sr, b, nContrib, totalBond);
 
         m.claim(caseId);
 
@@ -205,7 +206,10 @@ contract GasBoundsTest is ModerationTestBase {
     /// (frozen at settlement), a handful coherent, winning appeals with
     /// contributors at every non-final depth, and 5 topics. This is the case the
     /// M2 "86-voter" gas test omitted.
-    function _buildMaximalCase(ModerationHarness m, MockBZZ b) internal returns (uint256 caseId, uint256 nSeats) {
+    function _buildMaximalCase(ModerationHarness m, StakeRegistryHarness sr, MockBZZ b)
+        internal
+        returns (uint256 caseId, uint256 nSeats)
+    {
         uint256 pot = 100000 * XBZZ;
         caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, pot);
         b.mint(address(m), pot);
@@ -224,7 +228,7 @@ contract GasBoundsTest is ModerationTestBase {
                 // and failed to reveal (frozen) — the adversarial widen pattern.
                 uint8 rc = (v % 8 == 0) ? 1 : 0;
                 m.__injectSeat(caseId, d, voter, 1, camt, rc);
-                b.mint(address(m), camt);
+                b.mint(address(sr), camt);
                 v++;
             }
             if (d < 3) {
@@ -238,8 +242,8 @@ contract GasBoundsTest is ModerationTestBase {
 
     function test_maximal_case_settles_in_bounded_batches() public {
         MockBZZ b = new MockBZZ();
-        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
-        (uint256 caseId, uint256 nSeats) = _buildMaximalCase(m, b);
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+        (uint256 caseId, uint256 nSeats) = _buildMaximalCase(m, sr, b);
         assertEq(nSeats, 344, "reachable worst case is 344 seats, not 86");
 
         // Settle in bounded batches; every batch must fit well under the ceiling.
@@ -258,12 +262,7 @@ contract GasBoundsTest is ModerationTestBase {
         assertLt(maxBatchGas, HARD_CEILING, "every settlement batch fits under the 8M ceiling");
 
         // Conservation holds exactly after full settlement (totalSettling back to 0).
-        uint256 buckets = m.totalFreeStake() + m.totalCommittedStake() + m.totalFrozenStake();
-        assertEq(
-            b.balanceOf(address(m)),
-            buckets + m.openPotsTotal() + m.totalPendingBond() + m.totalPendingPayout() + m.totalSettling(),
-            "conservation after batched settlement"
-        );
+        _assertStackConservation(m, sr, b); // conservation after batched settlement
         assertEq(m.totalSettling(), 0, "no value left in flight");
     }
 
@@ -271,8 +270,8 @@ contract GasBoundsTest is ModerationTestBase {
     /// far heavier than the old 86-voter measurement implied. Logged for contrast.
     function test_maximal_case_oneshot_gas_measurement() public {
         MockBZZ b = new MockBZZ();
-        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
-        (uint256 caseId,) = _buildMaximalCase(m, b);
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+        (uint256 caseId,) = _buildMaximalCase(m, sr, b);
         uint256 g = gasleft();
         m.claim(caseId); // unbounded
         emit log_named_uint("maximal_oneshot_claim_gas", g - gasleft());
@@ -285,7 +284,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// worst case for the old linear scan). Returns the gas the deletion used.
     function _buildAndDeleteFront(uint256 n) internal returns (uint256 used) {
         MockBZZ b = new MockBZZ();
-        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
         bytes32 topic = keccak256("bigtopic");
         for (uint256 i = 0; i < n; i++) {
             m.__pushEntry(topic, i);
@@ -367,18 +366,18 @@ contract GasBoundsTest is ModerationTestBase {
     /// depth-panel draw over 1000 activated moderators.
     function test_measure_draw_poke_1000_mods() public {
         MockBZZ b = new MockBZZ();
-        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
         for (uint256 i = 0; i < 1000; i++) {
             address a = address(uint160(uint256(keccak256(abi.encode("bigmod", i)))));
             b.mint(a, 100 * XBZZ);
             vm.prank(a);
-            b.approve(address(m), type(uint256).max);
+            b.approve(address(sr), type(uint256).max);
             vm.prank(a);
-            m.stake(20 * XBZZ);
+            sr.stake(20 * XBZZ);
         }
         vm.warp(block.timestamp + 7 days);
         for (uint256 i = 0; i < 1000; i++) {
-            m.activate(address(uint160(uint256(keccak256(abi.encode("bigmod", i))))));
+            sr.activate(address(uint160(uint256(keccak256(abi.encode("bigmod", i))))));
         }
 
         // Inject a FINALIZED-then-reopened depth-3 round? Simpler: measure a

@@ -42,6 +42,8 @@ abstract contract ModerationTestBase is StackDeployer {
         _spawnModerators(8, 3000 * XBZZ);
     }
 
+    /// Stake goes to the registry now (M2.5 port): moderators deposit, activate
+    /// and pledge duty there directly, never through the logic contract.
     function _spawnModerators(uint256 n, uint256 stakeEach) internal {
         uint256 start = mods.length;
         for (uint256 i = start; i < start + n; i++) {
@@ -49,20 +51,21 @@ abstract contract ModerationTestBase is StackDeployer {
             mods.push(m);
             bzz.mint(m, 100_000 * XBZZ);
             vm.prank(m);
-            bzz.approve(address(mod), type(uint256).max);
+            bzz.approve(address(stakeReg), type(uint256).max);
             vm.prank(m);
-            mod.stake(stakeEach);
+            stakeReg.stake(stakeEach);
         }
         vm.warp(block.timestamp + ACTIVATION_DELAY);
+        // Compute BEFORE pranking: an external call in the arg list eats the prank.
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        uint256 units = stakeEach / riskPerSeat;
         for (uint256 i = 0; i < mods.length; i++) {
-            (, uint256 pending,,,,,,,) = mod.moderatorInfo(mods[i]);
-            if (pending > 0) mod.activate(mods[i]);
-            // H-07: stake alone is no longer drawable — a moderator must PLEDGE
-            // duty capacity. Pledge generously so panels fill as before.
-            uint256 riskPerSeat = mod.getParams().riskPerSeat;
-            uint256 units = stakeEach / riskPerSeat;
+            (, uint256 pending,,,,,,,) = stakeReg.moderatorInfo(mods[i]);
+            if (pending > 0) stakeReg.activate(mods[i]);
+            // H-07: stake alone is not drawable — a moderator must PLEDGE duty
+            // capacity. Pledge generously so panels fill as before.
             vm.prank(mods[i]);
-            mod.setDutyUnits(units);
+            stakeReg.setDutyUnits(units);
         }
         vm.roll(block.number + 1);
     }
@@ -173,12 +176,9 @@ abstract contract ModerationTestBase is StackDeployer {
         _finalize(caseId);
     }
 
+    /// M2.5 port: conservation now spans two contracts — the logic contract holds
+    /// only pot money, the registry holds exactly the staked buckets.
     function _assertConservation() internal view {
-        uint256 buckets = mod.totalFreeStake() + mod.totalCommittedStake() + mod.totalFrozenStake();
-        assertEq(
-            bzz.balanceOf(address(mod)),
-            buckets + mod.openPotsTotal() + mod.totalPendingBond() + mod.totalPendingPayout(),
-            "conservation: balance == staked buckets + live pots + pending bond + pending payout"
-        );
+        _assertStackConservation(mod, stakeReg, bzz);
     }
 }

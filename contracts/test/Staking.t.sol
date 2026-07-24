@@ -33,21 +33,21 @@ contract StakingTest is StackDeployer {
     function _fund(address who, uint256 amount) internal {
         bzz.mint(who, amount);
         vm.prank(who);
-        bzz.approve(address(mod), type(uint256).max);
+        bzz.approve(address(stakeReg), type(uint256).max);
     }
 
     function _stakeActivate(address who, uint256 amount) internal {
         _fund(who, amount);
         vm.prank(who);
-        mod.stake(amount);
+        stakeReg.stake(amount);
         vm.warp(block.timestamp + ACTIVATION_DELAY);
-        mod.activate(who);
+        stakeReg.activate(who);
         // H-07: activated stake is only draw-eligible once duty capacity is
         // pledged. Pledge the full amount so these tests exercise weight changes.
         // Compute BEFORE the prank: an external call in the arg list eats it.
         uint256 units = amount / mod.getParams().riskPerSeat;
         vm.prank(who);
-        mod.setDutyUnits(units);
+        stakeReg.setDutyUnits(units);
     }
 
     // --- staking / activation ------------------------------------------------
@@ -55,8 +55,8 @@ contract StakingTest is StackDeployer {
     function test_first_stake_below_min_reverts() public {
         _fund(alice, MIN_STAKE);
         vm.prank(alice);
-        vm.expectRevert(Moderation.BelowMinStake.selector);
-        mod.stake(MIN_STAKE - 1);
+        vm.expectRevert(StakeRegistry.BelowMinStake.selector);
+        stakeReg.stake(MIN_STAKE - 1);
     }
 
     // H-07: the min-stake floor binds on CURRENT total, not a one-time flag. After
@@ -65,75 +65,75 @@ contract StakingTest is StackDeployer {
     function test_restake_below_min_after_full_exit_reverts() public {
         _fund(alice, MIN_STAKE);
         vm.prank(alice);
-        mod.stake(MIN_STAKE);
+        stakeReg.stake(MIN_STAKE);
 
         // Full exit and withdraw.
         vm.prank(alice);
-        mod.requestExit(MIN_STAKE);
+        stakeReg.requestExit(MIN_STAKE);
         vm.warp(block.timestamp + 8 days);
         vm.prank(alice);
-        mod.withdraw();
-        assertEq(mod.totalStakeOf(alice), 0, "fully exited");
+        stakeReg.withdraw();
+        assertEq(stakeReg.totalStakeOf(alice), 0, "fully exited");
 
         // Re-staking below the floor is now rejected (was allowed via the stale
         // `exists` flag).
         _fund(alice, 1);
         vm.prank(alice);
-        vm.expectRevert(Moderation.BelowMinStake.selector);
-        mod.stake(1);
+        vm.expectRevert(StakeRegistry.BelowMinStake.selector);
+        stakeReg.stake(1);
     }
 
     function test_stake_is_pending_until_activated() public {
         _fund(alice, 100 * XBZZ);
         vm.prank(alice);
-        mod.stake(100 * XBZZ);
+        stakeReg.stake(100 * XBZZ);
 
         // In the free bucket, but not draw-eligible yet.
-        assertEq(mod.totalStakeOf(alice), 100 * XBZZ);
-        assertEq(mod.eligibleWeightOf(alice), 0, "pending: not in tree");
-        assertEq(mod.totalEligibleWeight(), 0);
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ);
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "pending: not in tree");
+        assertEq(stakeReg.totalEligibleWeight(), 0);
 
         // Cannot activate before the delay.
-        vm.expectRevert(Moderation.NotYetActivatable.selector);
-        mod.activate(alice);
+        vm.expectRevert(StakeRegistry.NotYetActivatable.selector);
+        stakeReg.activate(alice);
 
         vm.warp(block.timestamp + ACTIVATION_DELAY);
-        mod.activate(alice); // permissionless
+        stakeReg.activate(alice); // permissionless
 
         // H-07: activation alone no longer makes stake drawable. Capacity must be
         // pledged first — passive stake is never drafted into duty.
-        assertEq(mod.eligibleWeightOf(alice), 0, "activated but not pledged: still not drawable");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "activated but not pledged: still not drawable");
         uint256 units = 100 * XBZZ / mod.getParams().riskPerSeat;
         vm.prank(alice);
-        mod.setDutyUnits(units);
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ, "pledged: full weight in tree");
-        assertEq(mod.totalEligibleWeight(), 100 * XBZZ);
+        stakeReg.setDutyUnits(units);
+        assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ, "pledged: full weight in tree");
+        assertEq(stakeReg.totalEligibleWeight(), 100 * XBZZ);
     }
 
     function test_topup_rearms_pending_keeps_activated_eligible() public {
         _stakeActivate(alice, 100 * XBZZ);
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ);
+        assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ);
 
         // Top up: the new stake is pending; the already-activated 100 stays eligible.
         _fund(alice, 40 * XBZZ);
         vm.prank(alice);
-        mod.stake(40 * XBZZ);
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ, "top-up does not evict activated stake");
-        assertEq(mod.totalStakeOf(alice), 140 * XBZZ);
+        stakeReg.stake(40 * XBZZ);
+        assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ, "top-up does not evict activated stake");
+        assertEq(stakeReg.totalStakeOf(alice), 140 * XBZZ);
 
         // Just-in-time stake cannot be activated before its own delay.
-        vm.expectRevert(Moderation.NotYetActivatable.selector);
-        mod.activate(alice);
+        vm.expectRevert(StakeRegistry.NotYetActivatable.selector);
+        stakeReg.activate(alice);
 
         vm.warp(block.timestamp + ACTIVATION_DELAY);
-        mod.activate(alice);
+        stakeReg.activate(alice);
         // Weight stays capped by the pledge until capacity is raised to match
         // (H-07): duty is opt-in at every size, not just at first stake.
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ, "still capped by the original pledge");
+        assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ, "still capped by the original pledge");
         uint256 units = 140 * XBZZ / mod.getParams().riskPerSeat;
         vm.prank(alice);
-        mod.setDutyUnits(units);
-        assertEq(mod.eligibleWeightOf(alice), 140 * XBZZ);
+        stakeReg.setDutyUnits(units);
+        assertEq(stakeReg.eligibleWeightOf(alice), 140 * XBZZ);
     }
 
     // H-07: duty is opt-in. Stake that never pledged capacity is never drawable,
@@ -142,12 +142,12 @@ contract StakingTest is StackDeployer {
     function test_unpledged_stake_is_never_drawable() public {
         _fund(alice, 100 * XBZZ);
         vm.prank(alice);
-        mod.stake(100 * XBZZ);
+        stakeReg.stake(100 * XBZZ);
         vm.warp(block.timestamp + ACTIVATION_DELAY);
-        mod.activate(alice);
+        stakeReg.activate(alice);
 
-        assertEq(mod.eligibleWeightOf(alice), 0, "activated but unpledged -> not in the draw pool");
-        assertEq(mod.totalEligibleWeight(), 0, "nothing drawable network-wide");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "activated but unpledged -> not in the draw pool");
+        assertEq(stakeReg.totalEligibleWeight(), 0, "nothing drawable network-wide");
     }
 
     // H-07: selection weight is capped by pledged capacity, so a moderator can
@@ -155,19 +155,19 @@ contract StakingTest is StackDeployer {
     function test_selection_weight_capped_by_pledged_capacity() public {
         _fund(alice, 100 * XBZZ);
         vm.prank(alice);
-        mod.stake(100 * XBZZ);
+        stakeReg.stake(100 * XBZZ);
         vm.warp(block.timestamp + ACTIVATION_DELAY);
-        mod.activate(alice);
+        stakeReg.activate(alice);
 
         uint256 riskPerSeat = mod.getParams().riskPerSeat;
         vm.prank(alice);
-        mod.setDutyUnits(3); // pledge 3 seats out of 10 affordable
-        assertEq(mod.eligibleWeightOf(alice), 3 * riskPerSeat, "weight == pledged capacity, not full stake");
+        stakeReg.setDutyUnits(3); // pledge 3 seats out of 10 affordable
+        assertEq(stakeReg.eligibleWeightOf(alice), 3 * riskPerSeat, "weight == pledged capacity, not full stake");
 
         // Cannot pledge more than the stake can back.
         vm.prank(alice);
-        vm.expectRevert(Moderation.InsufficientEligibleFree.selector);
-        mod.setDutyUnits(11);
+        vm.expectRevert(StakeRegistry.InsufficientEligibleFree.selector);
+        stakeReg.setDutyUnits(11);
     }
 
     // --- exit / withdraw -----------------------------------------------------
@@ -175,39 +175,39 @@ contract StakingTest is StackDeployer {
     function test_requestExit_excludes_from_draws_then_withdraw() public {
         _stakeActivate(alice, 100 * XBZZ);
         vm.prank(alice);
-        mod.requestExit(30 * XBZZ);
+        stakeReg.requestExit(30 * XBZZ);
 
         // Excluded from draws immediately, but still in the free bucket.
-        assertEq(mod.eligibleWeightOf(alice), 70 * XBZZ, "exiting stake leaves the tree");
-        assertEq(mod.totalStakeOf(alice), 100 * XBZZ, "still owned during cooldown");
+        assertEq(stakeReg.eligibleWeightOf(alice), 70 * XBZZ, "exiting stake leaves the tree");
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "still owned during cooldown");
 
-        vm.expectRevert(Moderation.CooldownNotElapsed.selector);
+        vm.expectRevert(StakeRegistry.CooldownNotElapsed.selector);
         vm.prank(alice);
-        mod.withdraw();
+        stakeReg.withdraw();
 
         vm.warp(block.timestamp + EXIT_COOLDOWN);
         uint256 balBefore = bzz.balanceOf(alice);
         vm.prank(alice);
-        mod.withdraw();
+        stakeReg.withdraw();
         assertEq(bzz.balanceOf(alice) - balBefore, 30 * XBZZ);
-        assertEq(mod.totalStakeOf(alice), 70 * XBZZ);
-        assertEq(mod.eligibleWeightOf(alice), 70 * XBZZ);
+        assertEq(stakeReg.totalStakeOf(alice), 70 * XBZZ);
+        assertEq(stakeReg.eligibleWeightOf(alice), 70 * XBZZ);
     }
 
     function test_double_exit_reverts() public {
         _stakeActivate(alice, 100 * XBZZ);
         vm.prank(alice);
-        mod.requestExit(10 * XBZZ);
+        stakeReg.requestExit(10 * XBZZ);
         vm.prank(alice);
-        vm.expectRevert(Moderation.ExitPending.selector);
-        mod.requestExit(10 * XBZZ);
+        vm.expectRevert(StakeRegistry.ExitPending.selector);
+        stakeReg.requestExit(10 * XBZZ);
     }
 
     function test_exit_over_free_reverts() public {
         _stakeActivate(alice, 100 * XBZZ);
         vm.prank(alice);
-        vm.expectRevert(Moderation.InsufficientFree.selector);
-        mod.requestExit(101 * XBZZ);
+        vm.expectRevert(StakeRegistry.InsufficientFree.selector);
+        stakeReg.requestExit(101 * XBZZ);
     }
 
     // --- MIN_STAKE floor (§3) ------------------------------------------------
@@ -216,29 +216,29 @@ contract StakingTest is StackDeployer {
         _stakeActivate(alice, 15 * XBZZ); // total 15
         // Exiting 10 leaves 5 < MIN_STAKE(10): not a full exit, so blocked.
         vm.prank(alice);
-        vm.expectRevert(Moderation.MinStakeFloor.selector);
-        mod.requestExit(10 * XBZZ);
+        vm.expectRevert(StakeRegistry.MinStakeFloor.selector);
+        stakeReg.requestExit(10 * XBZZ);
     }
 
     function test_full_exit_below_floor_allowed() public {
         _stakeActivate(alice, 15 * XBZZ);
         // Exiting all 15 is a full exit (remaining 0): allowed even though < floor.
         vm.prank(alice);
-        mod.requestExit(15 * XBZZ);
+        stakeReg.requestExit(15 * XBZZ);
         vm.warp(block.timestamp + EXIT_COOLDOWN);
         vm.prank(alice);
-        mod.withdraw();
-        assertEq(mod.totalStakeOf(alice), 0);
+        stakeReg.withdraw();
+        assertEq(stakeReg.totalStakeOf(alice), 0);
     }
 
     function test_partial_exit_leaving_exactly_floor_allowed() public {
         _stakeActivate(alice, 25 * XBZZ);
         vm.prank(alice);
-        mod.requestExit(15 * XBZZ); // leaves 10 == MIN_STAKE
+        stakeReg.requestExit(15 * XBZZ); // leaves 10 == MIN_STAKE
         vm.warp(block.timestamp + EXIT_COOLDOWN);
         vm.prank(alice);
-        mod.withdraw();
-        assertEq(mod.totalStakeOf(alice), 10 * XBZZ);
+        stakeReg.withdraw();
+        assertEq(stakeReg.totalStakeOf(alice), 10 * XBZZ);
     }
 
     // --- §9.5 withdrawals never pausable -------------------------------------
@@ -250,41 +250,41 @@ contract StakingTest is StackDeployer {
     function test_withdraw_has_no_admin_gate() public {
         _stakeActivate(alice, 50 * XBZZ);
         vm.prank(alice);
-        mod.requestExit(50 * XBZZ);
+        stakeReg.requestExit(50 * XBZZ);
         vm.warp(block.timestamp + EXIT_COOLDOWN);
 
         // No account — deployer, a would-be admin, anyone — can block it.
         vm.prank(alice);
-        mod.withdraw();
-        assertEq(mod.totalStakeOf(alice), 0);
+        stakeReg.withdraw();
+        assertEq(stakeReg.totalStakeOf(alice), 0);
     }
 
     // --- freeze exclusion + thaw (injected frozen state) ---------------------
 
     function test_frozen_excluded_from_draws_until_thaw() public {
         _stakeActivate(alice, 100 * XBZZ);
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ);
+        assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ);
 
         // Commit 40 (free->committed), then a settlement freezes that slice.
         mod.__commit(alice, 40 * XBZZ);
-        assertEq(mod.eligibleWeightOf(alice), 60 * XBZZ, "committed stake leaves the tree");
+        assertEq(stakeReg.eligibleWeightOf(alice), 60 * XBZZ, "committed stake leaves the tree");
 
         uint256 until = block.timestamp + 7 days;
         mod.__freeze(alice, 40 * XBZZ, until); // committed 40 -> frozen
 
         // D6: the WHOLE moderator is excluded while frozen, not just the slice.
-        assertEq(mod.eligibleWeightOf(alice), 0, "fully excluded while frozen");
-        assertEq(mod.totalStakeOf(alice), 100 * XBZZ, "no stake lost to freeze");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "fully excluded while frozen");
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "no stake lost to freeze");
 
         // Cannot thaw early.
-        vm.expectRevert(Moderation.NotFrozen.selector);
-        mod.thaw(alice);
+        vm.expectRevert(StakeRegistry.NotFrozen.selector);
+        stakeReg.thaw(alice);
 
         vm.warp(until);
-        mod.thaw(alice); // permissionless
+        stakeReg.thaw(alice); // permissionless
         // Frozen returns to free; moderator re-enters the tree at full weight.
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ);
-        assertEq(mod.totalStakeOf(alice), 100 * XBZZ);
+        assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ);
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ);
     }
 
     // --- partition + conservation fuzz (§9.1, §9.3) --------------------------
@@ -298,7 +298,7 @@ contract StakingTest is StackDeployer {
         for (uint256 i = 0; i < 2; i++) {
             bzz.mint(actors[i], 1_000_000 * XBZZ);
             vm.prank(actors[i]);
-            bzz.approve(address(mod), type(uint256).max);
+            bzz.approve(address(stakeReg), type(uint256).max);
         }
 
         for (uint256 i = 0; i < 16; i++) {
@@ -308,34 +308,34 @@ contract StakingTest is StackDeployer {
 
             if (op == 0) {
                 // stake (respect first-stake floor)
-                if (mod.totalStakeOf(a) == 0 && amt < MIN_STAKE) amt = MIN_STAKE;
+                if (stakeReg.totalStakeOf(a) == 0 && amt < MIN_STAKE) amt = MIN_STAKE;
                 vm.prank(a);
-                mod.stake(amt);
+                stakeReg.stake(amt);
             } else if (op == 1) {
-                (,uint256 pending,,,,uint256 activatesAt,,,) = mod.moderatorInfo(a);
-                if (pending > 0 && block.timestamp >= activatesAt) mod.activate(a);
+                (,uint256 pending,,,,uint256 activatesAt,,,) = stakeReg.moderatorInfo(a);
+                if (pending > 0 && block.timestamp >= activatesAt) stakeReg.activate(a);
             } else if (op == 2) {
-                (uint256 free,,,,,,uint256 exitAmount,,) = mod.moderatorInfo(a);
-                uint256 tot = mod.totalStakeOf(a);
+                (uint256 free,,,,,,uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
+                uint256 tot = stakeReg.totalStakeOf(a);
                 if (exitAmount == 0 && amt <= free && (tot - amt == 0 || tot - amt >= MIN_STAKE)) {
                     vm.prank(a);
-                    mod.requestExit(amt);
+                    stakeReg.requestExit(amt);
                 }
             } else if (op == 3) {
-                (,,,,,,uint256 exitAmount, uint256 exitReqAt,) = mod.moderatorInfo(a);
-                uint256 tot = mod.totalStakeOf(a);
+                (,,,,,,uint256 exitAmount, uint256 exitClaimableAt,) = stakeReg.moderatorInfo(a);
+                uint256 tot = stakeReg.totalStakeOf(a);
                 if (
-                    exitAmount > 0 && block.timestamp >= exitReqAt + EXIT_COOLDOWN
+                    exitAmount > 0 && block.timestamp >= exitClaimableAt
                         && (tot - exitAmount == 0 || tot - exitAmount >= MIN_STAKE)
                 ) {
                     vm.prank(a);
-                    mod.withdraw();
+                    stakeReg.withdraw();
                 }
             } else if (op == 4) {
                 // commit eligible free (free -> committed); if already committed,
                 // freeze that slice (committed -> frozen). Mirrors the real
                 // commitVote -> settlement-freeze path.
-                (uint256 free, uint256 pending, uint256 committed,,,,uint256 exitAmount,,) = mod.moderatorInfo(a);
+                (uint256 free, uint256 pending, uint256 committed,,,,uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
                 if (committed > 0) {
                     mod.__freeze(a, committed, block.timestamp + 3 days);
                 } else {
@@ -365,7 +365,7 @@ contract StakingTest is StackDeployer {
                 ,
                 uint256 exitAmount,
                 ,
-            ) = mod.moderatorInfo(actors[i]);
+            ) = stakeReg.moderatorInfo(actors[i]);
             // §9.3 partition: each bucket non-negative (uint) and pending/exit are subsets of free.
             assertLe(pending, free, "pending <= free");
             assertLe(exitAmount, free, "exitAmount <= free");
@@ -374,14 +374,14 @@ contract StakingTest is StackDeployer {
             sumFrozen += frozen;
         }
         // Aggregate accounting matches per-moderator sums.
-        assertEq(mod.totalFreeStake(), sumFree, "totalFree == sum free");
-        assertEq(mod.totalCommittedStake(), sumCommitted, "totalCommitted == sum committed");
-        assertEq(mod.totalFrozenStake(), sumFrozen, "totalFrozen == sum frozen");
-        // §9.1 conservation (no case pots yet): token balance == free + committed + frozen.
+        assertEq(stakeReg.totalFreeStake(), sumFree, "totalFree == sum free");
+        assertEq(stakeReg.totalCommittedStake(), sumCommitted, "totalCommitted == sum committed");
+        assertEq(stakeReg.totalFrozenStake(), sumFrozen, "totalFrozen == sum frozen");
+        // §9.1 conservation: stake custody is the REGISTRY's balance now.
         assertEq(
-            bzz.balanceOf(address(mod)),
+            bzz.balanceOf(address(stakeReg)),
             sumFree + sumCommitted + sumFrozen,
-            "conservation: token balance == staked buckets"
+            "conservation: registry balance == staked buckets"
         );
     }
 }

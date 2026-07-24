@@ -41,9 +41,9 @@ contract GovernanceTest is ModerationTestBase {
     // request time, so governance cannot extend or invalidate it retroactively.
     function test_exit_terms_snapshotted_against_governance() public {
         // mods[0] already staked in setUp; request a full exit.
-        (uint256 free,,,,,,,,) = mod.moderatorInfo(mods[0]);
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(mods[0]);
         vm.prank(mods[0]);
-        mod.requestExit(free);
+        stakeReg.requestExit(free);
 
         // Governance triples the exit cooldown mid-wait.
         Moderation.Params memory p = mod.getParams();
@@ -56,7 +56,7 @@ contract GovernanceTest is ModerationTestBase {
         vm.warp(block.timestamp + 1); // now well past the original claimable time
         uint256 before = bzz.balanceOf(mods[0]);
         vm.prank(mods[0]);
-        mod.withdraw();
+        stakeReg.withdraw();
         assertEq(bzz.balanceOf(mods[0]) - before, free, "exit honored on its snapshotted terms");
     }
 
@@ -188,11 +188,11 @@ contract GovernanceTest is ModerationTestBase {
 
         address m = mods[0];
         vm.prank(m);
-        mod.requestExit(500 * XBZZ);
+        stakeReg.requestExit(500 * XBZZ);
         vm.warp(block.timestamp + 7 days);
         uint256 balBefore = bzz.balanceOf(m);
         vm.prank(m);
-        mod.withdraw();
+        stakeReg.withdraw();
         assertEq(bzz.balanceOf(m) - balBefore, 500 * XBZZ, "withdraw unaffected by governance");
     }
 

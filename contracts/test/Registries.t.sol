@@ -358,6 +358,38 @@ contract RegistriesTest is Test {
         assertFalse(indexReg.isIndexed(TK, 4));
     }
 
+    /// H-05: the seat seed is armed against `eligibilityAddVersion`, so EVERY
+    /// path that adds draw-eligible weight must bump it. If one does not, an
+    /// attacker can wait for a snapshot block's hash to become public and only
+    /// then reshape the tree in its favour — the draw would proceed on entropy
+    /// the attacker already knew. activate() and thaw() were both silent here,
+    /// which retired the defence the moment staking moved off the monolith.
+    function test_eligibility_version_bumps_on_every_weight_add() public {
+        _stake(alice, 100 * XBZZ);
+        uint256 v0 = stakeReg.eligibilityAddVersion();
+
+        vm.warp(block.timestamp + ACTIVATION);
+        stakeReg.activate(alice);
+        uint256 v1 = stakeReg.eligibilityAddVersion();
+        assertGt(v1, v0, "activate: pending stake becomes drawable");
+
+        vm.prank(alice);
+        stakeReg.setDutyUnits(10);
+        uint256 v2 = stakeReg.eligibilityAddVersion();
+        assertGt(v2, v1, "setDutyUnits: pledging capacity adds draw weight");
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, RISK_PER_SEAT);
+        stakeReg.freeze(alice, RISK_PER_SEAT, block.timestamp + 1 days);
+        vm.stopPrank();
+        uint256 v3 = stakeReg.eligibilityAddVersion();
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> out of the pool");
+
+        vm.warp(block.timestamp + 1 days + 1);
+        stakeReg.thaw(alice);
+        assertGt(stakeReg.eligibilityAddVersion(), v3, "thaw: a frozen moderator re-enters the pool");
+    }
+
     function test_two_step_governance_transfer() public {
         stakeReg.proposeGovernance(bob);
         assertEq(stakeReg.governance(), address(this), "not transferred until accepted");

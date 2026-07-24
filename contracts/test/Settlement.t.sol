@@ -6,15 +6,15 @@ import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 
 contract SettlementTest is ModerationTestBase {
     function _total(address a) internal view returns (uint256) {
-        return mod.totalStakeOf(a);
+        return stakeReg.totalStakeOf(a);
     }
 
     function _frozenUntil(address a) internal view returns (uint256 fu) {
-        (,,,, fu,,,,) = mod.moderatorInfo(a);
+        (,,,, fu,,,,) = stakeReg.moderatorInfo(a);
     }
 
     function _track(address a) internal view returns (uint256 t) {
-        (,,,,,,,, t) = mod.moderatorInfo(a);
+        (,,,,,,,, t) = stakeReg.moderatorInfo(a);
     }
 
     // --- happy path: undisputed approve --------------------------------------
@@ -109,7 +109,7 @@ contract SettlementTest is ModerationTestBase {
 
         // The depth-0 Approve voter is incoherent vs the final Reject -> frozen.
         assertGt(_frozenUntil(victim), block.timestamp, "incoherent voter frozen");
-        assertEq(mod.eligibleWeightOf(victim), 0, "frozen -> excluded from the tree");
+        assertEq(stakeReg.eligibleWeightOf(victim), 0, "frozen -> excluded from the tree");
 
         // A fresh case never draws the frozen victim.
         uint256 case2 = _submit(mods[1]);
@@ -118,8 +118,8 @@ contract SettlementTest is ModerationTestBase {
 
         // After the freeze elapses, thaw restores eligibility.
         vm.warp(_frozenUntil(victim) + 1);
-        mod.thaw(victim);
-        assertGt(mod.eligibleWeightOf(victim), 0, "thawed -> eligible again");
+        stakeReg.thaw(victim);
+        assertGt(stakeReg.eligibleWeightOf(victim), 0, "thawed -> eligible again");
     }
 
     // --- failed reveal: brief freeze -----------------------------------------
@@ -217,7 +217,7 @@ contract SettlementTest is ModerationTestBase {
         mod.__injectRound(caseId);
         address rejVoter = makeAddr("rejVoter");
         mod.__injectSeat(caseId, 0, rejVoter, 1, 10 * XBZZ, 2); // Reject == final
-        bzz.mint(address(mod), 10 * XBZZ);
+        bzz.mint(address(stakeReg), 10 * XBZZ); // committed backing lives in the registry
         mod.__injectBond(caseId, 0, Moderation.Outcome.Approve, true);
         address challenger = makeAddr("honestChallenger");
         mod.__injectBondContrib(caseId, 0, challenger, bondAmt);

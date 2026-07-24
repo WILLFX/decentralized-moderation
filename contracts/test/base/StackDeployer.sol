@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {StakeRegistry} from "../../src/StakeRegistry.sol";
+import {StakeRegistryHarness} from "../harnesses/StakeRegistryHarness.sol";
 import {IndexRegistry} from "../../src/IndexRegistry.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
@@ -26,15 +27,15 @@ abstract contract StackDeployer is Test {
 
     function _deployStack(MockBZZ bzz)
         internal
-        returns (ModerationHarness m, StakeRegistry sr, IndexRegistry ir)
+        returns (ModerationHarness m, StakeRegistryHarness sr, IndexRegistry ir)
     {
         (sr, ir) = _deployRegistries(bzz);
         m = new ModerationHarness(IERC20(address(bzz)), sr, ir);
         _authorizeLogic(sr, ir, address(m));
     }
 
-    function _deployRegistries(MockBZZ bzz) internal returns (StakeRegistry sr, IndexRegistry ir) {
-        sr = new StakeRegistry(
+    function _deployRegistries(MockBZZ bzz) internal returns (StakeRegistryHarness sr, IndexRegistry ir) {
+        sr = new StakeRegistryHarness(
             IERC20(address(bzz)), REG_TIMELOCK, REG_MIN_STAKE, REG_ACTIVATION, REG_COOLDOWN, REG_RISK_PER_SEAT
         );
         ir = new IndexRegistry(REG_TIMELOCK);

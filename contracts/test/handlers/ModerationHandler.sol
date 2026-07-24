@@ -7,6 +7,7 @@ import {StdUtils} from "forge-std/StdUtils.sol";
 import {Moderation} from "../../src/Moderation.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
+import {StakeRegistry} from "../../src/StakeRegistry.sol";
 
 /// @notice Invariant-campaign driver. The fuzzer calls these bounded actions in
 ///         random order; each is robust to being called in any state (it guards
@@ -16,6 +17,7 @@ import {MockBZZ} from "../mocks/MockBZZ.sol";
 ///         stake, accumulated track) between calls.
 contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     ModerationHarness public immutable mod;
+    StakeRegistry public immutable stakeReg;
     MockBZZ public immutable bzz;
     address[] public actors;
 
@@ -28,8 +30,9 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     mapping(address => uint256) public netDeposited;
     uint256 public casesSettled;
 
-    constructor(ModerationHarness _mod, MockBZZ _bzz, address[] memory _actors) {
+    constructor(ModerationHarness _mod, StakeRegistry _stakeReg, MockBZZ _bzz, address[] memory _actors) {
         mod = _mod;
+        stakeReg = _stakeReg;
         bzz = _bzz;
         actors = _actors;
     }
@@ -43,55 +46,55 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     function hStake(uint256 actorSeed, uint256 amount) external {
         address a = _actor(actorSeed);
         amount = bound(amount, XBZZ, 2000 * XBZZ);
-        if (mod.totalStakeOf(a) == 0 && amount < 10 * XBZZ) amount = 10 * XBZZ;
+        if (stakeReg.totalStakeOf(a) == 0 && amount < 10 * XBZZ) amount = 10 * XBZZ;
         bzz.mint(a, amount);
         vm.prank(a);
-        bzz.approve(address(mod), type(uint256).max);
+        bzz.approve(address(stakeReg), type(uint256).max);
         vm.prank(a);
-        try mod.stake(amount) {
+        try stakeReg.stake(amount) {
             netDeposited[a] += amount;
         } catch {}
     }
 
     function hActivate(uint256 actorSeed) external {
         address a = _actor(actorSeed);
-        (, uint256 pending,,,, uint256 activatesAt,,,) = mod.moderatorInfo(a);
+        (, uint256 pending,,,, uint256 activatesAt,,,) = stakeReg.moderatorInfo(a);
         if (pending == 0 || block.timestamp < activatesAt) return;
-        try mod.activate(a) {} catch {}
+        try stakeReg.activate(a) {} catch {}
     }
 
     function hRequestExitPranked(uint256 actorSeed, uint256 amount) external {
         address a = _actor(actorSeed);
-        (uint256 free,,,,,, uint256 exitAmount,,) = mod.moderatorInfo(a);
+        (uint256 free,,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
         if (exitAmount != 0 || free == 0) return;
         amount = bound(amount, 1, free);
         vm.prank(a);
-        try mod.requestExit(amount) {} catch {}
+        try stakeReg.requestExit(amount) {} catch {}
     }
 
     function hWithdraw(uint256 actorSeed) external {
         address a = _actor(actorSeed);
-        (,,,,,, uint256 exitAmount, uint256 exitReqAt,) = mod.moderatorInfo(a);
+        (,,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
         if (exitAmount == 0) return;
         vm.warp(block.timestamp + 8 days); // ensure cooldown elapsed
         vm.prank(a);
-        try mod.withdraw() {
+        try stakeReg.withdraw() {
             netDeposited[a] -= exitAmount;
         } catch {}
     }
 
     function hThaw(uint256 actorSeed) external {
         address a = _actor(actorSeed);
-        (,,, uint256 frozen, uint256 frozenUntil,,,,) = mod.moderatorInfo(a);
+        (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(a);
         if (frozen == 0) return;
         if (block.timestamp < frozenUntil) vm.warp(frozenUntil + 1);
-        try mod.thaw(a) {} catch {}
+        try stakeReg.thaw(a) {} catch {}
     }
 
     // --- run a full case to settlement ---------------------------------------
 
     function hRunCase(uint256 submitterSeed, uint256 voteSeed, bool doAppeal) external {
-        if (mod.totalEligibleWeight() == 0) return;
+        if (stakeReg.totalEligibleWeight() == 0) return;
         address submitter = _actor(submitterSeed);
 
         uint256 fee = mod.minFee(1);

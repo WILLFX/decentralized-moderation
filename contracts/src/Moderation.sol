@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
-import {SortitionTree} from "./lib/SortitionTree.sol";
 import {FreezeMath} from "./lib/FreezeMath.sol";
 import {StakeRegistry} from "./StakeRegistry.sol";
 import {IndexRegistry} from "./IndexRegistry.sol";
@@ -23,7 +22,6 @@ import {IndexRegistry} from "./IndexRegistry.sol";
 ///      lifecycle, appeals, settlement, index, and governance land in later
 ///      items.
 contract Moderation is ReentrancyGuard {
-    using SortitionTree for SortitionTree.Tree;
     using SafeTransferLib for address;
 
     // --- units ---------------------------------------------------------------
@@ -96,13 +94,6 @@ contract Moderation is ReentrancyGuard {
     mapping(uint256 => Ruleset) internal rulesets;
     uint256 public currentRulesVersion;
 
-    /// H-05: bumped whenever draw-eligible weight is ADDED to the sortition tree
-    /// (activate/thaw). A round's seat seed is armed against a snapshot of this
-    /// counter; if it changed before the draw is realized, the seed is re-armed to
-    /// fresh entropy. So an attacker can never pair an already-known blockhash with
-    /// a tree it just reshaped (adaptive-activation grinding).
-    uint256 public eligibilityAddVersion;
-
     // --- governance (§9.9, P6) -----------------------------------------------
 
     address public governance; // multisig
@@ -127,32 +118,6 @@ contract Moderation is ReentrancyGuard {
     PendingParams internal pendingParams;
     PendingGuidelines internal pendingGuidelines;
 
-    // --- moderator state (§2) ------------------------------------------------
-
-    struct Moderator {
-        uint256 free; // withdrawable balance (partition bucket; includes pending + exit-reserved)
-        uint256 pending; // subset of free not yet past its activation delay (not draw-eligible)
-        uint256 committed; // stake backing votes in open cases
-        uint256 frozen; // stake locked as penalty
-        uint256 frozenUntil; // timestamp frozen -> free becomes available; also the draw-exclusion deadline
-        uint256 activatesAt; // timestamp `pending` may be activated
-        uint256 exitAmount; // amount marked for withdrawal (subset of free; excluded from draws)
-        uint256 exitRequestedAt; // 0 if no pending exit
-        uint256 exitClaimableAt; // H-11: cooldown end snapshotted at request; governance can't extend it retroactively
-        uint256 track; // decayed coherent-participation record, WAD (used from M2-5)
-        // H-07: opt-in duty capacity. `dutyUnits` is the number of seats this
-        // moderator has PLEDGED to serve concurrently, each backed by riskPerSeat
-        // of its own stake; `dutyReserved` counts the units currently held by live
-        // panels. Only available capacity is draw-eligible, so selection weight
-        // equals collateral that can actually be locked — and stake that never
-        // opted in can never be drafted (submission spam cannot grief it).
-        uint256 dutyUnits;
-        uint256 dutyReserved;
-        bool exists; // has ever staked
-    }
-
-    mapping(address => Moderator) internal moderators;
-
     // --- accounting ----------------------------------------------------------
 
     IERC20 public immutable token;
@@ -164,35 +129,9 @@ contract Moderation is ReentrancyGuard {
     /// The topic -> approved-entries index, likewise outliving this contract.
     IndexRegistry public immutable indexReg;
 
-    SortitionTree.Tree internal stakeTree;
-
-    uint256 public totalFreeStake; // Σ free
-    uint256 public totalCommittedStake; // Σ committed
-    uint256 public totalFrozenStake; // Σ frozen
-
-    // --- events --------------------------------------------------------------
-
-    event DutyUnitsSet(address indexed moderator, uint256 units, uint256 reserved);
-    event DutyNoShow(address indexed moderator, uint256 seats, uint256 penalty, uint256 until);
-    event Staked(address indexed moderator, uint256 amount, uint256 activatesAt);
-    event Activated(address indexed moderator, uint256 eligibleWeight);
-    event ExitRequested(address indexed moderator, uint256 amount, uint256 claimableAt);
-    event Withdrawn(address indexed moderator, uint256 amount);
-    event Thawed(address indexed moderator, uint256 amount);
-
     // --- errors --------------------------------------------------------------
 
-    error BelowMinStake();
     error AmountZero();
-    error InsufficientFree();
-    error NothingPending();
-    error NotYetActivatable();
-    error ExitPending();
-    error NoExitPending();
-    error CooldownNotElapsed();
-    error MinStakeFloor();
-    error NotFrozen();
-    error NoModerator();
 
     // -------------------------------------------------------------------------
 
@@ -200,7 +139,6 @@ contract Moderation is ReentrancyGuard {
         token = _token;
         stakeReg = _stakeReg;
         indexReg = _indexReg;
-        stakeTree.initialize(2); // binary sortition tree
         params = Params({
             minStake: 10 * XBZZ,
             activationDelay: 7 days,
@@ -236,141 +174,18 @@ contract Moderation is ReentrancyGuard {
     }
 
     // --- staking (§3) --------------------------------------------------------
+    //
+    // Deliberately absent. Stake deposit, activation, exit, withdrawal, thaw and
+    // the H-07 duty pledge all live on StakeRegistry and are called there by the
+    // moderator directly (M2.5-P0-b). Routing them through this contract would
+    // put the game back in the custody path and re-create the very coupling the
+    // split exists to remove: exit must never be gated by logic, so logic must
+    // not sit between a moderator and its own stake.
+    //
+    // What remains here is the narrow privileged API this contract is authorized
+    // to call: lock / release / freeze / reward / setTrack / drawPanel /
+    // releaseDuty / penalizeNoShow.
 
-    /// @notice Deposit xBZZ as stake. The first stake must be >= MIN_STAKE. New
-    ///         stake enters `pending` and is not draw-eligible until its
-    ///         activation delay elapses and `activate` is called — this is what
-    ///         stops just-in-time staking from gaming a specific draw.
-    /// @dev Topping up re-arms the activation clock for the pending bucket only;
-    ///      stake already activated stays eligible (M2 deviation note, docs at
-    ///      M2-10).
-    function stake(uint256 amount) external nonReentrant {
-        if (amount == 0) revert AmountZero();
-        Moderator storage m = moderators[msg.sender];
-
-        // H-07: the min-stake floor is checked against CURRENT total, not a
-        // one-time `exists` flag. A full exit leaves total == 0, so re-staking
-        // below the floor (stake -> full exit -> stake 1 wei) is rejected — no
-        // more sub-minimum identities splitting into the sortition tree.
-        if (_total(m) == 0 && amount < params.minStake) revert BelowMinStake();
-        m.exists = true;
-
-        address(token).safeTransferFrom(msg.sender, address(this), amount);
-
-        m.free += amount;
-        m.pending += amount;
-        m.activatesAt = block.timestamp + params.activationDelay;
-        totalFreeStake += amount;
-        // Not synced into the tree: new stake is pending until activation.
-
-        emit Staked(msg.sender, amount, m.activatesAt);
-    }
-
-    /// @notice Activate a moderator's pending stake once its delay has elapsed,
-    ///         making it draw-eligible. Permissionless poke (D6): activation only
-    ///         helps the target, so anyone (a keeper) may call it.
-    function activate(address moderator) external {
-        Moderator storage m = moderators[moderator];
-        if (!m.exists) revert NoModerator();
-        if (m.pending == 0) revert NothingPending();
-        if (block.timestamp < m.activatesAt) revert NotYetActivatable();
-
-        m.pending = 0; // all free is now past its delay
-        _syncTree(moderator, m);
-        eligibilityAddVersion++; // H-05: eligible weight grew
-        emit Activated(moderator, _eligibleWeight(m));
-    }
-
-    /// @notice Request withdrawal of `amount` free stake. The stake stays in the
-    ///         `free` partition bucket during the cooldown (so conservation and
-    ///         the §9.3 partition are untouched) but is immediately excluded from
-    ///         draws. One pending exit at a time.
-    /// @dev MIN_STAKE floor (§3): after the eventual withdrawal the moderator's
-    ///      total must be either zero (full exit) or still >= MIN_STAKE.
-    function requestExit(uint256 amount) external {
-        if (amount == 0) revert AmountZero();
-        Moderator storage m = moderators[msg.sender];
-        if (m.exitAmount != 0) revert ExitPending();
-        if (amount > m.free) revert InsufficientFree();
-
-        uint256 remaining = _total(m) - amount;
-        if (remaining != 0 && remaining < params.minStake) revert MinStakeFloor();
-
-        m.exitAmount = amount;
-        m.exitRequestedAt = block.timestamp;
-        // H-11: snapshot the cooldown end and settle the min-stake decision now, so
-        // a later governance change can neither extend the wait nor invalidate an
-        // already-valid exit.
-        m.exitClaimableAt = block.timestamp + params.exitCooldown;
-        _syncTree(msg.sender, m); // remove exiting stake from eligibility
-
-        emit ExitRequested(msg.sender, amount, m.exitClaimableAt);
-    }
-
-    /// @notice Claim a previously requested exit after the cooldown. No admin
-    ///         gate exists on this path (invariant §9.5: withdrawals never
-    ///         pausable).
-    function withdraw() external nonReentrant {
-        Moderator storage m = moderators[msg.sender];
-        uint256 amount = m.exitAmount;
-        if (amount == 0) revert NoExitPending();
-        // H-11: cooldown end and the min-stake decision were fixed at request time.
-        if (block.timestamp < m.exitClaimableAt) revert CooldownNotElapsed();
-
-        m.free -= amount;
-        totalFreeStake -= amount;
-        if (m.pending > m.free) m.pending = m.free; // keep pending <= free
-        m.exitAmount = 0;
-        m.exitRequestedAt = 0;
-        m.exitClaimableAt = 0;
-        _syncTree(msg.sender, m);
-
-        address(token).safeTransfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
-    }
-
-    /// @notice Pledge (or re-pledge) duty capacity: the number of seats you are
-    ///         willing to serve concurrently, each backed by `riskPerSeat` of your
-    ///         own stake (H-07). Only pledged, unreserved capacity is draw-eligible.
-    ///
-    ///         This is what makes non-participation punishable without griefing:
-    ///         you were not conscripted, you volunteered — so failing to commit on a
-    ///         seat you were drawn for costs a bounded freeze. Stake that never
-    ///         opts in is never drawn and never penalized.
-    /// @param units Seats pledged. 0 opts out of future draws; capacity already
-    ///        reserved by live panels stays reserved until those cases settle.
-    function setDutyUnits(uint256 units) external {
-        Moderator storage m = moderators[msg.sender];
-        if (!m.exists) revert NoModerator();
-        if (units > 0) {
-            // Must be able to collateralize every pledged unit right now.
-            uint256 reserved = m.pending + m.exitAmount;
-            uint256 usable = m.free > reserved ? m.free - reserved : 0;
-            if (usable < units * params.riskPerSeat) revert InsufficientEligibleFree();
-            eligibilityAddVersion++; // H-05: pledging adds draw weight
-        }
-        m.dutyUnits = units;
-        _syncTree(msg.sender, m);
-        emit DutyUnitsSet(msg.sender, units, m.dutyReserved);
-    }
-
-    /// @notice Release a moderator's frozen stake back to free once its freeze
-    ///         has expired. Permissionless poke (D6).
-    function thaw(address moderator) external {
-        Moderator storage m = moderators[moderator];
-        if (m.frozen == 0) revert NotFrozen();
-        if (block.timestamp < m.frozenUntil) revert NotFrozen();
-
-        uint256 amount = m.frozen;
-        m.frozen = 0;
-        totalFrozenStake -= amount;
-        m.free += amount;
-        totalFreeStake += amount;
-        _syncTree(moderator, m);
-        eligibilityAddVersion++; // H-05: eligible weight grew
-
-        emit Thawed(moderator, amount);
-    }
 
     // =========================================================================
     // Case lifecycle (§4, §5) — submit -> DRAW -> COMMIT -> REVEAL -> TALLY ->
@@ -703,13 +518,13 @@ contract Moderation is ReentrancyGuard {
         // what defeats adaptive activation: an attacker that waits for the
         // blockhash to be public and then activates a favourable subset only
         // invalidates the seed it was trying to exploit.
-        if (bh == 0 || eligibilityAddVersion != r.eligVersionAtArm) {
+        if (bh == 0 || stakeReg.eligibilityAddVersion() != r.eligVersionAtArm) {
             r.seatSnapshotBlock = block.number + _cp(c).seedLag;
-            r.eligVersionAtArm = eligibilityAddVersion;
+            r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
             emit SeedRearmed(caseId, c.depth, false, r.seatSnapshotBlock);
             return;
         }
-        if (stakeTree.total() == 0) revert NoEligibleModerators();
+        if (stakeReg.totalEligibleWeight() == 0) revert NoEligibleModerators();
 
         // H-06: domain-separate the raw blockhash so two cases snapshotting the
         // same block (or the same case at different depths) never draw identical
@@ -750,7 +565,7 @@ contract Moderation is ReentrancyGuard {
         if (affordable < s) s = affordable;
 
         uint256 lock = riskPerSeat * s;
-        _lockStake(msg.sender, lock);
+        stakeReg.lock(msg.sender, lock);
         r.committedAmt[msg.sender] = lock;
         r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
         r.commits[msg.sender] = commitHash;
@@ -803,7 +618,7 @@ contract Moderation is ReentrancyGuard {
         uint256 cs = r.committedSeats[msg.sender];
         if (s > cs) s = cs;
         r.talliedSeats[msg.sender] = s;
-        uint256 trackContrib = s * moderators[msg.sender].track; // snapshot track now (M-03)
+        uint256 trackContrib = s * stakeReg.trackOf(msg.sender); // snapshot track now (M-03)
         if (vote == Vote.Approve) {
             r.approveSeats += s;
             r.approveTrackNum += trackContrib;
@@ -1091,19 +906,22 @@ contract Moderation is ReentrancyGuard {
         if (vote == Vote.None) {
             _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
         } else if (_coherent(vote, fo)) {
-            Moderator storage m = moderators[a];
-            m.committed -= amt;
-            m.free += amt;
-            totalCommittedStake -= amt;
-            totalFreeStake += amt;
+            // Principal: pure bookkeeping inside the registry, no transfer — the
+            // committed slice never left it.
+            stakeReg.release(a, amt);
             uint256 reward = s.winnersSeats == 0 ? 0 : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
             if (reward > 0) {
-                m.free += reward;
-                totalFreeStake += reward;
                 s.distributed += reward;
                 totalSettling -= reward;
+                // The reward is the one value that CROSSES the contract boundary:
+                // it is pot money (fees + forfeited bonds) held here, becoming
+                // stake held there. Move the tokens FIRST, then credit them.
+                // Reversing the order would leave the registry crediting a
+                // balance it does not hold, and conservation would fail on the
+                // registry side of the pair.
+                address(token).safeTransfer(address(stakeReg), reward);
+                stakeReg.reward(a, reward);
             }
-            _syncTree(a, m);
         } else {
             _freezeSlice(a, amt, block.timestamp + s.freezeDur);
         }
@@ -1116,11 +934,11 @@ contract Moderation is ReentrancyGuard {
     function _touchTrack(Case storage c, Round storage r, address a, Outcome fo) internal {
         if (trackDecayed[c.id][a]) return;
         trackDecayed[c.id][a] = true;
-        Moderator storage m = moderators[a];
-        m.track = (m.track * _cp(c).trackDecay) / WAD;
+        uint256 t = (stakeReg.trackOf(a) * _cp(c).trackDecay) / WAD;
         if (c.rounds.length == 1 && r.reveals[a] != Vote.None && _coherent(r.reveals[a], fo)) {
-            m.track += WAD; // +1 for a coherent, undisputed participation
+            t += WAD; // +1 for a coherent, undisputed participation
         }
+        stakeReg.setTrack(a, t);
     }
 
     /// @dev Complete settlement: sweep reward-channel dust into the claim bounty,
@@ -1286,13 +1104,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     function _freezeSlice(address a, uint256 amt, uint256 until) internal {
-        Moderator storage m = moderators[a];
-        m.committed -= amt;
-        m.frozen += amt;
-        totalCommittedStake -= amt;
-        totalFrozenStake += amt;
-        if (until > m.frozenUntil) m.frozenUntil = until;
-        _syncTree(a, m);
+        stakeReg.freeze(a, amt, until); // committed -> frozen; never a transfer
     }
 
     /// @dev H-07/H-10: penalize a seat-holder that pledged duty capacity, was
@@ -1303,22 +1115,11 @@ contract Moderation is ReentrancyGuard {
     ///      the penalty can never fail settlement.
     function _penalizeNoShow(Case storage c, address a, uint256 seats) internal {
         if (seats == 0) return;
-        Moderator storage m = moderators[a];
-        if (m.dutyUnits == 0) return; // never opted in -> was not drawable; nothing owed
-        uint256 reserved = m.pending + m.exitAmount;
-        uint256 usable = m.free > reserved ? m.free - reserved : 0;
-        uint256 penalty = _cp(c).riskPerSeat; // one seat's worth, regardless of seats held
-        if (penalty > usable) penalty = usable;
-        if (penalty == 0) return;
-
-        m.free -= penalty;
-        m.frozen += penalty;
-        totalFreeStake -= penalty;
-        totalFrozenStake += penalty;
-        uint256 until = block.timestamp + _cp(c).failedRevealFreeze;
-        if (until > m.frozenUntil) m.frozenUntil = until;
-        _syncTree(a, m);
-        emit DutyNoShow(a, seats, penalty, m.frozenUntil);
+        Params storage p = _cp(c);
+        // One seat's worth, regardless of seats held. The registry owns the
+        // opt-in check (never pledged -> nothing owed) and clamps the penalty to
+        // what the moderator actually has, so this can never fail settlement.
+        stakeReg.penalizeNoShow(a, p.riskPerSeat, block.timestamp + p.failedRevealFreeze);
     }
 
     function _coherent(Vote vote, Outcome finalOutcome) internal pure returns (bool) {
@@ -1334,7 +1135,7 @@ contract Moderation is ReentrancyGuard {
         r.nSeats = _commitTarget(c, depth);
         r.pendingDraw = r.nSeats; // H-05
         r.seatSnapshotBlock = block.number + _cp(c).seedLag;
-        r.eligVersionAtArm = eligibilityAddVersion; // H-05
+        r.eligVersionAtArm = stakeReg.eligibilityAddVersion(); // H-05
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
@@ -1368,7 +1169,7 @@ contract Moderation is ReentrancyGuard {
             // draws only the added seats.
             r.pendingDraw = add;
             r.seatSnapshotBlock = block.number + _cp(c).seedLag;
-            r.eligVersionAtArm = eligibilityAddVersion;
+            r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
             c.phase = Phase.DRAW;
             emit Widened(c.id, c.depth, r.widenCount, r.nSeats);
             emit RoundOpened(c.id, c.depth, r.nSeats, r.seatSnapshotBlock);
@@ -1466,66 +1267,30 @@ contract Moderation is ReentrancyGuard {
     ///      sampling and no unbounded gas: each exclusion happens at most once per
     ///      distinct moderator, and the loop is bounded by `count + exclusions`.
     function _drawSeats(Round storage r, uint256 count, bytes32 seed, uint256 offset) internal {
-        address[] memory excluded = new address[](count);
-        uint256 nExcluded;
-        uint256 drawn;
-        uint256 nonce;
-        // Bound the total attempts: every extra attempt beyond `count` must have
-        // excluded a distinct moderator, and we never exclude more than `count`.
-        uint256 maxAttempts = 2 * count;
-        while (drawn < count && nonce < maxAttempts) {
-            if (stakeTree.total() == 0) break; // capacity exhausted network-wide
-            address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + nonce))));
-            nonce++;
-            Moderator storage m = moderators[seat];
-            if (m.dutyUnits <= m.dutyReserved) {
-                // No capacity left: exclude for this draw and retry the seat.
-                if (nExcluded < count) {
-                    excluded[nExcluded++] = seat;
-                    stakeTree.set(seat, 0);
-                }
-                continue;
-            }
-            m.dutyReserved += 1; // reserve the unit backing this seat
+        (address[] memory seats, uint256 attempts) = stakeReg.drawPanel(count, seed, offset);
+        uint256 n = seats.length;
+        for (uint256 i; i < n; ++i) {
+            address seat = seats[i];
             if (r.seats[seat] == 0) r.seatHolders.push(seat);
             r.seats[seat] += 1;
-            drawn++;
-            _syncTree(seat, m); // weight shrinks as capacity is consumed
         }
-        // Restore the temporarily excluded moderators' weights.
-        for (uint256 j; j < nExcluded; ++j) {
-            Moderator storage em = moderators[excluded[j]];
-            stakeTree.set(excluded[j], _eligibleWeight(em));
-        }
-        r.seatDrawCount += nonce;
+        // Attempts, not seats: the offset must advance past every draw the
+        // registry actually performed, so a later widen's draws stay disjoint
+        // from this one's even when some attempts hit exhausted capacity.
+        r.seatDrawCount += attempts;
     }
 
     /// @dev Release the duty capacity a seat-holder reserved for this round.
     function _releaseDuty(address a, uint256 seats) internal {
-        Moderator storage m = moderators[a];
-        uint256 rel = seats > m.dutyReserved ? m.dutyReserved : seats;
-        m.dutyReserved -= rel;
-        _syncTree(a, m);
+        stakeReg.releaseDuty(a, seats);
     }
 
     /// @dev Free stake usable as per-case collateral right now: excludes the
     ///      pending-activation and exit-reserved portions (H-07 partial commit).
     function _eligibleFreeOf(address moderator) internal view returns (uint256) {
-        Moderator storage m = moderators[moderator];
-        uint256 reserved = m.pending + m.exitAmount;
-        return m.free > reserved ? m.free - reserved : 0;
-    }
-
-    function _lockStake(address moderator, uint256 amount) internal {
-        Moderator storage m = moderators[moderator];
-        uint256 reserved = m.pending + m.exitAmount;
-        uint256 eligible = m.free > reserved ? m.free - reserved : 0;
-        if (eligible < amount) revert InsufficientEligibleFree();
-        m.free -= amount;
-        m.committed += amount;
-        totalFreeStake -= amount;
-        totalCommittedStake += amount;
-        _syncTree(moderator, m);
+        (uint256 free, uint256 pending,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(moderator);
+        uint256 reserved = pending + exitAmount;
+        return free > reserved ? free - reserved : 0;
     }
 
     function _clearDedup(Case storage c) internal {
@@ -1804,76 +1569,11 @@ contract Moderation is ReentrancyGuard {
     }
 
     // --- eligibility wiring (D6) ---------------------------------------------
-
-    /// @dev The draw-eligible weight the tree should hold for `m`: zero while the
-    ///      moderator is frozen (fully excluded, however small the frozen slice),
-    ///      otherwise the free balance minus the pending-activation and
-    ///      exit-reserved portions.
-    /// @dev Draw-eligible weight (H-07): free, unreserved stake CAPPED by remaining
-    ///      pledged duty capacity. Selection weight therefore never exceeds
-    ///      collateral the moderator can actually lock, and stake that never opted
-    ///      in (`dutyUnits == 0`) is not drawable at all — so submission spam
-    ///      cannot draft passive stakers into duty.
-    function _eligibleWeight(Moderator storage m) internal view returns (uint256) {
-        if (block.timestamp < m.frozenUntil) return 0;
-        uint256 reserved = m.pending + m.exitAmount;
-        if (m.free <= reserved) return 0;
-        if (m.dutyUnits <= m.dutyReserved) return 0; // capacity fully in use
-        uint256 usable = m.free - reserved;
-        uint256 capacity = (m.dutyUnits - m.dutyReserved) * params.riskPerSeat;
-        return usable < capacity ? usable : capacity;
-    }
-
-    function _syncTree(address moderator, Moderator storage m) internal {
-        stakeTree.set(moderator, _eligibleWeight(m));
-    }
-
-    function _total(Moderator storage m) internal view returns (uint256) {
-        return m.free + m.committed + m.frozen;
-    }
-
-    // --- views ---------------------------------------------------------------
-
-    function moderatorInfo(address moderator)
-        external
-        view
-        returns (
-            uint256 free,
-            uint256 pending,
-            uint256 committed,
-            uint256 frozen,
-            uint256 frozenUntil,
-            uint256 activatesAt,
-            uint256 exitAmount,
-            uint256 exitRequestedAt,
-            uint256 track
-        )
-    {
-        Moderator storage m = moderators[moderator];
-        return (
-            m.free,
-            m.pending,
-            m.committed,
-            m.frozen,
-            m.frozenUntil,
-            m.activatesAt,
-            m.exitAmount,
-            m.exitRequestedAt,
-            m.track
-        );
-    }
-
-    function totalStakeOf(address moderator) external view returns (uint256) {
-        return _total(moderators[moderator]);
-    }
-
-    function eligibleWeightOf(address moderator) external view returns (uint256) {
-        return stakeTree.weightOf(moderator);
-    }
-
-    function totalEligibleWeight() external view returns (uint256) {
-        return stakeTree.total();
-    }
+    //
+    // Draw-eligible weight, the sortition tree and the free/committed/frozen
+    // partition are StakeRegistry-internal (M2.5-P0-b). Read them there:
+    // `moderatorInfo`, `totalStakeOf`, `eligibleWeightOf`, `totalEligibleWeight`,
+    // `stakeBuckets`.
 
     function getParams() external view returns (Params memory) {
         return params;

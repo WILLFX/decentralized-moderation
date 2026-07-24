@@ -311,11 +311,11 @@ contract CaseLifecycleTest is ModerationTestBase {
         // Every committer that vanished is frozen for the brief duration and
         // excluded from the tree — the deterrent is present in the VOID path.
         for (uint256 i = 0; i < committers.length; i++) {
-            (,,, uint256 frozen, uint256 frozenUntil,,,,) = mod.moderatorInfo(committers[i]);
+            (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(committers[i]);
             assertGt(frozen, 0, "vanisher's stake frozen, not released");
             assertGt(frozenUntil, block.timestamp, "vanisher frozen");
             assertLe(frozenUntil - block.timestamp, 1 days, "brief freeze only");
-            assertEq(mod.eligibleWeightOf(committers[i]), 0, "frozen -> excluded");
+            assertEq(stakeReg.eligibleWeightOf(committers[i]), 0, "frozen -> excluded");
         }
         _assertConservation();
     }
@@ -348,12 +348,12 @@ contract CaseLifecycleTest is ModerationTestBase {
                 revert("unexpected phase");
             }
         }
-        assertGt(mod.totalFrozenStake(), 0, "pledged no-shows are penalized, not free");
+        assertGt(stakeReg.totalFrozenStake(), 0, "pledged no-shows are penalized, not free");
         // The penalty is a freeze of their own stake, never a transfer: total
         // stake across the system is unchanged.
         uint256 totalStaked;
         for (uint256 i = 0; i < mods.length; i++) {
-            totalStaked += mod.totalStakeOf(mods[i]);
+            totalStaked += stakeReg.totalStakeOf(mods[i]);
         }
         assertEq(totalStaked, 8 * 3000 * XBZZ, "no principal was moved or destroyed");
         _assertConservation();
@@ -385,11 +385,11 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.__injectWidenSeats(caseId, 0, sh, 5);
         uint256 seats = mod.__seats(caseId, 0, sh);
         uint256 riskPerSeat = mod.getParams().riskPerSeat;
-        (uint256 free,,,,,,,,) = mod.moderatorInfo(sh);
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(sh);
         // Exit-reserve most of the stake so only 1 seat is affordable.
         uint256 keep = riskPerSeat; // exactly one seat's worth
         vm.prank(sh);
-        mod.requestExit(free - keep);
+        stakeReg.requestExit(free - keep);
         assertLt(keep / riskPerSeat, seats, "holder is genuinely overdrawn");
 
         bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
@@ -417,9 +417,9 @@ contract CaseLifecycleTest is ModerationTestBase {
         address lurker = makeAddr("lurker");
         bzz.mint(lurker, 1000 * XBZZ);
         vm.prank(lurker);
-        bzz.approve(address(mod), type(uint256).max);
+        bzz.approve(address(stakeReg), type(uint256).max);
         vm.prank(lurker);
-        mod.stake(500 * XBZZ);
+        stakeReg.stake(500 * XBZZ);
         vm.warp(block.timestamp + ACTIVATION_DELAY);
 
         // The seed's snapshot block is now mined: its blockhash is public.
@@ -427,7 +427,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         (,,,,,,,, uint256 snapBefore,) = mod.roundInfo(caseId, 0);
 
         // Attacker activates now, reshaping the tree against a known seed.
-        mod.activate(lurker);
+        stakeReg.activate(lurker);
 
         // The draw does not proceed — it re-arms to a fresh, unknown block.
         mod.realizeSeats(caseId);

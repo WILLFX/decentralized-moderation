@@ -3,21 +3,43 @@
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
-> Status: **M2 complete.** The contract implements the full state machine
-> (staking, sortition, case lifecycle, appeals, settlement, index, governance)
-> with 86 passing tests including a handler-driven invariant campaign and a
-> differential test against an independent Python reference.
+> Status: **M2.5 complete.** The state machine (staking, sortition, case
+> lifecycle, appeals, settlement, index, governance) is implemented across three
+> contracts — the replaceable game plus two permanent registries — with 137
+> passing tests including a handler-driven invariant campaign, a differential
+> test against an independent Python reference, and a live logic-migration test.
+>
+> Builds with `via_ir = true` (EIP-170: `Moderation` does not fit the 24,576-byte
+> limit without it). The suite runs on the same pipeline that ships. One
+> consequence for contributors: **test code must use `vm.getBlockTimestamp()` /
+> `vm.getBlockNumber()`, never `block.timestamp` / `block.number`** — the IR
+> optimizer hoists those across `vm.warp`/`vm.roll` and the test silently reads a
+> stale clock. See `GAS_BUDGETS.md`.
 
 ## Module map
 
 | File | Role |
 |---|---|
-| `src/Moderation.sol` | The single deployed contract: moderators + stake, the sortition tree, cases, appeals, settlement, the index, and governance — one token balance for the conservation invariant (§9.1). |
+| `src/Moderation.sol` | The **replaceable game**: cases, appeals, settlement, governance. Holds pot money only (fees + appeal bonds). |
+| `src/StakeRegistry.sol` | **Permanent** custody + bookkeeping for moderator stake, the sortition tree and the H-07 duty pool. Moderators stake, exit and withdraw here directly — never through the game, so exit is never gated by logic. |
+| `src/IndexRegistry.sol` | **Permanent** topic → approved-entries index. The protocol's actual product; it outlives every logic redeployment. |
 | `src/lib/SortitionTree.sol` | Stake-weighted draw over a sum tree (clean 0.8.x port of Kleros' MIT `SortitionSumTreeFactory`; see attribution in the file). |
 | `src/lib/FreezeMath.sol` | The §6.4 freezing-power curve `1 + (CAP-1)(1-e^(-meanTrack/SAT))` via solady `expWad`. |
 
 Settlement math (the WO-1 solvent payout order) lives in `Moderation.sol` itself,
 since it touches every part of the state.
+
+Stake and approvals live in the registries so the game can be improved without
+forcing every moderator to withdraw and re-stake and without discarding the
+index. Governance repoints the registries at a new logic contract behind a
+timelock; both stay authorized during handover so in-flight cases settle. See
+`test/Migration.t.sol` for the property exercised end to end.
+
+Conservation therefore spans two balances:
+
+    balanceOf(Moderation)    == openPotsTotal + totalPendingBond
+                                + totalPendingPayout + totalSettling
+    balanceOf(StakeRegistry) == free + committed + frozen
 
 ## Tests
 
@@ -29,6 +51,8 @@ since it touches every part of the state.
 | `Appeals.t.sol` | flip-bond aggregation, floor cap, reclaim, self-appeal, MAX_DEPTH (§5.4) |
 | `Settlement.t.sol` + `FreezeMath.t.sol` | WO-1 payout order, flip-flop conservation, freeze, track (§6) |
 | `Index.t.sol` | write-at-settlement, uncontested, removal, supersafe (§8) |
+| `Registries.t.sol` | the storage/logic split: no re-staking across an upgrade, approvals survive, timelocked repoint, exit independent of logic, governance cannot touch funds |
+| `Migration.t.sol` | a live logic migration: case settled under A, registries repointed, stake + index intact, new case settles under B |
 | `Governance.t.sol` | timelocked params, append-only guidelines, no pause (§9.9) |
 | `Invariant.t.sol` | handler campaign: conservation, partition, no-principal-lost (§9.1/2/3/11) |
 | `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |

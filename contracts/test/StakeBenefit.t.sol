@@ -17,7 +17,7 @@ contract StakeBenefitTest is ModerationTestBase {
 
     function setUp() public override {
         bzz = new MockBZZ();
-        mod = new ModerationHarness(IERC20(address(bzz)));
+        (mod, stakeReg, indexReg) = _deployStack(bzz);
         _spawnModerators(10, 1000 * XBZZ); // equal stake each
         // 7 A : 3 B  ->  70% : 30% of stake.
         for (uint256 i = 0; i < mods.length; i++) {
@@ -30,10 +30,12 @@ contract StakeBenefitTest is ModerationTestBase {
         for (uint256 i = 0; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, 0, i);
             Moderation.Vote v = isFactionA[sh] ? Moderation.Vote.Approve : Moderation.Vote.Reject;
-            vm.prank(sh);
             if (commit) {
-                mod.commitVote(caseId, keccak256(abi.encode(uint8(v), SALT)));
+                bytes32 h = mod.computeCommit(caseId, 0, sh, v, SALT); // before prank
+                vm.prank(sh);
+                mod.commitVote(caseId, h);
             } else {
+                vm.prank(sh);
                 mod.revealVote(caseId, v, SALT);
             }
         }
@@ -58,12 +60,12 @@ contract StakeBenefitTest is ModerationTestBase {
             _realizeSeats(caseId);
             _voteByFaction(caseId, true);
             if (_phase(caseId) == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             }
             _voteByFaction(caseId, false);
             if (_phase(caseId) == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             }
             if (_phase(caseId) == Moderation.Phase.TALLY) {

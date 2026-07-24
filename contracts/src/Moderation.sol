@@ -4,8 +4,9 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
-import {SortitionTree} from "./lib/SortitionTree.sol";
 import {FreezeMath} from "./lib/FreezeMath.sol";
+import {StakeRegistry} from "./StakeRegistry.sol";
+import {IndexRegistry} from "./IndexRegistry.sol";
 
 /// @title Moderation
 /// @notice On-chain decentralized moderation contract (specs/state-machine.md).
@@ -21,7 +22,6 @@ import {FreezeMath} from "./lib/FreezeMath.sol";
 ///      lifecycle, appeals, settlement, index, and governance land in later
 ///      items.
 contract Moderation is ReentrancyGuard {
-    using SortitionTree for SortitionTree.Tree;
     using SafeTransferLib for address;
 
     // --- units ---------------------------------------------------------------
@@ -33,11 +33,28 @@ contract Moderation is ReentrancyGuard {
 
     /// WAD scale for fractional parameters (1e18 = 100%).
     uint256 internal constant WAD = 1e18;
+    // H-06: randomness domain-separation purpose tags.
+    uint8 internal constant SEED_SEATS = 1;
+    uint8 internal constant SEED_OUTCOME = 2;
+    // H-11: immutable protocol caps. Governance can tune numbers only WITHIN these
+    // bounds, so it can never configure an unsettleable case or overflowing freeze.
+    uint256 internal constant MAX_RULE_DEPTH = 8;
+    uint256 internal constant MAX_RULE_WIDEN = 8;
+    uint256 internal constant MAX_PANEL = 512; // per-depth commit target
+    uint256 internal constant MAX_RULE_TOPICS = 16;
+    uint256 internal constant MAX_ARRAY_LEN = 16;
+    uint256 internal constant MAX_WINDOW = 30 days;
+    uint256 internal constant MAX_FREEZE = 365 days;
+    uint256 internal constant MAX_BOND_MULT = 100;
+    uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window
+    uint256 internal constant MAX_TOTAL_DRAWS = 4000; // reachable settlement bound
 
+    // NOTE: MIN_STAKE, ACTIVATION_DELAY and EXIT_COOLDOWN are deliberately absent.
+    // They govern the custody path, which is StakeRegistry's, and are set at its
+    // construction. Mirroring them here would let governance "change" a number
+    // that nothing reads — the withdrawal that actually honours a cooldown is the
+    // registry's, and it must stay beyond this contract's reach (trust model #2).
     struct Params {
-        uint256 minStake; // MIN_STAKE
-        uint256 activationDelay; // ACTIVATION_DELAY
-        uint256 exitCooldown; // EXIT_COOLDOWN
         uint256 commitTimeout; // COMMIT_TIMEOUT
         uint256 revealWindow; // REVEAL_WINDOW
         uint256 minReveals; // MIN_REVEALS
@@ -59,12 +76,25 @@ contract Moderation is ReentrancyGuard {
         uint256 supersafeAge; // SUPERSAFE_AGE (seconds)
     }
 
-    Params internal params;
+    Params internal params; // live mirror of rulesets[currentRulesVersion].p
 
     /// COMMIT_TARGET[depth]: counted seats per depth (clamped to last at deeper).
     uint256[] internal commitTargetByDepth;
     /// APPEAL_WINDOW[depth]: appeal window duration per depth.
     uint256[] internal appealWindowByDepth;
+
+    // H-11: governance changes create a new immutable ruleset VERSION; each case
+    // pins the version live when it was submitted and reads all its consensus
+    // parameters from that pinned ruleset, so a mid-case parameter change never
+    // alters the rules of an already-open case.
+    struct Ruleset {
+        Params p;
+        uint256[] commitTargets;
+        uint256[] appealWindows;
+    }
+
+    mapping(uint256 => Ruleset) internal rulesets;
+    uint256 public currentRulesVersion;
 
     // --- governance (§9.9, P6) -----------------------------------------------
 
@@ -90,63 +120,28 @@ contract Moderation is ReentrancyGuard {
     PendingParams internal pendingParams;
     PendingGuidelines internal pendingGuidelines;
 
-    // --- moderator state (§2) ------------------------------------------------
-
-    struct Moderator {
-        uint256 free; // withdrawable balance (partition bucket; includes pending + exit-reserved)
-        uint256 pending; // subset of free not yet past its activation delay (not draw-eligible)
-        uint256 committed; // stake backing votes in open cases
-        uint256 frozen; // stake locked as penalty
-        uint256 frozenUntil; // timestamp frozen -> free becomes available; also the draw-exclusion deadline
-        uint256 activatesAt; // timestamp `pending` may be activated
-        uint256 exitAmount; // amount marked for withdrawal (subset of free; excluded from draws)
-        uint256 exitRequestedAt; // 0 if no pending exit
-        uint256 track; // decayed coherent-participation record, WAD (used from M2-5)
-        bool exists; // has ever staked
-    }
-
-    mapping(address => Moderator) internal moderators;
-
     // --- accounting ----------------------------------------------------------
 
     IERC20 public immutable token;
-    SortitionTree.Tree internal stakeTree;
 
-    uint256 public totalFreeStake; // Σ free
-    uint256 public totalCommittedStake; // Σ committed
-    uint256 public totalFrozenStake; // Σ frozen
-
-    // --- events --------------------------------------------------------------
-
-    event Staked(address indexed moderator, uint256 amount, uint256 activatesAt);
-    event Activated(address indexed moderator, uint256 eligibleWeight);
-    event ExitRequested(address indexed moderator, uint256 amount, uint256 claimableAt);
-    event Withdrawn(address indexed moderator, uint256 amount);
-    event Thawed(address indexed moderator, uint256 amount);
+    /// Custody + bookkeeping for moderator stake (M2.5-P0-b). Stake lives there
+    /// permanently so this contract — the replaceable *game* — can be redeployed
+    /// without every moderator having to withdraw and re-stake.
+    StakeRegistry public immutable stakeReg;
+    /// The topic -> approved-entries index, likewise outliving this contract.
+    IndexRegistry public immutable indexReg;
 
     // --- errors --------------------------------------------------------------
 
-    error BelowMinStake();
     error AmountZero();
-    error InsufficientFree();
-    error NothingPending();
-    error NotYetActivatable();
-    error ExitPending();
-    error NoExitPending();
-    error CooldownNotElapsed();
-    error MinStakeFloor();
-    error NotFrozen();
-    error NoModerator();
 
     // -------------------------------------------------------------------------
 
-    constructor(IERC20 _token) {
+    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg) {
         token = _token;
-        stakeTree.initialize(2); // binary sortition tree
+        stakeReg = _stakeReg;
+        indexReg = _indexReg;
         params = Params({
-            minStake: 10 * XBZZ,
-            activationDelay: 7 days,
-            exitCooldown: 7 days,
             commitTimeout: 24 hours,
             revealWindow: 24 hours,
             minReveals: 3,
@@ -170,116 +165,31 @@ contract Moderation is ReentrancyGuard {
         commitTargetByDepth = [uint256(5), 11, 23, 47];
         appealWindowByDepth = [uint256(4 days), 3 days, 3 days, 3 days];
 
+        // Ruleset version 0 mirrors the initial params (H-11).
+        // Ruleset 0 never goes through _validateParams, so the seat-collateral
+        // bound is enforced here too: a deployment pointed at a registry whose
+        // duty unit is smaller than this contract's per-seat lock would seat
+        // panels on collateral that cannot cover them, from the very first case.
+        if (params.riskPerSeat > _stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
+        rulesets[0] = Ruleset({p: params, commitTargets: commitTargetByDepth, appealWindows: appealWindowByDepth});
+
         governance = msg.sender;
         timelockDelay = 7 days;
     }
 
     // --- staking (§3) --------------------------------------------------------
+    //
+    // Deliberately absent. Stake deposit, activation, exit, withdrawal, thaw and
+    // the H-07 duty pledge all live on StakeRegistry and are called there by the
+    // moderator directly (M2.5-P0-b). Routing them through this contract would
+    // put the game back in the custody path and re-create the very coupling the
+    // split exists to remove: exit must never be gated by logic, so logic must
+    // not sit between a moderator and its own stake.
+    //
+    // What remains here is the narrow privileged API this contract is authorized
+    // to call: lock / release / freeze / reward / setTrack / drawPanel /
+    // releaseDuty / penalizeNoShow.
 
-    /// @notice Deposit xBZZ as stake. The first stake must be >= MIN_STAKE. New
-    ///         stake enters `pending` and is not draw-eligible until its
-    ///         activation delay elapses and `activate` is called — this is what
-    ///         stops just-in-time staking from gaming a specific draw.
-    /// @dev Topping up re-arms the activation clock for the pending bucket only;
-    ///      stake already activated stays eligible (M2 deviation note, docs at
-    ///      M2-10).
-    function stake(uint256 amount) external nonReentrant {
-        if (amount == 0) revert AmountZero();
-        Moderator storage m = moderators[msg.sender];
-
-        if (!m.exists) {
-            if (amount < params.minStake) revert BelowMinStake();
-            m.exists = true;
-        }
-
-        address(token).safeTransferFrom(msg.sender, address(this), amount);
-
-        m.free += amount;
-        m.pending += amount;
-        m.activatesAt = block.timestamp + params.activationDelay;
-        totalFreeStake += amount;
-        // Not synced into the tree: new stake is pending until activation.
-
-        emit Staked(msg.sender, amount, m.activatesAt);
-    }
-
-    /// @notice Activate a moderator's pending stake once its delay has elapsed,
-    ///         making it draw-eligible. Permissionless poke (D6): activation only
-    ///         helps the target, so anyone (a keeper) may call it.
-    function activate(address moderator) external {
-        Moderator storage m = moderators[moderator];
-        if (!m.exists) revert NoModerator();
-        if (m.pending == 0) revert NothingPending();
-        if (block.timestamp < m.activatesAt) revert NotYetActivatable();
-
-        m.pending = 0; // all free is now past its delay
-        _syncTree(moderator, m);
-        emit Activated(moderator, _eligibleWeight(m));
-    }
-
-    /// @notice Request withdrawal of `amount` free stake. The stake stays in the
-    ///         `free` partition bucket during the cooldown (so conservation and
-    ///         the §9.3 partition are untouched) but is immediately excluded from
-    ///         draws. One pending exit at a time.
-    /// @dev MIN_STAKE floor (§3): after the eventual withdrawal the moderator's
-    ///      total must be either zero (full exit) or still >= MIN_STAKE.
-    function requestExit(uint256 amount) external {
-        if (amount == 0) revert AmountZero();
-        Moderator storage m = moderators[msg.sender];
-        if (m.exitAmount != 0) revert ExitPending();
-        if (amount > m.free) revert InsufficientFree();
-
-        uint256 remaining = _total(m) - amount;
-        if (remaining != 0 && remaining < params.minStake) revert MinStakeFloor();
-
-        m.exitAmount = amount;
-        m.exitRequestedAt = block.timestamp;
-        _syncTree(msg.sender, m); // remove exiting stake from eligibility
-
-        emit ExitRequested(msg.sender, amount, block.timestamp + params.exitCooldown);
-    }
-
-    /// @notice Claim a previously requested exit after the cooldown. No admin
-    ///         gate exists on this path (invariant §9.5: withdrawals never
-    ///         pausable).
-    function withdraw() external nonReentrant {
-        Moderator storage m = moderators[msg.sender];
-        uint256 amount = m.exitAmount;
-        if (amount == 0) revert NoExitPending();
-        if (block.timestamp < m.exitRequestedAt + params.exitCooldown) revert CooldownNotElapsed();
-
-        // Re-check the floor against current total (committed may have settled
-        // back into free, or nothing changed).
-        uint256 remaining = _total(m) - amount;
-        if (remaining != 0 && remaining < params.minStake) revert MinStakeFloor();
-
-        m.free -= amount;
-        totalFreeStake -= amount;
-        if (m.pending > m.free) m.pending = m.free; // keep pending <= free
-        m.exitAmount = 0;
-        m.exitRequestedAt = 0;
-        _syncTree(msg.sender, m);
-
-        address(token).safeTransfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
-    }
-
-    /// @notice Release a moderator's frozen stake back to free once its freeze
-    ///         has expired. Permissionless poke (D6).
-    function thaw(address moderator) external {
-        Moderator storage m = moderators[moderator];
-        if (m.frozen == 0) revert NotFrozen();
-        if (block.timestamp < m.frozenUntil) revert NotFrozen();
-
-        uint256 amount = m.frozen;
-        m.frozen = 0;
-        totalFrozenStake -= amount;
-        m.free += amount;
-        totalFreeStake += amount;
-        _syncTree(moderator, m);
-
-        emit Thawed(moderator, amount);
-    }
 
     // =========================================================================
     // Case lifecycle (§4, §5) — submit -> DRAW -> COMMIT -> REVEAL -> TALLY ->
@@ -301,6 +211,7 @@ contract Moderation is ReentrancyGuard {
         TALLY,
         APPEAL_WINDOW,
         FINALIZED,
+        SETTLING, // H-04: settlement in progress across batched claim() calls
         VOID,
         SETTLED
     }
@@ -319,15 +230,18 @@ contract Moderation is ReentrancyGuard {
     }
 
     struct Round {
-        uint256 nSeats; // counted seats drawn so far this round (grows on widen)
+        uint256 nSeats; // seats ACTUALLY seated so far this round (grows on widen; may fall short of the commit target when pledged duty capacity is scarce)
         uint256 seatDrawCount; // total seat draws performed (offset base for widen draws)
         uint256 widenCount; // widen re-draws used
+        uint256 pendingDraw; // H-05: seats still to be drawn for this round (fresh entropy per draw, incl. each widen)
+        uint256 eligVersionAtArm; // H-05: eligibilityAddVersion when the seat seed was armed
         uint256 seatSnapshotBlock; // block whose blockhash seeds the seat draw
         uint256 outcomeSnapshotBlock; // block whose blockhash seeds the outcome draw
         bytes32 seatSeed;
         bytes32 outcomeSeed;
         address[] seatHolders; // unique drawn addresses
         mapping(address => uint256) seats; // seat-holder -> seat count (may grow on widen)
+        mapping(address => uint256) committedSeats; // H-08: seats collateralized at commit (tally is capped to this)
         mapping(address => uint256) talliedSeats; // seats counted for THIS voter at reveal (frozen; F2)
         mapping(address => bytes32) commits; // seat-holder -> commit hash
         mapping(address => Vote) reveals; // seat-holder -> revealed vote
@@ -337,12 +251,18 @@ contract Moderation is ReentrancyGuard {
         uint256 revealedCount; // # committers revealed
         uint256 approveSeats; // Σ seats revealing Approve
         uint256 rejectSeats; // Σ seats revealing Reject
+        // H-04/M-03: Σ talliedSeats × track (snapshotted at reveal) per side, so
+        // settlement derives mean-track in O(rounds) and freeze durations no
+        // longer depend on when the case is claimed relative to track mutations.
+        uint256 approveTrackNum;
+        uint256 rejectTrackNum;
+        bool underQuorum; // H-09: outcome armed below MIN_REVEALS after max widen
         uint256 revealedSeats; // approveSeats + rejectSeats
         Outcome outcome; // drawn ∝ seat counts
         Outcome appealFor; // the outcome an appeal against THIS round argues for
         uint256 bond; // flip-bond accumulated to appeal this round's outcome
         bool bondInPot; // true once the floor was met and the bond moved to the pot
-        address[] bondContributors;
+        bool bondRefundOnly; // H-10: the appeal this bond funded failed for lack of quorum, not on merits -> refund capital (no bonus, not forfeited)
         mapping(address => uint256) bondContribs;
     }
 
@@ -355,39 +275,67 @@ contract Moderation is ReentrancyGuard {
         bytes32[] topicKeys;
         uint256 targetCaseId; // removal only (§8.2, validated in M2-6)
         uint256 guidelinesVersion; // pinned at submit (governance in M2-7)
+        uint256 rulesVersion; // H-11: consensus ruleset pinned at submit
         Phase phase;
         uint256 depth;
         uint256 pot; // fee + appeal bonds moved in (§6.2)
         uint256 appealBondTotal; // Σ appeal bonds that met their floor and joined the pot
         uint256 phaseDeadline;
         Outcome finalOutcome;
+        // H-01: a SUBMISSION whose entries are currently live in the index. Set
+        // true when its entries are written, false when a removal deletes them.
+        // Serves as the target's "index generation" signal: a removal is bound to
+        // an indexed target at submit and no-ops at settlement if it is no longer
+        // indexed (already removed by a concurrent removal).
+        bool isIndexed;
         Round[] rounds; // one per depth reached
+        // C-01: winning-appeal refunds+bonuses are pulled (not credited in a loop
+        // at settlement, which was unbounded in contributor count). These running
+        // totals let claimAppealPayout compute each share in O(1); the final
+        // claimer absorbs the pro-rata dust, so the pool is consumed exactly.
+        uint256 apBonusPoolLeft; // bonus pool not yet pulled
+        uint256 apContribTotLeft; // winning-contribution total not yet pulled
     }
 
     mapping(uint256 => Case) internal cases;
     uint256 public nextCaseId;
     uint256 public openPotsTotal; // Σ live case pots (§9.1)
     uint256 public totalPendingBond; // Σ appeal contributions collected but not yet flooring a round
-    uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull
-    mapping(address => uint256) public pendingPayout; // appeal refunds/bonuses, withdrawn via claimPayout
-    mapping(bytes32 => bool) public submissionExists; // dedup: H(content, meta, topicKey) (P3, §9.7)
+    uint256 public totalPendingPayout; // Σ settled bond refunds + bonuses awaiting pull (per (case,depth), pulled via claimAppealPayout)
+    uint256 public totalSettling; // H-04: pot value in flight during batched settlement (rewards not yet credited + unpaid bounty); 0 outside an in-progress claim
 
-    // --- index (§8, README 3.8) ----------------------------------------------
-
-    struct Entry {
-        bytes32 contentHash;
-        bytes32 metaHash;
-        uint40 approvalTime; // settlement time; drives the supersafe age filter
-        bool uncontested; // true iff no Reject vote was ever revealed in the case
-        uint256 caseId; // back-reference for removal (§8.2)
+    // H-04: per-case batched-settlement working state. The aggregate scalars are
+    // computed once (O(rounds)) when settlement starts; the (round, idx) cursor
+    // walks seat-holders across batched claim() calls so no single transaction
+    // must dispose all of a maximal case's ~344 committed seats at once.
+    struct SettleState {
+        uint256 winnersSeats;
+        uint256 distributable;
+        uint256 freezeDur;
+        uint256 bounty; // base claim bounty (reward-channel dust added at finish)
+        uint256 pot; // original pot, for the Settled event
+        uint256 distributed; // Σ rewards credited so far (across batches)
+        uint256 round; // cursor: current round
+        uint256 idx; // cursor: next seat-holder index in that round
     }
 
-    mapping(bytes32 => Entry[]) internal indexByTopic; // topicKey -> approved entries
-    mapping(bytes32 => bool) internal topicSeen; // first index write emits TopicCreated
+    mapping(uint256 => SettleState) internal settleState;
+    mapping(uint256 => mapping(address => bool)) internal trackDecayed; // caseId -> participant -> track already decayed (dedup, O(1))
+    // Dedup (P3, §9.7): H(content, meta, topicKey) -> owning caseId + 1 (0 = free).
+    // H-02: keyed by OWNER, not a bare bool, so an obsolete case (e.g. a stale
+    // removal) can never clear a reservation a newer resubmission now holds.
+    mapping(bytes32 => uint256) internal dedupOwnerPlusOne;
 
-    event TopicCreated(bytes32 indexed topicKey);
-    event EntryWritten(uint256 indexed caseId, bytes32 indexed topicKey, bool uncontested);
-    event EntryRemoved(uint256 indexed caseId, bytes32 indexed topicKey);
+    // --- index (§8, README 3.8) ----------------------------------------------
+    //
+    // The topic -> approved-entries index lives in IndexRegistry (M2.5-P0-b).
+    // It is the protocol's actual product, and it outlives this contract: if it
+    // were held here, every logic redeployment would throw away every approval
+    // ever made. Writes and deletions happen through the registry's logic-facing
+    // API; the views below forward so the M2 ABI keeps working.
+    //
+    // `Case.isIndexed` deliberately stays on the case (H-01): it is the removal
+    // generation signal and must not depend on iterating a topic.
 
     // --- case events ---------------------------------------------------------
 
@@ -416,6 +364,7 @@ contract Moderation is ReentrancyGuard {
     error BadTopicCount();
     error FeeTooLow();
     error DuplicateSubmission();
+    error DuplicateTopic(); // M-04: a submission's topic keys must be distinct
     error WrongPhase();
     error SeedNotReady();
     error NotSeatHolder();
@@ -433,6 +382,17 @@ contract Moderation is ReentrancyGuard {
     error CaseNotTerminal();
     error BondLocked();
     error NothingToReclaim();
+    error PhaseDeadlinePassed(); // M-02: commit/reveal after the window has elapsed
+    error BadKind(); // submit() is submissions-only; removals go through submitRemoval
+    error TargetNotRemovable(); // removal target must be a settled, approved, indexed submission
+
+    event RemovalTargeted(
+        uint256 indexed caseId,
+        uint256 indexed targetCaseId,
+        bytes32 contentHash,
+        bytes32 metaHash,
+        uint256 topicCount
+    );
 
     // --- submit --------------------------------------------------------------
 
@@ -449,17 +409,24 @@ contract Moderation is ReentrancyGuard {
         uint256 targetCaseId,
         uint256 fee
     ) external nonReentrant returns (uint256 caseId) {
+        // H-01: removals no longer accept caller-chosen content/meta/topics/target
+        // (they were ignored at settlement, which resolved the target lazily — a
+        // future-ID or payload-substitution vector). Use submitRemoval instead.
+        if (kind != Kind.SUBMISSION) revert BadKind();
+        targetCaseId; // unused for submissions
         uint256 n = topicKeys.length;
         if (n == 0 || n > params.maxTopics) revert BadTopicCount();
         if (fee < minFee(n)) revert FeeTooLow();
 
-        if (kind == Kind.SUBMISSION) {
-            for (uint256 i; i < n; ++i) {
-                if (submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])]) revert DuplicateSubmission();
+        // M-04: topic keys must be distinct (n <= maxTopics is small). Duplicates
+        // would double-write the entry and corrupt the O(1) position map (H-03).
+        for (uint256 i; i < n; ++i) {
+            for (uint256 j; j < i; ++j) {
+                if (topicKeys[i] == topicKeys[j]) revert DuplicateTopic();
             }
-            for (uint256 i; i < n; ++i) {
-                submissionExists[_dedupKey(contentHash, metaHash, topicKeys[i])] = true;
-            }
+        }
+        for (uint256 i; i < n; ++i) {
+            if (dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] != 0) revert DuplicateSubmission();
         }
 
         address(token).safeTransferFrom(msg.sender, address(this), fee);
@@ -467,21 +434,63 @@ contract Moderation is ReentrancyGuard {
         caseId = nextCaseId++;
         Case storage c = cases[caseId];
         c.id = caseId;
-        c.kind = kind;
+        c.kind = Kind.SUBMISSION;
         c.submitter = msg.sender;
         c.contentHash = contentHash;
         c.metaHash = metaHash;
         for (uint256 i; i < n; ++i) {
             c.topicKeys.push(topicKeys[i]);
+            dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] = caseId + 1; // this case owns the reservation
         }
-        c.targetCaseId = targetCaseId;
         c.guidelinesVersion = guidelinesVersion; // pinned at submit; never changes (§9.6)
+        c.rulesVersion = currentRulesVersion; // H-11: pin the consensus ruleset
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
 
         _openRound(c, 0);
-        emit CaseSubmitted(caseId, kind, msg.sender, fee);
+        emit CaseSubmitted(caseId, Kind.SUBMISSION, msg.sender, fee);
+    }
+
+    /// @notice Open a REMOVAL case against an existing index entry (§8.2, P1).
+    ///         Unlike the old generic path, the target is bound at submit: it must
+    ///         be a settled, approved SUBMISSION whose entries are currently in the
+    ///         index, and the content/metadata/topics are derived from that target
+    ///         (not caller-supplied), so the removal cannot name a future case ID
+    ///         or display a payload that differs from what settlement acts on
+    ///         (H-01). Fee scales with the target's real topic count.
+    function submitRemoval(uint256 targetCaseId, uint256 fee) external nonReentrant returns (uint256 caseId) {
+        if (targetCaseId >= nextCaseId) revert TargetNotRemovable();
+        Case storage target = cases[targetCaseId];
+        if (target.kind != Kind.SUBMISSION || target.phase != Phase.SETTLED) revert TargetNotRemovable();
+        if (target.finalOutcome != Outcome.Approve || !target.isIndexed) revert TargetNotRemovable();
+
+        uint256 n = target.topicKeys.length;
+        if (fee < minFee(n)) revert FeeTooLow();
+
+        address(token).safeTransferFrom(msg.sender, address(this), fee);
+
+        caseId = nextCaseId++;
+        Case storage c = cases[caseId];
+        c.id = caseId;
+        c.kind = Kind.REMOVAL;
+        c.submitter = msg.sender;
+        // Derived from the bound target so client-displayed payload == settled action.
+        c.contentHash = target.contentHash;
+        c.metaHash = target.metaHash;
+        for (uint256 i; i < n; ++i) {
+            c.topicKeys.push(target.topicKeys[i]);
+        }
+        c.targetCaseId = targetCaseId;
+        c.guidelinesVersion = guidelinesVersion;
+        c.rulesVersion = currentRulesVersion; // H-11
+        c.pot = fee;
+        openPotsTotal += fee;
+        c.finalOutcome = Outcome.Unset;
+
+        _openRound(c, 0);
+        emit CaseSubmitted(caseId, Kind.REMOVAL, msg.sender, fee);
+        emit RemovalTargeted(caseId, targetCaseId, target.contentHash, target.metaHash, n);
     }
 
     // --- phase transitions (permissionless pokes) ----------------------------
@@ -497,18 +506,29 @@ contract Moderation is ReentrancyGuard {
         if (block.number <= r.seatSnapshotBlock) revert SeedNotReady();
 
         bytes32 bh = blockhash(r.seatSnapshotBlock);
-        if (bh == 0) {
-            r.seatSnapshotBlock = block.number + params.seedLag;
+        // H-05: re-arm to fresh entropy if the blockhash is stale (D4) OR if
+        // draw-eligible weight was ADDED since this seed was armed. The latter is
+        // what defeats adaptive activation: an attacker that waits for the
+        // blockhash to be public and then activates a favourable subset only
+        // invalidates the seed it was trying to exploit.
+        if (bh == 0 || stakeReg.eligibilityAddVersion() != r.eligVersionAtArm) {
+            r.seatSnapshotBlock = block.number + _cp(c).seedLag;
+            r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
             emit SeedRearmed(caseId, c.depth, false, r.seatSnapshotBlock);
             return;
         }
-        if (stakeTree.total() == 0) revert NoEligibleModerators();
+        if (stakeReg.totalEligibleWeight() == 0) revert NoEligibleModerators();
 
-        r.seatSeed = bh;
-        _drawSeats(r, r.nSeats, bh, 0);
+        // H-06: domain-separate the raw blockhash so two cases snapshotting the
+        // same block (or the same case at different depths) never draw identical
+        // panels. The purpose tag keeps seat vs outcome entropy independent.
+        // The offset makes each widen's draw disjoint from earlier ones.
+        r.seatSeed = _domainSeed(caseId, c.depth, SEED_SEATS, bh);
+        _drawSeats(r, r.pendingDraw, r.seatSeed, r.seatDrawCount);
+        r.pendingDraw = 0;
 
         c.phase = Phase.COMMIT;
-        c.phaseDeadline = block.timestamp + params.commitTimeout;
+        c.phaseDeadline = block.timestamp + _cp(c).commitTimeout;
         emit SeatsDrawn(caseId, c.depth, r.nSeats);
         emit CommitOpened(caseId, c.depth, c.phaseDeadline);
     }
@@ -518,20 +538,46 @@ contract Moderation is ReentrancyGuard {
     function commitVote(uint256 caseId, bytes32 commitHash) external {
         Case storage c = cases[caseId];
         if (c.phase != Phase.COMMIT) revert WrongPhase();
+        if (block.timestamp >= c.phaseDeadline) revert PhaseDeadlinePassed(); // M-02: hard window
         Round storage r = _cur(c);
         uint256 s = r.seats[msg.sender];
         if (s == 0) revert NotSeatHolder();
         if (r.committed[msg.sender]) revert AlreadyCommitted();
 
-        uint256 lock = params.riskPerSeat * s;
-        _lockStake(msg.sender, lock);
+        // H-07: seats are drawn stake-weighted WITH REPLACEMENT, so a moderator can
+        // win more seats than its free stake can collateralize (a min-stake holder
+        // drawn twice, a holder selected by several concurrent cases, or one whose
+        // stake was reserved for exit after selection). Requiring the full
+        // riskPerSeat x seats made commitVote revert outright — the moderator could
+        // not serve even ONE of its seats, and a panel of such holders could never
+        // reach quorum. Commit as many seats as the moderator can actually back;
+        // the rest are simply not collateralized and (via H-08) never tallied.
+        uint256 riskPerSeat = _cp(c).riskPerSeat;
+        uint256 affordable = _eligibleFreeOf(msg.sender) / riskPerSeat;
+        if (affordable == 0) revert InsufficientEligibleFree();
+        if (affordable < s) s = affordable;
+
+        uint256 lock = riskPerSeat * s;
+        stakeReg.lock(msg.sender, lock);
         r.committedAmt[msg.sender] = lock;
+        r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
         r.commits[msg.sender] = commitHash;
         r.committed[msg.sender] = true;
         r.committedCount++;
 
         emit Committed(caseId, msg.sender, s);
         if (r.committedCount == r.seatHolders.length) _toReveal(c);
+    }
+
+    /// @notice The commit hash a voter must submit: bound to chain, contract,
+    ///         case, depth, voter, vote, and salt (M-01). Binding prevents copying
+    ///         another voter's commitment or replaying one across cases/depths.
+    function computeCommit(uint256 caseId, uint256 depth, address voter, Vote vote, bytes32 salt)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(block.chainid, address(this), caseId, depth, voter, uint8(vote), salt));
     }
 
     /// @notice COMMIT -> REVEAL once the commit window elapses (also triggered
@@ -548,20 +594,31 @@ contract Moderation is ReentrancyGuard {
     function revealVote(uint256 caseId, Vote vote, bytes32 salt) external {
         Case storage c = cases[caseId];
         if (c.phase != Phase.REVEAL) revert WrongPhase();
+        if (block.timestamp >= c.phaseDeadline) revert PhaseDeadlinePassed(); // M-02: hard window
         if (vote != Vote.Approve && vote != Vote.Reject) revert BadVote();
         Round storage r = _cur(c);
         if (!r.committed[msg.sender]) revert NotCommitted();
         if (r.reveals[msg.sender] != Vote.None) revert AlreadyRevealed();
-        if (keccak256(abi.encode(uint8(vote), salt)) != r.commits[msg.sender]) revert BadReveal();
+        if (computeCommit(caseId, c.depth, msg.sender, vote, salt) != r.commits[msg.sender]) revert BadReveal();
 
         r.reveals[msg.sender] = vote;
+        // Tally is capped to the seats collateralized at commit (H-08): a widen can
+        // add seats to r.seats[voter] AFTER commit, but those are uncollateralized,
+        // so they must not be tallied, rewarded, or mean-track weighted. Combined
+        // with the reveal-time freeze this keeps talliedSeats*riskPerSeat <=
+        // committedAmt (F2 + H-08).
         uint256 s = r.seats[msg.sender];
-        // Freeze the seat count credited to this voter at reveal time: a later
-        // widen re-draw can add seats to r.seats[voter], but settlement must pay
-        // (and mean-track) only the seats actually tallied here (F2).
+        uint256 cs = r.committedSeats[msg.sender];
+        if (s > cs) s = cs;
         r.talliedSeats[msg.sender] = s;
-        if (vote == Vote.Approve) r.approveSeats += s;
-        else r.rejectSeats += s;
+        uint256 trackContrib = s * stakeReg.trackOf(msg.sender); // snapshot track now (M-03)
+        if (vote == Vote.Approve) {
+            r.approveSeats += s;
+            r.approveTrackNum += trackContrib;
+        } else {
+            r.rejectSeats += s;
+            r.rejectTrackNum += trackContrib;
+        }
         r.revealedSeats += s;
         r.revealedCount++;
 
@@ -589,17 +646,17 @@ contract Moderation is ReentrancyGuard {
 
         bytes32 bh = blockhash(r.outcomeSnapshotBlock);
         if (bh == 0) {
-            r.outcomeSnapshotBlock = block.number + params.seedLag;
+            r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
             emit SeedRearmed(caseId, c.depth, true, r.outcomeSnapshotBlock);
             return;
         }
-        r.outcomeSeed = bh;
+        r.outcomeSeed = _domainSeed(caseId, c.depth, SEED_OUTCOME, bh); // H-06
         uint256 tot = r.approveSeats + r.rejectSeats; // >= 1 by construction
-        uint256 rand = uint256(bh) % tot;
+        uint256 rand = uint256(r.outcomeSeed) % tot;
         r.outcome = rand < r.approveSeats ? Outcome.Approve : Outcome.Reject;
 
         c.phase = Phase.APPEAL_WINDOW;
-        c.phaseDeadline = block.timestamp + _appealWindow(c.depth);
+        c.phaseDeadline = block.timestamp + _appealWindow(c, c.depth);
         emit OutcomeDrawn(caseId, c.depth, r.outcome);
         emit AppealWindowOpened(caseId, c.depth, c.phaseDeadline);
     }
@@ -629,13 +686,13 @@ contract Moderation is ReentrancyGuard {
         if (amount == 0) revert AmountZero();
         Case storage c = cases[caseId];
         if (c.phase != Phase.APPEAL_WINDOW) revert WrongPhase();
-        if (c.depth >= params.maxDepth) revert AppealsClosed();
+        if (c.depth >= _cp(c).maxDepth) revert AppealsClosed();
         if (block.timestamp >= c.phaseDeadline) revert AppealWindowClosed();
 
         Round storage r = _cur(c);
         if (r.appealFor == Outcome.Unset) r.appealFor = _opposite(r.outcome);
 
-        uint256 floor = params.bondMultiplier * c.pot;
+        uint256 floor = _cp(c).bondMultiplier * c.pot;
         // Guard underflow: a governance parameter change (lower bondMultiplier) can
         // execute mid-window and drop the floor below the already-aggregated bond.
         if (floor <= r.bond) revert AppealAlreadyFull();
@@ -643,7 +700,6 @@ contract Moderation is ReentrancyGuard {
         accepted = amount < room ? amount : room;
 
         address(token).safeTransferFrom(msg.sender, address(this), accepted);
-        if (r.bondContribs[msg.sender] == 0) r.bondContributors.push(msg.sender);
         r.bondContribs[msg.sender] += accepted;
         r.bond += accepted;
         totalPendingBond += accepted;
@@ -670,7 +726,10 @@ contract Moderation is ReentrancyGuard {
     ///         it lost) — those cannot be reclaimed here.
     function reclaimBond(uint256 caseId, uint256 depth) external nonReentrant {
         Case storage c = cases[caseId];
-        if (c.phase != Phase.FINALIZED && c.phase != Phase.SETTLED && c.phase != Phase.VOID) {
+        if (
+            c.phase != Phase.FINALIZED && c.phase != Phase.SETTLING && c.phase != Phase.SETTLED
+                && c.phase != Phase.VOID
+        ) {
             revert CaseNotTerminal();
         }
         Round storage r = c.rounds[depth];
@@ -696,182 +755,245 @@ contract Moderation is ReentrancyGuard {
     // claim bounty, so funds conservation (invariant 11) is an exact equality.
     // =========================================================================
 
-    struct SettleVars {
-        Outcome finalOutcome;
-        uint256 pot;
-        uint256 winnersSeats; // Σ coherent seats across all rounds
-        uint256 meanTrackNum; // Σ seats*track over coherent voters (WAD)
-        uint256 meanTrackDen; // Σ coherent seats
-        uint256 refunds; // Σ winning-appeal bonds (own capital returned first)
-        uint256 winningContribTot; // Σ winning-appeal contributions (bonus pro-rata base)
-        uint256 residual; // pot − refunds
-        uint256 bounty; // base claim bounty (before dust)
-        uint256 bonusPool; // winning-appellant bonus pool
-        uint256 distributable; // residual − bounty − bonusPool -> coherent seats
-        uint256 distributed; // Σ rewards actually credited (floor)
-        uint256 bonusPaid; // Σ bonuses actually credited (floor)
-        uint256 freezeDur; // freeze duration for incoherent voters (seconds)
-    }
-
     event Settled(uint256 indexed caseId, Outcome finalOutcome, uint256 pot, uint256 claimBounty);
+    event SettleProgressed(uint256 indexed caseId, uint256 round, uint256 idx);
     event PayoutClaimed(address indexed who, uint256 amount);
 
     error CaseNotFinalized();
 
-    /// @notice Settle a FINALIZED case: pay out the pot in the solvent order,
-    ///         freeze incoherent voters, update track, and run index effects.
-    ///         Permissionless; pays the caller the claim bounty (plus all rounding
-    ///         dust). Idempotent — a case settles once.
+    /// @notice Settle a FINALIZED case in a single call (unbounded work). Suitable
+    ///         for any realistic case; for a maximal adversarial case that would
+    ///         not fit one block, use claim(caseId, maxSteps) to settle it in
+    ///         batches. Permissionless; the caller that completes settlement earns
+    ///         the claim bounty (plus reward-channel rounding dust).
     function claim(uint256 caseId) external nonReentrant {
-        Case storage c = cases[caseId];
-        if (c.phase != Phase.FINALIZED) revert CaseNotFinalized();
-        c.phase = Phase.SETTLED;
-
-        SettleVars memory v;
-        v.finalOutcome = c.finalOutcome;
-        v.pot = c.pot;
-
-        _aggregate(c, v);
-
-        // Amounts (D7/D8), all rounding down.
-        v.residual = v.pot - v.refunds;
-        v.bounty = (v.residual * params.claimBountyFrac) / WAD;
-        v.bonusPool = v.winningContribTot == 0 ? 0 : (v.residual * params.bonusFrac) / WAD;
-        v.distributable = v.residual - v.bounty - v.bonusPool;
-        v.freezeDur = FreezeMath.freezeDuration(
-            v.meanTrackDen == 0 ? 0 : v.meanTrackNum / v.meanTrackDen,
-            params.trackSat,
-            params.freezeCap,
-            params.freezeBase
-        );
-
-        _settleRounds(c, v);
-        _updateTracks(c, v);
-
-        // Sweep all dust into the claim bounty so the pot is exactly consumed.
-        uint256 claimBounty = v.bounty + (v.distributable - v.distributed) + (v.bonusPool - v.bonusPaid);
-
-        openPotsTotal -= v.pot;
-        c.pot = 0;
-
-        _settleIndex(c);
-
-        if (claimBounty > 0) address(token).safeTransfer(msg.sender, claimBounty);
-        emit Settled(caseId, v.finalOutcome, v.pot, claimBounty);
+        _settle(caseId, type(uint256).max);
     }
 
-    /// @notice Withdraw appeal refunds and bonuses credited during settlement.
-    function claimPayout() external nonReentrant {
-        uint256 amt = pendingPayout[msg.sender];
-        if (amt == 0) revert NothingToReclaim();
-        pendingPayout[msg.sender] = 0;
+    /// @notice Settle up to `maxSteps` seat-holders of a FINALIZED/SETTLING case,
+    ///         advancing a persistent cursor (H-04). The first call computes the
+    ///         O(rounds) aggregates and moves the case to SETTLING; subsequent
+    ///         calls dispose seat-holders in bounded batches; the call that
+    ///         processes the last seat-holder runs the index effects, pays the
+    ///         bounty, and moves the case to SETTLED. So no single transaction
+    ///         must dispose all of a maximal case's ~344 committed seats at once.
+    function claim(uint256 caseId, uint256 maxSteps) external nonReentrant {
+        _settle(caseId, maxSteps);
+    }
+
+    function _settle(uint256 caseId, uint256 maxSteps) internal {
+        Case storage c = cases[caseId];
+        if (c.phase == Phase.FINALIZED) _settleInit(c);
+        if (c.phase != Phase.SETTLING) revert CaseNotFinalized();
+        _settleStep(c, maxSteps);
+    }
+
+    /// @dev O(rounds) aggregate + money bookkeeping, run once when settlement
+    ///      starts. Winners' seats and mean-track are read from the per-round,
+    ///      per-side accumulators frozen at reveal (no O(participants) scan).
+    function _settleInit(Case storage c) internal {
+        Outcome fo = c.finalOutcome;
+        uint256 nRounds = c.rounds.length;
+        uint256 winnersSeats;
+        uint256 meanTrackNum;
+        uint256 refunds;
+        uint256 winningContribTot;
+        for (uint256 d; d < nRounds; ++d) {
+            Round storage r = c.rounds[d];
+            if (fo == Outcome.Approve) {
+                winnersSeats += r.approveSeats;
+                meanTrackNum += r.approveTrackNum;
+            } else {
+                winnersSeats += r.rejectSeats;
+                meanTrackNum += r.rejectTrackNum;
+            }
+            if (r.bondInPot) {
+                if (r.appealFor == fo) {
+                    // winning appeal: capital refunded + shares the bonus pool
+                    refunds += r.bond;
+                    winningContribTot += r.bond;
+                } else if (r.bondRefundOnly) {
+                    // quorum-failed appeal (H-10): capital refunded, no bonus, not
+                    // forfeited to winners — excluded from the distributable pot.
+                    refunds += r.bond;
+                }
+            }
+        }
+
+        Params storage p = _cp(c); // cache pinned ruleset (avoids stack pressure)
+        uint256 pot = c.pot;
+        uint256 residual = pot - refunds; // WO-1: refund winning bond capital first
+        uint256 bounty = (residual * p.claimBountyFrac) / WAD;
+        uint256 bonusPool = winningContribTot == 0 ? 0 : (residual * p.bonusFrac) / WAD;
+        uint256 distributable = residual - bounty - bonusPool;
+
+        // Winning-appeal refunds + bonuses become pull-based (C-01); the reward
+        // pool + bounty are held in `totalSettling` while the batched disposition
+        // credits them out, so conservation is exact at every intermediate state.
+        openPotsTotal -= pot;
+        c.apBonusPoolLeft = bonusPool;
+        c.apContribTotLeft = winningContribTot;
+        totalPendingPayout += refunds + bonusPool;
+        totalSettling += residual - bonusPool; // = bounty + distributable, in flight
+
+        SettleState storage s = settleState[c.id];
+        s.winnersSeats = winnersSeats;
+        s.distributable = distributable;
+        s.freezeDur = FreezeMath.freezeDuration(
+            winnersSeats == 0 ? 0 : meanTrackNum / winnersSeats, p.trackSat, p.freezeCap, p.freezeBase
+        );
+        s.bounty = bounty;
+        s.pot = pot;
+        c.phase = Phase.SETTLING;
+    }
+
+    /// @dev Dispose up to `maxSteps` seat-holders from the cursor, then finish if
+    ///      the last round is complete. Every seat-holder visit counts toward the
+    ///      budget so a batch's gas is bounded regardless of non-committers.
+    function _settleStep(Case storage c, uint256 maxSteps) internal {
+        SettleState storage s = settleState[c.id];
+        Outcome fo = c.finalOutcome;
+        uint256 nRounds = c.rounds.length;
+        uint256 round = s.round;
+        uint256 idx = s.idx;
+        uint256 steps;
+        while (round < nRounds) {
+            Round storage r = c.rounds[round];
+            uint256 nsh = r.seatHolders.length;
+            while (idx < nsh) {
+                if (steps >= maxSteps) {
+                    s.round = round;
+                    s.idx = idx;
+                    emit SettleProgressed(c.id, round, idx);
+                    return;
+                }
+                address a = r.seatHolders[idx];
+                idx++;
+                steps++;
+                if (r.committed[a]) {
+                    _disposeSeat(c, r, a, fo, s);
+                } else {
+                    // H-07/H-10: drawn on pledged capacity but never committed.
+                    // The moderator volunteered for duty, so a no-show is its own
+                    // choice, not conscription — it takes the §6.3 brief freeze on
+                    // one seat's worth of stake. This is the penalty that makes
+                    // "dominate the appeal panel and simply refuse to commit"
+                    // (H-10) cost something.
+                    _penalizeNoShow(c, a, r.seats[a]);
+                }
+                _releaseDuty(a, r.seats[a]); // capacity returns either way
+            }
+            round++;
+            idx = 0;
+        }
+        s.round = round;
+        s.idx = 0;
+        _settleFinish(c, s);
+    }
+
+    /// @dev Return or freeze one seat-holder's committed stake, credit its reward
+    ///      if coherent, and decay its track once per case.
+    function _disposeSeat(Case storage c, Round storage r, address a, Outcome fo, SettleState storage s) internal {
+        uint256 amt = r.committedAmt[a];
+        Vote vote = r.reveals[a];
+        if (vote == Vote.None) {
+            _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
+        } else if (_coherent(vote, fo)) {
+            // Principal: pure bookkeeping inside the registry, no transfer — the
+            // committed slice never left it.
+            stakeReg.release(a, amt);
+            uint256 reward = s.winnersSeats == 0 ? 0 : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
+            if (reward > 0) {
+                s.distributed += reward;
+                totalSettling -= reward;
+                // The reward is the one value that CROSSES the contract boundary:
+                // it is pot money (fees + forfeited bonds) held here, becoming
+                // stake held there. Move the tokens FIRST, then credit them.
+                // Reversing the order would leave the registry crediting a
+                // balance it does not hold, and conservation would fail on the
+                // registry side of the pair.
+                address(token).safeTransfer(address(stakeReg), reward);
+                stakeReg.reward(a, reward);
+            }
+        } else {
+            _freezeSlice(a, amt, block.timestamp + s.freezeDur);
+        }
+        _touchTrack(c, r, a, fo);
+    }
+
+    /// @dev Decay a participant's track exactly once per case (O(1) dedup, no more
+    ///      O(participants²) scan), with the coherent-undisputed +1 for a single
+    ///      round case (§6.5).
+    function _touchTrack(Case storage c, Round storage r, address a, Outcome fo) internal {
+        if (trackDecayed[c.id][a]) return;
+        trackDecayed[c.id][a] = true;
+        uint256 t = (stakeReg.trackOf(a) * _cp(c).trackDecay) / WAD;
+        if (c.rounds.length == 1 && r.reveals[a] != Vote.None && _coherent(r.reveals[a], fo)) {
+            t += WAD; // +1 for a coherent, undisputed participation
+        }
+        stakeReg.setTrack(a, t);
+    }
+
+    /// @dev Complete settlement: sweep reward-channel dust into the claim bounty,
+    ///      run index effects, pay the finisher, and mark SETTLED.
+    function _settleFinish(Case storage c, SettleState storage s) internal {
+        uint256 claimBounty = s.bounty + (s.distributable - s.distributed);
+        totalSettling -= claimBounty; // drains this case's in-flight amount to 0
+        c.pot = 0;
+        _settleIndex(c);
+        c.phase = Phase.SETTLED;
+        if (claimBounty > 0) address(token).safeTransfer(msg.sender, claimBounty);
+        emit Settled(c.id, c.finalOutcome, s.pot, claimBounty);
+    }
+
+    /// @notice Withdraw a winning appeal contribution's refund (own capital) plus
+    ///         its pro-rata bonus, after the case has SETTLED. Pull-based and O(1)
+    ///         (C-01): settlement never iterates the contributor set, so an
+    ///         attacker cannot brick claim() by funding a bond from many
+    ///         addresses. The final claimer of a case's pool absorbs the rounding
+    ///         dust, so the pool is consumed to the wei.
+    function claimAppealPayout(uint256 caseId, uint256 depth) external nonReentrant {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.SETTLED) revert CaseNotFinalized();
+        if (depth >= c.rounds.length) revert NothingToReclaim();
+        Round storage r = c.rounds[depth];
+        bool winning = r.bondInPot && r.appealFor == c.finalOutcome;
+        bool refundOnly = r.bondInPot && r.bondRefundOnly && !winning; // H-10: capital back, no bonus
+        // A bond that lost on the merits was forfeited into the rewards — nothing to pull.
+        if (!winning && !refundOnly) revert NothingToReclaim();
+        uint256 contrib = r.bondContribs[msg.sender];
+        if (contrib == 0) revert NothingToReclaim();
+
+        r.bondContribs[msg.sender] = 0;
+        uint256 bonus;
+        if (winning) {
+            bonus = c.apContribTotLeft == 0 ? 0 : (c.apBonusPoolLeft * contrib) / c.apContribTotLeft;
+            c.apBonusPoolLeft -= bonus;
+            c.apContribTotLeft -= contrib;
+        }
+
+        uint256 amt = contrib + bonus;
         totalPendingPayout -= amt;
         address(token).safeTransfer(msg.sender, amt);
         emit PayoutClaimed(msg.sender, amt);
     }
 
-    function _aggregate(Case storage c, SettleVars memory v) internal view {
+    /// @notice The amount `who` can pull from a winning appeal contribution to
+    ///         `caseId`, summed across winning rounds. Pristine (pre-pull) it
+    ///         equals the exact pro-rata refund+bonus; it shrinks as pulls occur.
+    function appealPayoutOwed(uint256 caseId, address who) external view returns (uint256 owed) {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.SETTLED) return 0;
         uint256 nRounds = c.rounds.length;
         for (uint256 d; d < nRounds; ++d) {
             Round storage r = c.rounds[d];
-            uint256 nsh = r.seatHolders.length;
-            for (uint256 i; i < nsh; ++i) {
-                address a = r.seatHolders[i];
-                if (!r.committed[a] || r.reveals[a] == Vote.None) continue;
-                if (_coherent(r.reveals[a], v.finalOutcome)) {
-                    uint256 s = r.talliedSeats[a]; // F2: reveal-time count, not post-widen
-                    v.winnersSeats += s;
-                    v.meanTrackNum += s * moderators[a].track;
-                    v.meanTrackDen += s;
-                }
-            }
-            if (r.bondInPot && r.appealFor == v.finalOutcome) {
-                v.refunds += r.bond;
-                v.winningContribTot += r.bond;
-            }
-        }
-    }
-
-    function _settleRounds(Case storage c, SettleVars memory v) internal {
-        uint256 nRounds = c.rounds.length;
-        for (uint256 d; d < nRounds; ++d) {
-            Round storage r = c.rounds[d];
-            uint256 nsh = r.seatHolders.length;
-            for (uint256 i; i < nsh; ++i) {
-                address a = r.seatHolders[i];
-                if (!r.committed[a]) continue; // drawn but never committed: nothing locked
-                uint256 amt = r.committedAmt[a];
-                Vote vote = r.reveals[a];
-                if (vote == Vote.None) {
-                    _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
-                } else if (_coherent(vote, v.finalOutcome)) {
-                    Moderator storage m = moderators[a];
-                    m.committed -= amt;
-                    m.free += amt;
-                    totalCommittedStake -= amt;
-                    totalFreeStake += amt;
-                    uint256 reward =
-                        v.winnersSeats == 0 ? 0 : (v.distributable * r.talliedSeats[a]) / v.winnersSeats;
-                    if (reward > 0) {
-                        m.free += reward;
-                        totalFreeStake += reward;
-                        v.distributed += reward;
-                    }
-                    _syncTree(a, m);
-                } else {
-                    _freezeSlice(a, amt, block.timestamp + v.freezeDur);
-                }
-            }
-            // Winning-appeal payouts: refund own capital + bonus pro-rata (pull).
-            if (r.bondInPot && r.appealFor == v.finalOutcome) {
-                uint256 nc = r.bondContributors.length;
-                for (uint256 j; j < nc; ++j) {
-                    address cAddr = r.bondContributors[j];
-                    uint256 contrib = r.bondContribs[cAddr];
-                    if (contrib == 0) continue;
-                    uint256 bonus = v.winningContribTot == 0 ? 0 : (v.bonusPool * contrib) / v.winningContribTot;
-                    pendingPayout[cAddr] += contrib + bonus;
-                    totalPendingPayout += contrib + bonus;
-                    v.bonusPaid += bonus;
-                }
-            }
-        }
-    }
-
-    function _updateTracks(Case storage c, SettleVars memory v) internal {
-        uint256 nRounds = c.rounds.length;
-        uint256 maxP;
-        for (uint256 d; d < nRounds; ++d) {
-            maxP += c.rounds[d].seatHolders.length;
-        }
-        address[] memory parts = new address[](maxP);
-        uint256 pc;
-        for (uint256 d; d < nRounds; ++d) {
-            Round storage r = c.rounds[d];
-            uint256 nsh = r.seatHolders.length;
-            for (uint256 i; i < nsh; ++i) {
-                address a = r.seatHolders[i];
-                if (!r.committed[a]) continue;
-                bool seen;
-                for (uint256 k; k < pc; ++k) {
-                    if (parts[k] == a) {
-                        seen = true;
-                        break;
-                    }
-                }
-                if (!seen) parts[pc++] = a;
-            }
-        }
-
-        bool undisputed = nRounds == 1;
-        Round storage r0 = c.rounds[0];
-        for (uint256 i; i < pc; ++i) {
-            address a = parts[i];
-            Moderator storage m = moderators[a];
-            m.track = (m.track * params.trackDecay) / WAD;
-            if (undisputed && r0.reveals[a] != Vote.None && _coherent(r0.reveals[a], v.finalOutcome)) {
-                m.track += WAD; // +1 for a coherent, undisputed participation (§6.5)
-            }
+            if (!r.bondInPot) continue;
+            bool winning = r.appealFor == c.finalOutcome;
+            if (!winning && !r.bondRefundOnly) continue; // forfeited on the merits
+            uint256 contrib = r.bondContribs[who];
+            if (contrib == 0) continue;
+            uint256 bonus = winning && c.apContribTotLeft != 0 ? (c.apBonusPoolLeft * contrib) / c.apContribTotLeft : 0;
+            owed += contrib + bonus;
         }
     }
 
@@ -894,49 +1016,33 @@ contract Moderation is ReentrancyGuard {
 
     function _writeEntries(Case storage c) internal {
         bool uncontested = _noRejectEver(c); // an appeal alone does not clear it (§8.1)
-        uint40 t = uint40(block.timestamp);
+        bool fullQuorum = _fullQuorum(c);
         uint256 n = c.topicKeys.length;
         for (uint256 i; i < n; ++i) {
-            bytes32 topicKey = c.topicKeys[i];
-            if (!topicSeen[topicKey]) {
-                topicSeen[topicKey] = true;
-                emit TopicCreated(topicKey);
-            }
-            indexByTopic[topicKey].push(
-                Entry({
-                    contentHash: c.contentHash,
-                    metaHash: c.metaHash,
-                    approvalTime: t,
-                    uncontested: uncontested,
-                    caseId: c.id
-                })
-            );
-            emit EntryWritten(c.id, topicKey, uncontested);
+            indexReg.writeEntry(c.topicKeys[i], c.id, c.contentHash, c.metaHash, uncontested, fullQuorum);
         }
+        c.isIndexed = true; // now live in the index (H-01 generation signal)
     }
 
     function _removeTarget(Case storage c) internal {
         Case storage target = cases[c.targetCaseId];
+        // H-01: no-op if the target is no longer indexed (a concurrent removal
+        // already deleted it). Bound to a specific caseId at submit, so this can
+        // only ever delete the exact entries the removal was approved against.
+        if (!target.isIndexed) return;
         uint256 n = target.topicKeys.length;
         for (uint256 i; i < n; ++i) {
             _deleteEntry(target.topicKeys[i], c.targetCaseId);
         }
+        target.isIndexed = false;
         _clearDedup(target); // the removed submission is resubmittable
     }
 
-    /// @dev Swap-and-pop the entry for `caseId` under `topicKey`. No-op if absent
-    ///      (already removed): removal of a missing entry settles cleanly (§10).
+    /// @dev Delete the entry for `caseId` under `topicKey`. The registry does the
+    ///      O(1) swap-and-pop via its position map (H-03) and no-ops if the entry
+    ///      is absent, so a removal whose target is already gone settles cleanly.
     function _deleteEntry(bytes32 topicKey, uint256 caseId) internal {
-        Entry[] storage arr = indexByTopic[topicKey];
-        uint256 len = arr.length;
-        for (uint256 i; i < len; ++i) {
-            if (arr[i].caseId == caseId) {
-                arr[i] = arr[len - 1];
-                arr.pop();
-                emit EntryRemoved(caseId, topicKey);
-                return;
-            }
-        }
+        indexReg.deleteEntry(topicKey, caseId);
     }
 
     /// @dev uncontested iff no Reject vote was revealed in ANY round (§8.1).
@@ -948,14 +1054,36 @@ contract Moderation is ReentrancyGuard {
         return true;
     }
 
+    /// @dev H-09: a case is "full quorum" — the precondition for the supersafe
+    ///      view — iff no round fell back to arming below MIN_REVEALS after max
+    ///      widen, and the deciding (final) round drew at least MIN_REVEALS
+    ///      *independent* revealers (addresses, not seats — one multi-seat voter
+    ///      must not satisfy quorum alone).
+    function _fullQuorum(Case storage c) internal view returns (bool) {
+        uint256 n = c.rounds.length;
+        for (uint256 d; d < n; ++d) {
+            if (c.rounds[d].underQuorum) return false;
+        }
+        return c.rounds[c.depth].revealedCount >= _cp(c).minReveals;
+    }
+
     function _freezeSlice(address a, uint256 amt, uint256 until) internal {
-        Moderator storage m = moderators[a];
-        m.committed -= amt;
-        m.frozen += amt;
-        totalCommittedStake -= amt;
-        totalFrozenStake += amt;
-        if (until > m.frozenUntil) m.frozenUntil = until;
-        _syncTree(a, m);
+        stakeReg.freeze(a, amt, until); // committed -> frozen; never a transfer
+    }
+
+    /// @dev H-07/H-10: penalize a seat-holder that pledged duty capacity, was
+    ///      drawn on it, and never committed. Freezes one seat's worth of its FREE
+    ///      stake for the brief failed-reveal duration — a liquidity and
+    ///      eligibility cost, never a transfer to anyone (principle 2 holds: no
+    ///      internal attack profit). Bounded to what the moderator actually has, so
+    ///      the penalty can never fail settlement.
+    function _penalizeNoShow(Case storage c, address a, uint256 seats) internal {
+        if (seats == 0) return;
+        Params storage p = _cp(c);
+        // One seat's worth, regardless of seats held. The registry owns the
+        // opt-in check (never pledged -> nothing owed) and clamps the penalty to
+        // what the moderator actually has, so this can never fail settlement.
+        stakeReg.penalizeNoShow(a, p.riskPerSeat, block.timestamp + p.failedRevealFreeze);
     }
 
     function _coherent(Vote vote, Outcome finalOutcome) internal pure returns (bool) {
@@ -968,18 +1096,21 @@ contract Moderation is ReentrancyGuard {
     function _openRound(Case storage c, uint256 depth) internal {
         c.rounds.push();
         Round storage r = c.rounds[c.rounds.length - 1];
-        r.nSeats = _commitTarget(depth);
-        r.seatSnapshotBlock = block.number + params.seedLag;
+        uint256 target = _commitTarget(c, depth);
+        r.nSeats = 0; // filled in by the draw: seats seated, not seats sought
+        r.pendingDraw = target; // H-05
+        r.seatSnapshotBlock = block.number + _cp(c).seedLag;
+        r.eligVersionAtArm = stakeReg.eligibilityAddVersion(); // H-05
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
         c.phase = Phase.DRAW;
-        emit RoundOpened(c.id, depth, r.nSeats, r.seatSnapshotBlock);
+        emit RoundOpened(c.id, depth, target, r.seatSnapshotBlock); // seats SOUGHT
     }
 
     function _toReveal(Case storage c) internal {
         c.phase = Phase.REVEAL;
-        c.phaseDeadline = block.timestamp + params.revealWindow;
+        c.phaseDeadline = block.timestamp + _cp(c).revealWindow;
         emit RevealOpened(c.id, c.depth, c.phaseDeadline);
     }
 
@@ -987,28 +1118,33 @@ contract Moderation is ReentrancyGuard {
         Round storage r = _cur(c);
         uint256 reveals = r.revealedSeats;
 
-        if (reveals >= params.minReveals) {
+        if (reveals >= _cp(c).minReveals) {
             _armOutcome(c, r);
             return;
         }
         // Under-participation: widen while retries remain.
-        if (r.widenCount < params.maxWiden) {
+        if (r.widenCount < _cp(c).maxWiden) {
             r.widenCount++;
-            uint256 add = _commitTarget(c.depth);
-            uint256 offset = r.seatDrawCount;
-            bytes32 newSeed = keccak256(abi.encode(r.seatSeed, r.widenCount));
-            r.seatSeed = newSeed;
-            r.nSeats += add;
-            _drawSeats(r, add, newSeed, offset);
-            c.phase = Phase.COMMIT;
-            c.phaseDeadline = block.timestamp + params.commitTimeout;
-            emit Widened(c.id, c.depth, r.widenCount, r.nSeats);
-            emit CommitOpened(c.id, c.depth, c.phaseDeadline);
+            uint256 add = _commitTarget(c, c.depth);
+            // H-05: a widen re-draw gets FRESH entropy (a newly armed snapshot
+            // block), not keccak(oldSeed, widenCount) — which contained no new
+            // randomness and was fully known before a voter decided whether to
+            // withhold a reveal and trigger the widen. Back to DRAW; the poke
+            // draws only the added seats.
+            r.pendingDraw = add;
+            r.seatSnapshotBlock = block.number + _cp(c).seedLag;
+            r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
+            c.phase = Phase.DRAW;
+            emit Widened(c.id, c.depth, r.widenCount, r.nSeats); // seated so far
+            emit RoundOpened(c.id, c.depth, add, r.seatSnapshotBlock); // seats SOUGHT
             return;
         }
         // Widen exhausted with participation: proceed with the reveals we have
-        // (a case that got participation should still yield an outcome).
+        // (a case that got participation should still yield an outcome), but mark
+        // the round under-quorum so its approval can never reach the supersafe
+        // view (H-09).
         if (reveals != 0) {
+            r.underQuorum = true;
             _armOutcome(c, r);
             return;
         }
@@ -1020,7 +1156,12 @@ contract Moderation is ReentrancyGuard {
         if (c.depth == 0) {
             _void(c);
         } else {
+            // The appeal round drew NO quorum after max widen: the adjudication
+            // layer failed, the appeal did not lose on the merits. Restore the
+            // prior outcome for liveness, but refund the funding bond's capital
+            // (no bonus) instead of forfeiting it to the prior winners (H-10).
             Round storage prev = c.rounds[c.depth - 1];
+            prev.bondRefundOnly = true;
             r.outcome = prev.outcome;
             c.finalOutcome = prev.outcome;
             c.phase = Phase.FINALIZED;
@@ -1030,7 +1171,7 @@ contract Moderation is ReentrancyGuard {
 
     function _armOutcome(Case storage c, Round storage r) internal {
         c.phase = Phase.TALLY;
-        r.outcomeSnapshotBlock = block.number + params.seedLag;
+        r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
     }
 
@@ -1049,12 +1190,15 @@ contract Moderation is ReentrancyGuard {
             uint256 amt = r.committedAmt[a];
             if (amt > 0) {
                 r.committedAmt[a] = 0;
-                _freezeSlice(a, amt, block.timestamp + params.failedRevealFreeze);
+                _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
+            } else {
+                _penalizeNoShow(c, a, r.seats[a]); // pledged, drawn, never committed
             }
+            _releaseDuty(a, r.seats[a]); // H-07: capacity returns when the case ends
         }
 
         uint256 pot = c.pot;
-        uint256 bounty = (pot * params.claimBountyFrac) / WAD;
+        uint256 bounty = (pot * _cp(c).claimBountyFrac) / WAD;
         c.pot = 0;
         openPotsTotal -= pot;
         _clearDedup(c);
@@ -1070,32 +1214,64 @@ contract Moderation is ReentrancyGuard {
         return c.rounds[c.rounds.length - 1];
     }
 
+    /// @dev H-06: bind randomness to (chain, contract, case, depth, purpose) so
+    ///      no two draws share a seed derived from the same blockhash.
+    function _domainSeed(uint256 caseId, uint256 depth, uint8 purpose, bytes32 entropy)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(block.chainid, address(this), caseId, depth, purpose, entropy));
+    }
+
+    /// @dev Draw `count` seats, RESERVING one duty unit per seat (H-07). A
+    ///      moderator whose pledged capacity is exhausted mid-draw drops out of the
+    ///      tree for the remainder of this draw (its weight is restored at the
+    ///      end), so seats land only where collateral exists — no rejection
+    ///      sampling and no unbounded gas: each exclusion happens at most once per
+    ///      distinct moderator, and the loop is bounded by `count + exclusions`.
     function _drawSeats(Round storage r, uint256 count, bytes32 seed, uint256 offset) internal {
-        for (uint256 i; i < count; ++i) {
-            address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + i))));
+        (address[] memory seats, uint256 attempts) = stakeReg.drawPanel(count, seed, offset);
+        uint256 n = seats.length;
+        for (uint256 i; i < n; ++i) {
+            address seat = seats[i];
             if (r.seats[seat] == 0) r.seatHolders.push(seat);
             r.seats[seat] += 1;
         }
-        r.seatDrawCount += count;
+        // The registry seats only where collateral exists, so a panel can come
+        // back SHORT of the commit target when pledged duty capacity is scarce
+        // (H-07). Count what was actually seated, not what was asked for: an
+        // inflated nSeats would misreport the panel and, if it ever fed quorum
+        // logic, would let a thin panel look full. Under-participation is
+        // already the widen path's job.
+        r.nSeats += n;
+        // Attempts, not seats: the offset must advance past every draw the
+        // registry actually performed, so a later widen's draws stay disjoint
+        // from this one's even when some attempts hit exhausted capacity.
+        r.seatDrawCount += attempts;
     }
 
-    function _lockStake(address moderator, uint256 amount) internal {
-        Moderator storage m = moderators[moderator];
-        uint256 reserved = m.pending + m.exitAmount;
-        uint256 eligible = m.free > reserved ? m.free - reserved : 0;
-        if (eligible < amount) revert InsufficientEligibleFree();
-        m.free -= amount;
-        m.committed += amount;
-        totalFreeStake -= amount;
-        totalCommittedStake += amount;
-        _syncTree(moderator, m);
+    /// @dev Release the duty capacity a seat-holder reserved for this round.
+    function _releaseDuty(address a, uint256 seats) internal {
+        stakeReg.releaseDuty(a, seats);
+    }
+
+    /// @dev Free stake usable as per-case collateral right now: excludes the
+    ///      pending-activation and exit-reserved portions (H-07 partial commit).
+    function _eligibleFreeOf(address moderator) internal view returns (uint256) {
+        (uint256 free, uint256 pending,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(moderator);
+        uint256 reserved = pending + exitAmount;
+        return free > reserved ? free - reserved : 0;
     }
 
     function _clearDedup(Case storage c) internal {
         if (c.kind != Kind.SUBMISSION) return;
         uint256 len = c.topicKeys.length;
         for (uint256 i; i < len; ++i) {
-            delete submissionExists[_dedupKey(c.contentHash, c.metaHash, c.topicKeys[i])];
+            bytes32 k = _dedupKey(c.contentHash, c.metaHash, c.topicKeys[i]);
+            // H-02: only the current owner may release its reservation, so a stale
+            // case cannot wipe a key a newer resubmission now holds.
+            if (dedupOwnerPlusOne[k] == c.id + 1) delete dedupOwnerPlusOne[k];
         }
     }
 
@@ -1103,14 +1279,33 @@ contract Moderation is ReentrancyGuard {
         return keccak256(abi.encode(contentHash, metaHash, topicKey));
     }
 
-    function _commitTarget(uint256 depth) internal view returns (uint256) {
-        uint256 len = commitTargetByDepth.length;
-        return commitTargetByDepth[depth < len ? depth : len - 1];
+    /// @notice True iff the (content, meta, topic) triple is currently reserved.
+    function submissionExists(bytes32 dedupKey) external view returns (bool) {
+        return dedupOwnerPlusOne[dedupKey] != 0;
     }
 
-    function _appealWindow(uint256 depth) internal view returns (uint256) {
-        uint256 len = appealWindowByDepth.length;
-        return appealWindowByDepth[depth < len ? depth : len - 1];
+    /// @notice The caseId currently holding a dedup reservation (reverts-free: 0
+    ///         means unreserved; otherwise the owning caseId).
+    function dedupOwner(bytes32 dedupKey) external view returns (uint256) {
+        uint256 v = dedupOwnerPlusOne[dedupKey];
+        return v == 0 ? 0 : v - 1;
+    }
+
+    /// @dev H-11: consensus params for a case come from its pinned ruleset.
+    function _cp(Case storage c) internal view returns (Params storage) {
+        return rulesets[c.rulesVersion].p;
+    }
+
+    function _commitTarget(Case storage c, uint256 depth) internal view returns (uint256) {
+        uint256[] storage arr = rulesets[c.rulesVersion].commitTargets;
+        uint256 len = arr.length;
+        return arr[depth < len ? depth : len - 1];
+    }
+
+    function _appealWindow(Case storage c, uint256 depth) internal view returns (uint256) {
+        uint256[] storage arr = rulesets[c.rulesVersion].appealWindows;
+        uint256 len = arr.length;
+        return arr[depth < len ? depth : len - 1];
     }
 
     function minFee(uint256 nTopics) public view returns (uint256) {
@@ -1181,37 +1376,31 @@ contract Moderation is ReentrancyGuard {
     }
 
     function appealFloor(uint256 caseId) external view returns (uint256) {
-        return params.bondMultiplier * cases[caseId].pot;
+        return _cp(cases[caseId]).bondMultiplier * cases[caseId].pot;
     }
 
     // --- index views (§8.3) --------------------------------------------------
+    // Thin forwarders: the entries are the registry's, but the M2 ABI keeps
+    // working for clients pointed at this contract.
 
     /// Superset: number of current entries under a topic.
     function entryCount(bytes32 topicKey) external view returns (uint256) {
-        return indexByTopic[topicKey].length;
+        return indexReg.entryCount(topicKey);
     }
 
-    function entryAt(bytes32 topicKey, uint256 i) external view returns (Entry memory) {
-        return indexByTopic[topicKey][i];
+    function entryAt(bytes32 topicKey, uint256 i) external view returns (IndexRegistry.Entry memory) {
+        return indexReg.entryAt(topicKey, i);
     }
 
-    /// Supersafe subset (§8.3): uncontested and aged past SUPERSAFE_AGE.
-    function supersafeEntries(bytes32 topicKey) external view returns (Entry[] memory out) {
-        Entry[] storage arr = indexByTopic[topicKey];
-        uint256 len = arr.length;
-        uint256 count;
-        for (uint256 i; i < len; ++i) {
-            if (_isSupersafe(arr[i])) count++;
-        }
-        out = new Entry[](count);
-        uint256 j;
-        for (uint256 i; i < len; ++i) {
-            if (_isSupersafe(arr[i])) out[j++] = arr[i];
-        }
-    }
-
-    function _isSupersafe(Entry storage e) internal view returns (bool) {
-        return e.uncontested && block.timestamp - e.approvalTime >= params.supersafeAge;
+    /// Supersafe subset (§8.3): uncontested, full-quorum (H-09), and aged past
+    /// this contract's SUPERSAFE_AGE. Age is registry-caller policy, so the
+    /// parameter is supplied here rather than stored there — the index outlives
+    /// any particular parameter set.
+    /// @dev Unpaginated, preserving the M2 signature. A front end serving a large
+    ///      topic should read `indexReg.supersafeEntries(topic, minAge, cursor,
+    ///      limit)` directly (M-04).
+    function supersafeEntries(bytes32 topicKey) external view returns (IndexRegistry.Entry[] memory) {
+        return indexReg.supersafeEntries(topicKey, params.supersafeAge, 0, indexReg.entryCount(topicKey));
     }
 
     function caseGuidelinesVersion(uint256 caseId) external view returns (uint256) {
@@ -1236,6 +1425,9 @@ contract Moderation is ReentrancyGuard {
     error NoPendingProposal();
     error TimelockNotElapsed();
     error BadParams();
+    /// A proposed ruleset would lock more per seat than a pledged duty unit is
+    /// worth, so panels could be seated on collateral that cannot cover them.
+    error RiskPerSeatExceedsDutyUnit();
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -1266,6 +1458,11 @@ contract Moderation is ReentrancyGuard {
         params = pp.p;
         commitTargetByDepth = pp.commitTargets;
         appealWindowByDepth = pp.appealWindows;
+        // H-11: seal a new immutable ruleset version; open cases keep their pinned
+        // version, only cases submitted after this pick up the new rules.
+        currentRulesVersion += 1;
+        rulesets[currentRulesVersion] =
+            Ruleset({p: pp.p, commitTargets: pp.commitTargets, appealWindows: pp.appealWindows});
         delete pendingParams;
         emit ParametersExecuted();
     }
@@ -1297,20 +1494,55 @@ contract Moderation is ReentrancyGuard {
         emit GovernanceTransferred(next);
     }
 
+    /// @dev Not `pure`: it consults the registry. `riskPerSeat` exists in both
+    ///      contracts by design — there it is what one DUTY UNIT is worth (a
+    ///      staking-layer constant, immutable), here it is what a case LOCKS per
+    ///      seat (a consensus parameter, pinned per case by H-11). Collapsing
+    ///      them would either break per-case pinning or make draw eligibility
+    ///      retroactively mutable.
+    ///
+    ///      Only one direction of divergence is harmful: a case locking MORE than
+    ///      the unit reserved for it, which would seat a panel on collateral that
+    ///      cannot cover it. Rejecting that here makes the dangerous desync
+    ///      unrepresentable rather than merely documented — governance cannot
+    ///      create it by accident. The other direction (locking less) is benign:
+    ///      seats are simply over-collateralized relative to eligibility.
     function _validateParams(Params calldata p, uint256[] calldata commitTargets, uint256[] calldata appealWindows)
         internal
-        pure
+        view
     {
         if (commitTargets.length == 0 || appealWindows.length == 0) revert BadParams();
-        if (p.minStake == 0 || p.riskPerSeat == 0) revert BadParams();
+        if (commitTargets.length > MAX_ARRAY_LEN || appealWindows.length > MAX_ARRAY_LEN) revert BadParams();
+        if (p.riskPerSeat == 0) revert BadParams();
+        // A case must never lock more than one pledged duty unit is worth.
+        if (p.riskPerSeat > stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
         if (p.minReveals == 0) revert BadParams();
-        if (p.bondMultiplier == 0) revert BadParams();
+        if (p.bondMultiplier == 0 || p.bondMultiplier > MAX_BOND_MULT) revert BadParams();
         if (p.freezeCap < WAD) revert BadParams(); // power multiplier >= 1
         if (p.trackDecay > WAD) revert BadParams(); // decay is a fraction
         if (p.claimBountyFrac + p.bonusFrac > WAD) revert BadParams(); // distributable stays >= 0
+
+        // H-11: hard protocol caps + cross-field sanity so governance cannot brick
+        // active or future cases.
+        if (p.maxDepth > MAX_RULE_DEPTH || p.maxWiden > MAX_RULE_WIDEN) revert BadParams();
+        if (p.maxTopics == 0 || p.maxTopics > MAX_RULE_TOPICS) revert BadParams();
+        if (p.seedLag == 0 || p.seedLag > MAX_SEED_LAG) revert BadParams();
+        if (p.commitTimeout == 0 || p.commitTimeout > MAX_WINDOW) revert BadParams();
+        if (p.revealWindow == 0 || p.revealWindow > MAX_WINDOW) revert BadParams();
+        if (p.failedRevealFreeze > MAX_FREEZE || p.freezeBase == 0 || p.freezeBase > MAX_FREEZE) revert BadParams();
+        // minReveals must be reachable within the fully-widened depth-0 panel.
+        if (p.minReveals > commitTargets[0] * (1 + p.maxWiden)) revert BadParams();
+
+        uint256 totalDraws;
         for (uint256 i; i < commitTargets.length; ++i) {
-            if (commitTargets[i] == 0) revert BadParams();
+            if (commitTargets[i] == 0 || commitTargets[i] > MAX_PANEL) revert BadParams();
+            // every depth up to maxDepth can widen maxWiden times
+            if (i <= p.maxDepth) totalDraws += (1 + p.maxWiden) * commitTargets[i];
         }
+        for (uint256 i; i < appealWindows.length; ++i) {
+            if (appealWindows[i] == 0 || appealWindows[i] > MAX_WINDOW) revert BadParams();
+        }
+        if (totalDraws > MAX_TOTAL_DRAWS) revert BadParams();
     }
 
     function pendingParamsEta() external view returns (uint256 eta, bool exists) {
@@ -1318,68 +1550,11 @@ contract Moderation is ReentrancyGuard {
     }
 
     // --- eligibility wiring (D6) ---------------------------------------------
-
-    /// @dev The draw-eligible weight the tree should hold for `m`: zero while the
-    ///      moderator is frozen (fully excluded, however small the frozen slice),
-    ///      otherwise the free balance minus the pending-activation and
-    ///      exit-reserved portions.
-    function _eligibleWeight(Moderator storage m) internal view returns (uint256) {
-        if (block.timestamp < m.frozenUntil) return 0;
-        uint256 reserved = m.pending + m.exitAmount;
-        if (m.free <= reserved) return 0;
-        return m.free - reserved;
-    }
-
-    function _syncTree(address moderator, Moderator storage m) internal {
-        stakeTree.set(moderator, _eligibleWeight(m));
-    }
-
-    function _total(Moderator storage m) internal view returns (uint256) {
-        return m.free + m.committed + m.frozen;
-    }
-
-    // --- views ---------------------------------------------------------------
-
-    function moderatorInfo(address moderator)
-        external
-        view
-        returns (
-            uint256 free,
-            uint256 pending,
-            uint256 committed,
-            uint256 frozen,
-            uint256 frozenUntil,
-            uint256 activatesAt,
-            uint256 exitAmount,
-            uint256 exitRequestedAt,
-            uint256 track
-        )
-    {
-        Moderator storage m = moderators[moderator];
-        return (
-            m.free,
-            m.pending,
-            m.committed,
-            m.frozen,
-            m.frozenUntil,
-            m.activatesAt,
-            m.exitAmount,
-            m.exitRequestedAt,
-            m.track
-        );
-    }
-
-    function totalStakeOf(address moderator) external view returns (uint256) {
-        return _total(moderators[moderator]);
-    }
-
-    function eligibleWeightOf(address moderator) external view returns (uint256) {
-        return stakeTree.weightOf(moderator);
-    }
-
-    function totalEligibleWeight() external view returns (uint256) {
-        return stakeTree.total();
-    }
+    //
+    // Draw-eligible weight, the sortition tree and the free/committed/frozen
+    // partition are StakeRegistry-internal (M2.5-P0-b). Read them there:
+    // `moderatorInfo`, `totalStakeOf`, `eligibleWeightOf`, `totalEligibleWeight`,
+    // `stakeBuckets`.
 
     function getParams() external view returns (Params memory) {
         return params;
@@ -1394,6 +1569,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     function commitTargetAt(uint256 depth) external view returns (uint256) {
-        return _commitTarget(depth);
+        uint256 len = commitTargetByDepth.length;
+        return commitTargetByDepth[depth < len ? depth : len - 1];
     }
 }

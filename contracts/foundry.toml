@@ -14,7 +14,11 @@ evm_version = "cancun"          # Gnosis Chain supports Cancun opcodes
 
 optimizer = true
 optimizer_runs = 200
-via_ir = false                  # keep off for faster iteration; revisit at M2-9 if gas-bound
+# EIP-170: `Moderation` does not fit the 24,576-byte runtime limit without the IR
+# pipeline (25,986 B through the legacy one). We test what we ship — on a contract
+# custodying stake, running the suite against bytecode that can never be deployed
+# is not a tradeoff worth taking. See GAS_BUDGETS.md.
+via_ir = true
 
 # Differential vectors are read from disk (M2-8, D10).
 fs_permissions = [{ access = "read", path = "./test/vectors" }]
@@ -33,6 +37,8 @@ fail_on_revert = false          # handler guards revert on out-of-domain calls b
 [profile.ci]
 fuzz = { runs = 1024 }
 invariant = { runs = 512, depth = 128 }
+
+
 
 # Remappings: forge auto-detects lib/, but pin them explicitly for clarity.
 remappings = [

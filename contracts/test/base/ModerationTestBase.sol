@@ -6,12 +6,17 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../../src/Moderation.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
+import {StakeRegistry} from "../../src/StakeRegistry.sol";
+import {IndexRegistry} from "../../src/IndexRegistry.sol";
+import {StackDeployer} from "../base/StackDeployer.sol";
 
 /// @notice Shared setup and lifecycle-driving helpers for the Moderation tests.
 ///         Stands up a funded, activated moderator set and drives cases through
 ///         the phase machine by reading the actual (randomly drawn) seat-holders
 ///         from the contract.
-abstract contract ModerationTestBase is Test {
+abstract contract ModerationTestBase is StackDeployer {
+    StakeRegistry internal stakeReg;
+    IndexRegistry internal indexReg;
     ModerationHarness internal mod;
     MockBZZ internal bzz;
 
@@ -31,12 +36,14 @@ abstract contract ModerationTestBase is Test {
 
     function setUp() public virtual {
         bzz = new MockBZZ();
-        mod = new ModerationHarness(IERC20(address(bzz)));
+        (mod, stakeReg, indexReg) = _deployStack(bzz);
         // Generous stake: a deep appeal chain locks stake in several concurrent
         // rounds at once (committed isn't released until claim, M2-5).
         _spawnModerators(8, 3000 * XBZZ);
     }
 
+    /// Stake goes to the registry now (M2.5 port): moderators deposit, activate
+    /// and pledge duty there directly, never through the logic contract.
     function _spawnModerators(uint256 n, uint256 stakeEach) internal {
         uint256 start = mods.length;
         for (uint256 i = start; i < start + n; i++) {
@@ -44,16 +51,23 @@ abstract contract ModerationTestBase is Test {
             mods.push(m);
             bzz.mint(m, 100_000 * XBZZ);
             vm.prank(m);
-            bzz.approve(address(mod), type(uint256).max);
+            bzz.approve(address(stakeReg), type(uint256).max);
             vm.prank(m);
-            mod.stake(stakeEach);
+            stakeReg.stake(stakeEach);
         }
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
+        // Compute BEFORE pranking: an external call in the arg list eats the prank.
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        uint256 units = stakeEach / riskPerSeat;
         for (uint256 i = 0; i < mods.length; i++) {
-            (, uint256 pending,,,,,,,) = mod.moderatorInfo(mods[i]);
-            if (pending > 0) mod.activate(mods[i]);
+            (, uint256 pending,,,,,,,) = stakeReg.moderatorInfo(mods[i]);
+            if (pending > 0) stakeReg.activate(mods[i]);
+            // H-07: stake alone is not drawable — a moderator must PLEDGE duty
+            // capacity. Pledge generously so panels fill as before.
+            vm.prank(mods[i]);
+            stakeReg.setDutyUnits(units);
         }
-        vm.roll(block.number + 1);
+        vm.roll(vm.getBlockNumber() + 1);
     }
 
     function _topics() internal pure returns (bytes32[] memory t) {
@@ -81,19 +95,19 @@ abstract contract ModerationTestBase is Test {
     }
 
     function _realizeSeats(uint256 caseId) internal {
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         mod.realizeSeats(caseId);
         while (_phase(caseId) == Moderation.Phase.DRAW) {
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             mod.realizeSeats(caseId);
         }
     }
 
     function _commitAll(uint256 caseId, uint256 depth, Moderation.Vote vote) internal {
         (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, depth);
-        bytes32 commitHash = keccak256(abi.encode(uint8(vote), SALT));
         for (uint256 i = 0; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, depth, i);
+            bytes32 commitHash = mod.computeCommit(caseId, depth, sh, vote, SALT); // M-01: bound per voter
             vm.prank(sh);
             mod.commitVote(caseId, commitHash);
         }
@@ -109,10 +123,10 @@ abstract contract ModerationTestBase is Test {
     }
 
     function _realizeOutcome(uint256 caseId) internal {
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         mod.realizeOutcome(caseId);
         while (_phase(caseId) == Moderation.Phase.TALLY) {
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             mod.realizeOutcome(caseId);
         }
     }
@@ -122,12 +136,12 @@ abstract contract ModerationTestBase is Test {
     function _runRoundToAppealWindow(uint256 caseId, uint256 depth, Moderation.Vote vote) internal {
         _commitAll(caseId, depth, vote);
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
         _revealAll(caseId, depth, vote);
         if (_phase(caseId) == Moderation.Phase.REVEAL) {
-            vm.warp(block.timestamp + REVEAL_WINDOW);
+            vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
             mod.closeReveal(caseId);
         }
         _realizeOutcome(caseId);
@@ -162,12 +176,9 @@ abstract contract ModerationTestBase is Test {
         _finalize(caseId);
     }
 
+    /// M2.5 port: conservation now spans two contracts — the logic contract holds
+    /// only pot money, the registry holds exactly the staked buckets.
     function _assertConservation() internal view {
-        uint256 buckets = mod.totalFreeStake() + mod.totalCommittedStake() + mod.totalFrozenStake();
-        assertEq(
-            bzz.balanceOf(address(mod)),
-            buckets + mod.openPotsTotal() + mod.totalPendingBond() + mod.totalPendingPayout(),
-            "conservation: balance == staked buckets + live pots + pending bond + pending payout"
-        );
+        _assertStackConservation(mod, stakeReg, bzz);
     }
 }

@@ -6,17 +6,20 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
+import {StackDeployer} from "./base/StackDeployer.sol";
 
 /// F2 regression: a widen re-draw can add seats to a voter that already revealed.
 /// Settlement must pay (and mean-track) only the seats tallied at reveal, not the
 /// inflated post-widen count — otherwise the re-drawn voter siphons reward from
 /// its co-winners.
-contract WidenSeatsTest is Test {
+contract WidenSeatsTest is StackDeployer {
     uint256 internal constant XBZZ = 1e16;
 
     function test_widen_inflated_seats_do_not_change_settlement() public {
         MockBZZ bzz = new MockBZZ();
-        ModerationHarness mod = new ModerationHarness(IERC20(address(bzz)));
+        (ModerationHarness mod, StakeRegistry stakeReg,) = _deployStack(bzz);
 
         // Two equally-tallied coherent voters (2 seats each), final APPROVE.
         uint256 pot = 1000 * XBZZ + 12345; // odd -> dust
@@ -29,15 +32,15 @@ contract WidenSeatsTest is Test {
         uint256 camt = 20 * XBZZ;
         mod.__injectSeat(caseId, 0, vv, 2, camt, 1); // Approve, 2 tallied seats
         mod.__injectSeat(caseId, 0, ww, 2, camt, 1); // Approve, 2 tallied seats
-        bzz.mint(address(mod), 2 * camt);
+        bzz.mint(address(stakeReg), 2 * camt); // committed backing lives in the registry
 
         // A widen re-drew 10 extra seats onto V *after* V revealed.
         mod.__injectWidenSeats(caseId, 0, vv, 10);
 
         mod.claim(caseId);
 
-        (uint256 vFree,,,,,,,,) = mod.moderatorInfo(vv);
-        (uint256 wFree,,,,,,,,) = mod.moderatorInfo(ww);
+        (uint256 vFree,,,,,,,,) = stakeReg.moderatorInfo(vv);
+        (uint256 wFree,,,,,,,,) = stakeReg.moderatorInfo(ww);
         // Equal tallied seats -> equal reward; the 10 phantom seats are inert.
         assertEq(vFree, wFree, "widen-inflated seats must not enlarge V's reward");
         // And each got their stake back plus a positive reward.

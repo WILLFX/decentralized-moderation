@@ -7,6 +7,7 @@ import {StdUtils} from "forge-std/StdUtils.sol";
 import {Moderation} from "../../src/Moderation.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
+import {StakeRegistry} from "../../src/StakeRegistry.sol";
 
 /// @notice Invariant-campaign driver. The fuzzer calls these bounded actions in
 ///         random order; each is robust to being called in any state (it guards
@@ -16,6 +17,7 @@ import {MockBZZ} from "../mocks/MockBZZ.sol";
 ///         stake, accumulated track) between calls.
 contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     ModerationHarness public immutable mod;
+    StakeRegistry public immutable stakeReg;
     MockBZZ public immutable bzz;
     address[] public actors;
 
@@ -28,8 +30,9 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     mapping(address => uint256) public netDeposited;
     uint256 public casesSettled;
 
-    constructor(ModerationHarness _mod, MockBZZ _bzz, address[] memory _actors) {
+    constructor(ModerationHarness _mod, StakeRegistry _stakeReg, MockBZZ _bzz, address[] memory _actors) {
         mod = _mod;
+        stakeReg = _stakeReg;
         bzz = _bzz;
         actors = _actors;
     }
@@ -43,55 +46,70 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     function hStake(uint256 actorSeed, uint256 amount) external {
         address a = _actor(actorSeed);
         amount = bound(amount, XBZZ, 2000 * XBZZ);
-        if (mod.totalStakeOf(a) == 0 && amount < 10 * XBZZ) amount = 10 * XBZZ;
+        if (stakeReg.totalStakeOf(a) == 0 && amount < 10 * XBZZ) amount = 10 * XBZZ;
         bzz.mint(a, amount);
         vm.prank(a);
-        bzz.approve(address(mod), type(uint256).max);
+        bzz.approve(address(stakeReg), type(uint256).max);
         vm.prank(a);
-        try mod.stake(amount) {
+        try stakeReg.stake(amount) {
             netDeposited[a] += amount;
         } catch {}
     }
 
+    /// H-07: stake alone is not drawable — capacity must be PLEDGED. Without
+    /// this action the sortition tree stays empty, hRunCase returns at its
+    /// eligibility guard, and the whole campaign silently degenerates into a
+    /// staking-only test that never adjudicates a case.
+    function hSetDuty(uint256 actorSeed, uint256 units) external {
+        address a = _actor(actorSeed);
+        (uint256 free, uint256 pending,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
+        uint256 usable = free > pending + exitAmount ? free - pending - exitAmount : 0;
+        uint256 maxUnits = usable / stakeReg.riskPerSeat();
+        if (maxUnits == 0) return;
+        units = bound(units, 1, maxUnits);
+        vm.prank(a);
+        try stakeReg.setDutyUnits(units) {} catch {}
+    }
+
     function hActivate(uint256 actorSeed) external {
         address a = _actor(actorSeed);
-        (, uint256 pending,,,, uint256 activatesAt,,,) = mod.moderatorInfo(a);
-        if (pending == 0 || block.timestamp < activatesAt) return;
-        try mod.activate(a) {} catch {}
+        (, uint256 pending,,,, uint256 activatesAt,,,) = stakeReg.moderatorInfo(a);
+        if (pending == 0 || vm.getBlockTimestamp() < activatesAt) return;
+        try stakeReg.activate(a) {} catch {}
     }
 
     function hRequestExitPranked(uint256 actorSeed, uint256 amount) external {
         address a = _actor(actorSeed);
-        (uint256 free,,,,,, uint256 exitAmount,,) = mod.moderatorInfo(a);
+        (uint256 free,,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
         if (exitAmount != 0 || free == 0) return;
         amount = bound(amount, 1, free);
         vm.prank(a);
-        try mod.requestExit(amount) {} catch {}
+        try stakeReg.requestExit(amount) {} catch {}
     }
 
     function hWithdraw(uint256 actorSeed) external {
         address a = _actor(actorSeed);
-        (,,,,,, uint256 exitAmount, uint256 exitReqAt,) = mod.moderatorInfo(a);
+        (,,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
         if (exitAmount == 0) return;
-        vm.warp(block.timestamp + 8 days); // ensure cooldown elapsed
+        vm.warp(vm.getBlockTimestamp() + 8 days); // ensure cooldown elapsed
         vm.prank(a);
-        try mod.withdraw() {
+        try stakeReg.withdraw() {
             netDeposited[a] -= exitAmount;
         } catch {}
     }
 
     function hThaw(uint256 actorSeed) external {
         address a = _actor(actorSeed);
-        (,,, uint256 frozen, uint256 frozenUntil,,,,) = mod.moderatorInfo(a);
+        (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(a);
         if (frozen == 0) return;
-        if (block.timestamp < frozenUntil) vm.warp(frozenUntil + 1);
-        try mod.thaw(a) {} catch {}
+        if (vm.getBlockTimestamp() < frozenUntil) vm.warp(frozenUntil + 1);
+        try stakeReg.thaw(a) {} catch {}
     }
 
     // --- run a full case to settlement ---------------------------------------
 
     function hRunCase(uint256 submitterSeed, uint256 voteSeed, bool doAppeal) external {
-        if (mod.totalEligibleWeight() == 0) return;
+        if (stakeReg.totalEligibleWeight() == 0) return;
         address submitter = _actor(submitterSeed);
 
         uint256 fee = mod.minFee(1);
@@ -147,7 +165,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     /// voters (exercising freeze paths). Returns false if the round couldn't be
     /// advanced (and the caller should stop).
     function _runRound(uint256 caseId, uint256 depth, uint256 voteSeed) internal returns (bool) {
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         try mod.realizeSeats(caseId) {} catch {
             return false;
         }
@@ -155,7 +173,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         uint256 guard;
         while (_phase(caseId) == Moderation.Phase.DRAW) {
             if (guard++ > 4) return false;
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             try mod.realizeSeats(caseId) {} catch {
                 return false;
             }
@@ -167,12 +185,12 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         for (uint256 i; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, depth, i);
             Moderation.Vote v = ((voteSeed + i) % 2 == 0) ? Moderation.Vote.Approve : Moderation.Vote.Reject;
-            bytes32 h = keccak256(abi.encode(uint8(v), bytes32(uint256(0xabc))));
+            bytes32 h = mod.computeCommit(caseId, depth, sh, v, bytes32(uint256(0xabc))); // M-01
             vm.prank(sh);
             try mod.commitVote(caseId, h) {} catch {}
         }
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + 25 hours);
+            vm.warp(vm.getBlockTimestamp() + 25 hours);
             try mod.closeCommit(caseId) {} catch {
                 return false;
             }
@@ -187,7 +205,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
             }
         }
         if (_phase(caseId) == Moderation.Phase.REVEAL) {
-            vm.warp(block.timestamp + 25 hours);
+            vm.warp(vm.getBlockTimestamp() + 25 hours);
             try mod.closeReveal(caseId) {} catch {
                 return false;
             }
@@ -196,7 +214,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         guard = 0;
         while (_phase(caseId) == Moderation.Phase.TALLY) {
             if (guard++ > 4) return false;
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             try mod.realizeOutcome(caseId) {} catch {
                 return false;
             }

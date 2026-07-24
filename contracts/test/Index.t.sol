@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
+import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
+import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
 
 contract IndexTest is ModerationTestBase {
     bytes32 internal constant TK = keccak256("marine biology");
@@ -13,7 +18,55 @@ contract IndexTest is ModerationTestBase {
         vm.prank(who);
         bzz.approve(address(mod), type(uint256).max);
         vm.prank(who);
-        caseId = mod.submit(Moderation.Kind.REMOVAL, CONTENT, META, _topics(), targetCaseId, fee);
+        caseId = mod.submitRemoval(targetCaseId, fee);
+    }
+
+    function _settleRemovalApprove(uint256 remId) internal {
+        _realizeSeats(remId);
+        _runRoundToAppealWindow(remId, 0, Moderation.Vote.Approve);
+        _finalize(remId);
+        mod.claim(remId);
+    }
+
+    // H-02: an obsolete removal must never clear a dedup reservation that a newer
+    // resubmission now owns. Dedup is keyed by owner (caseId+1), so only the
+    // current holder can release it.
+    function test_obsolete_removal_cannot_wipe_newer_reservation() public {
+        bytes32 key = keccak256(abi.encode(CONTENT, META, TK));
+
+        uint256 t = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(t);
+        assertEq(mod.dedupOwner(key), t, "T owns the reservation");
+
+        // Two removals opened against T while it is still indexed.
+        uint256 rem1 = _submitRemoval(mods[1], t);
+        uint256 rem2 = _submitRemoval(mods[2], t);
+
+        // First removal frees the reservation.
+        _settleRemovalApprove(rem1);
+        assertEq(mod.entryCount(TK), 0);
+        assertEq(mod.dedupOwner(key), 0, "reservation freed after removal");
+
+        // Same content resubmitted: N now owns the reservation and is indexed.
+        uint256 nCase = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(nCase);
+        assertEq(mod.dedupOwner(key), nCase, "N now owns the reservation");
+        assertEq(mod.entryCount(TK), 1);
+
+        // The obsolete removal (targets T) settles: it must not touch N's
+        // reservation or entry.
+        _settleRemovalApprove(rem2);
+        assertEq(mod.dedupOwner(key), nCase, "obsolete removal leaves N's reservation intact");
+        assertEq(mod.entryCount(TK), 1, "N's entry untouched");
+
+        // Proof the reservation is really held: a duplicate is rejected.
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[3], fee);
+        vm.prank(mods[3]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[3]);
+        vm.expectRevert(Moderation.DuplicateSubmission.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
     }
 
     // --- write happens only at settlement ------------------------------------
@@ -28,7 +81,7 @@ contract IndexTest is ModerationTestBase {
 
         mod.claim(caseId);
         assertEq(mod.entryCount(TK), 1, "written at settlement");
-        Moderation.Entry memory e = mod.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertEq(e.contentHash, CONTENT);
         assertEq(e.metaHash, META);
         assertEq(e.caseId, caseId);
@@ -57,7 +110,7 @@ contract IndexTest is ModerationTestBase {
         mod.claim(caseId);
 
         assertEq(mod.entryCount(TK), 1, "approve-won-on-appeal writes an entry");
-        Moderation.Entry memory e = mod.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertFalse(e.uncontested, "a reject was revealed at depth 0 -> contested");
     }
 
@@ -74,7 +127,7 @@ contract IndexTest is ModerationTestBase {
         mod.claim(caseId);
 
         assertEq(mod.entryCount(TK), 1);
-        Moderation.Entry memory e = mod.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertTrue(e.uncontested, "no reject ever revealed -> appeal alone doesn't clear it");
     }
 
@@ -97,24 +150,113 @@ contract IndexTest is ModerationTestBase {
         assertGt(caseId2, rem);
     }
 
-    function test_removal_of_missing_entry_settles_cleanly() public {
+    // H-01: two removals opened against the same still-indexed target. The first
+    // deletes the entry; the second settles as a clean no-op (guarded by the
+    // target's `indexed` generation signal), never reverting or touching a
+    // now-unrelated entry.
+    function test_concurrent_removals_second_settles_as_noop() public {
         uint256 caseId = _runUndisputed(mods[0], Moderation.Vote.Approve);
         mod.claim(caseId);
+        assertEq(mod.entryCount(TK), 1);
 
+        // Both submitted while the target is still indexed.
         uint256 rem1 = _submitRemoval(mods[1], caseId);
+        uint256 rem2 = _submitRemoval(mods[2], caseId);
+
         _realizeSeats(rem1);
         _runRoundToAppealWindow(rem1, 0, Moderation.Vote.Approve);
         _finalize(rem1);
         mod.claim(rem1);
-        assertEq(mod.entryCount(TK), 0);
+        assertEq(mod.entryCount(TK), 0, "first removal deletes the entry");
 
-        // A second removal of the same (already gone) target settles without revert.
-        uint256 rem2 = _submitRemoval(mods[2], caseId);
         _realizeSeats(rem2);
         _runRoundToAppealWindow(rem2, 0, Moderation.Vote.Approve);
         _finalize(rem2);
-        mod.claim(rem2); // no revert
+        mod.claim(rem2); // clean no-op, no revert
         assertEq(uint256(_phase(rem2)), uint256(Moderation.Phase.SETTLED));
+        assertEq(mod.entryCount(TK), 0, "second removal changes nothing");
+    }
+
+    // H-01: a removal can only be opened against a target that is a settled,
+    // approved submission currently in the index. Future IDs, rejected content,
+    // and already-removed entries are rejected at submit — no more lazy target
+    // resolution at claim time.
+    function test_removal_requires_indexed_target() public {
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[1], 3 * fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(mod), type(uint256).max);
+
+        // (a) future / nonexistent case id
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(999, fee);
+
+        // (b) a rejected submission was never indexed
+        uint256 rejected = _runUndisputed(mods[0], Moderation.Vote.Reject);
+        mod.claim(rejected);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(rejected, fee);
+
+        // (c) an approved-then-removed target is no longer indexed
+        uint256 approved = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(approved);
+        uint256 rem = _submitRemoval(mods[2], approved);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Approve);
+        _finalize(rem);
+        mod.claim(rem);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(approved, fee);
+    }
+
+    // --- H-09: under-quorum approvals never reach the supersafe view ---------
+
+    // A single approving seat (after max widen the outcome arms on `reveals != 0`)
+    // must land in the superset but NEVER the supersafe subset, however long it
+    // ages: supersafe now also requires MIN_REVEALS independent revealers.
+    function test_one_seat_approval_never_supersafe() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(caseId, TK);
+        m.__injectRound(caseId);
+        m.__injectSeat(caseId, 0, makeAddr("solo"), 1, 0, 1); // one Approve revealer
+        m.claim(caseId);
+
+        assertEq(m.entryCount(TK), 1, "one-seat approval is in the superset");
+        IndexRegistry.Entry memory e = m.entryAt(TK, 0);
+        assertTrue(e.uncontested, "no reject -> uncontested");
+        assertFalse(e.fullQuorum, "one independent revealer is not full quorum");
+
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
+        assertEq(m.supersafeEntries(TK).length, 0, "under-quorum approval never supersafe, regardless of age");
+    }
+
+    // An appealed case whose EARLIER round was decided under quorum is also barred
+    // from supersafe, even if the final round had a full panel.
+    function test_appealed_case_with_degraded_earlier_round_never_supersafe() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(caseId, TK);
+        m.__setDepth(caseId, 1);
+        // round 0: degraded (armed under quorum), round 1 (final): full panel.
+        m.__injectRound(caseId);
+        m.__injectSeat(caseId, 0, makeAddr("d0a"), 1, 0, 1);
+        m.__setUnderQuorum(caseId, 0);
+        m.__injectRound(caseId);
+        m.__injectSeat(caseId, 1, makeAddr("d1a"), 1, 0, 1);
+        m.__injectSeat(caseId, 1, makeAddr("d1b"), 1, 0, 1);
+        m.__injectSeat(caseId, 1, makeAddr("d1c"), 1, 0, 1);
+        m.claim(caseId);
+
+        IndexRegistry.Entry memory e = m.entryAt(TK, 0);
+        assertFalse(e.fullQuorum, "a degraded earlier round bars supersafe");
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
+        assertEq(m.supersafeEntries(TK).length, 0, "not supersafe");
     }
 
     // --- supersafe view ------------------------------------------------------
@@ -126,7 +268,7 @@ contract IndexTest is ModerationTestBase {
         assertEq(mod.entryCount(TK), 1);
         assertEq(mod.supersafeEntries(TK).length, 0, "too young for supersafe");
 
-        vm.warp(block.timestamp + 96 hours);
+        vm.warp(vm.getBlockTimestamp() + 96 hours);
         assertEq(mod.supersafeEntries(TK).length, 1, "aged uncontested -> supersafe");
     }
 
@@ -140,7 +282,7 @@ contract IndexTest is ModerationTestBase {
         _finalize(caseId);
         mod.claim(caseId);
 
-        vm.warp(block.timestamp + 200 hours);
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
         assertEq(mod.entryCount(TK), 1, "in superset");
         assertEq(mod.supersafeEntries(TK).length, 0, "contested is never supersafe, regardless of age");
     }

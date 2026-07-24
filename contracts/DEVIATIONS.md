@@ -101,12 +101,23 @@ settling caller.
 bounty — economically irrelevant, and it is the same party the protocol already pays
 to finalize. No new incentive.
 
+**C-01 refinement.** The *bonus-channel* dust is no longer swept into the claim
+bounty. Bonuses (and their refunds) are now pulled per contributor
+(`claimAppealPayout`, see D-7), and computing the exact bonus dust at settlement
+would require iterating the contributor set — the very unboundedness C-01 removes.
+Instead the whole bonus pool is booked as pending at settlement and the **final
+appeal-claimer absorbs the pro-rata dust** (a running `apBonusPoolLeft /
+apContribTotLeft` pair drains to zero exactly). Conservation stays an exact
+equality, and the dust stays *retrievable* rather than stranded — the point the
+senior audit pressed (conservation ≠ retrievability). Reward-channel dust still
+sweeps to the bounty as above.
+
 ### D-7. Reward vs. payout channels (spec §6.2, implementation choice)
 
 **What.** Voter rewards and returned committed stake are credited to the moderator's
 `free` balance (an internal pull — they withdraw via the normal exit path). Appeal
-refunds + bonuses to non-moderator contributors are credited to a `pendingPayout`
-mapping, withdrawn via `claimPayout`.
+refunds + bonuses to contributors are pulled per contribution via
+`claimAppealPayout(caseId, depth)`.
 
 **Why.** Avoids looping token transfers to arbitrary addresses inside `claim()` — a
 reverting recipient contract could otherwise brick settlement (DoS). Everything is a
@@ -114,6 +125,17 @@ pull.
 
 **Threat model.** Removes a settlement-DoS vector. No recipient can block another's
 payout or the case's settlement.
+
+**C-01 update.** The original design credited each contributor eagerly into a
+`pendingPayout` mapping *inside* `claim()`, which still iterated the whole
+contributor list — an attacker funding a winning bond from thousands of addresses
+could push that loop past the block gas limit and **permanently strand the pot and
+all committed stake** (conservation held; retrievability did not). Settlement no
+longer touches the contributor set at all: it records only two case-level running
+totals (`apBonusPoolLeft`, `apContribTotLeft`), and each contributor pulls its
+refund+bonus later via `claimAppealPayout`, O(1) and independent of contributor
+count (measured: identical 232,714 gas for 2 vs. 2,000 contributors). The
+`pendingPayout` mapping / `claimPayout` are removed.
 
 ### D-8. Seat draw over the live tree (spec §7)
 
@@ -126,10 +148,34 @@ Within a single `realizeSeats` all seats are drawn from one consistent tree stat
 widen draws from the then-current tree (which excludes voters who have since committed
 to this case — desirable).
 
-**Threat model.** Minor. Between round-open and a widen, a moderator could stake and
-activate to enter the pool — but `ACTIVATION_DELAY` (7 days) far exceeds the intra-case
-timescale, so no realistic just-in-time entry exists. Documented as a residual, not a
-live vector.
+**Threat model.** ~~Minor~~ — **the original "minor" rating was wrong (senior audit
+H-05).** `ACTIVATION_DELAY` bounds the *age* of the stake, not *when the holder
+decides to activate it*: an attacker could keep matured stake unactivated, wait for
+the seat seed's blockhash to become public, simulate panels under different
+activation subsets, and activate the favourable one in the same transaction as the
+draw poke. Widen was worse — its seed was `keccak(oldSeed, widenCount)`, containing
+no new entropy, so a voter could compute the widened panel before deciding whether
+to withhold a reveal and trigger it.
+
+**Fixed (M2.5).** Two changes make the eligible set effectively frozen before the
+entropy that draws from it is known:
+1. **Eligibility-add version gate.** `activate()`/`thaw()` bump a global
+   `eligibilityAddVersion`. A round records it when its seat seed is armed; if it
+   differs at `realizeSeats`, the seed is **re-armed** to a fresh future block
+   instead of drawing. Adding weight against a known blockhash therefore destroys
+   exactly the seed the attacker was trying to exploit.
+2. **Fresh entropy per widen.** A widen no longer derives a seed; it re-arms a new
+   snapshot block and returns the round to `DRAW`, so each widen's panel is drawn
+   from entropy that did not exist when anyone chose to withhold a reveal.
+
+*Residual (accepted, documented):* the gate is deliberately one-directional — it
+triggers on eligibility **increases** only. Weight *removals* (a selected moderator
+requesting an exit) still change the live tree, but that costs the actor its own
+eligibility and cannot add a chosen identity to a panel. A determined party can also
+repeatedly bump the version to delay a draw; each bump costs gas and yields no
+control over the eventual seed (re-arming is the same unbounded mechanism as the
+stale-blockhash re-arm, D-1). Full epoch-checkpointed eligibility remains the
+stronger M4 option if this proves insufficient.
 
 ### D-9. `TopicCreated` emits the topic key, not the string (spec §8.4)
 
@@ -167,6 +213,20 @@ of invariant 9. Withdrawals have no admin gate anywhere (§9.5).
 cannot rewrite guidelines history — only append. The timelock gives moderators warning
 to exit before any parameter change takes effect.
 
+**H-11 update.** Parameter changes no longer affect *in-flight* cases. Executing a
+proposal seals a new immutable **ruleset version**; every case pins the version live
+at submit (`Case.rulesVersion`) and reads all its consensus parameters from that
+pinned ruleset, so a mid-case change can never move an open case's bond floor,
+windows, freeze curve, quorum, etc. Pending exits likewise snapshot their cooldown
+end and min-stake decision at request time (`exitClaimableAt`), so governance can
+neither extend nor invalidate an exit already requested. Governance is additionally
+bounded by immutable protocol **caps** (`MAX_RULE_DEPTH/WIDEN/PANEL/TOPICS/WINDOW/
+FREEZE/BOND_MULT/SEED_LAG/TOTAL_DRAWS`) plus cross-field checks (e.g. minReveals
+reachable within the widened depth-0 panel, total reachable draws ≤ the tested
+settlement bound), so it cannot configure an unsettleable case or an overflowing
+freeze — even by accident. `supersafeAge` and the fee floor stay live (display /
+submit-time only, not consensus).
+
 ### D-12. Widen re-draw onto an already-revealed voter is inert (spec §5.3, F2)
 
 **What.** A widen draws additional seats from the live tree and can land them on a
@@ -185,6 +245,33 @@ an under-participating (widened) round would collect extra reward-lottery weight
 widen at its co-winners' expense, and skew the freeze-power mean-track input. The
 phantom seats now change nothing.
 
+### D-13. Batched settlement with a persistent cursor (spec §6, H-04)
+
+**What.** `claim()` no longer settles a whole case in one transaction. Settlement
+computes its aggregates once in O(rounds) — winners' seats, mean-track, refunds
+are read from per-round, per-side accumulators frozen at reveal — then disposes
+seat-holders through a `(round, idx)` cursor. `claim(caseId)` settles unbounded in
+one call (fine for any realistic case); `claim(caseId, maxSteps)` settles in
+bounded batches. The case moves FINALIZED → SETTLING → SETTLED; in-flight pot value
+sits in `totalSettling` (0 outside an active settlement) so conservation is exact
+at every intermediate state. Track decay is deduplicated in O(1) via a per-case
+`trackDecayed` map, replacing the old O(participants²) scan.
+
+**Why.** The documented "86-voter worst case" was not the reachable worst case. With
+`MAX_WIDEN = 3` each depth can draw 4× its target, so a maximal case reaches
+20+44+92+188 = 344 committed seats. One-shot settlement of that case costs ~30.3M
+gas — over any real block limit — which would leave the pot and all committed stake
+permanently stranded (Invariant 8 violated). Batching makes settlement's per-call
+gas bounded (measured max batch ~3.7M) and independent of case size.
+
+**Threat model.** Closes the finalizability failure behind H-04 (an adversary
+widening every depth and mostly failing to reveal could push settlement past the
+block limit). The mean-track accumulators are snapshotted at reveal, so freeze
+durations no longer depend on the order in which finalized cases are claimed
+(folds in audit M-03). The batch finisher receives the whole claim bounty; a
+proportional split across batchers is a possible future refinement (in practice one
+keeper settles all batches).
+
 ---
 
 ## Accepted liveness edges (M2; no code change — flagged for M4)
@@ -198,12 +285,113 @@ and the poke succeeds. Accepted for M2 (a live network always has an eligible se
 The obvious M4 remedy if it ever matters is a DRAW-age → VOID (refund) path, the
 same shape as the reveal-phase VOID.
 
-### L-2. Removal `targetCaseId` is not validated at submit
+### L-2. ~~Removal `targetCaseId` is not validated at submit~~ — RETRACTED (fixed, H-01)
 
-`submit` stores a REMOVAL case's `targetCaseId` without checking it names a real,
-approved submission. A bogus or already-removed target simply settles as a clean
-no-op at `_removeTarget` (per spec §10). This is intentional — validating index
-membership at submit would duplicate the settlement-time lookup and could race a
-concurrent removal — but it means a removal case can be spun up (and pays its fee)
-against a target that will never delete anything. No safety impact; the fee is the
-griefing cost.
+**Struck by the senior audit (H-01).** The original claim — that a lazily-resolved
+removal target is a "harmless no-op" — was wrong. Because `_removeTarget` resolved
+`cases[targetCaseId]` at *claim* time and IDs are sequential, a removal could name a
+*future* case ID, finalize while unclaimed, and then delete whatever case later took
+that ID (a blank-cheque deletion); the caller-supplied payload was also ignored at
+settlement (display/act mismatch).
+
+**Fixed (M2.5-P0-a → P0-c).** REMOVAL now goes through `submitRemoval(targetCaseId,
+fee)`, which requires the target to be a **settled, approved, currently-indexed
+SUBMISSION** and derives content/metadata/topics from it (fee scales with the
+target's real topic count). Each SUBMISSION carries an `isIndexed` generation
+signal (true on write, false on delete); `_removeTarget` no-ops if the target is no
+longer indexed, so two concurrent removals resolve cleanly and a removal can only
+ever delete the exact entries it was approved against. The generic `submit` now
+rejects `REMOVAL` (`BadKind`).
+
+---
+
+## M2.5 port: consequences of the storage/logic split
+
+### D-11. Stake and index custody left `Moderation`
+
+`Moderation` no longer holds moderator stake or index entries. Stake lives in
+`StakeRegistry`, approvals in `IndexRegistry`, and this contract is the
+replaceable *game* that governance repoints them at.
+
+Consequences worth knowing:
+
+- **Moderators call the registry directly** for `stake`, `activate`,
+  `requestExit`, `withdraw`, `thaw` and `setDutyUnits`. Those entry points are
+  gone from `Moderation` and were not replaced with forwarders — deliberately.
+  Forwarding would put the game back in the custody path, and trust model #2
+  requires that exit is never gated by logic.
+- **Index reads kept their M2 ABI.** `entryCount`, `entryAt` and
+  `supersafeEntries` remain on `Moderation` as thin forwarders so existing
+  clients keep working. `supersafeEntries(bytes32)` is unpaginated, as in M2; a
+  front end serving a large topic should read the registry's paginated
+  `supersafeEntries(topic, minAge, cursor, limit)` (M-04) instead.
+- **Conservation is a pair of identities**, not one:
+  `balanceOf(Moderation) == openPotsTotal + totalPendingBond + totalPendingPayout
+  + totalSettling` and `balanceOf(StakeRegistry) == stakeBuckets()`. Both are
+  asserted in the unit suites, the differential replay and the invariant
+  campaign. A reward transferred without being credited (or credited without
+  being transferred) breaks exactly one side, which is the point.
+
+### D-12. MIN_STAKE / ACTIVATION_DELAY / EXIT_COOLDOWN removed from `Params`
+
+These three govern the custody path, which is the registry's, and they are set at
+`StakeRegistry`'s construction. They were left in `Moderation.Params` by the
+initial split, where nothing read them — governance could have proposed and
+executed a new `exitCooldown` through the timelock and changed nothing at all.
+They are removed rather than mirrored, so the parameter surface cannot lie about
+what it controls. Changing them now requires deploying a new registry, which is a
+migration, not a parameter change — appropriate for numbers that bound
+withdrawals.
+
+### D-13. `riskPerSeat` is duplicated across both contracts — deliberately, and bounded
+
+`riskPerSeat` exists in *both* `StakeRegistry` and `Moderation.Params`. This is
+not redundancy to be collapsed: they are two different quantities that happen to
+share a name and, by default, a value.
+
+| | `StakeRegistry.riskPerSeat` | `Moderation.Params.riskPerSeat` |
+|---|---|---|
+| Means | what one pledged **duty unit** is worth | what a case **locks per seat** |
+| Layer | staking (custody) | consensus |
+| Mutability | **`immutable`** — set at construction, no setter | governable, and **pinned per case** by ruleset version (H-11) |
+| Used by | draw eligibility: capacity = unpledged units × this | `commitVote` collateral, no-show penalty |
+
+Collapsing them is not available. Reading `stakeReg.riskPerSeat()` at commit time
+would break H-11's guarantee that an open case's consensus parameters are fixed
+at submit; making the registry's value governable would make draw eligibility
+retroactively mutable, which is worse.
+
+**Only one direction of divergence is harmful:** a case locking *more* than the
+duty unit reserved for it. A panel would then be seated on collateral that cannot
+cover its own seats. That state is now **unrepresentable**:
+
+- `Moderation._validateParams` rejects any ruleset with
+  `riskPerSeat > stakeReg.riskPerSeat()` (`RiskPerSeatExceedsDutyUnit`). This is
+  why `_validateParams` is `view` rather than `pure`.
+- The constructor applies the same bound to ruleset 0, which never passes through
+  `_validateParams` — so a deployment cannot be born misconfigured either.
+- The registry's value is `immutable`, which is what makes those checks
+  trustworthy: a mutable duty unit could be lowered *after* a ruleset had been
+  validated against it, re-opening the hole from the other side.
+
+The other direction (locking **less** than a duty unit) is benign and remains
+allowed: seats are over-collateralized relative to eligibility, which costs a
+moderator nothing it did not already pledge.
+
+Changing the duty unit therefore requires deploying a new registry — a migration,
+which moderators can exit ahead of during the timelock (trust model #2) — rather
+than a parameter change. That is the correct weight for a number that bounds
+what stake can be locked.
+
+Tests: `test_ruleset_locking_more_than_a_duty_unit_is_rejected`,
+`test_registry_duty_unit_is_immutable`.
+
+### D-14. `nSeats` counts seats seated, not seats sought
+
+`drawPanel` seats only where collateral exists, so a panel can come back short of
+the commit target when pledged duty capacity is scarce (H-07) — something the
+monolith could not do. `Round.nSeats` now counts what was actually seated. The
+`RoundOpened` event carries seats *sought*; `SeatsDrawn` and `Widened` carry seats
+*seated*. Short panels are a liveness path, not an error: the round opens COMMIT
+with whatever it seated, and under-participation falls through to the existing
+widen and VOID handling.

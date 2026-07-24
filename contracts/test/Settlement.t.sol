@@ -6,15 +6,15 @@ import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 
 contract SettlementTest is ModerationTestBase {
     function _total(address a) internal view returns (uint256) {
-        return mod.totalStakeOf(a);
+        return stakeReg.totalStakeOf(a);
     }
 
     function _frozenUntil(address a) internal view returns (uint256 fu) {
-        (,,,, fu,,,,) = mod.moderatorInfo(a);
+        (,,,, fu,,,,) = stakeReg.moderatorInfo(a);
     }
 
     function _track(address a) internal view returns (uint256 t) {
-        (,,,,,,,, t) = mod.moderatorInfo(a);
+        (,,,,,,,, t) = stakeReg.moderatorInfo(a);
     }
 
     // --- happy path: undisputed approve --------------------------------------
@@ -108,8 +108,8 @@ contract SettlementTest is ModerationTestBase {
         mod.claim(caseId);
 
         // The depth-0 Approve voter is incoherent vs the final Reject -> frozen.
-        assertGt(_frozenUntil(victim), block.timestamp, "incoherent voter frozen");
-        assertEq(mod.eligibleWeightOf(victim), 0, "frozen -> excluded from the tree");
+        assertGt(_frozenUntil(victim), vm.getBlockTimestamp(), "incoherent voter frozen");
+        assertEq(stakeReg.eligibleWeightOf(victim), 0, "frozen -> excluded from the tree");
 
         // A fresh case never draws the frozen victim.
         uint256 case2 = _submit(mods[1]);
@@ -118,8 +118,8 @@ contract SettlementTest is ModerationTestBase {
 
         // After the freeze elapses, thaw restores eligibility.
         vm.warp(_frozenUntil(victim) + 1);
-        mod.thaw(victim);
-        assertGt(mod.eligibleWeightOf(victim), 0, "thawed -> eligible again");
+        stakeReg.thaw(victim);
+        assertGt(stakeReg.eligibleWeightOf(victim), 0, "thawed -> eligible again");
     }
 
     // --- failed reveal: brief freeze -----------------------------------------
@@ -130,7 +130,7 @@ contract SettlementTest is ModerationTestBase {
         // Everyone commits; one seat-holder never reveals.
         _commitAll(caseId, 0, Moderation.Vote.Approve);
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
         (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
@@ -141,7 +141,7 @@ contract SettlementTest is ModerationTestBase {
             vm.prank(sh);
             mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
         }
-        vm.warp(block.timestamp + REVEAL_WINDOW);
+        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
         mod.closeReveal(caseId);
         _realizeOutcome(caseId);
         _finalize(caseId);
@@ -149,8 +149,8 @@ contract SettlementTest is ModerationTestBase {
 
         // Vanisher took a brief (1 day) freeze, not the full incoherent freeze.
         uint256 fu = _frozenUntil(vanisher);
-        assertGt(fu, block.timestamp, "vanisher frozen");
-        assertLe(fu - block.timestamp, 1 days, "brief freeze only");
+        assertGt(fu, vm.getBlockTimestamp(), "vanisher frozen");
+        assertLe(fu - vm.getBlockTimestamp(), 1 days, "brief freeze only");
         _assertConservation();
     }
 
@@ -169,11 +169,12 @@ contract SettlementTest is ModerationTestBase {
         mod.claim(caseId);
 
         // Winner's appeal matched the final outcome: refund (capital) + bonus.
-        uint256 owed = mod.pendingPayout(winner);
+        // The bond is stored on the round it appealed against (depth 0).
+        uint256 owed = mod.appealPayoutOwed(caseId, winner);
         assertGt(owed, floor, "winning appellant gets capital back plus a bonus");
         uint256 balBefore = bzz.balanceOf(winner);
         vm.prank(winner);
-        mod.claimPayout();
+        mod.claimAppealPayout(caseId, 0);
         assertEq(bzz.balanceOf(winner) - balBefore, owed);
         _assertConservation();
     }
@@ -190,7 +191,49 @@ contract SettlementTest is ModerationTestBase {
         mod.claim(caseId);
 
         // Losing appeal: nothing owed back; the bond was distributed as rewards.
-        assertEq(mod.pendingPayout(loser), 0, "losing appellant forfeits the bond");
+        assertEq(mod.appealPayoutOwed(caseId, loser), 0, "losing appellant forfeits the bond");
+        vm.prank(loser);
+        vm.expectRevert(Moderation.NothingToReclaim.selector);
+        mod.claimAppealPayout(caseId, 0);
+        _assertConservation();
+    }
+
+    // H-10: an appeal round that draws NO quorum after max widen is a protocol
+    // failure, not a loss on the merits. The prior outcome stands, but the honest
+    // appeal bond's capital is REFUNDED (no bonus), never confiscated to the prior
+    // winners. Built via injection: depth-1 appeal round empty (zero reveals),
+    // round-0 bond marked refund-only as the real finalize-to-prior path does.
+    function test_zero_quorum_appeal_refunds_bond_not_confiscated() public {
+        uint256 bondAmt = 100 * XBZZ;
+        uint256 fee = 1000 * XBZZ;
+        uint256 pot = fee + bondAmt;
+
+        uint256 caseId = mod.__injectFinalized(0, Moderation.Outcome.Reject, pot);
+        bzz.mint(address(mod), pot);
+        mod.__setDepth(caseId, 1);
+
+        // round 0: original Reject outcome, one coherent Reject voter, plus a bond
+        // that appealed FOR Approve (funded the depth-1 round).
+        mod.__injectRound(caseId);
+        address rejVoter = makeAddr("rejVoter");
+        mod.__injectSeat(caseId, 0, rejVoter, 1, 10 * XBZZ, 2); // Reject == final
+        bzz.mint(address(stakeReg), 10 * XBZZ); // committed backing lives in the registry
+        mod.__injectBond(caseId, 0, Moderation.Outcome.Approve, true);
+        address challenger = makeAddr("honestChallenger");
+        mod.__injectBondContrib(caseId, 0, challenger, bondAmt);
+        mod.__setBondRefundOnly(caseId, 0); // the depth-1 appeal it funded got no quorum
+
+        // round 1: the appeal round, zero reveals.
+        mod.__injectRound(caseId);
+
+        mod.claim(caseId);
+
+        // Capital back, no bonus.
+        assertEq(mod.appealPayoutOwed(caseId, challenger), bondAmt, "refund is capital only, no bonus");
+        uint256 before = bzz.balanceOf(challenger);
+        vm.prank(challenger);
+        mod.claimAppealPayout(caseId, 0);
+        assertEq(bzz.balanceOf(challenger) - before, bondAmt, "honest appellant recovers its bond");
         _assertConservation();
     }
 

@@ -260,3 +260,52 @@ P0-b (registry split) before P0-e/f/h/k, which rewrite the storage the split
 reorganizes. P0-g (epochs) and P0-h (duty pool) are the deepest changes and share
 the sortition structure — do them adjacently. P1 and P2 follow. Nothing here is a
 parameter tweak; treat the whole of P0 as a precondition for re-audit.
+
+---
+
+## Resolution record (M2.5 execution)
+
+Branch `claude/determined-curie-nkf71s`, one commit per item. Suite: **91 → 126
+green** (14 → 15 suites), green at every commit. Each fix ships the isolating
+regression test named below; several are *reachable-worst-case* tests of the kind
+the audit showed M2 lacked.
+
+| ID | Finding | Status | Evidence |
+|---|---|---|---|
+| C-01 | Settlement bricked by contributor count | **Fixed** | `claim()` gas **identical for 2 vs 2,000** contributors (232,714); pull-based `claimAppealPayout`, pool drains to the wei |
+| H-01 | Removal = unbound deletion authorization | **Fixed** | `submitRemoval` binds a settled/approved/indexed target, payload derived from it; future-ID/rejected/removed targets revert at submit |
+| H-02 | Obsolete removal clears newer dedup | **Fixed** | ownership-keyed dedup (`caseId+1`); stale removal leaves a newer resubmission's reservation intact |
+| H-03 | Index deletion linear in topic size | **Fixed** | position map; delete gas **identical for topic size 8 vs 2,000** (65,916) |
+| H-04 | 86-voter "worst case" not reachable-worst | **Fixed** | reachable 344-seat case: **30.3M one-shot → 9 batches, worst 3.69M**; O(rounds) aggregate; O(P²) track loop removed |
+| H-05 | Seed fixed before eligibility fixed | **Fixed** | eligibility-add version gate re-arms the seed; **fresh entropy per widen** (was `keccak(oldSeed, widenCount)`) |
+| H-06 | No randomness domain separation | **Fixed** | seeds bound to (chainid, contract, caseId, depth, purpose); same-block cases draw different panels |
+| H-07 | Selection weight ≠ collateral capacity | **Fixed (partial)** | partial commit (overdrawn holder serves what it can back, instead of reverting); min-stake floor on current total. *Opt-in duty pool remains* |
+| H-08 | Widen adds uncollateralized votes | **Fixed** | `committedSeats` snapshot at commit caps the tally; `talliedSeats × riskPerSeat ≤ committedAmt` holds |
+| H-09 | One seat → "supersafe" | **Fixed** | `underQuorum` flag + `fullQuorum` per entry; supersafe needs MIN_REVEALS **independent** revealers |
+| H-10 | Quorum failure confiscates honest bond | **Fixed (safety half)** | `bondRefundOnly`: capital refunded, no bonus, not forfeited. *No-show penalty needs the duty pool* |
+| H-11 | Live params change active cases | **Fixed** | per-case pinned ruleset versions; `exitClaimableAt` snapshot; immutable caps + cross-field validation |
+| M-01 | Commitments copyable/replayable | **Fixed** | `computeCommit` binds chain/contract/case/depth/voter |
+| M-02 | Soft commit/reveal deadlines | **Fixed** | hard `[open, deadline)` window; late reveal reverts |
+| M-03 | Freeze depends on claim order | **Fixed** | track snapshotted at reveal into per-round, per-side accumulators |
+| M-04 | Duplicate topics / unbounded views | **Fixed (partial)** | duplicate topic keys rejected; paginated reads on IndexRegistry. *Richer case payload getters/events on the monolith remain* |
+| P0-b | Storage/logic registry split | **Delivered** | `StakeRegistry` + `IndexRegistry` with the constrained trust model; 15 tests. *Porting `Moderation.sol` onto them remains* |
+
+### Explicitly NOT done (do not read the table as complete)
+
+1. **Opt-in collateralized duty pool.** Selection weight should *equal* pledged,
+   collateralized capacity, with a bounded penalty for opted-in no-shows (and
+   passive stake undraftable, so submission spam cannot grief it). This is the rest
+   of H-07 and the penalty half of H-10. It is a staking-model change.
+2. **Porting `Moderation.sol` onto the registries.** The registries and their trust
+   model are built and tested; the monolith still owns its own stake/index storage.
+   The port is mechanical but large, and it is what makes the split *live*.
+3. **P2 economic/deployment validation.** Re-running the M1 simulation with the real
+   no-show/capacity/widen semantics, repeated-submission attack modelling
+   (1-(1-p)^N), correlated-AI moderators, `forge build --sizes` as a release gate,
+   and stateful fuzzing that asserts **finalizability** (not only conservation).
+4. **Independent re-audit** after items 1–2 land, per the audit's own closing
+   recommendation — the storage and state transitions moved substantially.
+
+The audit's standing recommendation still holds and we are not treating it as
+lifted: **no deployment with material funds, and the index is not presented as
+reliable safe-search certification, until the above closes and a re-audit passes.**

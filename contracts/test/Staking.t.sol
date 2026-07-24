@@ -37,6 +37,12 @@ contract StakingTest is Test {
         mod.stake(amount);
         vm.warp(block.timestamp + ACTIVATION_DELAY);
         mod.activate(who);
+        // H-07: activated stake is only draw-eligible once duty capacity is
+        // pledged. Pledge the full amount so these tests exercise weight changes.
+        // Compute BEFORE the prank: an external call in the arg list eats it.
+        uint256 units = amount / mod.getParams().riskPerSeat;
+        vm.prank(who);
+        mod.setDutyUnits(units);
     }
 
     // --- staking / activation ------------------------------------------------
@@ -88,7 +94,14 @@ contract StakingTest is Test {
 
         vm.warp(block.timestamp + ACTIVATION_DELAY);
         mod.activate(alice); // permissionless
-        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ, "activated: full weight in tree");
+
+        // H-07: activation alone no longer makes stake drawable. Capacity must be
+        // pledged first — passive stake is never drafted into duty.
+        assertEq(mod.eligibleWeightOf(alice), 0, "activated but not pledged: still not drawable");
+        uint256 units = 100 * XBZZ / mod.getParams().riskPerSeat;
+        vm.prank(alice);
+        mod.setDutyUnits(units);
+        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ, "pledged: full weight in tree");
         assertEq(mod.totalEligibleWeight(), 100 * XBZZ);
     }
 
@@ -109,7 +122,47 @@ contract StakingTest is Test {
 
         vm.warp(block.timestamp + ACTIVATION_DELAY);
         mod.activate(alice);
+        // Weight stays capped by the pledge until capacity is raised to match
+        // (H-07): duty is opt-in at every size, not just at first stake.
+        assertEq(mod.eligibleWeightOf(alice), 100 * XBZZ, "still capped by the original pledge");
+        uint256 units = 140 * XBZZ / mod.getParams().riskPerSeat;
+        vm.prank(alice);
+        mod.setDutyUnits(units);
         assertEq(mod.eligibleWeightOf(alice), 140 * XBZZ);
+    }
+
+    // H-07: duty is opt-in. Stake that never pledged capacity is never drawable,
+    // so a spammer cannot conscript passive stakers into duty (and therefore
+    // cannot expose them to no-show penalties).
+    function test_unpledged_stake_is_never_drawable() public {
+        _fund(alice, 100 * XBZZ);
+        vm.prank(alice);
+        mod.stake(100 * XBZZ);
+        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        mod.activate(alice);
+
+        assertEq(mod.eligibleWeightOf(alice), 0, "activated but unpledged -> not in the draw pool");
+        assertEq(mod.totalEligibleWeight(), 0, "nothing drawable network-wide");
+    }
+
+    // H-07: selection weight is capped by pledged capacity, so a moderator can
+    // never be drawn for more seats than its own stake can collateralize.
+    function test_selection_weight_capped_by_pledged_capacity() public {
+        _fund(alice, 100 * XBZZ);
+        vm.prank(alice);
+        mod.stake(100 * XBZZ);
+        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        mod.activate(alice);
+
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        vm.prank(alice);
+        mod.setDutyUnits(3); // pledge 3 seats out of 10 affordable
+        assertEq(mod.eligibleWeightOf(alice), 3 * riskPerSeat, "weight == pledged capacity, not full stake");
+
+        // Cannot pledge more than the stake can back.
+        vm.prank(alice);
+        vm.expectRevert(Moderation.InsufficientEligibleFree.selector);
+        mod.setDutyUnits(11);
     }
 
     // --- exit / withdraw -----------------------------------------------------

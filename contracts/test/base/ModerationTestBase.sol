@@ -52,6 +52,12 @@ abstract contract ModerationTestBase is Test {
         for (uint256 i = 0; i < mods.length; i++) {
             (, uint256 pending,,,,,,,) = mod.moderatorInfo(mods[i]);
             if (pending > 0) mod.activate(mods[i]);
+            // H-07: stake alone is no longer drawable — a moderator must PLEDGE
+            // duty capacity. Pledge generously so panels fill as before.
+            uint256 riskPerSeat = mod.getParams().riskPerSeat;
+            uint256 units = stakeEach / riskPerSeat;
+            vm.prank(mods[i]);
+            mod.setDutyUnits(units);
         }
         vm.roll(block.number + 1);
     }

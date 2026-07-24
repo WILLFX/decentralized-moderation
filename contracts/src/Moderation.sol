@@ -138,6 +138,14 @@ contract Moderation is ReentrancyGuard {
         uint256 exitRequestedAt; // 0 if no pending exit
         uint256 exitClaimableAt; // H-11: cooldown end snapshotted at request; governance can't extend it retroactively
         uint256 track; // decayed coherent-participation record, WAD (used from M2-5)
+        // H-07: opt-in duty capacity. `dutyUnits` is the number of seats this
+        // moderator has PLEDGED to serve concurrently, each backed by riskPerSeat
+        // of its own stake; `dutyReserved` counts the units currently held by live
+        // panels. Only available capacity is draw-eligible, so selection weight
+        // equals collateral that can actually be locked — and stake that never
+        // opted in can never be drafted (submission spam cannot grief it).
+        uint256 dutyUnits;
+        uint256 dutyReserved;
         bool exists; // has ever staked
     }
 
@@ -154,6 +162,8 @@ contract Moderation is ReentrancyGuard {
 
     // --- events --------------------------------------------------------------
 
+    event DutyUnitsSet(address indexed moderator, uint256 units, uint256 reserved);
+    event DutyNoShow(address indexed moderator, uint256 seats, uint256 penalty, uint256 until);
     event Staked(address indexed moderator, uint256 amount, uint256 activatesAt);
     event Activated(address indexed moderator, uint256 eligibleWeight);
     event ExitRequested(address indexed moderator, uint256 amount, uint256 claimableAt);
@@ -305,6 +315,31 @@ contract Moderation is ReentrancyGuard {
 
         address(token).safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, amount);
+    }
+
+    /// @notice Pledge (or re-pledge) duty capacity: the number of seats you are
+    ///         willing to serve concurrently, each backed by `riskPerSeat` of your
+    ///         own stake (H-07). Only pledged, unreserved capacity is draw-eligible.
+    ///
+    ///         This is what makes non-participation punishable without griefing:
+    ///         you were not conscripted, you volunteered — so failing to commit on a
+    ///         seat you were drawn for costs a bounded freeze. Stake that never
+    ///         opts in is never drawn and never penalized.
+    /// @param units Seats pledged. 0 opts out of future draws; capacity already
+    ///        reserved by live panels stays reserved until those cases settle.
+    function setDutyUnits(uint256 units) external {
+        Moderator storage m = moderators[msg.sender];
+        if (!m.exists) revert NoModerator();
+        if (units > 0) {
+            // Must be able to collateralize every pledged unit right now.
+            uint256 reserved = m.pending + m.exitAmount;
+            uint256 usable = m.free > reserved ? m.free - reserved : 0;
+            if (usable < units * params.riskPerSeat) revert InsufficientEligibleFree();
+            eligibilityAddVersion++; // H-05: pledging adds draw weight
+        }
+        m.dutyUnits = units;
+        _syncTree(msg.sender, m);
+        emit DutyUnitsSet(msg.sender, units, m.dutyReserved);
     }
 
     /// @notice Release a moderator's frozen stake back to free once its freeze
@@ -1015,7 +1050,18 @@ contract Moderation is ReentrancyGuard {
                 address a = r.seatHolders[idx];
                 idx++;
                 steps++;
-                if (r.committed[a]) _disposeSeat(c, r, a, fo, s);
+                if (r.committed[a]) {
+                    _disposeSeat(c, r, a, fo, s);
+                } else {
+                    // H-07/H-10: drawn on pledged capacity but never committed.
+                    // The moderator volunteered for duty, so a no-show is its own
+                    // choice, not conscription — it takes the §6.3 brief freeze on
+                    // one seat's worth of stake. This is the penalty that makes
+                    // "dominate the appeal panel and simply refuse to commit"
+                    // (H-10) cost something.
+                    _penalizeNoShow(c, a, r.seats[a]);
+                }
+                _releaseDuty(a, r.seats[a]); // capacity returns either way
             }
             round++;
             idx = 0;
@@ -1237,6 +1283,32 @@ contract Moderation is ReentrancyGuard {
         _syncTree(a, m);
     }
 
+    /// @dev H-07/H-10: penalize a seat-holder that pledged duty capacity, was
+    ///      drawn on it, and never committed. Freezes one seat's worth of its FREE
+    ///      stake for the brief failed-reveal duration — a liquidity and
+    ///      eligibility cost, never a transfer to anyone (principle 2 holds: no
+    ///      internal attack profit). Bounded to what the moderator actually has, so
+    ///      the penalty can never fail settlement.
+    function _penalizeNoShow(Case storage c, address a, uint256 seats) internal {
+        if (seats == 0) return;
+        Moderator storage m = moderators[a];
+        if (m.dutyUnits == 0) return; // never opted in -> was not drawable; nothing owed
+        uint256 reserved = m.pending + m.exitAmount;
+        uint256 usable = m.free > reserved ? m.free - reserved : 0;
+        uint256 penalty = _cp(c).riskPerSeat; // one seat's worth, regardless of seats held
+        if (penalty > usable) penalty = usable;
+        if (penalty == 0) return;
+
+        m.free -= penalty;
+        m.frozen += penalty;
+        totalFreeStake -= penalty;
+        totalFrozenStake += penalty;
+        uint256 until = block.timestamp + _cp(c).failedRevealFreeze;
+        if (until > m.frozenUntil) m.frozenUntil = until;
+        _syncTree(a, m);
+        emit DutyNoShow(a, seats, penalty, m.frozenUntil);
+    }
+
     function _coherent(Vote vote, Outcome finalOutcome) internal pure returns (bool) {
         return (vote == Vote.Approve && finalOutcome == Outcome.Approve)
             || (vote == Vote.Reject && finalOutcome == Outcome.Reject);
@@ -1342,7 +1414,10 @@ contract Moderation is ReentrancyGuard {
             if (amt > 0) {
                 r.committedAmt[a] = 0;
                 _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
+            } else {
+                _penalizeNoShow(c, a, r.seats[a]); // pledged, drawn, never committed
             }
+            _releaseDuty(a, r.seats[a]); // H-07: capacity returns when the case ends
         }
 
         uint256 pot = c.pot;
@@ -1372,13 +1447,53 @@ contract Moderation is ReentrancyGuard {
         return keccak256(abi.encode(block.chainid, address(this), caseId, depth, purpose, entropy));
     }
 
+    /// @dev Draw `count` seats, RESERVING one duty unit per seat (H-07). A
+    ///      moderator whose pledged capacity is exhausted mid-draw drops out of the
+    ///      tree for the remainder of this draw (its weight is restored at the
+    ///      end), so seats land only where collateral exists — no rejection
+    ///      sampling and no unbounded gas: each exclusion happens at most once per
+    ///      distinct moderator, and the loop is bounded by `count + exclusions`.
     function _drawSeats(Round storage r, uint256 count, bytes32 seed, uint256 offset) internal {
-        for (uint256 i; i < count; ++i) {
-            address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + i))));
+        address[] memory excluded = new address[](count);
+        uint256 nExcluded;
+        uint256 drawn;
+        uint256 nonce;
+        // Bound the total attempts: every extra attempt beyond `count` must have
+        // excluded a distinct moderator, and we never exclude more than `count`.
+        uint256 maxAttempts = 2 * count;
+        while (drawn < count && nonce < maxAttempts) {
+            if (stakeTree.total() == 0) break; // capacity exhausted network-wide
+            address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + nonce))));
+            nonce++;
+            Moderator storage m = moderators[seat];
+            if (m.dutyUnits <= m.dutyReserved) {
+                // No capacity left: exclude for this draw and retry the seat.
+                if (nExcluded < count) {
+                    excluded[nExcluded++] = seat;
+                    stakeTree.set(seat, 0);
+                }
+                continue;
+            }
+            m.dutyReserved += 1; // reserve the unit backing this seat
             if (r.seats[seat] == 0) r.seatHolders.push(seat);
             r.seats[seat] += 1;
+            drawn++;
+            _syncTree(seat, m); // weight shrinks as capacity is consumed
         }
-        r.seatDrawCount += count;
+        // Restore the temporarily excluded moderators' weights.
+        for (uint256 j; j < nExcluded; ++j) {
+            Moderator storage em = moderators[excluded[j]];
+            stakeTree.set(excluded[j], _eligibleWeight(em));
+        }
+        r.seatDrawCount += nonce;
+    }
+
+    /// @dev Release the duty capacity a seat-holder reserved for this round.
+    function _releaseDuty(address a, uint256 seats) internal {
+        Moderator storage m = moderators[a];
+        uint256 rel = seats > m.dutyReserved ? m.dutyReserved : seats;
+        m.dutyReserved -= rel;
+        _syncTree(a, m);
     }
 
     /// @dev Free stake usable as per-case collateral right now: excludes the
@@ -1682,11 +1797,19 @@ contract Moderation is ReentrancyGuard {
     ///      moderator is frozen (fully excluded, however small the frozen slice),
     ///      otherwise the free balance minus the pending-activation and
     ///      exit-reserved portions.
+    /// @dev Draw-eligible weight (H-07): free, unreserved stake CAPPED by remaining
+    ///      pledged duty capacity. Selection weight therefore never exceeds
+    ///      collateral the moderator can actually lock, and stake that never opted
+    ///      in (`dutyUnits == 0`) is not drawable at all — so submission spam
+    ///      cannot draft passive stakers into duty.
     function _eligibleWeight(Moderator storage m) internal view returns (uint256) {
         if (block.timestamp < m.frozenUntil) return 0;
         uint256 reserved = m.pending + m.exitAmount;
         if (m.free <= reserved) return 0;
-        return m.free - reserved;
+        if (m.dutyUnits <= m.dutyReserved) return 0; // capacity fully in use
+        uint256 usable = m.free - reserved;
+        uint256 capacity = (m.dutyUnits - m.dutyReserved) * params.riskPerSeat;
+        return usable < capacity ? usable : capacity;
     }
 
     function _syncTree(address moderator, Moderator storage m) internal {

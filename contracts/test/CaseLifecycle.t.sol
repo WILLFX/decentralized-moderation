@@ -322,7 +322,12 @@ contract CaseLifecycleTest is ModerationTestBase {
 
     /// The zero-commit VOID (nobody ever committed) still freezes nothing — there
     /// was no stake to lock.
-    function test_void_with_no_commits_freezes_nothing() public {
+    // H-07/H-10: seat-holders were drawn on capacity they PLEDGED, so failing to
+    // show up is a choice with a cost — each no-show takes a bounded freeze of one
+    // seat's worth of its own stake. (Before the duty pool, occupying seats and
+    // refusing to commit was free, which is what let an attacker kill an appeal
+    // panel and confiscate the challenger's bond.) Principal is never transferred.
+    function test_void_with_no_commits_penalizes_no_shows() public {
         uint256 caseId = _submit(mods[0]);
         _realizeSeats(caseId);
         uint256 guard;
@@ -343,7 +348,14 @@ contract CaseLifecycleTest is ModerationTestBase {
                 revert("unexpected phase");
             }
         }
-        assertEq(mod.totalFrozenStake(), 0, "no commits -> nothing frozen");
+        assertGt(mod.totalFrozenStake(), 0, "pledged no-shows are penalized, not free");
+        // The penalty is a freeze of their own stake, never a transfer: total
+        // stake across the system is unchanged.
+        uint256 totalStaked;
+        for (uint256 i = 0; i < mods.length; i++) {
+            totalStaked += mod.totalStakeOf(mods[i]);
+        }
+        assertEq(totalStaked, 8 * 3000 * XBZZ, "no principal was moved or destroyed");
         _assertConservation();
     }
 

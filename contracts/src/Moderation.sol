@@ -94,6 +94,13 @@ contract Moderation is ReentrancyGuard {
     mapping(uint256 => Ruleset) internal rulesets;
     uint256 public currentRulesVersion;
 
+    /// H-05: bumped whenever draw-eligible weight is ADDED to the sortition tree
+    /// (activate/thaw). A round's seat seed is armed against a snapshot of this
+    /// counter; if it changed before the draw is realized, the seed is re-armed to
+    /// fresh entropy. So an attacker can never pair an already-known blockhash with
+    /// a tree it just reshaped (adaptive-activation grinding).
+    uint256 public eligibilityAddVersion;
+
     // --- governance (§9.9, P6) -----------------------------------------------
 
     address public governance; // multisig
@@ -248,6 +255,7 @@ contract Moderation is ReentrancyGuard {
 
         m.pending = 0; // all free is now past its delay
         _syncTree(moderator, m);
+        eligibilityAddVersion++; // H-05: eligible weight grew
         emit Activated(moderator, _eligibleWeight(m));
     }
 
@@ -312,6 +320,7 @@ contract Moderation is ReentrancyGuard {
         m.free += amount;
         totalFreeStake += amount;
         _syncTree(moderator, m);
+        eligibilityAddVersion++; // H-05: eligible weight grew
 
         emit Thawed(moderator, amount);
     }
@@ -358,6 +367,8 @@ contract Moderation is ReentrancyGuard {
         uint256 nSeats; // counted seats drawn so far this round (grows on widen)
         uint256 seatDrawCount; // total seat draws performed (offset base for widen draws)
         uint256 widenCount; // widen re-draws used
+        uint256 pendingDraw; // H-05: seats still to be drawn for this round (fresh entropy per draw, incl. each widen)
+        uint256 eligVersionAtArm; // H-05: eligibilityAddVersion when the seat seed was armed
         uint256 seatSnapshotBlock; // block whose blockhash seeds the seat draw
         uint256 outcomeSnapshotBlock; // block whose blockhash seeds the outcome draw
         bytes32 seatSeed;
@@ -640,8 +651,14 @@ contract Moderation is ReentrancyGuard {
         if (block.number <= r.seatSnapshotBlock) revert SeedNotReady();
 
         bytes32 bh = blockhash(r.seatSnapshotBlock);
-        if (bh == 0) {
+        // H-05: re-arm to fresh entropy if the blockhash is stale (D4) OR if
+        // draw-eligible weight was ADDED since this seed was armed. The latter is
+        // what defeats adaptive activation: an attacker that waits for the
+        // blockhash to be public and then activates a favourable subset only
+        // invalidates the seed it was trying to exploit.
+        if (bh == 0 || eligibilityAddVersion != r.eligVersionAtArm) {
             r.seatSnapshotBlock = block.number + _cp(c).seedLag;
+            r.eligVersionAtArm = eligibilityAddVersion;
             emit SeedRearmed(caseId, c.depth, false, r.seatSnapshotBlock);
             return;
         }
@@ -650,8 +667,10 @@ contract Moderation is ReentrancyGuard {
         // H-06: domain-separate the raw blockhash so two cases snapshotting the
         // same block (or the same case at different depths) never draw identical
         // panels. The purpose tag keeps seat vs outcome entropy independent.
+        // The offset makes each widen's draw disjoint from earlier ones.
         r.seatSeed = _domainSeed(caseId, c.depth, SEED_SEATS, bh);
-        _drawSeats(r, r.nSeats, r.seatSeed, 0);
+        _drawSeats(r, r.pendingDraw, r.seatSeed, r.seatDrawCount);
+        r.pendingDraw = 0;
 
         c.phase = Phase.COMMIT;
         c.phaseDeadline = block.timestamp + _cp(c).commitTimeout;
@@ -1216,7 +1235,9 @@ contract Moderation is ReentrancyGuard {
         c.rounds.push();
         Round storage r = c.rounds[c.rounds.length - 1];
         r.nSeats = _commitTarget(c, depth);
+        r.pendingDraw = r.nSeats; // H-05
         r.seatSnapshotBlock = block.number + _cp(c).seedLag;
+        r.eligVersionAtArm = eligibilityAddVersion; // H-05
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
@@ -1242,15 +1263,18 @@ contract Moderation is ReentrancyGuard {
         if (r.widenCount < _cp(c).maxWiden) {
             r.widenCount++;
             uint256 add = _commitTarget(c, c.depth);
-            uint256 offset = r.seatDrawCount;
-            bytes32 newSeed = keccak256(abi.encode(r.seatSeed, r.widenCount));
-            r.seatSeed = newSeed;
             r.nSeats += add;
-            _drawSeats(r, add, newSeed, offset);
-            c.phase = Phase.COMMIT;
-            c.phaseDeadline = block.timestamp + _cp(c).commitTimeout;
+            // H-05: a widen re-draw gets FRESH entropy (a newly armed snapshot
+            // block), not keccak(oldSeed, widenCount) — which contained no new
+            // randomness and was fully known before a voter decided whether to
+            // withhold a reveal and trigger the widen. Back to DRAW; the poke
+            // draws only the added seats.
+            r.pendingDraw = add;
+            r.seatSnapshotBlock = block.number + _cp(c).seedLag;
+            r.eligVersionAtArm = eligibilityAddVersion;
+            c.phase = Phase.DRAW;
             emit Widened(c.id, c.depth, r.widenCount, r.nSeats);
-            emit CommitOpened(c.id, c.depth, c.phaseDeadline);
+            emit RoundOpened(c.id, c.depth, r.nSeats, r.seatSnapshotBlock);
             return;
         }
         // Widen exhausted with participation: proceed with the reveals we have

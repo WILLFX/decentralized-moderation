@@ -152,7 +152,11 @@ contract AppealsTest is ModerationTestBase {
         while (_phase(caseId) != Moderation.Phase.FINALIZED) {
             require(guard++ < 12, "did not finalize");
             Moderation.Phase p = _phase(caseId);
-            if (p == Moderation.Phase.COMMIT) {
+            if (p == Moderation.Phase.DRAW) {
+                // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
+                vm.roll(block.number + SEED_LAG + 1);
+                mod.realizeSeats(caseId);
+            } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(block.timestamp + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {

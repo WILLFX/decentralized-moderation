@@ -224,9 +224,13 @@ contract CaseLifecycleTest is ModerationTestBase {
 
         uint256 guard;
         while (_phase(caseId) != Moderation.Phase.VOID) {
-            require(guard++ < 10, "did not void");
+            require(guard++ < 24, "did not void");
             Moderation.Phase p = _phase(caseId);
-            if (p == Moderation.Phase.COMMIT) {
+            if (p == Moderation.Phase.DRAW) {
+                // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
+                vm.roll(block.number + SEED_LAG + 1);
+                mod.realizeSeats(caseId);
+            } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(block.timestamp + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
@@ -256,7 +260,11 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.closeCommit(caseId);
         vm.warp(block.timestamp + REVEAL_WINDOW);
         mod.closeReveal(caseId);
-        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "widened, back to commit");
+        // H-05: a widen re-arms fresh entropy, so the round goes back to DRAW;
+        // realizing the new seed draws the added seats and reopens COMMIT.
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "widened, back to draw");
+        _realizeSeats(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "fresh seed drawn, commit reopened");
         (uint256 nSeats1,,,,,, uint256 widen,,,) = mod.roundInfo(caseId, 0);
         assertEq(widen, 1);
         assertGt(nSeats1, nSeats0, "widen added seats");
@@ -283,9 +291,13 @@ contract CaseLifecycleTest is ModerationTestBase {
 
         uint256 guard;
         while (_phase(caseId) != Moderation.Phase.VOID) {
-            require(guard++ < 12, "did not void");
+            require(guard++ < 24, "did not void");
             Moderation.Phase p = _phase(caseId);
-            if (p == Moderation.Phase.COMMIT) {
+            if (p == Moderation.Phase.DRAW) {
+                // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
+                vm.roll(block.number + SEED_LAG + 1);
+                mod.realizeSeats(caseId);
+            } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(block.timestamp + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
@@ -315,9 +327,13 @@ contract CaseLifecycleTest is ModerationTestBase {
         _realizeSeats(caseId);
         uint256 guard;
         while (_phase(caseId) != Moderation.Phase.VOID) {
-            require(guard++ < 12, "did not void");
+            require(guard++ < 24, "did not void");
             Moderation.Phase p = _phase(caseId);
-            if (p == Moderation.Phase.COMMIT) {
+            if (p == Moderation.Phase.DRAW) {
+                // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
+                vm.roll(block.number + SEED_LAG + 1);
+                mod.realizeSeats(caseId);
+            } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(block.timestamp + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
@@ -340,6 +356,42 @@ contract CaseLifecycleTest is ModerationTestBase {
         _revealAll(caseId, 0, Moderation.Vote.Approve);
         _realizeOutcome(caseId);
         _assertConservation();
+    }
+
+    // H-05: adaptive activation. An attacker with mature-but-unactivated stake
+    // waits until the seat seed's blockhash is public, then activates a favourable
+    // subset immediately before realizeSeats. The draw must NOT proceed on that
+    // now-known seed: adding draw-eligible weight re-arms fresh entropy, so the
+    // attacker only destroyed the seed it was trying to exploit.
+    function test_H05_activation_after_seed_known_rearms() public {
+        uint256 caseId = _submit(mods[0]);
+
+        // Stake matures but is deliberately left unactivated.
+        address lurker = makeAddr("lurker");
+        bzz.mint(lurker, 1000 * XBZZ);
+        vm.prank(lurker);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(lurker);
+        mod.stake(500 * XBZZ);
+        vm.warp(block.timestamp + ACTIVATION_DELAY);
+
+        // The seed's snapshot block is now mined: its blockhash is public.
+        vm.roll(block.number + SEED_LAG + 1);
+        (,,,,,,,, uint256 snapBefore,) = mod.roundInfo(caseId, 0);
+
+        // Attacker activates now, reshaping the tree against a known seed.
+        mod.activate(lurker);
+
+        // The draw does not proceed — it re-arms to a fresh, unknown block.
+        mod.realizeSeats(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "still in DRAW: seed re-armed");
+        (,,,,,,,, uint256 snapAfter,) = mod.roundInfo(caseId, 0);
+        assertGt(snapAfter, snapBefore, "re-armed to a later, not-yet-known block");
+
+        // With no further eligibility changes, the next poke draws normally.
+        vm.roll(block.number + SEED_LAG + 1);
+        mod.realizeSeats(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "draw proceeds on untainted entropy");
     }
 
     // H-06: two cases opened in the SAME block share a snapshot block (hence the

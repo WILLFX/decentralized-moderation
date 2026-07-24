@@ -148,10 +148,34 @@ Within a single `realizeSeats` all seats are drawn from one consistent tree stat
 widen draws from the then-current tree (which excludes voters who have since committed
 to this case — desirable).
 
-**Threat model.** Minor. Between round-open and a widen, a moderator could stake and
-activate to enter the pool — but `ACTIVATION_DELAY` (7 days) far exceeds the intra-case
-timescale, so no realistic just-in-time entry exists. Documented as a residual, not a
-live vector.
+**Threat model.** ~~Minor~~ — **the original "minor" rating was wrong (senior audit
+H-05).** `ACTIVATION_DELAY` bounds the *age* of the stake, not *when the holder
+decides to activate it*: an attacker could keep matured stake unactivated, wait for
+the seat seed's blockhash to become public, simulate panels under different
+activation subsets, and activate the favourable one in the same transaction as the
+draw poke. Widen was worse — its seed was `keccak(oldSeed, widenCount)`, containing
+no new entropy, so a voter could compute the widened panel before deciding whether
+to withhold a reveal and trigger it.
+
+**Fixed (M2.5).** Two changes make the eligible set effectively frozen before the
+entropy that draws from it is known:
+1. **Eligibility-add version gate.** `activate()`/`thaw()` bump a global
+   `eligibilityAddVersion`. A round records it when its seat seed is armed; if it
+   differs at `realizeSeats`, the seed is **re-armed** to a fresh future block
+   instead of drawing. Adding weight against a known blockhash therefore destroys
+   exactly the seed the attacker was trying to exploit.
+2. **Fresh entropy per widen.** A widen no longer derives a seed; it re-arms a new
+   snapshot block and returns the round to `DRAW`, so each widen's panel is drawn
+   from entropy that did not exist when anyone chose to withhold a reveal.
+
+*Residual (accepted, documented):* the gate is deliberately one-directional — it
+triggers on eligibility **increases** only. Weight *removals* (a selected moderator
+requesting an exit) still change the live tree, but that costs the actor its own
+eligibility and cannot add a chosen identity to a panel. A determined party can also
+repeatedly bump the version to delay a draw; each bump costs gas and yields no
+control over the eventual seed (re-arming is the same unbounded mechanism as the
+stale-blockhash re-arm, D-1). Full epoch-checkpointed eligibility remains the
+stronger M4 option if this proves insufficient.
 
 ### D-9. `TopicCreated` emits the topic key, not the string (spec §8.4)
 

@@ -231,7 +231,7 @@ contract IndexTest is ModerationTestBase {
         assertTrue(e.uncontested, "no reject -> uncontested");
         assertFalse(e.fullQuorum, "one independent revealer is not full quorum");
 
-        vm.warp(block.timestamp + 200 hours);
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
         assertEq(m.supersafeEntries(TK).length, 0, "under-quorum approval never supersafe, regardless of age");
     }
 
@@ -255,7 +255,7 @@ contract IndexTest is ModerationTestBase {
 
         IndexRegistry.Entry memory e = m.entryAt(TK, 0);
         assertFalse(e.fullQuorum, "a degraded earlier round bars supersafe");
-        vm.warp(block.timestamp + 200 hours);
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
         assertEq(m.supersafeEntries(TK).length, 0, "not supersafe");
     }
 
@@ -268,7 +268,7 @@ contract IndexTest is ModerationTestBase {
         assertEq(mod.entryCount(TK), 1);
         assertEq(mod.supersafeEntries(TK).length, 0, "too young for supersafe");
 
-        vm.warp(block.timestamp + 96 hours);
+        vm.warp(vm.getBlockTimestamp() + 96 hours);
         assertEq(mod.supersafeEntries(TK).length, 1, "aged uncontested -> supersafe");
     }
 
@@ -282,7 +282,7 @@ contract IndexTest is ModerationTestBase {
         _finalize(caseId);
         mod.claim(caseId);
 
-        vm.warp(block.timestamp + 200 hours);
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
         assertEq(mod.entryCount(TK), 1, "in superset");
         assertEq(mod.supersafeEntries(TK).length, 0, "contested is never supersafe, regardless of age");
     }

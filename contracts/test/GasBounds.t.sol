@@ -66,7 +66,7 @@ contract GasBoundsTest is ModerationTestBase {
         }
 
         // Activate all 86 voters so they hold real tree weight (update, not insert).
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         for (uint256 j = 0; j < 86; j++) {
             sr.activate(address(uint160(uint256(keccak256(abi.encode("wv", j))))));
         }
@@ -332,7 +332,7 @@ contract GasBoundsTest is ModerationTestBase {
             mod.commitVote(caseId, h);
         }
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
 
@@ -347,7 +347,7 @@ contract GasBoundsTest is ModerationTestBase {
             mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
         }
         if (_phase(caseId) == Moderation.Phase.REVEAL) {
-            vm.warp(block.timestamp + REVEAL_WINDOW);
+            vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
             mod.closeReveal(caseId);
         }
         _realizeOutcome(caseId);
@@ -375,7 +375,7 @@ contract GasBoundsTest is ModerationTestBase {
             vm.prank(a);
             sr.stake(20 * XBZZ);
         }
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         for (uint256 i = 0; i < 1000; i++) {
             address a = address(uint160(uint256(keccak256(abi.encode("bigmod", i)))));
             sr.activate(a);
@@ -455,10 +455,10 @@ contract GasBoundsTest is ModerationTestBase {
             require(guard++ < 2 * (MAX_WIDEN + 2), "widen looped unboundedly");
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
                 break;

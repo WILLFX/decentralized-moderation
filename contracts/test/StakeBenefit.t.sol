@@ -60,12 +60,12 @@ contract StakeBenefitTest is ModerationTestBase {
             _realizeSeats(caseId);
             _voteByFaction(caseId, true);
             if (_phase(caseId) == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             }
             _voteByFaction(caseId, false);
             if (_phase(caseId) == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             }
             if (_phase(caseId) == Moderation.Phase.TALLY) {

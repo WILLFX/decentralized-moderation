@@ -119,7 +119,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         bytes32 h = keccak256(abi.encode(uint8(Moderation.Vote.Approve), SALT));
         vm.prank(sh);
         mod.commitVote(caseId, h);
-        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
         vm.prank(sh);
         vm.expectRevert(Moderation.BadReveal.selector);
@@ -145,7 +145,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.__injectWidenSeats(caseId, 0, sh, 7);
         assertEq(mod.__seats(caseId, 0, sh), collateralized + 7, "post-widen seat count is inflated");
 
-        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
         vm.prank(sh);
         mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
@@ -170,7 +170,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         vm.prank(b);
         mod.commitVote(caseId, hA); // b copies a's commitment
 
-        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
 
         // a reveals its own vote fine; b cannot reveal the copied commitment.
@@ -189,7 +189,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         _realizeSeats(caseId);
         _commitAll(caseId, 0, Moderation.Vote.Approve);
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
         assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.REVEAL));
@@ -210,7 +210,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         (,,,,,,,, uint256 seatSnap,) = mod.roundInfo(caseId, 0);
 
         _commitAll(caseId, 0, Moderation.Vote.Approve);
-        uint256 revealCloseBlock = block.number;
+        uint256 revealCloseBlock = vm.getBlockNumber();
         _revealAll(caseId, 0, Moderation.Vote.Approve);
 
         (,,,,,,,,, uint256 outcomeSnap) = mod.roundInfo(caseId, 0);
@@ -231,13 +231,13 @@ contract CaseLifecycleTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(block.number + SEED_LAG + 1);
+                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
                 revert("unexpected phase during void drive");
@@ -259,9 +259,9 @@ contract CaseLifecycleTest is ModerationTestBase {
         _realizeSeats(caseId);
         (uint256 nSeats0,,,,,,,,,) = mod.roundInfo(caseId, 0);
 
-        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
-        vm.warp(block.timestamp + REVEAL_WINDOW);
+        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
         mod.closeReveal(caseId);
         // H-05: a widen re-arms fresh entropy, so the round goes back to DRAW;
         // realizing the new seed draws the added seats and reopens COMMIT.
@@ -298,13 +298,13 @@ contract CaseLifecycleTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(block.number + SEED_LAG + 1);
+                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
                 revert("unexpected phase");
@@ -316,8 +316,8 @@ contract CaseLifecycleTest is ModerationTestBase {
         for (uint256 i = 0; i < committers.length; i++) {
             (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(committers[i]);
             assertGt(frozen, 0, "vanisher's stake frozen, not released");
-            assertGt(frozenUntil, block.timestamp, "vanisher frozen");
-            assertLe(frozenUntil - block.timestamp, 1 days, "brief freeze only");
+            assertGt(frozenUntil, vm.getBlockTimestamp(), "vanisher frozen");
+            assertLe(frozenUntil - vm.getBlockTimestamp(), 1 days, "brief freeze only");
             assertEq(stakeReg.eligibleWeightOf(committers[i]), 0, "frozen -> excluded");
         }
         _assertConservation();
@@ -339,13 +339,13 @@ contract CaseLifecycleTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(block.number + SEED_LAG + 1);
+                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
                 revert("unexpected phase");
@@ -401,7 +401,7 @@ contract CaseLifecycleTest is ModerationTestBase {
 
         // It committed exactly what it could afford, and the tally follows (H-08).
         assertEq(mod.__committedSeats(caseId, 0, sh), keep / riskPerSeat, "committed only affordable seats");
-        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
         vm.prank(sh);
         mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
@@ -423,10 +423,10 @@ contract CaseLifecycleTest is ModerationTestBase {
         bzz.approve(address(stakeReg), type(uint256).max);
         vm.prank(lurker);
         stakeReg.stake(500 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
 
         // The seed's snapshot block is now mined: its blockhash is public.
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         (,,,,,,,, uint256 snapBefore,) = mod.roundInfo(caseId, 0);
 
         // Attacker activates now, reshaping the tree against a known seed.
@@ -439,7 +439,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         assertGt(snapAfter, snapBefore, "re-armed to a later, not-yet-known block");
 
         // With no further eligibility changes, the next poke draws normally.
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         mod.realizeSeats(caseId);
         assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "draw proceeds on untainted entropy");
     }
@@ -463,7 +463,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         uint256 b = mod.submit(Moderation.Kind.SUBMISSION, keccak256("B"), META, _topics(), 0, fee);
 
         // Both were submitted in the same block -> identical seatSnapshotBlock.
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         mod.realizeSeats(a);
         mod.realizeSeats(b);
         assertTrue(mod.__seatSeed(a, 0) != mod.__seatSeed(b, 0), "domain separation -> distinct seat seeds");
@@ -489,13 +489,13 @@ contract CaseLifecycleTest is ModerationTestBase {
             vm.prank(few[i]);
             sr.stake(100 * XBZZ);
         }
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         for (uint256 i = 0; i < 2; i++) {
             sr.activate(few[i]);
             vm.prank(few[i]);
             sr.setDutyUnits(1);
         }
-        vm.roll(block.number + 1);
+        vm.roll(vm.getBlockNumber() + 1);
 
         // Compute the fee BEFORE any prank: an external call in the argument
         // list would consume it.
@@ -509,7 +509,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         uint256 guard;
         do {
             require(guard++ < 24, "never left DRAW");
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             m.realizeSeats(caseId);
         } while (uint256(_phaseOfLocal(m, caseId)) == uint256(Moderation.Phase.DRAW));
 

@@ -40,7 +40,7 @@ contract RegistriesTest is Test {
     function _authorize(address logic) internal {
         stakeReg.proposeLogic(logic);
         indexReg.proposeLogic(logic);
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         stakeReg.executeLogic();
         indexReg.executeLogic();
     }
@@ -57,7 +57,7 @@ contract RegistriesTest is Test {
     /// drawable).
     function _stakeActivatePledge(address who, uint256 amount) internal {
         _stake(who, amount);
-        vm.warp(block.timestamp + ACTIVATION);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(who);
         uint256 units = amount / RISK_PER_SEAT;
         vm.prank(who);
@@ -115,7 +115,7 @@ contract RegistriesTest is Test {
         vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
         stakeReg.executeLogic();
 
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         stakeReg.executeLogic();
         assertTrue(stakeReg.isLogic(newLogic));
     }
@@ -132,7 +132,7 @@ contract RegistriesTest is Test {
         // Alice objects and leaves; the exit path is hers alone.
         vm.prank(alice);
         stakeReg.requestExit(100 * XBZZ);
-        vm.warp(block.timestamp + COOLDOWN);
+        vm.warp(vm.getBlockTimestamp() + COOLDOWN);
         uint256 before = bzz.balanceOf(alice);
         vm.prank(alice);
         stakeReg.withdraw();
@@ -173,7 +173,7 @@ contract RegistriesTest is Test {
         vm.expectRevert(StakeRegistry.NotLogic.selector);
         stakeReg.lock(alice, 10 * XBZZ);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.freeze(alice, 1, block.timestamp + 1 days);
+        stakeReg.freeze(alice, 1, vm.getBlockTimestamp() + 1 days);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
         stakeReg.reward(alice, 1);
         vm.expectRevert(IndexRegistry.NotLogic.selector);
@@ -198,7 +198,7 @@ contract RegistriesTest is Test {
 
         vm.startPrank(oldLogic);
         stakeReg.lock(alice, 30 * XBZZ);
-        stakeReg.freeze(alice, 10 * XBZZ, block.timestamp + 1 days);
+        stakeReg.freeze(alice, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
         stakeReg.release(alice, 20 * XBZZ);
         stakeReg.lock(bob, 10 * XBZZ);
         vm.stopPrank();
@@ -229,11 +229,11 @@ contract RegistriesTest is Test {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.startPrank(oldLogic);
         stakeReg.lock(alice, 10 * XBZZ);
-        stakeReg.freeze(alice, 10 * XBZZ, block.timestamp + 3 days);
+        stakeReg.freeze(alice, 10 * XBZZ, vm.getBlockTimestamp() + 3 days);
         vm.stopPrank();
 
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> fully excluded from draws");
-        vm.warp(block.timestamp + 3 days + 1);
+        vm.warp(vm.getBlockTimestamp() + 3 days + 1);
         stakeReg.thaw(alice);
         assertGt(stakeReg.eligibleWeightOf(alice), 0, "eligible again after thaw");
         assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "freezing never destroys principal");
@@ -243,7 +243,7 @@ contract RegistriesTest is Test {
 
     function test_unpledged_stake_is_never_drawn() public {
         _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice); // activated but NOT pledged
         assertEq(stakeReg.totalEligibleWeight(), 0, "passive stake is not in the draw pool");
 
@@ -256,7 +256,7 @@ contract RegistriesTest is Test {
     /// only staker — the draw excludes exhausted capacity instead of over-seating.
     function test_draw_never_exceeds_pledged_capacity() public {
         _stake(alice, 1000 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice);
         vm.prank(alice);
         stakeReg.setDutyUnits(3); // only 3 seats pledged
@@ -284,7 +284,7 @@ contract RegistriesTest is Test {
         uint256 bobBefore = stakeReg.totalStakeOf(bob);
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, block.timestamp + 1 days);
+        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
 
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, RISK_PER_SEAT, "one seat's worth frozen");
@@ -298,11 +298,11 @@ contract RegistriesTest is Test {
     /// submission spam cannot grief passive stakers.
     function test_unpledged_stake_cannot_be_penalized() public {
         _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice);
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, block.timestamp + 1 days);
+        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, 0, "passive staker is untouchable");
     }
@@ -317,7 +317,7 @@ contract RegistriesTest is Test {
         vm.stopPrank();
 
         assertEq(indexReg.supersafeEntries(TK, 96 hours, 0, 10).length, 0, "too young");
-        vm.warp(block.timestamp + 96 hours);
+        vm.warp(vm.getBlockTimestamp() + 96 hours);
         IndexRegistry.Entry[] memory ss = indexReg.supersafeEntries(TK, 96 hours, 0, 10);
         assertEq(ss.length, 1, "only the uncontested full-quorum entry");
         assertEq(ss[0].caseId, 1);
@@ -368,7 +368,7 @@ contract RegistriesTest is Test {
         _stake(alice, 100 * XBZZ);
         uint256 v0 = stakeReg.eligibilityAddVersion();
 
-        vm.warp(block.timestamp + ACTIVATION);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice);
         uint256 v1 = stakeReg.eligibilityAddVersion();
         assertGt(v1, v0, "activate: pending stake becomes drawable");
@@ -380,12 +380,12 @@ contract RegistriesTest is Test {
 
         vm.startPrank(oldLogic);
         stakeReg.lock(alice, RISK_PER_SEAT);
-        stakeReg.freeze(alice, RISK_PER_SEAT, block.timestamp + 1 days);
+        stakeReg.freeze(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         vm.stopPrank();
         uint256 v3 = stakeReg.eligibilityAddVersion();
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> out of the pool");
 
-        vm.warp(block.timestamp + 1 days + 1);
+        vm.warp(vm.getBlockTimestamp() + 1 days + 1);
         stakeReg.thaw(alice);
         assertGt(stakeReg.eligibilityAddVersion(), v3, "thaw: a frozen moderator re-enters the pool");
     }

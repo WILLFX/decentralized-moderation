@@ -40,7 +40,7 @@ contract StakingTest is StackDeployer {
         _fund(who, amount);
         vm.prank(who);
         stakeReg.stake(amount);
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         stakeReg.activate(who);
         // H-07: activated stake is only draw-eligible once duty capacity is
         // pledged. Pledge the full amount so these tests exercise weight changes.
@@ -70,7 +70,7 @@ contract StakingTest is StackDeployer {
         // Full exit and withdraw.
         vm.prank(alice);
         stakeReg.requestExit(MIN_STAKE);
-        vm.warp(block.timestamp + 8 days);
+        vm.warp(vm.getBlockTimestamp() + 8 days);
         vm.prank(alice);
         stakeReg.withdraw();
         assertEq(stakeReg.totalStakeOf(alice), 0, "fully exited");
@@ -97,7 +97,7 @@ contract StakingTest is StackDeployer {
         vm.expectRevert(StakeRegistry.NotYetActivatable.selector);
         stakeReg.activate(alice);
 
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         stakeReg.activate(alice); // permissionless
 
         // H-07: activation alone no longer makes stake drawable. Capacity must be
@@ -125,7 +125,7 @@ contract StakingTest is StackDeployer {
         vm.expectRevert(StakeRegistry.NotYetActivatable.selector);
         stakeReg.activate(alice);
 
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         stakeReg.activate(alice);
         // Weight stays capped by the pledge until capacity is raised to match
         // (H-07): duty is opt-in at every size, not just at first stake.
@@ -143,7 +143,7 @@ contract StakingTest is StackDeployer {
         _fund(alice, 100 * XBZZ);
         vm.prank(alice);
         stakeReg.stake(100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         stakeReg.activate(alice);
 
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "activated but unpledged -> not in the draw pool");
@@ -156,7 +156,7 @@ contract StakingTest is StackDeployer {
         _fund(alice, 100 * XBZZ);
         vm.prank(alice);
         stakeReg.stake(100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         stakeReg.activate(alice);
 
         uint256 riskPerSeat = mod.getParams().riskPerSeat;
@@ -185,7 +185,7 @@ contract StakingTest is StackDeployer {
         vm.prank(alice);
         stakeReg.withdraw();
 
-        vm.warp(block.timestamp + EXIT_COOLDOWN);
+        vm.warp(vm.getBlockTimestamp() + EXIT_COOLDOWN);
         uint256 balBefore = bzz.balanceOf(alice);
         vm.prank(alice);
         stakeReg.withdraw();
@@ -225,7 +225,7 @@ contract StakingTest is StackDeployer {
         // Exiting all 15 is a full exit (remaining 0): allowed even though < floor.
         vm.prank(alice);
         stakeReg.requestExit(15 * XBZZ);
-        vm.warp(block.timestamp + EXIT_COOLDOWN);
+        vm.warp(vm.getBlockTimestamp() + EXIT_COOLDOWN);
         vm.prank(alice);
         stakeReg.withdraw();
         assertEq(stakeReg.totalStakeOf(alice), 0);
@@ -235,7 +235,7 @@ contract StakingTest is StackDeployer {
         _stakeActivate(alice, 25 * XBZZ);
         vm.prank(alice);
         stakeReg.requestExit(15 * XBZZ); // leaves 10 == MIN_STAKE
-        vm.warp(block.timestamp + EXIT_COOLDOWN);
+        vm.warp(vm.getBlockTimestamp() + EXIT_COOLDOWN);
         vm.prank(alice);
         stakeReg.withdraw();
         assertEq(stakeReg.totalStakeOf(alice), 10 * XBZZ);
@@ -251,7 +251,7 @@ contract StakingTest is StackDeployer {
         _stakeActivate(alice, 50 * XBZZ);
         vm.prank(alice);
         stakeReg.requestExit(50 * XBZZ);
-        vm.warp(block.timestamp + EXIT_COOLDOWN);
+        vm.warp(vm.getBlockTimestamp() + EXIT_COOLDOWN);
 
         // No account — deployer, a would-be admin, anyone — can block it.
         vm.prank(alice);
@@ -269,7 +269,7 @@ contract StakingTest is StackDeployer {
         mod.__commit(alice, 40 * XBZZ);
         assertEq(stakeReg.eligibleWeightOf(alice), 60 * XBZZ, "committed stake leaves the tree");
 
-        uint256 until = block.timestamp + 7 days;
+        uint256 until = vm.getBlockTimestamp() + 7 days;
         mod.__freeze(alice, 40 * XBZZ, until); // committed 40 -> frozen
 
         // D6: the WHOLE moderator is excluded while frozen, not just the slice.
@@ -313,7 +313,7 @@ contract StakingTest is StackDeployer {
                 stakeReg.stake(amt);
             } else if (op == 1) {
                 (,uint256 pending,,,,uint256 activatesAt,,,) = stakeReg.moderatorInfo(a);
-                if (pending > 0 && block.timestamp >= activatesAt) stakeReg.activate(a);
+                if (pending > 0 && vm.getBlockTimestamp() >= activatesAt) stakeReg.activate(a);
             } else if (op == 2) {
                 (uint256 free,,,,,,uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
                 uint256 tot = stakeReg.totalStakeOf(a);
@@ -325,7 +325,7 @@ contract StakingTest is StackDeployer {
                 (,,,,,,uint256 exitAmount, uint256 exitClaimableAt,) = stakeReg.moderatorInfo(a);
                 uint256 tot = stakeReg.totalStakeOf(a);
                 if (
-                    exitAmount > 0 && block.timestamp >= exitClaimableAt
+                    exitAmount > 0 && vm.getBlockTimestamp() >= exitClaimableAt
                         && (tot - exitAmount == 0 || tot - exitAmount >= MIN_STAKE)
                 ) {
                     vm.prank(a);
@@ -337,14 +337,14 @@ contract StakingTest is StackDeployer {
                 // commitVote -> settlement-freeze path.
                 (uint256 free, uint256 pending, uint256 committed,,,,uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
                 if (committed > 0) {
-                    mod.__freeze(a, committed, block.timestamp + 3 days);
+                    mod.__freeze(a, committed, vm.getBlockTimestamp() + 3 days);
                 } else {
                     uint256 eligible = free > pending + exitAmount ? free - pending - exitAmount : 0;
                     if (amt <= eligible && amt > 0) mod.__commit(a, amt);
                 }
             } else {
                 // advance time (lets activation delays / cooldowns / freezes elapse)
-                vm.warp(block.timestamp + 2 days);
+                vm.warp(vm.getBlockTimestamp() + 2 days);
             }
 
             _assertInvariants(actors);

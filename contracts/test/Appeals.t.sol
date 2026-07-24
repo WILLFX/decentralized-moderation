@@ -154,13 +154,13 @@ contract AppealsTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(block.number + SEED_LAG + 1);
+                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
-                vm.warp(block.timestamp + COMMIT_TIMEOUT);
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
             } else if (p == Moderation.Phase.REVEAL) {
-                vm.warp(block.timestamp + REVEAL_WINDOW);
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
                 revert("unexpected phase");
@@ -184,11 +184,11 @@ contract AppealsTest is ModerationTestBase {
         uint256[] memory cts = mod.getCommitTargets();
         uint256[] memory aws = mod.getAppealWindows();
         mod.proposeParameters(p, cts, aws);
-        uint256 eta = block.timestamp + 7 days;
+        uint256 eta = vm.getBlockTimestamp() + 7 days;
 
         // Open the case ~3.5 days before eta so the 4-day appeal window is still
         // open when the timelock fires.
-        vm.warp(block.timestamp + 3 days + 12 hours);
+        vm.warp(vm.getBlockTimestamp() + 3 days + 12 hours);
         uint256 caseId = _submit(mods[0]); // pins ruleset v0 (bondMultiplier 2)
         _realizeSeats(caseId);
         _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);

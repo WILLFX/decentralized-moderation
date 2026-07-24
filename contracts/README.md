@@ -9,9 +9,12 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > passing tests including a handler-driven invariant campaign, a differential
 > test against an independent Python reference, and a live logic-migration test.
 >
-> **Before deploying, read the EIP-170 section of `GAS_BUDGETS.md`:**
-> `Moderation` only fits the contract-size limit when built with
-> `FOUNDRY_PROFILE=viair`, which is not the profile the suite runs under.
+> Builds with `via_ir = true` (EIP-170: `Moderation` does not fit the 24,576-byte
+> limit without it). The suite runs on the same pipeline that ships. One
+> consequence for contributors: **test code must use `vm.getBlockTimestamp()` /
+> `vm.getBlockNumber()`, never `block.timestamp` / `block.number`** — the IR
+> optimizer hoists those across `vm.warp`/`vm.roll` and the test silently reads a
+> stale clock. See `GAS_BUDGETS.md`.
 
 ## Module map
 

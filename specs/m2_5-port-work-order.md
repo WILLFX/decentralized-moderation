@@ -150,3 +150,46 @@ the invariant handler/checker.
    handle `DRAW` mid-round, and guards need ~24 iterations.
 5. **Order matters on rewards**: transfer, then credit. Reversing it breaks
    conservation between the two asserts.
+
+---
+
+## Port outcome (completed) and one follow-up
+
+The port landed across six commits; `forge test` is **140 green** (132 baseline
++ 8), and the campaign checklist above is satisfied. Four defects surfaced during
+the work — three pre-existing, all fixed here:
+
+1. **H-05 was dead after the split.** `StakeRegistry.activate()` and `thaw()` add
+   draw-eligible weight without bumping `eligibilityAddVersion`, so the
+   anti-grinding re-arm would never have fired once staking left the monolith.
+2. **The invariant campaign had stopped adjudicating cases.** H-07 made stake
+   drawable only after a duty pledge; neither the setUp nor the handler pledged,
+   so `hRunCase` returned at its eligibility guard on every call. It reported
+   `reverts: 0` over 65,536 calls without drawing a single panel. An anti-vacuity
+   test (`test_campaign_actions_do_real_work`) now guards it permanently.
+3. **The 47-seat draw gas budget was never measured** — same root cause; the
+   assertion passed on ~5k gas against an empty tree. Real cost ~4.39M.
+4. **`Moderation` exceeded EIP-170** (29,769 B pre-port; the monolith was never
+   deployable). Resolved by the port plus `via_ir`.
+
+### Follow-up: size-reduction pass on `Moderation` (NOT done in this pass)
+
+| | Runtime size | Margin vs 24,576 B |
+|---|---|---|
+| pre-port, legacy pipeline | 29,769 B | **−5,193** |
+| post-port, legacy pipeline | 25,986 B | **−1,410** |
+| post-port, `via_ir` (shipped) | **23,392 B** | **+1,184** |
+
+Two reasons this needs its own pass:
+
+- **1,184 B is thin.** That is roughly one moderate feature of headroom. Any
+  M3 work on `Moderation` can push it back over the limit, and the failure mode
+  is a deploy that reverts rather than a test that fails.
+- **The size is a design signal, not just a codegen fact.** A logic contract that
+  was 5,193 B over before the split, and fits now only by virtue of an optimizer
+  pipeline, is saying the split is not finished. `Moderation` is still the case
+  lifecycle, appeals, settlement *and* governance in one contract. The natural
+  next seam is governance (parameters, rulesets, guidelines history — self
+  contained, and already versioned) or settlement.
+
+Do this before adding features to `Moderation`, not after.

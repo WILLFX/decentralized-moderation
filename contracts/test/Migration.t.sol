@@ -112,7 +112,7 @@ contract MigrationTest is ModerationTestBase {
         vm.prank(leaver);
         stakeReg.requestExit(owned);
 
-        vm.warp(block.timestamp + REG_COOLDOWN);
+        vm.warp(vm.getBlockTimestamp() + REG_COOLDOWN);
         uint256 balBefore = bzz.balanceOf(leaver);
         vm.prank(leaver);
         stakeReg.withdraw();

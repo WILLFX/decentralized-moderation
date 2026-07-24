@@ -42,7 +42,7 @@ contract InvariantTest is StackDeployer {
             stakeReg.stake(seed);
             handler.setNetDeposited(actors[i], seed);
         }
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         uint256 units = seed / stakeReg.riskPerSeat();
         for (uint256 i = 0; i < actors.length; i++) {
             stakeReg.activate(actors[i]);

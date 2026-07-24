@@ -55,7 +55,7 @@ abstract contract ModerationTestBase is StackDeployer {
             vm.prank(m);
             stakeReg.stake(stakeEach);
         }
-        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
         // Compute BEFORE pranking: an external call in the arg list eats the prank.
         uint256 riskPerSeat = mod.getParams().riskPerSeat;
         uint256 units = stakeEach / riskPerSeat;
@@ -67,7 +67,7 @@ abstract contract ModerationTestBase is StackDeployer {
             vm.prank(mods[i]);
             stakeReg.setDutyUnits(units);
         }
-        vm.roll(block.number + 1);
+        vm.roll(vm.getBlockNumber() + 1);
     }
 
     function _topics() internal pure returns (bytes32[] memory t) {
@@ -95,10 +95,10 @@ abstract contract ModerationTestBase is StackDeployer {
     }
 
     function _realizeSeats(uint256 caseId) internal {
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         mod.realizeSeats(caseId);
         while (_phase(caseId) == Moderation.Phase.DRAW) {
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             mod.realizeSeats(caseId);
         }
     }
@@ -123,10 +123,10 @@ abstract contract ModerationTestBase is StackDeployer {
     }
 
     function _realizeOutcome(uint256 caseId) internal {
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         mod.realizeOutcome(caseId);
         while (_phase(caseId) == Moderation.Phase.TALLY) {
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             mod.realizeOutcome(caseId);
         }
     }
@@ -136,12 +136,12 @@ abstract contract ModerationTestBase is StackDeployer {
     function _runRoundToAppealWindow(uint256 caseId, uint256 depth, Moderation.Vote vote) internal {
         _commitAll(caseId, depth, vote);
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
         _revealAll(caseId, depth, vote);
         if (_phase(caseId) == Moderation.Phase.REVEAL) {
-            vm.warp(block.timestamp + REVEAL_WINDOW);
+            vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
             mod.closeReveal(caseId);
         }
         _realizeOutcome(caseId);

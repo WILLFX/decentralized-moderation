@@ -74,7 +74,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     function hActivate(uint256 actorSeed) external {
         address a = _actor(actorSeed);
         (, uint256 pending,,,, uint256 activatesAt,,,) = stakeReg.moderatorInfo(a);
-        if (pending == 0 || block.timestamp < activatesAt) return;
+        if (pending == 0 || vm.getBlockTimestamp() < activatesAt) return;
         try stakeReg.activate(a) {} catch {}
     }
 
@@ -91,7 +91,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         address a = _actor(actorSeed);
         (,,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
         if (exitAmount == 0) return;
-        vm.warp(block.timestamp + 8 days); // ensure cooldown elapsed
+        vm.warp(vm.getBlockTimestamp() + 8 days); // ensure cooldown elapsed
         vm.prank(a);
         try stakeReg.withdraw() {
             netDeposited[a] -= exitAmount;
@@ -102,7 +102,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         address a = _actor(actorSeed);
         (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(a);
         if (frozen == 0) return;
-        if (block.timestamp < frozenUntil) vm.warp(frozenUntil + 1);
+        if (vm.getBlockTimestamp() < frozenUntil) vm.warp(frozenUntil + 1);
         try stakeReg.thaw(a) {} catch {}
     }
 
@@ -165,7 +165,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
     /// voters (exercising freeze paths). Returns false if the round couldn't be
     /// advanced (and the caller should stop).
     function _runRound(uint256 caseId, uint256 depth, uint256 voteSeed) internal returns (bool) {
-        vm.roll(block.number + SEED_LAG + 1);
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
         try mod.realizeSeats(caseId) {} catch {
             return false;
         }
@@ -173,7 +173,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         uint256 guard;
         while (_phase(caseId) == Moderation.Phase.DRAW) {
             if (guard++ > 4) return false;
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             try mod.realizeSeats(caseId) {} catch {
                 return false;
             }
@@ -190,7 +190,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
             try mod.commitVote(caseId, h) {} catch {}
         }
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + 25 hours);
+            vm.warp(vm.getBlockTimestamp() + 25 hours);
             try mod.closeCommit(caseId) {} catch {
                 return false;
             }
@@ -205,7 +205,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
             }
         }
         if (_phase(caseId) == Moderation.Phase.REVEAL) {
-            vm.warp(block.timestamp + 25 hours);
+            vm.warp(vm.getBlockTimestamp() + 25 hours);
             try mod.closeReveal(caseId) {} catch {
                 return false;
             }
@@ -214,7 +214,7 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         guard = 0;
         while (_phase(caseId) == Moderation.Phase.TALLY) {
             if (guard++ > 4) return false;
-            vm.roll(block.number + SEED_LAG + 1);
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
             try mod.realizeOutcome(caseId) {} catch {
                 return false;
             }

@@ -9,6 +9,18 @@ import {IndexRegistry} from "../../src/IndexRegistry.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
 
+/// # Rule for all test code in this repo: never read `block.timestamp` or
+/// # `block.number` directly. Use `vm.getBlockTimestamp()` / `vm.getBlockNumber()`.
+///
+/// The suite builds with `via_ir = true` (EIP-170 — see GAS_BUDGETS.md). solc
+/// correctly treats TIMESTAMP and NUMBER as invariant within a transaction, so
+/// the IR optimizer hoists them and caches the value across calls. `vm.warp` and
+/// `vm.roll` are cheatcodes it cannot see, so a test that reads the clock, warps,
+/// and reads again silently gets the STALE value — and then mis-sequences without
+/// failing loudly. It cost ~20 tests when the pipeline was switched.
+///
+/// The cheatcode getters are external staticcalls, so they cannot be folded.
+///
 /// @notice Stands up the three-contract stack the way a real deployment does
 ///         (M2.5 port): registries first, then the logic contract, then a
 ///         timelocked `proposeLogic`/`executeLogic` on BOTH registries.
@@ -21,8 +33,9 @@ abstract contract StackDeployer is Test {
     uint256 internal constant REG_MIN_STAKE = 10 * 1e16;
     uint256 internal constant REG_ACTIVATION = 7 days;
     uint256 internal constant REG_COOLDOWN = 7 days;
-    /// Must match `Params.riskPerSeat`: the registry sizes draw eligibility by it
-    /// and the logic contract locks by it. See DEVIATIONS.md (M2.5 port).
+    /// The registry's DUTY UNIT. `Moderation.Params.riskPerSeat` (what a case
+    /// locks per seat) may be lower, but never higher — `_validateParams` and the
+    /// Moderation constructor both reject that. See DEVIATIONS.md D-13.
     uint256 internal constant REG_RISK_PER_SEAT = 10 * 1e16;
 
     function _deployStack(MockBZZ bzz)
@@ -46,7 +59,7 @@ abstract contract StackDeployer is Test {
     function _authorizeLogic(StakeRegistry sr, IndexRegistry ir, address logic) internal {
         sr.proposeLogic(logic);
         ir.proposeLogic(logic);
-        vm.warp(block.timestamp + REG_TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + REG_TIMELOCK);
         sr.executeLogic();
         ir.executeLogic();
     }

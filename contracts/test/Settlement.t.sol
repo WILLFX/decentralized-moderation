@@ -108,7 +108,7 @@ contract SettlementTest is ModerationTestBase {
         mod.claim(caseId);
 
         // The depth-0 Approve voter is incoherent vs the final Reject -> frozen.
-        assertGt(_frozenUntil(victim), block.timestamp, "incoherent voter frozen");
+        assertGt(_frozenUntil(victim), vm.getBlockTimestamp(), "incoherent voter frozen");
         assertEq(stakeReg.eligibleWeightOf(victim), 0, "frozen -> excluded from the tree");
 
         // A fresh case never draws the frozen victim.
@@ -130,7 +130,7 @@ contract SettlementTest is ModerationTestBase {
         // Everyone commits; one seat-holder never reveals.
         _commitAll(caseId, 0, Moderation.Vote.Approve);
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
-            vm.warp(block.timestamp + COMMIT_TIMEOUT);
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
         (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
@@ -141,7 +141,7 @@ contract SettlementTest is ModerationTestBase {
             vm.prank(sh);
             mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
         }
-        vm.warp(block.timestamp + REVEAL_WINDOW);
+        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
         mod.closeReveal(caseId);
         _realizeOutcome(caseId);
         _finalize(caseId);
@@ -149,8 +149,8 @@ contract SettlementTest is ModerationTestBase {
 
         // Vanisher took a brief (1 day) freeze, not the full incoherent freeze.
         uint256 fu = _frozenUntil(vanisher);
-        assertGt(fu, block.timestamp, "vanisher frozen");
-        assertLe(fu - block.timestamp, 1 days, "brief freeze only");
+        assertGt(fu, vm.getBlockTimestamp(), "vanisher frozen");
+        assertLe(fu - vm.getBlockTimestamp(), 1 days, "brief freeze only");
         _assertConservation();
     }
 

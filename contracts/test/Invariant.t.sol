@@ -43,18 +43,25 @@ contract InvariantTest is StackDeployer {
             handler.setNetDeposited(actors[i], seed);
         }
         vm.warp(block.timestamp + 7 days);
+        uint256 units = seed / stakeReg.riskPerSeat();
         for (uint256 i = 0; i < actors.length; i++) {
             stakeReg.activate(actors[i]);
+            // H-07: without a duty pledge nobody is drawable and no case in the
+            // campaign can ever reach a panel.
+            vm.prank(actors[i]);
+            stakeReg.setDutyUnits(units);
         }
+        assertGt(stakeReg.totalEligibleWeight(), 0, "campaign starts with a drawable set");
 
         // Fuzz only the handler's action functions.
-        bytes4[] memory selectors = new bytes4[](6);
+        bytes4[] memory selectors = new bytes4[](7);
         selectors[0] = ModerationHandler.hStake.selector;
         selectors[1] = ModerationHandler.hActivate.selector;
         selectors[2] = ModerationHandler.hRequestExitPranked.selector;
         selectors[3] = ModerationHandler.hWithdraw.selector;
         selectors[4] = ModerationHandler.hThaw.selector;
         selectors[5] = ModerationHandler.hRunCase.selector;
+        selectors[6] = ModerationHandler.hSetDuty.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -88,6 +95,30 @@ contract InvariantTest is StackDeployer {
         assertEq(stakeReg.totalFreeStake(), sf, "free total");
         assertEq(stakeReg.totalCommittedStake(), sc, "committed total");
         assertEq(stakeReg.totalFrozenStake(), sfz, "frozen total");
+    }
+
+    /// Anti-vacuity. Every invariant here holds trivially over a campaign whose
+    /// actions all silently reverted — and the handler swallows inner failures
+    /// by design, so "reverts: 0" proves nothing about whether work happened.
+    /// This drives the handler directly and checks that the actions actually
+    /// move registry state and settle cases.
+    function test_campaign_actions_do_real_work() public {
+        for (uint256 i = 0; i < 12; i++) {
+            handler.hStake(i, 50 * XBZZ);
+            handler.hActivate(i);
+        }
+        uint256 staked;
+        for (uint256 i = 0; i < actors.length; i++) {
+            staked += stakeReg.totalStakeOf(actors[i]);
+        }
+        assertGt(staked, 0, "handler staking reaches the registry");
+        assertGt(stakeReg.totalEligibleWeight(), 0, "handler makes moderators drawable");
+
+        for (uint256 i = 0; i < 8; i++) {
+            handler.hRunCase(i, i, i % 2 == 0);
+        }
+        assertGt(handler.casesSettled(), 0, "handler drives cases all the way to settlement");
+        _assertStackConservation(mod, stakeReg, bzz);
     }
 
     /// §9.2: no actor's stake principal is ever transferred away — their total

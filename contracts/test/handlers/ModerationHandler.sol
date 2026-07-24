@@ -56,6 +56,21 @@ contract ModerationHandler is CommonBase, StdCheats, StdUtils {
         } catch {}
     }
 
+    /// H-07: stake alone is not drawable — capacity must be PLEDGED. Without
+    /// this action the sortition tree stays empty, hRunCase returns at its
+    /// eligibility guard, and the whole campaign silently degenerates into a
+    /// staking-only test that never adjudicates a case.
+    function hSetDuty(uint256 actorSeed, uint256 units) external {
+        address a = _actor(actorSeed);
+        (uint256 free, uint256 pending,,,,, uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
+        uint256 usable = free > pending + exitAmount ? free - pending - exitAmount : 0;
+        uint256 maxUnits = usable / stakeReg.riskPerSeat();
+        if (maxUnits == 0) return;
+        units = bound(units, 1, maxUnits);
+        vm.prank(a);
+        try stakeReg.setDutyUnits(units) {} catch {}
+    }
+
     function hActivate(uint256 actorSeed) external {
         address a = _actor(actorSeed);
         (, uint256 pending,,,, uint256 activatesAt,,,) = stakeReg.moderatorInfo(a);

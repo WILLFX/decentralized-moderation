@@ -3,6 +3,9 @@ pragma solidity ^0.8.28;
 
 import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
+import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
+import {StakeRegistryHarness} from "./harnesses/StakeRegistryHarness.sol";
+import {MockBZZ} from "./mocks/MockBZZ.sol";
 
 contract CaseLifecycleTest is ModerationTestBase {
     // --- submit guards -------------------------------------------------------
@@ -464,5 +467,64 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.realizeSeats(a);
         mod.realizeSeats(b);
         assertTrue(mod.__seatSeed(a, 0) != mod.__seatSeed(b, 0), "domain separation -> distinct seat seeds");
+    }
+
+    // --- capacity-limited panels (H-07 + M2.5 port) --------------------------
+
+    /// The registry seats only where collateral exists, so a panel can come back
+    /// SHORT of the commit target when pledged duty capacity is scarce. The
+    /// round must report what was actually seated — an inflated nSeats would
+    /// misreport the panel — and must still make progress rather than revert.
+    function test_panel_short_of_target_when_capacity_is_scarce() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+
+        // Two moderators pledging ONE concurrent seat each: a depth-0 target of
+        // 5 can never be filled, however much stake they hold.
+        address[2] memory few = [makeAddr("few0"), makeAddr("few1")];
+        for (uint256 i = 0; i < 2; i++) {
+            b.mint(few[i], 1000 * XBZZ);
+            vm.prank(few[i]);
+            b.approve(address(sr), type(uint256).max);
+            vm.prank(few[i]);
+            sr.stake(100 * XBZZ);
+        }
+        vm.warp(block.timestamp + ACTIVATION_DELAY);
+        for (uint256 i = 0; i < 2; i++) {
+            sr.activate(few[i]);
+            vm.prank(few[i]);
+            sr.setDutyUnits(1);
+        }
+        vm.roll(block.number + 1);
+
+        // Compute the fee BEFORE any prank: an external call in the argument
+        // list would consume it.
+        uint256 fee = m.minFee(1);
+        b.mint(address(this), fee);
+        b.approve(address(m), type(uint256).max);
+        uint256 caseId = m.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
+
+        // H-05: a widen or an eligibility change returns the round to DRAW, so
+        // the poke has to be driven in a loop.
+        uint256 guard;
+        do {
+            require(guard++ < 24, "never left DRAW");
+            vm.roll(block.number + SEED_LAG + 1);
+            m.realizeSeats(caseId);
+        } while (uint256(_phaseOfLocal(m, caseId)) == uint256(Moderation.Phase.DRAW));
+
+        assertEq(m.commitTargetAt(0), 5, "depth-0 commit target is 5");
+        (uint256 nSeats, uint256 shCount,,,,,,,,) = m.roundInfo(caseId, 0);
+        assertEq(nSeats, 2, "reports seats actually seated, not the target");
+        assertEq(shCount, 2, "one seat each, both distinct");
+        assertEq(uint256(_phaseOfLocal(m, caseId)), uint256(Moderation.Phase.COMMIT), "short panel still opens commit");
+
+        // Capacity is fully reserved while the panel is live, so neither is
+        // drawable again until the case ends.
+        assertEq(sr.totalEligibleWeight(), 0, "both moderators' capacity is in use");
+    }
+
+    function _phaseOfLocal(ModerationHarness m, uint256 caseId) internal view returns (Moderation.Phase p) {
+        (,, p,,,,) = m.caseInfo(caseId);
     }
 }

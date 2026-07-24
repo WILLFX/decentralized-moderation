@@ -226,7 +226,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     struct Round {
-        uint256 nSeats; // counted seats drawn so far this round (grows on widen)
+        uint256 nSeats; // seats ACTUALLY seated so far this round (grows on widen; may fall short of the commit target when pledged duty capacity is scarce)
         uint256 seatDrawCount; // total seat draws performed (offset base for widen draws)
         uint256 widenCount; // widen re-draws used
         uint256 pendingDraw; // H-05: seats still to be drawn for this round (fresh entropy per draw, incl. each widen)
@@ -1132,15 +1132,16 @@ contract Moderation is ReentrancyGuard {
     function _openRound(Case storage c, uint256 depth) internal {
         c.rounds.push();
         Round storage r = c.rounds[c.rounds.length - 1];
-        r.nSeats = _commitTarget(c, depth);
-        r.pendingDraw = r.nSeats; // H-05
+        uint256 target = _commitTarget(c, depth);
+        r.nSeats = 0; // filled in by the draw: seats seated, not seats sought
+        r.pendingDraw = target; // H-05
         r.seatSnapshotBlock = block.number + _cp(c).seedLag;
         r.eligVersionAtArm = stakeReg.eligibilityAddVersion(); // H-05
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
         c.phase = Phase.DRAW;
-        emit RoundOpened(c.id, depth, r.nSeats, r.seatSnapshotBlock);
+        emit RoundOpened(c.id, depth, target, r.seatSnapshotBlock); // seats SOUGHT
     }
 
     function _toReveal(Case storage c) internal {
@@ -1161,7 +1162,6 @@ contract Moderation is ReentrancyGuard {
         if (r.widenCount < _cp(c).maxWiden) {
             r.widenCount++;
             uint256 add = _commitTarget(c, c.depth);
-            r.nSeats += add;
             // H-05: a widen re-draw gets FRESH entropy (a newly armed snapshot
             // block), not keccak(oldSeed, widenCount) — which contained no new
             // randomness and was fully known before a voter decided whether to
@@ -1171,8 +1171,8 @@ contract Moderation is ReentrancyGuard {
             r.seatSnapshotBlock = block.number + _cp(c).seedLag;
             r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
             c.phase = Phase.DRAW;
-            emit Widened(c.id, c.depth, r.widenCount, r.nSeats);
-            emit RoundOpened(c.id, c.depth, r.nSeats, r.seatSnapshotBlock);
+            emit Widened(c.id, c.depth, r.widenCount, r.nSeats); // seated so far
+            emit RoundOpened(c.id, c.depth, add, r.seatSnapshotBlock); // seats SOUGHT
             return;
         }
         // Widen exhausted with participation: proceed with the reveals we have
@@ -1274,6 +1274,13 @@ contract Moderation is ReentrancyGuard {
             if (r.seats[seat] == 0) r.seatHolders.push(seat);
             r.seats[seat] += 1;
         }
+        // The registry seats only where collateral exists, so a panel can come
+        // back SHORT of the commit target when pledged duty capacity is scarce
+        // (H-07). Count what was actually seated, not what was asked for: an
+        // inflated nSeats would misreport the panel and, if it ever fed quorum
+        // logic, would let a thin panel look full. Under-participation is
+        // already the widen path's job.
+        r.nSeats += n;
         // Attempts, not seats: the offset must advance past every draw the
         // registry actually performed, so a later widen's draws stay disjoint
         // from this one's even when some attempts hit exhausted capacity.

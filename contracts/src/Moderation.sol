@@ -323,26 +323,15 @@ contract Moderation is ReentrancyGuard {
     mapping(bytes32 => uint256) internal dedupOwnerPlusOne;
 
     // --- index (§8, README 3.8) ----------------------------------------------
-
-    struct Entry {
-        bytes32 contentHash;
-        bytes32 metaHash;
-        uint40 approvalTime; // settlement time; drives the supersafe age filter
-        bool uncontested; // true iff no Reject vote was ever revealed in the case
-        bool fullQuorum; // H-09: decided at full quorum (no under-quorum fallback, enough independent revealers)
-        uint256 caseId; // back-reference for removal (§8.2)
-    }
-
-    mapping(bytes32 => Entry[]) internal indexByTopic; // topicKey -> approved entries
-    mapping(bytes32 => bool) internal topicSeen; // first index write emits TopicCreated
-    // H-03: topicKey -> caseId -> (index in indexByTopic[topicKey]) + 1, so entry
-    // removal is O(1) swap-pop instead of an unbounded linear scan that could grow
-    // past the block gas limit and make a removal unclaimable.
-    mapping(bytes32 => mapping(uint256 => uint256)) internal entryPosPlusOne;
-
-    event TopicCreated(bytes32 indexed topicKey);
-    event EntryWritten(uint256 indexed caseId, bytes32 indexed topicKey, bool uncontested);
-    event EntryRemoved(uint256 indexed caseId, bytes32 indexed topicKey);
+    //
+    // The topic -> approved-entries index lives in IndexRegistry (M2.5-P0-b).
+    // It is the protocol's actual product, and it outlives this contract: if it
+    // were held here, every logic redeployment would throw away every approval
+    // ever made. Writes and deletions happen through the registry's logic-facing
+    // API; the views below forward so the M2 ABI keeps working.
+    //
+    // `Case.isIndexed` deliberately stays on the case (H-01): it is the removal
+    // generation signal and must not depend on iterating a topic.
 
     // --- case events ---------------------------------------------------------
 
@@ -1024,26 +1013,9 @@ contract Moderation is ReentrancyGuard {
     function _writeEntries(Case storage c) internal {
         bool uncontested = _noRejectEver(c); // an appeal alone does not clear it (§8.1)
         bool fullQuorum = _fullQuorum(c);
-        uint40 t = uint40(block.timestamp);
         uint256 n = c.topicKeys.length;
         for (uint256 i; i < n; ++i) {
-            bytes32 topicKey = c.topicKeys[i];
-            if (!topicSeen[topicKey]) {
-                topicSeen[topicKey] = true;
-                emit TopicCreated(topicKey);
-            }
-            indexByTopic[topicKey].push(
-                Entry({
-                    contentHash: c.contentHash,
-                    metaHash: c.metaHash,
-                    approvalTime: t,
-                    uncontested: uncontested,
-                    fullQuorum: fullQuorum,
-                    caseId: c.id
-                })
-            );
-            entryPosPlusOne[topicKey][c.id] = indexByTopic[topicKey].length; // 1-based position (H-03)
-            emit EntryWritten(c.id, topicKey, uncontested);
+            indexReg.writeEntry(c.topicKeys[i], c.id, c.contentHash, c.metaHash, uncontested, fullQuorum);
         }
         c.isIndexed = true; // now live in the index (H-01 generation signal)
     }
@@ -1062,23 +1034,11 @@ contract Moderation is ReentrancyGuard {
         _clearDedup(target); // the removed submission is resubmittable
     }
 
-    /// @dev O(1) swap-and-pop of the entry for `caseId` under `topicKey` via the
-    ///      position map (H-03). No-op if absent (already removed): removal of a
-    ///      missing entry settles cleanly (§10).
+    /// @dev Delete the entry for `caseId` under `topicKey`. The registry does the
+    ///      O(1) swap-and-pop via its position map (H-03) and no-ops if the entry
+    ///      is absent, so a removal whose target is already gone settles cleanly.
     function _deleteEntry(bytes32 topicKey, uint256 caseId) internal {
-        uint256 p = entryPosPlusOne[topicKey][caseId];
-        if (p == 0) return; // not present
-        Entry[] storage arr = indexByTopic[topicKey];
-        uint256 idx = p - 1;
-        uint256 last = arr.length - 1;
-        if (idx != last) {
-            Entry storage moved = arr[last];
-            arr[idx] = moved;
-            entryPosPlusOne[topicKey][moved.caseId] = idx + 1; // relocate the moved entry
-        }
-        arr.pop();
-        delete entryPosPlusOne[topicKey][caseId];
-        emit EntryRemoved(caseId, topicKey);
+        indexReg.deleteEntry(topicKey, caseId);
     }
 
     /// @dev uncontested iff no Reject vote was revealed in ANY round (§8.1).
@@ -1416,34 +1376,27 @@ contract Moderation is ReentrancyGuard {
     }
 
     // --- index views (§8.3) --------------------------------------------------
+    // Thin forwarders: the entries are the registry's, but the M2 ABI keeps
+    // working for clients pointed at this contract.
 
     /// Superset: number of current entries under a topic.
     function entryCount(bytes32 topicKey) external view returns (uint256) {
-        return indexByTopic[topicKey].length;
+        return indexReg.entryCount(topicKey);
     }
 
-    function entryAt(bytes32 topicKey, uint256 i) external view returns (Entry memory) {
-        return indexByTopic[topicKey][i];
+    function entryAt(bytes32 topicKey, uint256 i) external view returns (IndexRegistry.Entry memory) {
+        return indexReg.entryAt(topicKey, i);
     }
 
     /// Supersafe subset (§8.3): uncontested, full-quorum (H-09), and aged past
-    /// SUPERSAFE_AGE.
-    function supersafeEntries(bytes32 topicKey) external view returns (Entry[] memory out) {
-        Entry[] storage arr = indexByTopic[topicKey];
-        uint256 len = arr.length;
-        uint256 count;
-        for (uint256 i; i < len; ++i) {
-            if (_isSupersafe(arr[i])) count++;
-        }
-        out = new Entry[](count);
-        uint256 j;
-        for (uint256 i; i < len; ++i) {
-            if (_isSupersafe(arr[i])) out[j++] = arr[i];
-        }
-    }
-
-    function _isSupersafe(Entry storage e) internal view returns (bool) {
-        return e.uncontested && e.fullQuorum && block.timestamp - e.approvalTime >= params.supersafeAge;
+    /// this contract's SUPERSAFE_AGE. Age is registry-caller policy, so the
+    /// parameter is supplied here rather than stored there — the index outlives
+    /// any particular parameter set.
+    /// @dev Unpaginated, preserving the M2 signature. A front end serving a large
+    ///      topic should read `indexReg.supersafeEntries(topic, minAge, cursor,
+    ///      limit)` directly (M-04).
+    function supersafeEntries(bytes32 topicKey) external view returns (IndexRegistry.Entry[] memory) {
+        return indexReg.supersafeEntries(topicKey, params.supersafeAge, 0, indexReg.entryCount(topicKey));
     }
 
     function caseGuidelinesVersion(uint256 caseId) external view returns (uint256) {

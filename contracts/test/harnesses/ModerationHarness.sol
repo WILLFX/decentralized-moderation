@@ -124,20 +124,12 @@ contract ModerationHarness is Moderation {
         cases[caseId].rounds[depth].seats[voter] += extra;
     }
 
-    /// Directly push an index entry (with its position-map slot) so a large topic
-    /// array can be built cheaply for the H-03 O(1)-deletion gas test.
+    /// Push an index entry so a large topic array can be built cheaply for the
+    /// H-03 O(1)-deletion gas test. Goes through the registry's real write path
+    /// (this harness is the authorized logic contract), so the position map it
+    /// builds is the one deletion will read.
     function __pushEntry(bytes32 topicKey, uint256 caseId) external {
-        indexByTopic[topicKey].push(
-            Entry({
-                contentHash: bytes32(caseId),
-                metaHash: bytes32(caseId),
-                approvalTime: uint40(block.timestamp),
-                uncontested: true,
-                fullQuorum: true,
-                caseId: caseId
-            })
-        );
-        entryPosPlusOne[topicKey][caseId] = indexByTopic[topicKey].length;
+        indexReg.writeEntry(topicKey, caseId, bytes32(caseId), bytes32(caseId), true, true);
     }
 
     function __deleteEntry(bytes32 topicKey, uint256 caseId) external {

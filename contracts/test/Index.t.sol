@@ -6,6 +6,7 @@ import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 
 contract IndexTest is ModerationTestBase {
@@ -80,7 +81,7 @@ contract IndexTest is ModerationTestBase {
 
         mod.claim(caseId);
         assertEq(mod.entryCount(TK), 1, "written at settlement");
-        Moderation.Entry memory e = mod.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertEq(e.contentHash, CONTENT);
         assertEq(e.metaHash, META);
         assertEq(e.caseId, caseId);
@@ -109,7 +110,7 @@ contract IndexTest is ModerationTestBase {
         mod.claim(caseId);
 
         assertEq(mod.entryCount(TK), 1, "approve-won-on-appeal writes an entry");
-        Moderation.Entry memory e = mod.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertFalse(e.uncontested, "a reject was revealed at depth 0 -> contested");
     }
 
@@ -126,7 +127,7 @@ contract IndexTest is ModerationTestBase {
         mod.claim(caseId);
 
         assertEq(mod.entryCount(TK), 1);
-        Moderation.Entry memory e = mod.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertTrue(e.uncontested, "no reject ever revealed -> appeal alone doesn't clear it");
     }
 
@@ -226,7 +227,7 @@ contract IndexTest is ModerationTestBase {
         m.claim(caseId);
 
         assertEq(m.entryCount(TK), 1, "one-seat approval is in the superset");
-        Moderation.Entry memory e = m.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = m.entryAt(TK, 0);
         assertTrue(e.uncontested, "no reject -> uncontested");
         assertFalse(e.fullQuorum, "one independent revealer is not full quorum");
 
@@ -252,7 +253,7 @@ contract IndexTest is ModerationTestBase {
         m.__injectSeat(caseId, 1, makeAddr("d1c"), 1, 0, 1);
         m.claim(caseId);
 
-        Moderation.Entry memory e = m.entryAt(TK, 0);
+        IndexRegistry.Entry memory e = m.entryAt(TK, 0);
         assertFalse(e.fullQuorum, "a degraded earlier round bars supersafe");
         vm.warp(block.timestamp + 200 hours);
         assertEq(m.supersafeEntries(TK).length, 0, "not supersafe");

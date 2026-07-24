@@ -54,7 +54,7 @@ contract GovernanceTest is ModerationTestBase {
         Moderation.Params memory p = mod.getParams();
         p.revealWindow = 3 days;
         mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeParameters();
 
         (,,,,,,, uint256 claimableAfter,) = stakeReg.moderatorInfo(mods[0]);
@@ -65,6 +65,47 @@ contract GovernanceTest is ModerationTestBase {
         vm.prank(mods[0]);
         stakeReg.withdraw();
         assertEq(bzz.balanceOf(mods[0]) - before, free, "exit honored on its snapshotted terms");
+    }
+
+    // --- seat collateral is bounded by the registry's duty unit (D-13) -------
+
+    /// `riskPerSeat` lives in both contracts on purpose: in the registry it is
+    /// what one pledged DUTY UNIT is worth, here it is what a case LOCKS per
+    /// seat (pinned per case, H-11). The harmful direction is a case locking
+    /// MORE than the unit reserved for it — a panel seated on collateral that
+    /// cannot cover it. Governance must not be able to create that state.
+    function test_ruleset_locking_more_than_a_duty_unit_is_rejected() public {
+        uint256 unit = stakeReg.riskPerSeat();
+        // Hoist every external call out of the argument list: one in there would
+        // consume the expectRevert and propose as an ordinary call (work order
+        // trap #1 — the same hazard as vm.prank).
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        Moderation.Params memory p = mod.getParams();
+        p.riskPerSeat = unit + 1;
+        vm.expectRevert(Moderation.RiskPerSeatExceedsDutyUnit.selector);
+        mod.proposeParameters(p, cts, aws);
+
+        // Exactly one unit is the boundary and is allowed.
+        p.riskPerSeat = unit;
+        mod.proposeParameters(p, cts, aws);
+
+        // So is locking LESS: seats are simply over-collateralized relative to
+        // eligibility, which costs the moderator nothing it did not pledge.
+        p.riskPerSeat = unit / 2;
+        mod.proposeParameters(p, cts, aws);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        mod.executeParameters();
+        assertEq(mod.getParams().riskPerSeat, unit / 2, "under-locking ruleset accepted");
+    }
+
+    /// The registry's duty unit is immutable, so a ruleset validated against it
+    /// cannot be undermined later by lowering it.
+    function test_registry_duty_unit_is_immutable() public view {
+        assertEq(stakeReg.riskPerSeat(), REG_RISK_PER_SEAT, "duty unit fixed at construction");
+        // No setter exists: the only way to change it is a registry migration,
+        // which moderators can exit ahead of (trust model #2).
     }
 
     // --- access control ------------------------------------------------------
@@ -92,7 +133,7 @@ contract GovernanceTest is ModerationTestBase {
         vm.expectRevert(Moderation.TimelockNotElapsed.selector);
         mod.executeParameters();
 
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeParameters();
         assertEq(mod.getParams().minReveals, 5, "param applied after timelock");
     }
@@ -109,7 +150,7 @@ contract GovernanceTest is ModerationTestBase {
         mod.cancelParameters();
         (, bool exists2) = mod.pendingParamsEta();
         assertFalse(exists2);
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         vm.expectRevert(Moderation.NoPendingProposal.selector);
         mod.executeParameters();
     }
@@ -139,7 +180,7 @@ contract GovernanceTest is ModerationTestBase {
         Moderation.Params memory p = mod.getParams();
         p.feeBase = p.feeBase * 10;
         mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeParameters();
         assertGt(mod.minFee(1), oldFee, "fee floor rose");
     }
@@ -151,13 +192,13 @@ contract GovernanceTest is ModerationTestBase {
         bytes32 h2 = keccak256("guidelines v2");
 
         mod.proposeGuidelines(h1);
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 1);
         assertEq(mod.guidelinesHashByVersion(1), h1);
 
         mod.proposeGuidelines(h2);
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 2);
         assertEq(mod.guidelinesHashByVersion(2), h2);
@@ -170,7 +211,7 @@ contract GovernanceTest is ModerationTestBase {
     function test_case_guidelines_version_is_pinned() public {
         // Set v1.
         mod.proposeGuidelines(keccak256("v1"));
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 1);
 
@@ -179,7 +220,7 @@ contract GovernanceTest is ModerationTestBase {
 
         // Update to v2; the live case still points at v1.
         mod.proposeGuidelines(keccak256("v2"));
-        vm.warp(block.timestamp + TIMELOCK);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         mod.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 2);
         assertEq(mod.caseGuidelinesVersion(caseId), 1, "pinned version never changes");
@@ -196,7 +237,7 @@ contract GovernanceTest is ModerationTestBase {
         address m = mods[0];
         vm.prank(m);
         stakeReg.requestExit(500 * XBZZ);
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         uint256 balBefore = bzz.balanceOf(m);
         vm.prank(m);
         stakeReg.withdraw();

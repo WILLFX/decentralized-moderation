@@ -343,36 +343,48 @@ what it controls. Changing them now requires deploying a new registry, which is 
 migration, not a parameter change — appropriate for numbers that bound
 withdrawals.
 
-### D-13. `riskPerSeat` is duplicated across both contracts — keep them in sync
+### D-13. `riskPerSeat` is duplicated across both contracts — deliberately, and bounded
 
-**This is the one sharp edge the split leaves.** `riskPerSeat` exists in *both*
-`StakeRegistry` (immutable-in-practice: set at construction, no setter) and
-`Moderation.Params` (governable, and pinned per case by ruleset version, H-11).
-They serve different halves of the same rule:
+`riskPerSeat` exists in *both* `StakeRegistry` and `Moderation.Params`. This is
+not redundancy to be collapsed: they are two different quantities that happen to
+share a name and, by default, a value.
 
-- the registry sizes **draw eligibility** by it (capacity = pledged units ×
-  `riskPerSeat`);
-- `Moderation` locks **collateral** by it at `commitVote`, and sets the no-show
-  penalty by it.
+| | `StakeRegistry.riskPerSeat` | `Moderation.Params.riskPerSeat` |
+|---|---|---|
+| Means | what one pledged **duty unit** is worth | what a case **locks per seat** |
+| Layer | staking (custody) | consensus |
+| Mutability | **`immutable`** — set at construction, no setter | governable, and **pinned per case** by ruleset version (H-11) |
+| Used by | draw eligibility: capacity = unpledged units × this | `commitVote` collateral, no-show penalty |
 
-Governance can therefore move `Moderation`'s copy and leave the registry's
-behind. Nothing breaks catastrophically — no funds are at risk, and H-07's
-partial-commit path absorbs the mismatch — but the H-07 guarantee that "selection
-weight equals collateral that can actually be locked" degrades:
+Collapsing them is not available. Reading `stakeReg.riskPerSeat()` at commit time
+would break H-11's guarantee that an open case's consensus parameters are fixed
+at submit; making the registry's value governable would make draw eligibility
+retroactively mutable, which is worse.
 
-- logic value **>** registry value: a moderator drawn on its capacity may not
-  afford the full lock and commits fewer seats than it was drawn for;
-- logic value **<** registry value: seats are over-collateralized relative to
-  eligibility, and the panel under-fills.
+**Only one direction of divergence is harmful:** a case locking *more* than the
+duty unit reserved for it. A panel would then be seated on collateral that cannot
+cover its own seats. That state is now **unrepresentable**:
 
-It was **not** resolved here because the obvious fix — reading
-`stakeReg.riskPerSeat()` at commit time — would break H-11's guarantee that an
-open case's consensus parameters are pinned at submit. Resolving it properly
-means either making the registry's value versioned and pinnable, or moving seat
-collateral entirely under the registry. Flagged for M3.
+- `Moderation._validateParams` rejects any ruleset with
+  `riskPerSeat > stakeReg.riskPerSeat()` (`RiskPerSeatExceedsDutyUnit`). This is
+  why `_validateParams` is `view` rather than `pure`.
+- The constructor applies the same bound to ruleset 0, which never passes through
+  `_validateParams` — so a deployment cannot be born misconfigured either.
+- The registry's value is `immutable`, which is what makes those checks
+  trustworthy: a mutable duty unit could be lowered *after* a ruleset had been
+  validated against it, re-opening the hole from the other side.
 
-**Operationally, until then: any governance change to `riskPerSeat` must be paired
-with a registry migration**, and `_validateParams` cannot check this for you.
+The other direction (locking **less** than a duty unit) is benign and remains
+allowed: seats are over-collateralized relative to eligibility, which costs a
+moderator nothing it did not already pledge.
+
+Changing the duty unit therefore requires deploying a new registry — a migration,
+which moderators can exit ahead of during the timelock (trust model #2) — rather
+than a parameter change. That is the correct weight for a number that bounds
+what stake can be locked.
+
+Tests: `test_ruleset_locking_more_than_a_duty_unit_is_rejected`,
+`test_registry_duty_unit_is_immutable`.
 
 ### D-14. `nSeats` counts seats seated, not seats sought
 

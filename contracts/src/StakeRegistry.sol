@@ -78,9 +78,24 @@ contract StakeRegistry {
     uint256 public minStake;
     uint256 public activationDelay;
     uint256 public exitCooldown;
-    /// Collateral backing one seat of duty. Kept here (not in the logic contract)
-    /// because draw eligibility depends on it.
-    uint256 public riskPerSeat;
+    /// @notice What ONE DUTY UNIT is worth: the collateral a moderator pledges
+    ///         per concurrent seat it offers to serve. This is a staking-layer
+    ///         constant, and it is deliberately `immutable`.
+    ///
+    ///         The logic contract has its own `riskPerSeat` — what a case LOCKS
+    ///         per seat — which is a consensus parameter and is pinned per case
+    ///         (H-11). The two are different roles and must not be collapsed:
+    ///         collapsing them would either break per-case pinning or make draw
+    ///         eligibility retroactively mutable.
+    ///
+    ///         Only one direction of divergence is harmful: a case locking MORE
+    ///         than the unit reserved for it, which would let a panel be seated
+    ///         on collateral that cannot cover it. `Moderation._validateParams`
+    ///         rejects any ruleset with `riskPerSeat > stakeReg.riskPerSeat()`,
+    ///         so that state is unrepresentable. Immutability here is what makes
+    ///         that check trustworthy — a mutable value could be lowered after a
+    ///         ruleset was validated against it.
+    uint256 public immutable riskPerSeat;
 
     /// H-05: bumped whenever draw-eligible weight is ADDED, so the logic contract
     /// can detect an eligibility change between arming a seed and drawing on it

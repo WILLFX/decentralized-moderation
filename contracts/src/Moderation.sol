@@ -166,6 +166,11 @@ contract Moderation is ReentrancyGuard {
         appealWindowByDepth = [uint256(4 days), 3 days, 3 days, 3 days];
 
         // Ruleset version 0 mirrors the initial params (H-11).
+        // Ruleset 0 never goes through _validateParams, so the seat-collateral
+        // bound is enforced here too: a deployment pointed at a registry whose
+        // duty unit is smaller than this contract's per-seat lock would seat
+        // panels on collateral that cannot cover them, from the very first case.
+        if (params.riskPerSeat > _stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
         rulesets[0] = Ruleset({p: params, commitTargets: commitTargetByDepth, appealWindows: appealWindowByDepth});
 
         governance = msg.sender;
@@ -1420,6 +1425,9 @@ contract Moderation is ReentrancyGuard {
     error NoPendingProposal();
     error TimelockNotElapsed();
     error BadParams();
+    /// A proposed ruleset would lock more per seat than a pledged duty unit is
+    /// worth, so panels could be seated on collateral that cannot cover them.
+    error RiskPerSeatExceedsDutyUnit();
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -1486,13 +1494,28 @@ contract Moderation is ReentrancyGuard {
         emit GovernanceTransferred(next);
     }
 
+    /// @dev Not `pure`: it consults the registry. `riskPerSeat` exists in both
+    ///      contracts by design — there it is what one DUTY UNIT is worth (a
+    ///      staking-layer constant, immutable), here it is what a case LOCKS per
+    ///      seat (a consensus parameter, pinned per case by H-11). Collapsing
+    ///      them would either break per-case pinning or make draw eligibility
+    ///      retroactively mutable.
+    ///
+    ///      Only one direction of divergence is harmful: a case locking MORE than
+    ///      the unit reserved for it, which would seat a panel on collateral that
+    ///      cannot cover it. Rejecting that here makes the dangerous desync
+    ///      unrepresentable rather than merely documented — governance cannot
+    ///      create it by accident. The other direction (locking less) is benign:
+    ///      seats are simply over-collateralized relative to eligibility.
     function _validateParams(Params calldata p, uint256[] calldata commitTargets, uint256[] calldata appealWindows)
         internal
-        pure
+        view
     {
         if (commitTargets.length == 0 || appealWindows.length == 0) revert BadParams();
         if (commitTargets.length > MAX_ARRAY_LEN || appealWindows.length > MAX_ARRAY_LEN) revert BadParams();
         if (p.riskPerSeat == 0) revert BadParams();
+        // A case must never lock more than one pledged duty unit is worth.
+        if (p.riskPerSeat > stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
         if (p.minReveals == 0) revert BadParams();
         if (p.bondMultiplier == 0 || p.bondMultiplier > MAX_BOND_MULT) revert BadParams();
         if (p.freezeCap < WAD) revert BadParams(); // power multiplier >= 1

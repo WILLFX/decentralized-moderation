@@ -689,7 +689,20 @@ contract Moderation is ReentrancyGuard {
         if (s == 0) revert NotSeatHolder();
         if (r.committed[msg.sender]) revert AlreadyCommitted();
 
-        uint256 lock = _cp(c).riskPerSeat * s;
+        // H-07: seats are drawn stake-weighted WITH REPLACEMENT, so a moderator can
+        // win more seats than its free stake can collateralize (a min-stake holder
+        // drawn twice, a holder selected by several concurrent cases, or one whose
+        // stake was reserved for exit after selection). Requiring the full
+        // riskPerSeat x seats made commitVote revert outright — the moderator could
+        // not serve even ONE of its seats, and a panel of such holders could never
+        // reach quorum. Commit as many seats as the moderator can actually back;
+        // the rest are simply not collateralized and (via H-08) never tallied.
+        uint256 riskPerSeat = _cp(c).riskPerSeat;
+        uint256 affordable = _eligibleFreeOf(msg.sender) / riskPerSeat;
+        if (affordable == 0) revert InsufficientEligibleFree();
+        if (affordable < s) s = affordable;
+
+        uint256 lock = riskPerSeat * s;
         _lockStake(msg.sender, lock);
         r.committedAmt[msg.sender] = lock;
         r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
@@ -1366,6 +1379,14 @@ contract Moderation is ReentrancyGuard {
             r.seats[seat] += 1;
         }
         r.seatDrawCount += count;
+    }
+
+    /// @dev Free stake usable as per-case collateral right now: excludes the
+    ///      pending-activation and exit-reserved portions (H-07 partial commit).
+    function _eligibleFreeOf(address moderator) internal view returns (uint256) {
+        Moderator storage m = moderators[moderator];
+        uint256 reserved = m.pending + m.exitAmount;
+        return m.free > reserved ? m.free - reserved : 0;
     }
 
     function _lockStake(address moderator, uint256 amount) internal {

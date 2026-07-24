@@ -358,6 +358,41 @@ contract CaseLifecycleTest is ModerationTestBase {
         _assertConservation();
     }
 
+    // H-07: seats are drawn with replacement, so a moderator can win more seats
+    // than its free stake collateralizes. Requiring the full riskPerSeat x seats
+    // made commitVote revert outright — it could not serve even one of its seats,
+    // and a panel of such holders could never reach quorum. It must now commit as
+    // many seats as it can back, with the rest uncollateralized and untallied.
+    function test_H07_overdrawn_moderator_commits_what_it_can_afford() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        address sh = mod.seatHolderAt(caseId, 0, 0);
+
+        // Force the seat count above what this holder can collateralize: give it
+        // 5 seats but only enough eligible free stake for a couple.
+        mod.__injectWidenSeats(caseId, 0, sh, 5);
+        uint256 seats = mod.__seats(caseId, 0, sh);
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        (uint256 free,,,,,,,,) = mod.moderatorInfo(sh);
+        // Exit-reserve most of the stake so only 1 seat is affordable.
+        uint256 keep = riskPerSeat; // exactly one seat's worth
+        vm.prank(sh);
+        mod.requestExit(free - keep);
+        assertLt(keep / riskPerSeat, seats, "holder is genuinely overdrawn");
+
+        bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
+        vm.prank(sh);
+        mod.commitVote(caseId, h); // must NOT revert
+
+        // It committed exactly what it could afford, and the tally follows (H-08).
+        assertEq(mod.__committedSeats(caseId, 0, sh), keep / riskPerSeat, "committed only affordable seats");
+        vm.warp(block.timestamp + COMMIT_TIMEOUT);
+        mod.closeCommit(caseId);
+        vm.prank(sh);
+        mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+        assertEq(mod.__talliedSeats(caseId, 0, sh), keep / riskPerSeat, "tally <= collateralized seats");
+    }
+
     // H-05: adaptive activation. An attacker with mature-but-unactivated stake
     // waits until the seat seed's blockhash is public, then activates a favourable
     // subset immediately before realizeSeats. The draw must NOT proceed on that

@@ -17,6 +17,7 @@ contract RegistriesTest is Test {
     uint256 internal constant MIN_STAKE = 10 * XBZZ;
     uint256 internal constant ACTIVATION = 7 days;
     uint256 internal constant COOLDOWN = 7 days;
+    uint256 internal constant RISK_PER_SEAT = 10 * XBZZ;
 
     MockBZZ internal bzz;
     StakeRegistry internal stakeReg;
@@ -31,7 +32,7 @@ contract RegistriesTest is Test {
 
     function setUp() public {
         bzz = new MockBZZ();
-        stakeReg = new StakeRegistry(IERC20(address(bzz)), TIMELOCK, MIN_STAKE, ACTIVATION, COOLDOWN);
+        stakeReg = new StakeRegistry(IERC20(address(bzz)), TIMELOCK, MIN_STAKE, ACTIVATION, COOLDOWN, RISK_PER_SEAT);
         indexReg = new IndexRegistry(TIMELOCK);
         _authorize(oldLogic);
     }
@@ -52,14 +53,23 @@ contract RegistriesTest is Test {
         stakeReg.stake(amount);
     }
 
+    /// Stake, activate, and pledge full duty capacity (H-07: stake alone is not
+    /// drawable).
+    function _stakeActivatePledge(address who, uint256 amount) internal {
+        _stake(who, amount);
+        vm.warp(block.timestamp + ACTIVATION);
+        stakeReg.activate(who);
+        uint256 units = amount / RISK_PER_SEAT;
+        vm.prank(who);
+        stakeReg.setDutyUnits(units);
+    }
+
     // --- the point of the split ---------------------------------------------
 
     /// The headline property: swapping the business logic must not require any
     /// moderator to withdraw and re-stake, and must not touch their balances.
     function test_moderators_do_not_restake_across_a_logic_upgrade() public {
-        _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
-        stakeReg.activate(alice);
+        _stakeActivatePledge(alice, 100 * XBZZ);
         uint256 weightBefore = stakeReg.eligibleWeightOf(alice);
         uint256 totalBefore = stakeReg.totalStakeOf(alice);
 
@@ -114,9 +124,7 @@ contract RegistriesTest is Test {
     /// leave during the timelock. Exit never consults the logic contract, so no
     /// logic (malicious or not) and no governance action can trap stake.
     function test_moderator_can_always_exit_during_a_migration_timelock() public {
-        _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
-        stakeReg.activate(alice);
+        _stakeActivatePledge(alice, 100 * XBZZ);
 
         // A migration is announced.
         stakeReg.proposeLogic(newLogic);
@@ -135,9 +143,7 @@ contract RegistriesTest is Test {
     /// Trust model #3: the outgoing logic keeps its privileges during handover so
     /// it can settle in-flight cases; both are authorized at once.
     function test_handover_window_lets_old_logic_settle_in_flight_cases() public {
-        _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
-        stakeReg.activate(alice);
+        _stakeActivatePledge(alice, 100 * XBZZ);
         vm.prank(oldLogic);
         stakeReg.lock(alice, 10 * XBZZ); // an in-flight case
 
@@ -161,9 +167,7 @@ contract RegistriesTest is Test {
     /// Governance may NAME the logic contract and nothing else: it can never move,
     /// lock, freeze or credit stake itself.
     function test_governance_cannot_touch_funds() public {
-        _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
-        stakeReg.activate(alice);
+        _stakeActivatePledge(alice, 100 * XBZZ);
 
         // The test contract is governance; it is not a logic contract.
         vm.expectRevert(StakeRegistry.NotLogic.selector);
@@ -189,11 +193,8 @@ contract RegistriesTest is Test {
     // --- registry-local invariants -------------------------------------------
 
     function test_conservation_across_the_privileged_api() public {
-        _stake(alice, 100 * XBZZ);
-        _stake(bob, 50 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
-        stakeReg.activate(alice);
-        stakeReg.activate(bob);
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 50 * XBZZ);
 
         vm.startPrank(oldLogic);
         stakeReg.lock(alice, 30 * XBZZ);
@@ -225,9 +226,7 @@ contract RegistriesTest is Test {
     }
 
     function test_frozen_stake_is_excluded_from_draws_until_thaw() public {
-        _stake(alice, 100 * XBZZ);
-        vm.warp(block.timestamp + ACTIVATION);
-        stakeReg.activate(alice);
+        _stakeActivatePledge(alice, 100 * XBZZ);
         vm.startPrank(oldLogic);
         stakeReg.lock(alice, 10 * XBZZ);
         stakeReg.freeze(alice, 10 * XBZZ, block.timestamp + 3 days);
@@ -238,6 +237,74 @@ contract RegistriesTest is Test {
         stakeReg.thaw(alice);
         assertGt(stakeReg.eligibleWeightOf(alice), 0, "eligible again after thaw");
         assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "freezing never destroys principal");
+    }
+
+    // --- duty pool (H-07) ----------------------------------------------------
+
+    function test_unpledged_stake_is_never_drawn() public {
+        _stake(alice, 100 * XBZZ);
+        vm.warp(block.timestamp + ACTIVATION);
+        stakeReg.activate(alice); // activated but NOT pledged
+        assertEq(stakeReg.totalEligibleWeight(), 0, "passive stake is not in the draw pool");
+
+        vm.prank(oldLogic);
+        (address[] memory seats,) = stakeReg.drawPanel(5, keccak256("s"), 0);
+        assertEq(seats.length, 0, "nobody can be drafted into duty");
+    }
+
+    /// A panel never seats more units than a moderator pledged, even when it is the
+    /// only staker — the draw excludes exhausted capacity instead of over-seating.
+    function test_draw_never_exceeds_pledged_capacity() public {
+        _stake(alice, 1000 * XBZZ);
+        vm.warp(block.timestamp + ACTIVATION);
+        stakeReg.activate(alice);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(3); // only 3 seats pledged
+
+        vm.prank(oldLogic);
+        (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0);
+        assertEq(seats.length, 3, "seated exactly the pledged capacity");
+        (, uint256 reserved) = stakeReg.dutyOf(alice);
+        assertEq(reserved, 3, "one unit reserved per seat");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "capacity exhausted -> out of the pool");
+
+        // Releasing capacity puts the moderator back in the pool.
+        vm.prank(oldLogic);
+        stakeReg.releaseDuty(alice, 3);
+        (, reserved) = stakeReg.dutyOf(alice);
+        assertEq(reserved, 0);
+        assertGt(stakeReg.eligibleWeightOf(alice), 0, "eligible again once the case ends");
+    }
+
+    /// The no-show penalty (H-07/H-10): a pledged moderator that is drawn and does
+    /// not serve pays a freeze of its OWN stake — never a transfer to anyone.
+    function test_no_show_penalty_freezes_own_stake_only() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        uint256 bobBefore = stakeReg.totalStakeOf(bob);
+
+        vm.prank(oldLogic);
+        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, block.timestamp + 1 days);
+
+        (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, RISK_PER_SEAT, "one seat's worth frozen");
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "principal not destroyed, only locked");
+        assertEq(stakeReg.totalStakeOf(bob), bobBefore, "nobody gained from the penalty");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> excluded from draws");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Stake that never opted in cannot be penalized — it was never drawable, so
+    /// submission spam cannot grief passive stakers.
+    function test_unpledged_stake_cannot_be_penalized() public {
+        _stake(alice, 100 * XBZZ);
+        vm.warp(block.timestamp + ACTIVATION);
+        stakeReg.activate(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, block.timestamp + 1 days);
+        (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 0, "passive staker is untouchable");
     }
 
     // --- index registry ------------------------------------------------------

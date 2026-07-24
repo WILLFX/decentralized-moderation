@@ -55,6 +55,12 @@ contract StakeRegistry {
         uint256 exitAmount;
         uint256 exitClaimableAt; // snapshotted at request (H-11)
         uint256 track; // coherent-participation record (WAD), maintained by logic
+        // H-07 duty pool: pledged concurrent seat capacity and how much of it is
+        // held by live panels. Only available capacity is draw-eligible, so
+        // selection weight equals collateral that can actually be locked, and
+        // stake that never opted in is never drawable.
+        uint256 dutyUnits;
+        uint256 dutyReserved;
         bool exists;
     }
 
@@ -72,6 +78,13 @@ contract StakeRegistry {
     uint256 public minStake;
     uint256 public activationDelay;
     uint256 public exitCooldown;
+    /// Collateral backing one seat of duty. Kept here (not in the logic contract)
+    /// because draw eligibility depends on it.
+    uint256 public riskPerSeat;
+
+    /// H-05: bumped whenever draw-eligible weight is ADDED, so the logic contract
+    /// can detect an eligibility change between arming a seed and drawing on it.
+    uint256 public eligibilityAddVersion;
 
     // --- authorization -------------------------------------------------------
 
@@ -102,6 +115,8 @@ contract StakeRegistry {
     event StakeFrozen(address indexed moderator, uint256 amount, uint256 until);
     event Rewarded(address indexed moderator, uint256 amount);
     event TrackSet(address indexed moderator, uint256 track);
+    event DutyUnitsSet(address indexed moderator, uint256 units, uint256 reserved);
+    event NoShowPenalized(address indexed moderator, uint256 penalty, uint256 until);
 
     event LogicProposed(address indexed logic, uint256 eta);
     event LogicAuthorized(address indexed logic);
@@ -139,13 +154,22 @@ contract StakeRegistry {
         _;
     }
 
-    constructor(IERC20 _token, uint256 _timelockDelay, uint256 _minStake, uint256 _activationDelay, uint256 _exitCooldown) {
+    constructor(
+        IERC20 _token,
+        uint256 _timelockDelay,
+        uint256 _minStake,
+        uint256 _activationDelay,
+        uint256 _exitCooldown,
+        uint256 _riskPerSeat
+    ) {
         if (address(_token) == address(0)) revert ZeroAddress();
+        if (_riskPerSeat == 0) revert AmountZero();
         token = _token;
         timelockDelay = _timelockDelay;
         minStake = _minStake;
         activationDelay = _activationDelay;
         exitCooldown = _exitCooldown;
+        riskPerSeat = _riskPerSeat;
         governance = msg.sender;
         stakeTree.initialize(2);
     }
@@ -219,6 +243,24 @@ contract StakeRegistry {
         emit Withdrawn(msg.sender, amount);
     }
 
+    /// @notice Pledge concurrent seat capacity (H-07). Each unit is backed by
+    ///         `riskPerSeat` of your own stake, and only pledged, unreserved
+    ///         capacity is draw-eligible. Duty is opt-in precisely so that failing
+    ///         to serve can be penalized without conscripting passive stakers.
+    function setDutyUnits(uint256 units) external {
+        Moderator storage m = moderators[msg.sender];
+        if (!m.exists) revert NoModerator();
+        if (units > 0) {
+            uint256 reserved = m.pending + m.exitAmount;
+            uint256 usable = m.free > reserved ? m.free - reserved : 0;
+            if (usable < units * riskPerSeat) revert InsufficientEligibleFree();
+            eligibilityAddVersion++; // H-05
+        }
+        m.dutyUnits = units;
+        _syncTree(msg.sender, m);
+        emit DutyUnitsSet(msg.sender, units, m.dutyReserved);
+    }
+
     /// Permissionless poke: releases an already-expired freeze.
     function thaw(address moderator) external {
         Moderator storage m = moderators[moderator];
@@ -290,9 +332,80 @@ contract StakeRegistry {
         emit TrackSet(moderator, newTrack);
     }
 
-    /// Stake-weighted draw over the currently eligible set.
+    /// Stake-weighted draw over the currently eligible set (read-only preview).
     function draw(uint256 rand) external view returns (address) {
         return stakeTree.draw(rand);
+    }
+
+    /// @notice Draw a panel of `count` seats, RESERVING one duty unit per seat
+    ///         (H-07). A moderator whose pledged capacity is exhausted mid-draw
+    ///         drops out of the tree for the rest of this draw (its weight is
+    ///         restored before returning), so seats land only where collateral
+    ///         exists — no rejection sampling, and attempts are bounded at 2×count.
+    /// @return seats The drawn addresses, one entry per seat (duplicates possible).
+    function drawPanel(uint256 count, bytes32 seed, uint256 offset)
+        external
+        onlyLogic
+        returns (address[] memory seats, uint256 attempts)
+    {
+        seats = new address[](count);
+        address[] memory excluded = new address[](count);
+        uint256 nExcluded;
+        uint256 drawn;
+        uint256 maxAttempts = 2 * count;
+        while (drawn < count && attempts < maxAttempts) {
+            if (stakeTree.total() == 0) break; // no capacity left network-wide
+            address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + attempts))));
+            attempts++;
+            Moderator storage m = moderators[seat];
+            if (m.dutyUnits <= m.dutyReserved) {
+                if (nExcluded < count) {
+                    excluded[nExcluded++] = seat;
+                    stakeTree.set(seat, 0);
+                }
+                continue;
+            }
+            m.dutyReserved += 1;
+            seats[drawn++] = seat;
+            _syncTree(seat, m); // weight shrinks as capacity is consumed
+        }
+        for (uint256 j; j < nExcluded; ++j) {
+            Moderator storage em = moderators[excluded[j]];
+            stakeTree.set(excluded[j], _eligibleWeight(em));
+        }
+        if (drawn < count) {
+            // Shrink to what was actually seated.
+            assembly {
+                mstore(seats, drawn)
+            }
+        }
+    }
+
+    /// Release duty capacity held by a finished round.
+    function releaseDuty(address moderator, uint256 units) external onlyLogic {
+        Moderator storage m = moderators[moderator];
+        uint256 rel = units > m.dutyReserved ? m.dutyReserved : units;
+        m.dutyReserved -= rel;
+        _syncTree(moderator, m);
+    }
+
+    /// @notice Penalize a moderator that pledged capacity, was drawn on it, and
+    ///         never committed: freeze `amount` of its own FREE stake until
+    ///         `until`. Never a transfer — no internal attack profit exists.
+    function penalizeNoShow(address moderator, uint256 amount, uint256 until) external onlyLogic {
+        Moderator storage m = moderators[moderator];
+        if (m.dutyUnits == 0) return; // never opted in -> was not drawable
+        uint256 reserved = m.pending + m.exitAmount;
+        uint256 usable = m.free > reserved ? m.free - reserved : 0;
+        uint256 penalty = amount > usable ? usable : amount;
+        if (penalty == 0) return;
+        m.free -= penalty;
+        m.frozen += penalty;
+        totalFreeStake -= penalty;
+        totalFrozenStake += penalty;
+        if (until > m.frozenUntil) m.frozenUntil = until;
+        _syncTree(moderator, m);
+        emit NoShowPenalized(moderator, penalty, m.frozenUntil);
     }
 
     // =========================================================================
@@ -380,6 +493,11 @@ contract StakeRegistry {
         return moderators[a].track;
     }
 
+    function dutyOf(address a) external view returns (uint256 units, uint256 reserved) {
+        Moderator storage m = moderators[a];
+        return (m.dutyUnits, m.dutyReserved);
+    }
+
     function eligibleWeightOf(address a) external view returns (uint256) {
         return _eligibleWeight(moderators[a]);
     }
@@ -399,11 +517,16 @@ contract StakeRegistry {
         return m.free + m.committed + m.frozen;
     }
 
+    /// Draw-eligible weight (H-07): free, unreserved stake CAPPED by remaining
+    /// pledged duty capacity, and zero while frozen.
     function _eligibleWeight(Moderator storage m) internal view returns (uint256) {
         if (block.timestamp < m.frozenUntil) return 0; // fully excluded while frozen
         uint256 reserved = m.pending + m.exitAmount;
         if (m.free <= reserved) return 0;
-        return m.free - reserved;
+        if (m.dutyUnits <= m.dutyReserved) return 0; // capacity fully in use
+        uint256 usable = m.free - reserved;
+        uint256 capacity = (m.dutyUnits - m.dutyReserved) * riskPerSeat;
+        return usable < capacity ? usable : capacity;
     }
 
     function _syncTree(address moderator, Moderator storage m) internal {

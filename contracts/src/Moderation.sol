@@ -6,6 +6,8 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SortitionTree} from "./lib/SortitionTree.sol";
 import {FreezeMath} from "./lib/FreezeMath.sol";
+import {StakeRegistry} from "./StakeRegistry.sol";
+import {IndexRegistry} from "./IndexRegistry.sol";
 
 /// @title Moderation
 /// @notice On-chain decentralized moderation contract (specs/state-machine.md).
@@ -154,6 +156,14 @@ contract Moderation is ReentrancyGuard {
     // --- accounting ----------------------------------------------------------
 
     IERC20 public immutable token;
+
+    /// Custody + bookkeeping for moderator stake (M2.5-P0-b). Stake lives there
+    /// permanently so this contract — the replaceable *game* — can be redeployed
+    /// without every moderator having to withdraw and re-stake.
+    StakeRegistry public immutable stakeReg;
+    /// The topic -> approved-entries index, likewise outliving this contract.
+    IndexRegistry public immutable indexReg;
+
     SortitionTree.Tree internal stakeTree;
 
     uint256 public totalFreeStake; // Σ free
@@ -186,8 +196,10 @@ contract Moderation is ReentrancyGuard {
 
     // -------------------------------------------------------------------------
 
-    constructor(IERC20 _token) {
+    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg) {
         token = _token;
+        stakeReg = _stakeReg;
+        indexReg = _indexReg;
         stakeTree.initialize(2); // binary sortition tree
         params = Params({
             minStake: 10 * XBZZ,

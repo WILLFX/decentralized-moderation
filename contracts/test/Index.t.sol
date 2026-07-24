@@ -6,6 +6,7 @@ import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
 
 contract IndexTest is ModerationTestBase {
     bytes32 internal constant TK = keccak256("marine biology");
@@ -217,7 +218,7 @@ contract IndexTest is ModerationTestBase {
     // ages: supersafe now also requires MIN_REVEALS independent revealers.
     function test_one_seat_approval_never_supersafe() public {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
         m.__injectTopic(caseId, TK);
         m.__injectRound(caseId);
@@ -237,7 +238,7 @@ contract IndexTest is ModerationTestBase {
     // from supersafe, even if the final round had a full panel.
     function test_appealed_case_with_degraded_earlier_round_never_supersafe() public {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
         m.__injectTopic(caseId, TK);
         m.__setDepth(caseId, 1);

@@ -7,10 +7,15 @@ import {Moderation} from "../src/Moderation.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {ModerationHandler} from "./handlers/ModerationHandler.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
+import {StackDeployer} from "./base/StackDeployer.sol";
 
 /// Handler-driven invariant campaign. Random staking + full-case actions across
 /// overlapping state; the §9 accounting invariants must hold after every call.
-contract InvariantTest is Test {
+contract InvariantTest is StackDeployer {
+    StakeRegistry internal stakeReg;
+    IndexRegistry internal indexReg;
     ModerationHarness internal mod;
     MockBZZ internal bzz;
     ModerationHandler internal handler;
@@ -20,7 +25,7 @@ contract InvariantTest is Test {
 
     function setUp() public {
         bzz = new MockBZZ();
-        mod = new ModerationHarness(IERC20(address(bzz)));
+        (mod, stakeReg, indexReg) = _deployStack(bzz);
 
         for (uint256 i = 0; i < 6; i++) {
             actors.push(makeAddr(string(abi.encodePacked("actor", i))));

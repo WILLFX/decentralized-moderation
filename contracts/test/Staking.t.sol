@@ -6,8 +6,13 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
+import {StackDeployer} from "./base/StackDeployer.sol";
 
-contract StakingTest is Test {
+contract StakingTest is StackDeployer {
+    StakeRegistry internal stakeReg;
+    IndexRegistry internal indexReg;
     ModerationHarness internal mod;
     MockBZZ internal bzz;
 
@@ -22,7 +27,7 @@ contract StakingTest is Test {
 
     function setUp() public {
         bzz = new MockBZZ();
-        mod = new ModerationHarness(IERC20(address(bzz)));
+        (mod, stakeReg, indexReg) = _deployStack(bzz);
     }
 
     function _fund(address who, uint256 amount) internal {

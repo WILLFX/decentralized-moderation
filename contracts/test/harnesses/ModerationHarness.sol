@@ -4,6 +4,8 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../../src/Moderation.sol";
 import {SortitionTree} from "../../src/lib/SortitionTree.sol";
+import {StakeRegistry} from "../../src/StakeRegistry.sol";
+import {IndexRegistry} from "../../src/IndexRegistry.sol";
 
 /// @notice Test-only subclass exposing internal state and injectors for state
 ///         that later M2 items (freezing in M2-5, committing in M2-3) will
@@ -13,7 +15,9 @@ import {SortitionTree} from "../../src/lib/SortitionTree.sol";
 contract ModerationHarness is Moderation {
     using SortitionTree for SortitionTree.Tree;
 
-    constructor(IERC20 _token) Moderation(_token) {}
+    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg)
+        Moderation(_token, _stakeReg, _indexReg)
+    {}
 
     /// Move `amount` of a moderator's committed stake into the frozen bucket
     /// until `until` — exactly the transition a settlement freeze (§6.4, D6)

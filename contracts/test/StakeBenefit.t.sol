@@ -17,7 +17,7 @@ contract StakeBenefitTest is ModerationTestBase {
 
     function setUp() public override {
         bzz = new MockBZZ();
-        mod = new ModerationHarness(IERC20(address(bzz)));
+        (mod, stakeReg, indexReg) = _deployStack(bzz);
         _spawnModerators(10, 1000 * XBZZ); // equal stake each
         // 7 A : 3 B  ->  70% : 30% of stake.
         for (uint256 i = 0; i < mods.length; i++) {

@@ -6,12 +6,17 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation} from "../../src/Moderation.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
+import {StakeRegistry} from "../../src/StakeRegistry.sol";
+import {IndexRegistry} from "../../src/IndexRegistry.sol";
+import {StackDeployer} from "../base/StackDeployer.sol";
 
 /// @notice Shared setup and lifecycle-driving helpers for the Moderation tests.
 ///         Stands up a funded, activated moderator set and drives cases through
 ///         the phase machine by reading the actual (randomly drawn) seat-holders
 ///         from the contract.
-abstract contract ModerationTestBase is Test {
+abstract contract ModerationTestBase is StackDeployer {
+    StakeRegistry internal stakeReg;
+    IndexRegistry internal indexReg;
     ModerationHarness internal mod;
     MockBZZ internal bzz;
 
@@ -31,7 +36,7 @@ abstract contract ModerationTestBase is Test {
 
     function setUp() public virtual {
         bzz = new MockBZZ();
-        mod = new ModerationHarness(IERC20(address(bzz)));
+        (mod, stakeReg, indexReg) = _deployStack(bzz);
         // Generous stake: a deep appeal chain locks stake in several concurrent
         // rounds at once (committed isn't released until claim, M2-5).
         _spawnModerators(8, 3000 * XBZZ);

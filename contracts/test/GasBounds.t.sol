@@ -7,6 +7,7 @@ import {Moderation} from "../src/Moderation.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
 
 /// Gas-bound and failure-mode suite (spec §10, work order M2-9). The load-bearing
 /// assertion is that worst-case settlement fits in ONE transaction under the 8M
@@ -20,7 +21,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// APPROVE, and a winning appeal with contributors at every non-final depth.
     function test_worst_case_claim_under_hard_ceiling() public {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
 
         // pot includes the base fee plus the three winning appeal bonds
         // (2 * 5 xBZZ each) that joined it on appeal.
@@ -130,14 +131,14 @@ contract GasBoundsTest is ModerationTestBase {
         uint256 totalBond = 900 * XBZZ;
 
         MockBZZ bFew = new MockBZZ();
-        ModerationHarness mFew = new ModerationHarness(IERC20(address(bFew)));
+        (ModerationHarness mFew, StakeRegistry srFew,) = _deployStack(bFew);
         uint256 cFew = _injectWinningAppeal(mFew, bFew, 2, totalBond);
         uint256 g0 = gasleft();
         mFew.claim(cFew);
         uint256 gasFew = g0 - gasleft();
 
         MockBZZ bMany = new MockBZZ();
-        ModerationHarness mMany = new ModerationHarness(IERC20(address(bMany)));
+        (ModerationHarness mMany, StakeRegistry srMany,) = _deployStack(bMany);
         uint256 cMany = _injectWinningAppeal(mMany, bMany, 2000, totalBond);
         g0 = gasleft();
         mMany.claim(cMany);
@@ -161,7 +162,7 @@ contract GasBoundsTest is ModerationTestBase {
         uint256 nContrib = 47; // prime count -> guarantees pro-rata dust
         uint256 totalBond = 613 * XBZZ + 4242; // odd total -> dust
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         uint256 caseId = _injectWinningAppeal(m, b, nContrib, totalBond);
 
         m.claim(caseId);
@@ -237,7 +238,7 @@ contract GasBoundsTest is ModerationTestBase {
 
     function test_maximal_case_settles_in_bounded_batches() public {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         (uint256 caseId, uint256 nSeats) = _buildMaximalCase(m, b);
         assertEq(nSeats, 344, "reachable worst case is 344 seats, not 86");
 
@@ -270,7 +271,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// far heavier than the old 86-voter measurement implied. Logged for contrast.
     function test_maximal_case_oneshot_gas_measurement() public {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         (uint256 caseId,) = _buildMaximalCase(m, b);
         uint256 g = gasleft();
         m.claim(caseId); // unbounded
@@ -284,7 +285,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// worst case for the old linear scan). Returns the gas the deletion used.
     function _buildAndDeleteFront(uint256 n) internal returns (uint256 used) {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         bytes32 topic = keccak256("bigtopic");
         for (uint256 i = 0; i < n; i++) {
             m.__pushEntry(topic, i);
@@ -366,7 +367,7 @@ contract GasBoundsTest is ModerationTestBase {
     /// depth-panel draw over 1000 activated moderators.
     function test_measure_draw_poke_1000_mods() public {
         MockBZZ b = new MockBZZ();
-        ModerationHarness m = new ModerationHarness(IERC20(address(b)));
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
         for (uint256 i = 0; i < 1000; i++) {
             address a = address(uint160(uint256(keccak256(abi.encode("bigmod", i)))));
             b.mint(a, 100 * XBZZ);

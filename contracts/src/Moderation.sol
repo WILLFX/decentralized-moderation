@@ -49,10 +49,12 @@ contract Moderation is ReentrancyGuard {
     uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window
     uint256 internal constant MAX_TOTAL_DRAWS = 4000; // reachable settlement bound
 
+    // NOTE: MIN_STAKE, ACTIVATION_DELAY and EXIT_COOLDOWN are deliberately absent.
+    // They govern the custody path, which is StakeRegistry's, and are set at its
+    // construction. Mirroring them here would let governance "change" a number
+    // that nothing reads — the withdrawal that actually honours a cooldown is the
+    // registry's, and it must stay beyond this contract's reach (trust model #2).
     struct Params {
-        uint256 minStake; // MIN_STAKE
-        uint256 activationDelay; // ACTIVATION_DELAY
-        uint256 exitCooldown; // EXIT_COOLDOWN
         uint256 commitTimeout; // COMMIT_TIMEOUT
         uint256 revealWindow; // REVEAL_WINDOW
         uint256 minReveals; // MIN_REVEALS
@@ -140,9 +142,6 @@ contract Moderation is ReentrancyGuard {
         stakeReg = _stakeReg;
         indexReg = _indexReg;
         params = Params({
-            minStake: 10 * XBZZ,
-            activationDelay: 7 days,
-            exitCooldown: 7 days,
             commitTimeout: 24 hours,
             revealWindow: 24 hours,
             minReveals: 3,
@@ -1493,7 +1492,7 @@ contract Moderation is ReentrancyGuard {
     {
         if (commitTargets.length == 0 || appealWindows.length == 0) revert BadParams();
         if (commitTargets.length > MAX_ARRAY_LEN || appealWindows.length > MAX_ARRAY_LEN) revert BadParams();
-        if (p.minStake == 0 || p.riskPerSeat == 0) revert BadParams();
+        if (p.riskPerSeat == 0) revert BadParams();
         if (p.minReveals == 0) revert BadParams();
         if (p.bondMultiplier == 0 || p.bondMultiplier > MAX_BOND_MULT) revert BadParams();
         if (p.freezeCap < WAD) revert BadParams(); // power multiplier >= 1
@@ -1507,7 +1506,6 @@ contract Moderation is ReentrancyGuard {
         if (p.seedLag == 0 || p.seedLag > MAX_SEED_LAG) revert BadParams();
         if (p.commitTimeout == 0 || p.commitTimeout > MAX_WINDOW) revert BadParams();
         if (p.revealWindow == 0 || p.revealWindow > MAX_WINDOW) revert BadParams();
-        if (p.activationDelay > MAX_WINDOW || p.exitCooldown > MAX_WINDOW) revert BadParams();
         if (p.failedRevealFreeze > MAX_FREEZE || p.freezeBase == 0 || p.freezeBase > MAX_FREEZE) revert BadParams();
         // minReveals must be reachable within the fully-widened depth-0 panel.
         if (p.minReveals > commitTargets[0] * (1 + p.maxWiden)) revert BadParams();

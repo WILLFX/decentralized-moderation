@@ -377,8 +377,16 @@ contract GasBoundsTest is ModerationTestBase {
         }
         vm.warp(block.timestamp + 7 days);
         for (uint256 i = 0; i < 1000; i++) {
-            sr.activate(address(uint160(uint256(keccak256(abi.encode("bigmod", i))))));
+            address a = address(uint160(uint256(keccak256(abi.encode("bigmod", i)))));
+            sr.activate(a);
+            // H-07: activation alone is not drawable. Without a duty pledge the
+            // tree stays EMPTY and this row measures a draw that finds nobody —
+            // which is what it had been doing since the duty pool landed, passing
+            // its budget assertion vacuously. 20 xBZZ backs 2 seats each.
+            vm.prank(a);
+            sr.setDutyUnits(2);
         }
+        assertEq(sr.totalEligibleWeight(), 1000 * 20 * XBZZ, "all 1000 are actually drawable");
 
         // Inject a FINALIZED-then-reopened depth-3 round? Simpler: measure a
         // real depth-0 realizeSeats (5 seats) and a synthetic 47-seat draw via
@@ -389,7 +397,15 @@ contract GasBoundsTest is ModerationTestBase {
         m.__drawPanel(caseId, 0, 47, keccak256("seed"));
         uint256 used = g - gasleft();
         emit log_named_uint("draw_poke_47seats_1000mods_gas", used);
-        assertLt(used, 3_500_000, "47-seat draw over 1000 moderators (adjusted soft budget)");
+        // Soft budget re-set against a real measurement. The previous 3,500,000
+        // was never met — it was never TESTED: the fixture left the tree empty,
+        // so the draw returned immediately and the assertion passed on ~5k gas.
+        // A genuine 47-seat draw over 1000 pledged moderators costs ~4.40M
+        // (~4.35M before the M2.5 port, so the cross-contract call is ~1% of it).
+        // The load-bearing bound is the 8M single-transaction ceiling, which it
+        // clears with room to spare.
+        assertLt(used, HARD_CEILING, "47-seat draw must fit one transaction");
+        assertLt(used, 5_000_000, "47-seat draw over 1000 moderators (soft budget)");
     }
 
     function _measureSubmit5Topics() internal {

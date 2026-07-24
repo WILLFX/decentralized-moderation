@@ -302,3 +302,84 @@ signal (true on write, false on delete); `_removeTarget` no-ops if the target is
 longer indexed, so two concurrent removals resolve cleanly and a removal can only
 ever delete the exact entries it was approved against. The generic `submit` now
 rejects `REMOVAL` (`BadKind`).
+
+---
+
+## M2.5 port: consequences of the storage/logic split
+
+### D-11. Stake and index custody left `Moderation`
+
+`Moderation` no longer holds moderator stake or index entries. Stake lives in
+`StakeRegistry`, approvals in `IndexRegistry`, and this contract is the
+replaceable *game* that governance repoints them at.
+
+Consequences worth knowing:
+
+- **Moderators call the registry directly** for `stake`, `activate`,
+  `requestExit`, `withdraw`, `thaw` and `setDutyUnits`. Those entry points are
+  gone from `Moderation` and were not replaced with forwarders — deliberately.
+  Forwarding would put the game back in the custody path, and trust model #2
+  requires that exit is never gated by logic.
+- **Index reads kept their M2 ABI.** `entryCount`, `entryAt` and
+  `supersafeEntries` remain on `Moderation` as thin forwarders so existing
+  clients keep working. `supersafeEntries(bytes32)` is unpaginated, as in M2; a
+  front end serving a large topic should read the registry's paginated
+  `supersafeEntries(topic, minAge, cursor, limit)` (M-04) instead.
+- **Conservation is a pair of identities**, not one:
+  `balanceOf(Moderation) == openPotsTotal + totalPendingBond + totalPendingPayout
+  + totalSettling` and `balanceOf(StakeRegistry) == stakeBuckets()`. Both are
+  asserted in the unit suites, the differential replay and the invariant
+  campaign. A reward transferred without being credited (or credited without
+  being transferred) breaks exactly one side, which is the point.
+
+### D-12. MIN_STAKE / ACTIVATION_DELAY / EXIT_COOLDOWN removed from `Params`
+
+These three govern the custody path, which is the registry's, and they are set at
+`StakeRegistry`'s construction. They were left in `Moderation.Params` by the
+initial split, where nothing read them — governance could have proposed and
+executed a new `exitCooldown` through the timelock and changed nothing at all.
+They are removed rather than mirrored, so the parameter surface cannot lie about
+what it controls. Changing them now requires deploying a new registry, which is a
+migration, not a parameter change — appropriate for numbers that bound
+withdrawals.
+
+### D-13. `riskPerSeat` is duplicated across both contracts — keep them in sync
+
+**This is the one sharp edge the split leaves.** `riskPerSeat` exists in *both*
+`StakeRegistry` (immutable-in-practice: set at construction, no setter) and
+`Moderation.Params` (governable, and pinned per case by ruleset version, H-11).
+They serve different halves of the same rule:
+
+- the registry sizes **draw eligibility** by it (capacity = pledged units ×
+  `riskPerSeat`);
+- `Moderation` locks **collateral** by it at `commitVote`, and sets the no-show
+  penalty by it.
+
+Governance can therefore move `Moderation`'s copy and leave the registry's
+behind. Nothing breaks catastrophically — no funds are at risk, and H-07's
+partial-commit path absorbs the mismatch — but the H-07 guarantee that "selection
+weight equals collateral that can actually be locked" degrades:
+
+- logic value **>** registry value: a moderator drawn on its capacity may not
+  afford the full lock and commits fewer seats than it was drawn for;
+- logic value **<** registry value: seats are over-collateralized relative to
+  eligibility, and the panel under-fills.
+
+It was **not** resolved here because the obvious fix — reading
+`stakeReg.riskPerSeat()` at commit time — would break H-11's guarantee that an
+open case's consensus parameters are pinned at submit. Resolving it properly
+means either making the registry's value versioned and pinnable, or moving seat
+collateral entirely under the registry. Flagged for M3.
+
+**Operationally, until then: any governance change to `riskPerSeat` must be paired
+with a registry migration**, and `_validateParams` cannot check this for you.
+
+### D-14. `nSeats` counts seats seated, not seats sought
+
+`drawPanel` seats only where collateral exists, so a panel can come back short of
+the commit target when pledged duty capacity is scarce (H-07) — something the
+monolith could not do. `Round.nSeats` now counts what was actually seated. The
+`RoundOpened` event carries seats *sought*; `SeatsDrawn` and `Widened` carry seats
+*seated*. Short panels are a liveness path, not an error: the round opens COMMIT
+with whatever it seated, and under-participation falls through to the existing
+widen and VOID handling.

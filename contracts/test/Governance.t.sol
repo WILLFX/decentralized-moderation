@@ -37,23 +37,30 @@ contract GovernanceTest is ModerationTestBase {
         mod.proposeParameters(p, cts, aws);
     }
 
-    // H-11: a pending exit's cooldown end and min-stake decision are snapshotted at
-    // request time, so governance cannot extend or invalidate it retroactively.
-    function test_exit_terms_snapshotted_against_governance() public {
-        // mods[0] already staked in setUp; request a full exit.
+    // H-11 + M2.5 port: a pending exit's terms are snapshotted at request time,
+    // and after the split they are doubly out of reach — the cooldown that
+    // governs a withdrawal belongs to the registry, and this contract's
+    // governance has no path to it at all. (Before the split this test changed
+    // Moderation's own exitCooldown; that field is gone, precisely so governance
+    // cannot appear to move a number the exit path never reads.)
+    function test_exit_terms_are_beyond_governance_reach() public {
         (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(mods[0]);
         vm.prank(mods[0]);
         stakeReg.requestExit(free);
+        (,,,,,,, uint256 claimableAt,) = stakeReg.moderatorInfo(mods[0]);
+        assertGt(claimableAt, 0, "cooldown end snapshotted at request");
 
-        // Governance triples the exit cooldown mid-wait.
+        // Governance executes a full parameter change on the logic contract.
         Moderation.Params memory p = mod.getParams();
-        p.exitCooldown = 21 days;
+        p.revealWindow = 3 days;
         mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
         vm.warp(block.timestamp + TIMELOCK);
         mod.executeParameters();
 
-        // The original 7-day cooldown still governs this exit.
-        vm.warp(block.timestamp + 1); // now well past the original claimable time
+        (,,,,,,, uint256 claimableAfter,) = stakeReg.moderatorInfo(mods[0]);
+        assertEq(claimableAfter, claimableAt, "a pending exit's terms never move once requested");
+        assertEq(stakeReg.exitCooldown(), REG_COOLDOWN, "the registry's cooldown is not governable from here");
+
         uint256 before = bzz.balanceOf(mods[0]);
         vm.prank(mods[0]);
         stakeReg.withdraw();

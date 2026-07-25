@@ -6,16 +6,53 @@
 1 High-economic, 10 Medium. Every Critical/High cited below was **reproduced against
 the actual code before this order was written**; line references are from `b09ce31`.
 
-## Status of the two audits we received
+## Status of the audits
 
-- **Fresh-eyes audit (this one).** Reviewed the merged M2.5 code. Accurate on every
-  point checked (8/8 verified). It is the sole source for this work order.
-- **"Continuation" audit.** Not a continuation — it re-emitted the 2026-07-16 review
-  of pre-M2.5 code. It describes `bondContributors`, bool `submissionExists`, and
-  `claimPayout`, all removed in M2.5; cites 91 tests (we have 139) and a
-  single-contract architecture (we have three). **It carries no signal about the
-  current code and must not be worked from.** A genuine re-audit still needs to be
-  run against `b09ce31` or later.
+Both audits reviewed the same commit, `b09ce31`. **This work order merges them.**
+
+- **Fresh-eyes audit.** No prior context. Verified 8/8 on the points checked.
+- **Continuation audit.** Knew the July findings; includes a status table for all 22
+  of them. Verified 4/4 on its unique findings.
+- *(An earlier "continuation" attempt was a stale replay of the July review against
+  pre-M2.5 code and was discarded. The real one arrived afterwards and is used here.)*
+
+### Do they conflict? No — and that is the useful result
+
+They were compared finding-by-finding specifically to check for fixes pulling in
+opposite directions. **On every point both cover, they agree** — same root cause,
+same prescribed direction (global identity, real duty escrow, eligibility epochs,
+bounded terminality, per-batch keeper pay, exclusion on widen). Neither prescribes
+anything the other forbids. What differs is *coverage*, and each caught real things
+the other missed:
+
+**Fresh-eyes found, continuation missed:**
+- `reward()` credits unfunded stake (the only path to minting withdrawable claims).
+  **Already fixed — M2.6-P0-4, commit `d1317c1`.**
+- "uncontested" semantics conflict between README and code.
+
+**Continuation found, fresh-eyes missed** (all four verified against the code):
+- **VOID is still atomic** — `_void()` loops `seatHolders` with no cursor, and it is
+  called *inside* `closeReveal`, so exceeding gas reverts the transition and strands
+  the case in expired REVEAL. Settlement was batched; VOID was not. → **P0-7**
+- **`freezeCap` has no upper bound** (`Moderation.sol:1522` checks only `< WAD`), so
+  accepted parameters can overflow `FreezeMath` inside `_settleInit` and make every
+  settlement attempt revert. → **P0-8**
+- **A fourth duty bypass: partial commit.** `commitVote` reduces `s` to what the
+  moderator can afford and still sets `committed[msg.sender] = true`, so settlement
+  takes the committed path and the unbacked seats get **no disposition at all**
+  (assigned 10, afford 1 → 9 seats vanish penalty-free). This is a hole *created by*
+  the M2.5 partial-commit fix. → folded into **P0-2**
+- **`MAX_PANEL = 512` is not evidence-based** — the largest measured draw is 47 seats
+  at ~4.39M gas. → **P1-3**
+
+Continuation also sharpened three items: widening **reopens commit/reveal windows to
+earlier nonparticipants** (optional-stopping across tranches, not just inert seats);
+**freeze expiries differ by settlement batch** for participants in the same case; and
+a **revoked logic still accepts fees**, becoming a permanent fee trap with no refund
+path.
+
+**Neither audit's fixes need to be undone or reworked for the other.** Where the
+continuation is more complete (duty bypasses, retirement lifecycle), take its version.
 
 ## What M2.5 got right (independently confirmed)
 
@@ -98,8 +135,59 @@ the bucket is deferred: enforce `dutyUnits >= dutyReserved` and
 `exitAmount <= free − dutyReserved * riskPerSeat` — but the bucket is far easier to
 prove.
 
-**Tests.** Post-selection `setDutyUnits(0)` and post-selection `requestExit` both
-leave the penalty payable and applied; bonded collateral cannot be withdrawn.
+**Two further bypasses (continuation audit) — the fix must close all four:**
+
+3. **Partial commit excuses the unbacked seats.** `commitVote` reduces `s` to what
+   the moderator can afford and still sets `committed[msg.sender] = true`, so
+   settlement takes the committed path and the remaining assigned seats receive **no
+   disposition** — assigned 10, afford 1, and 9 seats disappear penalty-free. This
+   hole was *created by* the M2.5 partial-commit fix: it solved the liveness problem
+   (a min-stake holder drawn twice could not commit at all) and opened a penalty
+   problem. Both must hold: partial commit stays possible, unfulfilled assignments
+   still get penalised and released.
+4. **Backing is consumed elsewhere.** Because nothing is escrowed, the same free
+   stake can back several outstanding assignments, be locked by whichever case
+   commits first, or be exit-reserved. The tree stops issuing *new* duty once
+   capacity is reserved, but nothing protects the stake behind assignments already
+   made.
+
+**Tests.** Post-selection `setDutyUnits(0)`, post-selection `requestExit(all free)`,
+commit-one-of-ten, and cross-case consumption of the same backing all leave the
+penalty payable and applied; bonded collateral cannot be withdrawn, reduced, or
+double-spent.
+
+### P0-7. VOID must be batched like settlement
+
+**Confirmed.** `_void()` loops the entire `seatHolders` array with no cursor, calling
+the registry to freeze/penalise and release duty for every address, then refunds the
+submitter — all in one transaction. Settlement was batched in M2.5; VOID was not.
+Worse, `_void()` is invoked *inside* `closeReveal()`, so if it exceeds the block
+limit the whole transition reverts and the case is stuck in an expired REVEAL with no
+other exit. An adversarially widened depth-0 panel reaches this directly, and P1-3's
+validator gap makes far larger panels configurable.
+
+**Fix.** A `VOID_SETTLING` phase with the same bounded participant cursor as
+`SETTLING`. `closeReveal` must never do unbounded work.
+
+**Test.** A depth-0 VOID at the maximum *accepted* configuration completes in bounded
+batches; each batch under the ceiling; the submitter is refunded exactly once.
+
+### P0-8. Bound the freeze arithmetic
+
+**Confirmed.** `_validateParams` checks only `freezeCap < WAD` (`Moderation.sol:1522`)
+— a lower bound, no upper bound. `FreezeMath` computes `(freezeCap − WAD) × oneMinusExp`
+and then `freezeBase × power` with checked arithmetic, and `_settleInit` calls it
+*before* the case reaches a recoverable state. An accepted-but-large `freezeCap`
+therefore makes every settlement attempt revert permanently. `MAX_FREEZE` bounds
+`freezeBase` and `failedRevealFreeze` but not the amplified result.
+
+**Fix.** Validate both `freezeCap <= MAX_FREEZE_MULTIPLIER` and
+`mulDiv(freezeBase, freezeCap, WAD) <= MAX_FREEZE`. Use full-precision `mulDiv` in
+`FreezeMath` and defensively clamp the returned duration, so a future validation slip
+cannot brick settlement.
+
+**Test.** The maximum accepted freeze configuration settles; a configuration that
+would overflow is rejected at proposal time.
 
 ### P0-3. Replace the pseudo-epoch with a real one
 
@@ -158,14 +246,31 @@ on-chain `canRevoke(logic)` — revocation relies on governance *believing* the 
 logic drained, and old `Moderation` has no retirement mode, so users can keep opening
 cases during the supposed drain.
 
+**Continuation audit sharpens this into a retirement lifecycle.** Three further
+facts, each verified: revoking a live logic *strands* its cases (its pot, its
+committed stake, its duty reservations, its unpaid appeal contributors — the new
+logic cannot settle them because the case storage lives in the old contract); the old
+logic cannot be made settle-only, so an attacker can keep opening cases in it and it
+never provably drains; and a **revoked** logic still accepts fees, since `submit`
+never checks its own authorization — every retired contract becomes a permanent fee
+trap with no refund path. `openPotsTotal` is decremented at settlement *init*, so it
+is not a valid drain signal either.
+
 **Fix.** Creator-scoped obligation handles
 (`keccak256(logicEpoch, logic, caseId, depth, moderator)`); only the creating logic
 may release or freeze its own obligation. Per-logic open-obligation counters and an
 on-chain `canRevoke(logic)`. A `RETIRING` mode on the logic that rejects new
 submissions while preserving settlement.
 
+Add logic states `NONE | OPEN_AND_SETTLE | SETTLE_ONLY`, moved atomically across
+**both** registries (they are governed independently today, so a logic can be
+authorized in one and not the other — a case can then settle its stake and fail its
+index write). `submit`/`submitRemoval` must reject when not `OPEN_AND_SETTLE`.
+
 **Tests.** Cross-logic release/freeze/releaseDuty/setTrack all revert; `canRevoke` is
-false until counters hit zero; a retiring logic rejects submissions but still settles.
+false until counters hit zero; a retiring logic rejects submissions but still settles;
+a revoked logic refuses fees rather than trapping them; desynchronized registry
+authorization is unreachable.
 
 ### P0-6. Bounded DRAW terminality
 
@@ -204,6 +309,12 @@ expected registry code hashes. `submit`/`submitRemoval` require `active`. A
 token-mismatch deployment silently makes the registry insolvent in one asset while
 accumulating another.
 
+Also: **`MAX_PANEL = 512` is not evidence-based.** The largest measured draw is 47
+seats over 1,000 moderators at ~4.39M gas, and `realizeSeats` attempts a whole target
+in one call. Either derive the cap from a real worst-case benchmark or make seat
+drawing itself cursor-based. Requiring `commitTargets.length == maxDepth + 1` also
+removes the clamping ambiguity behind the total-draw miscount entirely.
+
 ### P1-3. Parameter validator must model the runtime state space
 Confirmed: `_validateParams` iterates `commitTargets.length` (`Moderation.sol:1537`)
 while runtime clamps to the last entry — `commitTargets=[400], maxDepth=8, maxWiden=8`
@@ -220,6 +331,26 @@ it) and price retries: escalating fee, cooldown, or fold resubmission into the
 existing appeal ladder.
 
 ---
+
+### P1-7. Widening tranches must close, and should exclude prior participants
+
+Beyond the inert-seat problem: because the same `Round` object is reused, a widen
+**reopens the commit and reveal windows to earlier nonparticipants**. A moderator can
+deliberately miss its window, watch the panel expand and votes disclose, then join a
+later tranche — an optional-stopping strategy across tranches, with no failed-
+participation penalty for the window it skipped. Model each widen tranche with its
+own deadlines and finalize missed assignments as failed; and prefer *excluding*
+already-selected addresses from later widen draws, which is what widening is for
+(adding independent participation, not re-drawing the same identity).
+
+### P1-8. One case-level penalty reference time
+
+Freeze deadlines are computed as `block.timestamp + duration` at the moment each
+participant's cursor position is processed, so participants in a later settlement
+batch get a later expiry than participants in the same case settled earlier — and a
+slow settlement adds the whole freeze on top of an already long committed lock.
+Record a `penaltyReferenceTime` at finalization/settle-init and derive every absolute
+deadline from it.
 
 ### P1-5. Quorum counts seats, not independent moderators
 
@@ -252,6 +383,12 @@ match.
 - **Pagination stability.** Swap-and-pop reorders arrays; concurrent deletion can make
   a paginating client skip or double-count. Paginate over monotonic global IDs with
   tombstones once P0-1 lands. Harden `cursor + limit` overflow in `supersafeEntries`.
+- **`dedupOwner()` cannot represent case zero.** Storage is `caseId + 1`, but the
+  getter subtracts one and returns 0 both for an unreserved key and for one owned by
+  case 0. Return `(bool exists, uint256 caseId)` or the raw plus-one value.
+- **`Moderation.supersafeEntries(topic)` is still unbounded** — the registry view is
+  paginated, but the compatibility wrapper calls it with the entire topic length, so
+  the preserved ABI is not operationally safe at scale.
 - **Track decay** is event-based, not time-based, despite the docs. Add lazy
   timestamp decay or fix the documentation.
 - **Two-step governance transfer on `Moderation`** (the registries already have it);

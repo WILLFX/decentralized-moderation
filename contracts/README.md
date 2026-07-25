@@ -4,10 +4,13 @@ Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
 > Status: **M2.5 complete.** The state machine (staking, sortition, case
-> lifecycle, appeals, settlement, index, governance) is implemented across three
-> contracts — the replaceable game plus two permanent registries — with 137
-> passing tests including a handler-driven invariant campaign, a differential
-> test against an independent Python reference, and a live logic-migration test.
+> lifecycle, appeals, settlement, index, governance) is implemented across four
+> contracts — the replaceable game and its governor, plus two permanent
+> registries — with 165 passing tests including a handler-driven invariant
+> campaign, a differential test against an independent Python reference, and a
+> live logic-migration test.
+>
+> M2.6 remediation is in progress: see `specs/m2_6-work-order.md`.
 >
 > Builds with `via_ir = true` (EIP-170: `Moderation` does not fit the 24,576-byte
 > limit without it). The suite runs on the same pipeline that ships. One
@@ -20,7 +23,9 @@ Foundry. Work order: `specs/m2-work-order.md`.
 
 | File | Role |
 |---|---|
-| `src/Moderation.sol` | The **replaceable game**: cases, appeals, settlement, governance. Holds pot money only (fees + appeal bonds). |
+| `src/Moderation.sol` | The **replaceable game**: cases, appeals, settlement. Holds pot money only (fees + appeal bonds). |
+| `src/RulesetGovernor.sol` | Governance **authoring**: proposing, validating and timelocking rulesets and guidelines versions. Split out of `Moderation` in M2.6 when it hit EIP-170 — authoring is cold and validation-heavy, enforcement is on every hot path. Ruleset *storage* stays in `Moderation` (`_cp()` reads it per transition); the governor pushes validated results in via `applyRuleset`. |
+| `src/lib/ProtocolLimits.sol` | The immutable H-11 caps, shared by the contract that validates a ruleset and the one that enforces it so the two cannot drift. |
 | `src/StakeRegistry.sol` | **Permanent** custody + bookkeeping for moderator stake, the sortition tree and the H-07 duty pool. Moderators stake, exit and withdraw here directly — never through the game, so exit is never gated by logic. |
 | `src/IndexRegistry.sol` | **Permanent** topic → approved-entries index. The protocol's actual product; it outlives every logic redeployment. |
 | `src/lib/SortitionTree.sol` | Stake-weighted draw over a sum tree (clean 0.8.x port of Kleros' MIT `SortitionSumTreeFactory`; see attribution in the file). |

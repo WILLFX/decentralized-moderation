@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {FreezeMath} from "./lib/FreezeMath.sol";
 import {StakeRegistry} from "./StakeRegistry.sol";
 import {IndexRegistry} from "./IndexRegistry.sol";
+import {ProtocolLimits as L} from "./lib/ProtocolLimits.sol";
 
 /// @title Moderation
 /// @notice On-chain decentralized moderation contract (specs/state-machine.md).
@@ -32,22 +33,13 @@ contract Moderation is ReentrancyGuard {
     // --- parameters (§1 working values; governance-settable in M2-7) ---------
 
     /// WAD scale for fractional parameters (1e18 = 100%).
-    uint256 internal constant WAD = 1e18;
+    uint256 internal constant WAD = L.WAD;
     // H-06: randomness domain-separation purpose tags.
     uint8 internal constant SEED_SEATS = 1;
     uint8 internal constant SEED_OUTCOME = 2;
-    // H-11: immutable protocol caps. Governance can tune numbers only WITHIN these
-    // bounds, so it can never configure an unsettleable case or overflowing freeze.
-    uint256 internal constant MAX_RULE_DEPTH = 8;
-    uint256 internal constant MAX_RULE_WIDEN = 8;
-    uint256 internal constant MAX_PANEL = 512; // per-depth commit target
-    uint256 internal constant MAX_RULE_TOPICS = 16;
-    uint256 internal constant MAX_ARRAY_LEN = 16;
-    uint256 internal constant MAX_WINDOW = 30 days;
-    uint256 internal constant MAX_FREEZE = 365 days;
-    uint256 internal constant MAX_BOND_MULT = 100;
-    uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window
-    uint256 internal constant MAX_TOTAL_DRAWS = 4000; // reachable settlement bound
+    // H-11: the immutable protocol caps live in `ProtocolLimits` (M2.6), shared
+    // with `RulesetGovernor` — the contract that validates a ruleset and the
+    // contract that enforces it must read the same numbers.
 
     // NOTE: MIN_STAKE, ACTIVATION_DELAY and EXIT_COOLDOWN are deliberately absent.
     // They govern the custody path, which is StakeRegistry's, and are set at its
@@ -98,27 +90,14 @@ contract Moderation is ReentrancyGuard {
 
     // --- governance (§9.9, P6) -----------------------------------------------
 
-    address public governance; // multisig
-    uint256 public timelockDelay; // delay between proposal and execution
+    /// M2.6: ruleset AUTHORING (propose / validate / timelock / execute) lives in
+    /// `RulesetGovernor`. Immutable, so this contract's trust surface is exactly
+    /// what the `governance` multisig held before the split. The ruleset STORAGE
+    /// stays here deliberately — `_cp()` reads it on every hot path, and putting
+    /// it behind a call would cost more than the split saved.
+    address public immutable governor;
     uint256 public guidelinesVersion; // current guidelines version
     mapping(uint256 => bytes32) public guidelinesHashByVersion; // append-only history (invariant 9)
-
-    struct PendingParams {
-        uint256 eta;
-        bool exists;
-        Params p;
-        uint256[] commitTargets;
-        uint256[] appealWindows;
-    }
-
-    struct PendingGuidelines {
-        uint256 eta;
-        bool exists;
-        bytes32 hash;
-    }
-
-    PendingParams internal pendingParams;
-    PendingGuidelines internal pendingGuidelines;
 
     // --- accounting ----------------------------------------------------------
 
@@ -137,7 +116,9 @@ contract Moderation is ReentrancyGuard {
 
     // -------------------------------------------------------------------------
 
-    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg) {
+    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg, address _governor) {
+        if (_governor == address(0)) revert ZeroGovernor();
+        governor = _governor;
         token = _token;
         stakeReg = _stakeReg;
         indexReg = _indexReg;
@@ -173,8 +154,6 @@ contract Moderation is ReentrancyGuard {
         if (params.riskPerSeat > _stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
         rulesets[0] = Ruleset({p: params, commitTargets: commitTargetByDepth, appealWindows: appealWindowByDepth});
 
-        governance = msg.sender;
-        timelockDelay = 7 days;
     }
 
     // --- staking (§3) --------------------------------------------------------
@@ -1528,145 +1507,60 @@ contract Moderation is ReentrancyGuard {
     }
 
     // =========================================================================
-    // Governance (§9.9, P6) — a multisig may change only the §1 numeric
-    // parameters and append (never mutate) guidelines versions, both behind a
-    // timelock. Core transitions (§3, §5) are code and have no mutation path, and
-    // no function anywhere pauses withdrawals (§9.5).
+    // Governance (§9.9, P6) — APPLICATION only.
+    //
+    // A ruleset is proposed, validated and timelocked in `RulesetGovernor`; what
+    // remains here is sealing the authored result into storage. Core transitions
+    // (§3, §5) are code and have no mutation path, and no function anywhere
+    // pauses withdrawals (§9.5).
     // =========================================================================
 
-    event ParametersProposed(uint256 eta);
-    event ParametersExecuted();
-    event ParametersCancelled();
-    event GuidelinesProposed(bytes32 hash, uint256 eta);
-    event GuidelinesExecuted(uint256 indexed version, bytes32 hash);
-    event GovernanceTransferred(address indexed newGovernance);
+    event ParametersApplied(uint256 indexed rulesVersion);
+    event GuidelinesApplied(uint256 indexed version, bytes32 hash);
 
-    error NotGovernance();
-    error NoPendingProposal();
-    error TimelockNotElapsed();
-    error BadParams();
-    /// A proposed ruleset would lock more per seat than a pledged duty unit is
-    /// worth, so panels could be seated on collateral that cannot cover them.
+    error NotGovernor();
+    error ZeroGovernor();
+    /// A ruleset would lock more per seat than a pledged duty unit is worth, so
+    /// panels could be seated on collateral that cannot cover them.
     error RiskPerSeatExceedsDutyUnit();
 
-    modifier onlyGovernance() {
-        if (msg.sender != governance) revert NotGovernance();
+    modifier onlyGovernor() {
+        if (msg.sender != governor) revert NotGovernor();
         _;
     }
 
-    /// @notice Queue a full replacement of the numeric parameters (validated for
-    ///         solvency/liveness sanity). Only these numbers are mutable.
-    function proposeParameters(
+    /// @notice Seal a validated ruleset as a new immutable version (H-11). Open
+    ///         cases keep the version they pinned at submit; only cases submitted
+    ///         after this pick up the new rules.
+    /// @dev Full validation is `RulesetGovernor`'s. The one bound re-checked here
+    ///      is the one whose violation is a SOLVENCY failure rather than a
+    ///      liveness one: a case locking more per seat than a pledged duty unit is
+    ///      worth would seat panels on collateral that cannot cover them. Every
+    ///      other validation failure can brick a case; only this one can seat an
+    ///      uncollateralized panel, so it is enforced at the boundary and cannot
+    ///      be skipped by a governor bug.
+    function applyRuleset(
         Params calldata p,
         uint256[] calldata commitTargets,
         uint256[] calldata appealWindows
-    ) external onlyGovernance {
-        _validateParams(p, commitTargets, appealWindows);
-        PendingParams storage pp = pendingParams;
-        pp.eta = block.timestamp + timelockDelay;
-        pp.exists = true;
-        pp.p = p;
-        pp.commitTargets = commitTargets;
-        pp.appealWindows = appealWindows;
-        emit ParametersProposed(pp.eta);
-    }
-
-    function executeParameters() external onlyGovernance {
-        PendingParams storage pp = pendingParams;
-        if (!pp.exists) revert NoPendingProposal();
-        if (block.timestamp < pp.eta) revert TimelockNotElapsed();
-        params = pp.p;
-        commitTargetByDepth = pp.commitTargets;
-        appealWindowByDepth = pp.appealWindows;
-        // H-11: seal a new immutable ruleset version; open cases keep their pinned
-        // version, only cases submitted after this pick up the new rules.
+    ) external onlyGovernor {
+        if (p.riskPerSeat > stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
+        params = p;
+        commitTargetByDepth = commitTargets;
+        appealWindowByDepth = appealWindows;
         currentRulesVersion += 1;
         rulesets[currentRulesVersion] =
-            Ruleset({p: pp.p, commitTargets: pp.commitTargets, appealWindows: pp.appealWindows});
-        delete pendingParams;
-        emit ParametersExecuted();
+            Ruleset({p: p, commitTargets: commitTargets, appealWindows: appealWindows});
+        emit ParametersApplied(currentRulesVersion);
     }
 
-    function cancelParameters() external onlyGovernance {
-        delete pendingParams;
-        emit ParametersCancelled();
-    }
-
-    /// @notice Queue a new guidelines version. Execution appends a new version
-    ///         entry; existing versions are never overwritten (invariant 9).
-    function proposeGuidelines(bytes32 hash) external onlyGovernance {
-        pendingGuidelines = PendingGuidelines({eta: block.timestamp + timelockDelay, exists: true, hash: hash});
-        emit GuidelinesProposed(hash, block.timestamp + timelockDelay);
-    }
-
-    function executeGuidelines() external onlyGovernance {
-        PendingGuidelines storage pg = pendingGuidelines;
-        if (!pg.exists) revert NoPendingProposal();
-        if (block.timestamp < pg.eta) revert TimelockNotElapsed();
-        guidelinesVersion += 1;
-        guidelinesHashByVersion[guidelinesVersion] = pg.hash;
-        emit GuidelinesExecuted(guidelinesVersion, pg.hash);
-        delete pendingGuidelines;
-    }
-
-    function transferGovernance(address next) external onlyGovernance {
-        governance = next;
-        emit GovernanceTransferred(next);
-    }
-
-    /// @dev Not `pure`: it consults the registry. `riskPerSeat` exists in both
-    ///      contracts by design — there it is what one DUTY UNIT is worth (a
-    ///      staking-layer constant, immutable), here it is what a case LOCKS per
-    ///      seat (a consensus parameter, pinned per case by H-11). Collapsing
-    ///      them would either break per-case pinning or make draw eligibility
-    ///      retroactively mutable.
-    ///
-    ///      Only one direction of divergence is harmful: a case locking MORE than
-    ///      the unit reserved for it, which would seat a panel on collateral that
-    ///      cannot cover it. Rejecting that here makes the dangerous desync
-    ///      unrepresentable rather than merely documented — governance cannot
-    ///      create it by accident. The other direction (locking less) is benign:
-    ///      seats are simply over-collateralized relative to eligibility.
-    function _validateParams(Params calldata p, uint256[] calldata commitTargets, uint256[] calldata appealWindows)
-        internal
-        view
-    {
-        if (commitTargets.length == 0 || appealWindows.length == 0) revert BadParams();
-        if (commitTargets.length > MAX_ARRAY_LEN || appealWindows.length > MAX_ARRAY_LEN) revert BadParams();
-        if (p.riskPerSeat == 0) revert BadParams();
-        // A case must never lock more than one pledged duty unit is worth.
-        if (p.riskPerSeat > stakeReg.riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
-        if (p.minReveals == 0) revert BadParams();
-        if (p.bondMultiplier == 0 || p.bondMultiplier > MAX_BOND_MULT) revert BadParams();
-        if (p.freezeCap < WAD) revert BadParams(); // power multiplier >= 1
-        if (p.trackDecay > WAD) revert BadParams(); // decay is a fraction
-        if (p.claimBountyFrac + p.bonusFrac > WAD) revert BadParams(); // distributable stays >= 0
-
-        // H-11: hard protocol caps + cross-field sanity so governance cannot brick
-        // active or future cases.
-        if (p.maxDepth > MAX_RULE_DEPTH || p.maxWiden > MAX_RULE_WIDEN) revert BadParams();
-        if (p.maxTopics == 0 || p.maxTopics > MAX_RULE_TOPICS) revert BadParams();
-        if (p.seedLag == 0 || p.seedLag > MAX_SEED_LAG) revert BadParams();
-        if (p.commitTimeout == 0 || p.commitTimeout > MAX_WINDOW) revert BadParams();
-        if (p.revealWindow == 0 || p.revealWindow > MAX_WINDOW) revert BadParams();
-        if (p.failedRevealFreeze > MAX_FREEZE || p.freezeBase == 0 || p.freezeBase > MAX_FREEZE) revert BadParams();
-        // minReveals must be reachable within the fully-widened depth-0 panel.
-        if (p.minReveals > commitTargets[0] * (1 + p.maxWiden)) revert BadParams();
-
-        uint256 totalDraws;
-        for (uint256 i; i < commitTargets.length; ++i) {
-            if (commitTargets[i] == 0 || commitTargets[i] > MAX_PANEL) revert BadParams();
-            // every depth up to maxDepth can widen maxWiden times
-            if (i <= p.maxDepth) totalDraws += (1 + p.maxWiden) * commitTargets[i];
-        }
-        for (uint256 i; i < appealWindows.length; ++i) {
-            if (appealWindows[i] == 0 || appealWindows[i] > MAX_WINDOW) revert BadParams();
-        }
-        if (totalDraws > MAX_TOTAL_DRAWS) revert BadParams();
-    }
-
-    function pendingParamsEta() external view returns (uint256 eta, bool exists) {
-        return (pendingParams.eta, pendingParams.exists);
+    /// @notice Append a guidelines version. Existing versions are never
+    ///         overwritten (invariant 9).
+    function applyGuidelines(bytes32 hash) external onlyGovernor returns (uint256 version) {
+        version = guidelinesVersion + 1;
+        guidelinesVersion = version;
+        guidelinesHashByVersion[version] = hash;
+        emit GuidelinesApplied(version, hash);
     }
 
     // --- eligibility wiring (D6) ---------------------------------------------

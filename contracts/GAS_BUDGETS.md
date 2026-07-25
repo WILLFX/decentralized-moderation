@@ -46,6 +46,9 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **size pass** (drop 2 broken views) | **23,438 B** | **1,138 B** | 8,977 B | 4,893 B |
 | **P0-1c** (legacy removal path) | **24,259 B** | **317 B** | 8,977 B | 5,288 B |
 | **P0-2** (duty escrow) | **24,343 B** | **233 B** | 9,951 B | 5,288 B |
+| **structural split** (governor out) | **22,298 B** | **2,278 B** | 9,951 B | 5,288 B |
+
+(The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 
 P0-1b cost `Moderation` **+287 B**: moving dedup into the registry replaces two
 storage operations with two cross-contract calls, and calldata encoding is bigger
@@ -81,13 +84,8 @@ Both reads are still available, better, from `IndexRegistry`:
 Reads there are permissionless and survive a logic upgrade, which is where a
 front end should have been pointed anyway.
 
-Remaining levers, cheapest first, if a later item does not fit:
-
-1. `submissionExists` / `entryCount` / `entryAt` forwarders — same argument as
-   above; the registry serves all three.
-2. The structural split the M2.5 port recorded: move governance (ruleset
-   proposal/validation) or settlement coordination into its own contract.
-   `_validateParams` alone is large, and P1-3 will grow it.
+The structural split that follows is what actually bought the milestone its
+headroom back; this pass only got P0-1c through the door.
 
 > **`forge build --sizes` exits non-zero on `ModerationHarness`** (26,783 B). That
 > is the test-only subclass with the storage injectors, it is never deployed, and
@@ -106,30 +104,62 @@ silently returns a stale value and mis-sequences the test. Switching the pipelin
 cost ~20 tests exactly this way. The rule is stated at the top of
 `test/base/StackDeployer.sol`, which every suite inherits.
 
-> **Open follow-up, now BLOCKING: structural split of `Moderation`.**
-> The 1,184 B below is historical — see the M2.6 table above for the live figure,
-> which is the only one to trust. One pass of dead-API removal has already been
-> spent (P0-1c did not fit without it) and it bought ~645 B, which P0-1c then
-> consumed. P0-3, P0-5, P0-6, P0-7 and P0-8 all still have to land in this
-> contract, with ~233 B left.
+> **DONE (M2.6): structural split of `Moderation`.** Ruleset authoring moved to
+> `RulesetGovernor`; see "The split" below. `Moderation` 24,343 -> 22,298 B.
 >
-> P0-2 fit only because a duty-escrow bucket is custody state: it cost
-> `StakeRegistry` +974 B and `Moderation` +84 B. Do not read that as a reprieve —
-> read it as the test for whether an item can be paid for on the registry side.
-> **P0-5 fails that test**: obligation handles change the signature of every
-> privileged call, so the cost lands on the caller. P0-3 (eligibility epochs) is
-> mostly registry state and may fit; P0-7 (a `VOID_SETTLING` phase with its own
-> participant cursor) is pure logic-contract growth and probably does not.
->
-> The next item that does not fit must be paid for by the split, not by another
-> scrounging pass: move governance (ruleset proposal/validation) or settlement
-> coordination into its own contract.
->
-> 1,184 B of headroom is thin — roughly one moderate feature. And a logic contract
-> that was 5,193 B over EIP-170 before this port, and fits now only by virtue of an
-> optimizer pipeline, is telling us it still wants splitting: `Moderation` is
-> still the case lifecycle, appeals, settlement AND governance in one contract.
-> Recorded in `specs/m2_5-port-work-order.md`.
+> The historical note this replaced said 1,184 B of headroom was thin — roughly
+> one moderate feature — and that a logic contract which was 5,193 B over EIP-170
+> before the M2.5 port, and fit only by virtue of an optimizer pipeline, was
+> telling us it still wanted splitting. That was right, and it took three items to
+> come due. Recorded in `specs/m2_5-port-work-order.md`.
+
+### The split (M2.6): authoring vs enforcement
+
+The seam is not "governance code" as a bucket — it is a real boundary:
+
+- **Authoring** is cold. A multisig proposes a ruleset, waits out a timelock,
+  executes; it runs a handful of times in the protocol's life. All the validation
+  lives here, and `_validateParams` was the largest cold blob in the system.
+- **Enforcement** is hot. Every case reads its pinned ruleset on every phase
+  transition, through `Moderation._cp()`.
+
+**Ruleset STORAGE deliberately did not move.** Putting `rulesets` behind a call
+would turn `_cp()` — on every hot path — into a cross-contract call returning a
+nineteen-field struct, costing more at the call sites than the split saved, plus
+a great deal of gas. The governor validates, then pushes the authored result into
+`Moderation`'s storage via `applyRuleset`.
+
+| | before | after |
+|---|---|---|
+| `Moderation` | 24,343 B (233 margin) | **22,298 B (2,278 margin)** |
+| `RulesetGovernor` | — | 3,993 B (20,583 margin) |
+
+Two things the split had to get right:
+
+1. **The caps could not be duplicated.** `MAX_RULE_DEPTH` and friends were
+   `internal constant` on `Moderation`, invisible to the governor. Copying them
+   would have created exactly the failure this milestone keeps finding — a safety
+   bound stated twice and silently diverging. They live in
+   `lib/ProtocolLimits.sol`; `internal constant` in a library is inlined, so it
+   costs nothing on either side.
+2. **Validation moving out weakens the boundary, so one check stayed.** Full
+   validation is the governor's, but `applyRuleset` re-checks
+   `riskPerSeat <= stakeReg.riskPerSeat()` on arrival. That is the only validation
+   failure which is a *solvency* problem rather than a liveness one: everything
+   else can brick a case, but this one seats panels on collateral that cannot
+   cover them. A governor bug cannot reintroduce it.
+
+`Moderation.governor` is immutable, so the split adds no trust surface: the
+governor holds exactly what the `governance` address held before. The multisig
+still rotates, via `RulesetGovernor.transferGovernance`.
+
+### What is left to cut, if a later item needs it
+
+1. `submissionExists` / `entryCount` / `entryAt` forwarders — the registry serves
+   all three.
+2. Settlement coordination (`_settle*`, the batch cursor) into its own contract.
+   Harder than governance was: it touches case storage on the hot path, so it
+   would need the same "state stays, logic moves" care, or a bigger rethink.
 
 ## Budgets and measured actuals (re-measured under `via_ir`)
 

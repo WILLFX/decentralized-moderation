@@ -16,8 +16,8 @@ import {StakeRegistryHarness} from "./StakeRegistryHarness.sol";
 contract ModerationHarness is Moderation {
     using SortitionTree for SortitionTree.Tree;
 
-    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg)
-        Moderation(_token, _stakeReg, _indexReg)
+    constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg, address _governor)
+        Moderation(_token, _stakeReg, _indexReg, _governor)
     {}
 
     // Stake transitions now go through the registry's real privileged API — this

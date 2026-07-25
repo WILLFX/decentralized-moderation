@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Moderation} from "../src/Moderation.sol";
+import {RulesetGovernor} from "../src/RulesetGovernor.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 
 contract GovernanceTest is ModerationTestBase {
@@ -12,7 +13,7 @@ contract GovernanceTest is ModerationTestBase {
     function _proposeMinReveals(uint256 newVal) internal {
         Moderation.Params memory p = mod.getParams();
         p.minReveals = newVal;
-        mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
+        governor.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
     }
 
     // --- H-11: immutable protocol caps ---------------------------------------
@@ -23,18 +24,18 @@ contract GovernanceTest is ModerationTestBase {
 
         Moderation.Params memory p = mod.getParams();
         p.maxDepth = 100; // > MAX_RULE_DEPTH
-        vm.expectRevert(Moderation.BadParams.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
 
         p = mod.getParams();
         p.commitTimeout = 60 days; // > MAX_WINDOW
-        vm.expectRevert(Moderation.BadParams.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
 
         p = mod.getParams();
         p.maxWiden = 50; // total reachable draws would blow past MAX_TOTAL_DRAWS
-        vm.expectRevert(Moderation.BadParams.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
     }
 
     // H-11 + M2.5 port: a pending exit's terms are snapshotted at request time,
@@ -53,9 +54,9 @@ contract GovernanceTest is ModerationTestBase {
         // Governance executes a full parameter change on the logic contract.
         Moderation.Params memory p = mod.getParams();
         p.revealWindow = 3 days;
-        mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
+        governor.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeParameters();
+        governor.executeParameters();
 
         (,,,,,,, uint256 claimableAfter,) = stakeReg.moderatorInfo(mods[0]);
         assertEq(claimableAfter, claimableAt, "a pending exit's terms never move once requested");
@@ -84,19 +85,19 @@ contract GovernanceTest is ModerationTestBase {
 
         Moderation.Params memory p = mod.getParams();
         p.riskPerSeat = unit + 1;
-        vm.expectRevert(Moderation.RiskPerSeatExceedsDutyUnit.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.RiskPerSeatExceedsDutyUnit.selector);
+        governor.proposeParameters(p, cts, aws);
 
         // Exactly one unit is the boundary and is allowed.
         p.riskPerSeat = unit;
-        mod.proposeParameters(p, cts, aws);
+        governor.proposeParameters(p, cts, aws);
 
         // So is locking LESS: seats are simply over-collateralized relative to
         // eligibility, which costs the moderator nothing it did not pledge.
         p.riskPerSeat = unit / 2;
-        mod.proposeParameters(p, cts, aws);
+        governor.proposeParameters(p, cts, aws);
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeParameters();
+        governor.executeParameters();
         assertEq(mod.getParams().riskPerSeat, unit / 2, "under-locking ruleset accepted");
     }
 
@@ -115,14 +116,14 @@ contract GovernanceTest is ModerationTestBase {
         uint256[] memory cts = mod.getCommitTargets();
         uint256[] memory aws = mod.getAppealWindows();
         vm.prank(stranger);
-        vm.expectRevert(Moderation.NotGovernance.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        governor.proposeParameters(p, cts, aws);
     }
 
     function test_only_governance_can_propose_guidelines() public {
         vm.prank(stranger);
-        vm.expectRevert(Moderation.NotGovernance.selector);
-        mod.proposeGuidelines(keccak256("g"));
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        governor.proposeGuidelines(keccak256("g"));
     }
 
     // --- timelock ------------------------------------------------------------
@@ -130,29 +131,29 @@ contract GovernanceTest is ModerationTestBase {
     function test_param_change_requires_timelock() public {
         _proposeMinReveals(5);
         // Cannot execute before the delay.
-        vm.expectRevert(Moderation.TimelockNotElapsed.selector);
-        mod.executeParameters();
+        vm.expectRevert(RulesetGovernor.TimelockNotElapsed.selector);
+        governor.executeParameters();
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeParameters();
+        governor.executeParameters();
         assertEq(mod.getParams().minReveals, 5, "param applied after timelock");
     }
 
     function test_execute_without_proposal_reverts() public {
-        vm.expectRevert(Moderation.NoPendingProposal.selector);
-        mod.executeParameters();
+        vm.expectRevert(RulesetGovernor.NoPendingProposal.selector);
+        governor.executeParameters();
     }
 
     function test_cancel_clears_pending() public {
         _proposeMinReveals(9);
-        (, bool exists) = mod.pendingParamsEta();
+        (, bool exists) = governor.pendingParamsEta();
         assertTrue(exists);
-        mod.cancelParameters();
-        (, bool exists2) = mod.pendingParamsEta();
+        governor.cancelParameters();
+        (, bool exists2) = governor.pendingParamsEta();
         assertFalse(exists2);
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        vm.expectRevert(Moderation.NoPendingProposal.selector);
-        mod.executeParameters();
+        vm.expectRevert(RulesetGovernor.NoPendingProposal.selector);
+        governor.executeParameters();
     }
 
     // --- parameter validation ------------------------------------------------
@@ -163,14 +164,14 @@ contract GovernanceTest is ModerationTestBase {
 
         Moderation.Params memory p = mod.getParams();
         p.freezeCap = 5e17; // < WAD -> invalid power multiplier
-        vm.expectRevert(Moderation.BadParams.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
 
         p = mod.getParams();
         p.claimBountyFrac = 6e17;
         p.bonusFrac = 6e17; // sum > WAD -> distributable would go negative
-        vm.expectRevert(Moderation.BadParams.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
     }
 
     /// A changed parameter actually drives behavior: raise the fee floor and a
@@ -179,9 +180,9 @@ contract GovernanceTest is ModerationTestBase {
         uint256 oldFee = mod.minFee(1);
         Moderation.Params memory p = mod.getParams();
         p.feeBase = p.feeBase * 10;
-        mod.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
+        governor.proposeParameters(p, mod.getCommitTargets(), mod.getAppealWindows());
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeParameters();
+        governor.executeParameters();
         assertGt(mod.minFee(1), oldFee, "fee floor rose");
     }
 
@@ -191,15 +192,15 @@ contract GovernanceTest is ModerationTestBase {
         bytes32 h1 = keccak256("guidelines v1");
         bytes32 h2 = keccak256("guidelines v2");
 
-        mod.proposeGuidelines(h1);
+        governor.proposeGuidelines(h1);
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeGuidelines();
+        governor.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 1);
         assertEq(mod.guidelinesHashByVersion(1), h1);
 
-        mod.proposeGuidelines(h2);
+        governor.proposeGuidelines(h2);
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeGuidelines();
+        governor.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 2);
         assertEq(mod.guidelinesHashByVersion(2), h2);
         // Prior version is untouched (immutable history).
@@ -210,18 +211,18 @@ contract GovernanceTest is ModerationTestBase {
 
     function test_case_guidelines_version_is_pinned() public {
         // Set v1.
-        mod.proposeGuidelines(keccak256("v1"));
+        governor.proposeGuidelines(keccak256("v1"));
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeGuidelines();
+        governor.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 1);
 
         uint256 caseId = _submit(mods[0]);
         assertEq(mod.caseGuidelinesVersion(caseId), 1, "pinned to current version");
 
         // Update to v2; the live case still points at v1.
-        mod.proposeGuidelines(keccak256("v2"));
+        governor.proposeGuidelines(keccak256("v2"));
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
-        mod.executeGuidelines();
+        governor.executeGuidelines();
         assertEq(mod.guidelinesVersion(), 2);
         assertEq(mod.caseGuidelinesVersion(caseId), 1, "pinned version never changes");
     }
@@ -248,18 +249,98 @@ contract GovernanceTest is ModerationTestBase {
 
     function test_transfer_governance() public {
         address newGov = makeAddr("newGov");
-        mod.transferGovernance(newGov);
-        assertEq(mod.governance(), newGov);
+        governor.transferGovernance(newGov);
+        assertEq(governor.governance(), newGov);
 
         // Old governance (this contract) can no longer propose.
         Moderation.Params memory p = mod.getParams();
         uint256[] memory cts = mod.getCommitTargets();
         uint256[] memory aws = mod.getAppealWindows();
-        vm.expectRevert(Moderation.NotGovernance.selector);
-        mod.proposeParameters(p, cts, aws);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        governor.proposeParameters(p, cts, aws);
 
         // New governance can.
         vm.prank(newGov);
-        mod.proposeGuidelines(keccak256("x"));
+        governor.proposeGuidelines(keccak256("x"));
+    }
+
+    // --- M2.6 split: the Moderation <-> RulesetGovernor boundary -------------
+
+    /// Applying a ruleset is the governor's alone. Nobody else can seal a version,
+    /// including the multisig that authors proposals — it must go through the
+    /// timelock in the governor.
+    function test_only_the_governor_can_apply() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        vm.expectRevert(Moderation.NotGovernor.selector);
+        mod.applyRuleset(p, cts, aws); // this contract is `governance`, not the governor
+
+        vm.prank(stranger);
+        vm.expectRevert(Moderation.NotGovernor.selector);
+        mod.applyRuleset(p, cts, aws);
+
+        vm.prank(stranger);
+        vm.expectRevert(Moderation.NotGovernor.selector);
+        mod.applyGuidelines(keccak256("g"));
+    }
+
+    /// The boundary re-check. Full validation lives in the governor, so a governor
+    /// bug could hand `Moderation` a ruleset that never passed it. One bound is
+    /// re-enforced on arrival — the one whose violation is a solvency failure
+    /// rather than a liveness one: a case must never lock more per seat than a
+    /// pledged duty unit is worth, or panels get seated on collateral that cannot
+    /// cover them. Every other validation failure can brick a case; only this one
+    /// can seat an uncollateralized panel.
+    function test_apply_rechecks_the_solvency_bound_even_from_the_governor() public {
+        Moderation.Params memory p = mod.getParams();
+        p.riskPerSeat = stakeReg.riskPerSeat() + 1;
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        // Straight from the governor address, bypassing the governor's own
+        // validation entirely — this is the "governor is buggy" case.
+        vm.prank(address(governor));
+        vm.expectRevert(Moderation.RiskPerSeatExceedsDutyUnit.selector);
+        mod.applyRuleset(p, cts, aws);
+
+        // And the same ruleset is refused at proposal time, before the timelock.
+        vm.expectRevert(RulesetGovernor.RiskPerSeatExceedsDutyUnit.selector);
+        governor.proposeParameters(p, cts, aws);
+    }
+
+    /// A ruleset that IS valid still applies normally through the governor, and
+    /// seals a new version rather than mutating the old one (H-11).
+    function test_governor_apply_seals_a_new_version() public {
+        uint256 v0 = mod.currentRulesVersion();
+        _proposeMinReveals(4);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        governor.executeParameters();
+
+        assertEq(mod.currentRulesVersion(), v0 + 1, "a new immutable version");
+        assertEq(mod.getParams().minReveals, 4, "and it is live");
+    }
+
+    /// The governor binds to one game contract, once. `Moderation.governor` is
+    /// immutable on the other side, so a rebind could only produce a governor
+    /// that governs nothing.
+    function test_bind_is_one_way() public {
+        vm.expectRevert(RulesetGovernor.AlreadyBound.selector);
+        governor.bindModeration(mod);
+
+        RulesetGovernor fresh = new RulesetGovernor(address(this), TIMELOCK);
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        fresh.bindModeration(mod);
+    }
+
+    /// An unbound governor cannot execute anything — it has nothing to apply to.
+    function test_unbound_governor_cannot_execute() public {
+        RulesetGovernor fresh = new RulesetGovernor(address(this), TIMELOCK);
+        fresh.proposeGuidelines(keccak256("x"));
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        vm.expectRevert(RulesetGovernor.NotBound.selector);
+        fresh.executeGuidelines();
     }
 }

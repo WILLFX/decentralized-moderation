@@ -7,6 +7,7 @@ import {StakeRegistry} from "../../src/StakeRegistry.sol";
 import {StakeRegistryHarness} from "../harnesses/StakeRegistryHarness.sol";
 import {IndexRegistry} from "../../src/IndexRegistry.sol";
 import {ModerationHarness} from "../harnesses/ModerationHarness.sol";
+import {RulesetGovernor} from "../../src/RulesetGovernor.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
 
 /// # Rule for all test code in this repo: never read `block.timestamp` or
@@ -37,14 +38,34 @@ abstract contract StackDeployer is Test {
     /// locks per seat) may be lower, but never higher — `_validateParams` and the
     /// Moderation constructor both reject that. See DEVIATIONS.md D-13.
     uint256 internal constant REG_RISK_PER_SEAT = 10 * 1e16;
+    /// Was `Moderation.timelockDelay`, hardcoded to 7 days before the M2.6 split.
+    uint256 internal constant GOV_TIMELOCK = 7 days;
+
+    /// The governor deployed alongside the most recent `_deployStack` call, for
+    /// suites that drive governance. M2.6 moved ruleset authoring out of
+    /// `Moderation` (EIP-170), so proposals go here.
+    RulesetGovernor internal governor;
 
     function _deployStack(MockBZZ bzz)
         internal
         returns (ModerationHarness m, StakeRegistryHarness sr, IndexRegistry ir)
     {
         (sr, ir) = _deployRegistries(bzz);
-        m = new ModerationHarness(IERC20(address(bzz)), sr, ir);
+        (m, governor) = _deployLogic(bzz, sr, ir);
         _authorizeLogic(sr, ir, address(m));
+    }
+
+    /// Deploy the game contract and its governor. The references are circular at
+    /// construction — `Moderation.governor` is immutable and the governor must
+    /// know what it governs — so the binding is a second step, exactly as a real
+    /// deployment does it.
+    function _deployLogic(MockBZZ bzz, StakeRegistryHarness sr, IndexRegistry ir)
+        internal
+        returns (ModerationHarness m, RulesetGovernor g)
+    {
+        g = new RulesetGovernor(address(this), GOV_TIMELOCK);
+        m = new ModerationHarness(IERC20(address(bzz)), sr, ir, address(g));
+        g.bindModeration(m);
     }
 
     function _deployRegistries(MockBZZ bzz) internal returns (StakeRegistryHarness sr, IndexRegistry ir) {

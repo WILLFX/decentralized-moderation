@@ -183,7 +183,7 @@ contract AppealsTest is ModerationTestBase {
         p.bondMultiplier = 1;
         uint256[] memory cts = mod.getCommitTargets();
         uint256[] memory aws = mod.getAppealWindows();
-        mod.proposeParameters(p, cts, aws);
+        governor.proposeParameters(p, cts, aws);
         uint256 eta = vm.getBlockTimestamp() + 7 days;
 
         // Open the case ~3.5 days before eta so the 4-day appeal window is still
@@ -204,7 +204,7 @@ contract AppealsTest is ModerationTestBase {
 
         // Governance executes mid-window: the LIVE multiplier drops to 1.
         vm.warp(eta);
-        mod.executeParameters();
+        governor.executeParameters();
         assertEq(mod.getParams().bondMultiplier, 1, "live param changed");
 
         // The open case is unaffected: its floor is still the pinned 2x, so the

@@ -6,6 +6,7 @@ import {Moderation} from "../src/Moderation.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
+import {RulesetGovernor} from "../src/RulesetGovernor.sol";
 
 /// The whole point of the M2.5 split, exercised end to end against live state
 /// rather than asserted about empty registries: run a real case to settlement
@@ -18,6 +19,14 @@ import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 contract MigrationTest is ModerationTestBase {
     bytes32 internal constant TK = keccak256("marine biology");
     bytes32 internal constant CONTENT_B = keccak256("content-b");
+
+    /// A replacement game contract, with its own governor — `Moderation.governor`
+    /// is immutable, so a new logic version brings a new one (M2.6 split).
+    function _deployReplacementLogic() internal returns (ModerationHarness m) {
+        RulesetGovernor g = new RulesetGovernor(address(this), GOV_TIMELOCK);
+        m = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg, address(g));
+        g.bindModeration(m);
+    }
 
     function test_live_migration_preserves_stake_and_index() public {
         // --- under logic A: a case runs all the way to an indexed approval ---
@@ -41,7 +50,7 @@ contract MigrationTest is ModerationTestBase {
 
         // --- governance migrates the game to logic B -------------------------
         ModerationHarness modA = mod; // keep a handle: `mod` is repointed to B below
-        ModerationHarness modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
+        ModerationHarness modB = _deployReplacementLogic();
         _authorizeLogic(stakeReg, indexReg, address(modB));
 
         // Not one moderator lifted a finger, and not one token moved.
@@ -135,7 +144,7 @@ contract MigrationTest is ModerationTestBase {
 
         // --- migrate: B authorized, A revoked. B has never seen this content --
         ModerationHarness modA = mod;
-        ModerationHarness modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
+        ModerationHarness modB = _deployReplacementLogic();
         _authorizeLogic(stakeReg, indexReg, address(modB));
         stakeReg.revokeLogic(address(modA));
         indexReg.revokeLogic(address(modA));
@@ -166,7 +175,7 @@ contract MigrationTest is ModerationTestBase {
     /// base helpers at B. Returns the outgoing logic.
     function _migrateToNewLogic() internal returns (ModerationHarness modA, ModerationHarness modB) {
         modA = mod;
-        modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
+        modB = _deployReplacementLogic();
         _authorizeLogic(stakeReg, indexReg, address(modB));
         stakeReg.revokeLogic(address(modA));
         indexReg.revokeLogic(address(modA));
@@ -321,7 +330,7 @@ contract MigrationTest is ModerationTestBase {
     /// announced migration can leave during the timelock. Exit is never gated by
     /// logic, so neither the outgoing nor the incoming game can trap stake.
     function test_moderator_can_exit_during_an_announced_migration() public {
-        ModerationHarness modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
+        ModerationHarness modB = _deployReplacementLogic();
         stakeReg.proposeLogic(address(modB)); // migration announced, not yet live
 
         address leaver = mods[2];

@@ -92,7 +92,7 @@ contract RegistriesTest is Test {
     /// the game is redeployed.
     function test_approvals_survive_a_logic_upgrade() public {
         vm.prank(oldLogic);
-        indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true);
+        indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true, 0, 0);
         assertEq(indexReg.entryCount(TK), 1);
 
         _authorize(newLogic);
@@ -177,7 +177,7 @@ contract RegistriesTest is Test {
         vm.expectRevert(StakeRegistry.NotLogic.selector);
         stakeReg.reward(alice, 1);
         vm.expectRevert(IndexRegistry.NotLogic.selector);
-        indexReg.writeEntry(TK, 1, bytes32(0), bytes32(0), true, true);
+        indexReg.writeEntry(TK, 1, bytes32(0), bytes32(0), true, true, 0, 0);
     }
 
     function test_unauthorized_caller_cannot_use_the_privileged_api() public {
@@ -372,22 +372,22 @@ contract RegistriesTest is Test {
 
     function test_supersafe_requires_uncontested_full_quorum_and_age() public {
         vm.startPrank(oldLogic);
-        indexReg.writeEntry(TK, 1, keccak256("a"), bytes32(0), true, true); // qualifies
-        indexReg.writeEntry(TK, 2, keccak256("b"), bytes32(0), false, true); // contested
-        indexReg.writeEntry(TK, 3, keccak256("c"), bytes32(0), true, false); // under-quorum
+        indexReg.writeEntry(TK, 1, keccak256("a"), bytes32(0), true, true, 0, 0); // qualifies
+        indexReg.writeEntry(TK, 2, keccak256("b"), bytes32(0), false, true, 0, 0); // contested
+        indexReg.writeEntry(TK, 3, keccak256("c"), bytes32(0), true, false, 0, 0); // under-quorum
         vm.stopPrank();
 
         assertEq(indexReg.supersafeEntries(TK, 96 hours, 0, 10).length, 0, "too young");
         vm.warp(vm.getBlockTimestamp() + 96 hours);
         IndexRegistry.Entry[] memory ss = indexReg.supersafeEntries(TK, 96 hours, 0, 10);
         assertEq(ss.length, 1, "only the uncontested full-quorum entry");
-        assertEq(ss[0].caseId, 1);
+        assertEq(ss[0].localCaseId, 1);
     }
 
     function test_reads_are_paginated_and_never_gated() public {
         vm.startPrank(oldLogic);
         for (uint256 i = 0; i < 25; i++) {
-            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true);
+            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0);
         }
         vm.stopPrank();
 
@@ -397,26 +397,27 @@ contract RegistriesTest is Test {
         vm.prank(bob);
         IndexRegistry.Entry[] memory page = indexReg.entries(TK, 10, 10);
         assertEq(page.length, 10, "paginated slice");
-        assertEq(page[0].caseId, 10);
+        assertEq(page[0].localCaseId, 10);
         assertEq(indexReg.entries(TK, 20, 10).length, 5, "final short page");
     }
 
     function test_index_deletion_is_o1_and_relocates_positions() public {
+        uint256[] memory ids = new uint256[](5);
         vm.startPrank(oldLogic);
         for (uint256 i = 0; i < 5; i++) {
-            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true);
+            ids[i] = indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0);
         }
-        indexReg.deleteEntry(TK, 0); // front entry: swap-pop with the last
+        indexReg.deleteEntry(TK, ids[0]); // front entry: swap-pop with the last
         vm.stopPrank();
 
         assertEq(indexReg.entryCount(TK), 4);
-        assertFalse(indexReg.isIndexed(TK, 0), "deleted");
-        assertTrue(indexReg.isIndexed(TK, 4), "moved entry still addressable");
+        assertFalse(indexReg.isIndexed(TK, ids[0]), "deleted");
+        assertTrue(indexReg.isIndexed(TK, ids[4]), "moved entry still addressable");
         // The relocated entry can still be deleted by id (position map is correct).
         vm.prank(oldLogic);
-        indexReg.deleteEntry(TK, 4);
+        indexReg.deleteEntry(TK, ids[4]);
         assertEq(indexReg.entryCount(TK), 3);
-        assertFalse(indexReg.isIndexed(TK, 4));
+        assertFalse(indexReg.isIndexed(TK, ids[4]));
     }
 
     /// H-05: the seat seed is armed against `eligibilityAddVersion`, so EVERY

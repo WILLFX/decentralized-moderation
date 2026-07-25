@@ -286,12 +286,14 @@ contract GasBoundsTest is ModerationTestBase {
         MockBZZ b = new MockBZZ();
         (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
         bytes32 topic = keccak256("bigtopic");
+        uint256 frontId;
         for (uint256 i = 0; i < n; i++) {
-            m.__pushEntry(topic, i);
+            uint256 gid = m.__pushEntry(topic, i);
+            if (i == 0) frontId = gid; // registry-minted handle (M2.6-P0-1)
         }
         assertEq(m.entryCount(topic), n);
         uint256 g = gasleft();
-        m.__deleteEntry(topic, 0); // front entry -> swap-pop with the last
+        m.__deleteEntry(topic, frontId); // front entry -> swap-pop with the last
         used = g - gasleft();
         assertEq(m.entryCount(topic), n - 1, "entry removed");
     }

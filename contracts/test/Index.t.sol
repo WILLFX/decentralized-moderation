@@ -84,7 +84,7 @@ contract IndexTest is ModerationTestBase {
         IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertEq(e.contentHash, CONTENT);
         assertEq(e.metaHash, META);
-        assertEq(e.caseId, caseId);
+        assertEq(e.localCaseId, caseId);
         assertTrue(e.uncontested, "all-approve -> uncontested");
     }
 

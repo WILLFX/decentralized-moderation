@@ -128,12 +128,14 @@ contract ModerationHarness is Moderation {
     /// H-03 O(1)-deletion gas test. Goes through the registry's real write path
     /// (this harness is the authorized logic contract), so the position map it
     /// builds is the one deletion will read.
-    function __pushEntry(bytes32 topicKey, uint256 caseId) external {
-        indexReg.writeEntry(topicKey, caseId, bytes32(caseId), bytes32(caseId), true, true);
+    /// @return globalId The registry-minted id — the ONLY valid deletion handle
+    ///         (M2.6-P0-1). A local caseId is not usable for this.
+    function __pushEntry(bytes32 topicKey, uint256 caseId) external returns (uint256 globalId) {
+        globalId = indexReg.writeEntry(topicKey, caseId, bytes32(caseId), bytes32(caseId), true, true, 0, 0);
     }
 
-    function __deleteEntry(bytes32 topicKey, uint256 caseId) external {
-        _deleteEntry(topicKey, caseId);
+    function __deleteEntry(bytes32 topicKey, uint256 globalId) external {
+        _deleteEntry(topicKey, globalId);
     }
 
     function __setDepth(uint256 caseId, uint256 depth) external {

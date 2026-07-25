@@ -39,6 +39,7 @@ contract MigrationTest is ModerationTestBase {
         IndexRegistry.Entry memory entryBefore = mod.entryAt(TK, 0);
 
         // --- governance migrates the game to logic B -------------------------
+        ModerationHarness modA = mod; // keep a handle: `mod` is repointed to B below
         ModerationHarness modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
         _authorizeLogic(stakeReg, indexReg, address(modB));
 
@@ -54,7 +55,7 @@ contract MigrationTest is ModerationTestBase {
         assertEq(mod.entryCount(TK), 1, "approval survives the migration");
         IndexRegistry.Entry memory entryAfter = indexReg.entryAt(TK, 0);
         assertEq(entryAfter.contentHash, entryBefore.contentHash, "entry content intact");
-        assertEq(entryAfter.caseId, entryBefore.caseId, "entry back-reference intact");
+        assertEq(entryAfter.localCaseId, entryBefore.localCaseId, "entry back-reference intact");
         assertEq(entryAfter.approvalTime, entryBefore.approvalTime, "approval time intact");
 
         // A has drained, so it is revoked. Reads are never gated by any of this.
@@ -68,6 +69,36 @@ contract MigrationTest is ModerationTestBase {
         mod.claim(caseB);
         assertEq(uint256(_phase(caseB)), uint256(Moderation.Phase.SETTLED), "case B settled under logic B");
         assertEq(indexReg.entryCount(TK), 2, "logic B appends to the same index");
+
+        // --- M2.6-P0-1: the cross-version collision the audits found ---------
+        // Both logics wrote their OWN local case 0 under the same topic. Before
+        // global ids, the second write silently overwrote the first's reverse-map
+        // slot: A's entry became a ghost (readable, reported absent by isIndexed,
+        // and un-deletable), and a delete aimed at A would hit B's entry instead.
+        IndexRegistry.Entry memory eA = indexReg.entryAt(TK, 0);
+        IndexRegistry.Entry memory eB = indexReg.entryAt(TK, 1);
+        assertEq(eA.localCaseId, eB.localCaseId, "both logics really did use the same LOCAL case id");
+        assertTrue(eA.globalId != eB.globalId, "but their permanent identities are distinct");
+        assertTrue(indexReg.isIndexed(TK, eA.globalId), "A's entry is addressable");
+        assertTrue(indexReg.isIndexed(TK, eB.globalId), "B's entry is addressable");
+
+        // Provenance survives the logic that produced it.
+        (address originA,,,) = indexReg.entryProvenance(TK, eA.globalId);
+        (address originB,,,) = indexReg.entryProvenance(TK, eB.globalId);
+        assertEq(originA, address(modA), "A's entry records the logic that decided it");
+        assertEq(originB, address(modB), "B's entry records the logic that decided it");
+        assertTrue(originA != originB, "provenance distinguishes the two versions");
+
+        // Each is independently deletable, and deleting one never orphans the other.
+        vm.prank(address(modB));
+        indexReg.deleteEntry(TK, eA.globalId); // remove the LEGACY entry
+        assertEq(indexReg.entryCount(TK), 1, "only one entry removed");
+        assertFalse(indexReg.isIndexed(TK, eA.globalId), "legacy entry gone");
+        assertTrue(indexReg.isIndexed(TK, eB.globalId), "B's entry survived and is still addressable");
+
+        vm.prank(address(modB));
+        indexReg.deleteEntry(TK, eB.globalId);
+        assertEq(indexReg.entryCount(TK), 0, "no ghost entries left behind");
         _assertConservation();
 
         // The moderators earned under B on stake they deposited under A.
@@ -95,7 +126,7 @@ contract MigrationTest is ModerationTestBase {
 
         vm.prank(address(mod));
         vm.expectRevert();
-        indexReg.writeEntry(TK, 999, CONTENT, META, true, true);
+        indexReg.writeEntry(TK, 999, CONTENT, META, true, true, 0, 0);
     }
 
     /// Trust model #2, with a live case in flight: a moderator that dislikes an

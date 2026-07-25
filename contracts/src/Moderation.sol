@@ -288,6 +288,11 @@ contract Moderation is ReentrancyGuard {
         // an indexed target at submit and no-ops at settlement if it is no longer
         // indexed (already removed by a concurrent removal).
         bool isIndexed;
+        // M2.6-P0-1: the registry mints a permanent global id per written entry.
+        // A local caseId is NOT a safe index handle — it restarts at 0 in every new
+        // logic deployment — so we record what the registry actually issued and
+        // remove by that. Parallel to topicKeys.
+        uint256[] entryIds;
         Round[] rounds; // one per depth reached
         // C-01: winning-appeal refunds+bonuses are pulled (not credited in a loop
         // at settlement, which was unbounded in contributor count). These running
@@ -1020,7 +1025,10 @@ contract Moderation is ReentrancyGuard {
         bool fullQuorum = _fullQuorum(c);
         uint256 n = c.topicKeys.length;
         for (uint256 i; i < n; ++i) {
-            indexReg.writeEntry(c.topicKeys[i], c.id, c.contentHash, c.metaHash, uncontested, fullQuorum);
+            uint256 gid = indexReg.writeEntry(
+                c.topicKeys[i], c.id, c.contentHash, c.metaHash, uncontested, fullQuorum, c.rulesVersion, c.guidelinesVersion
+            );
+            c.entryIds.push(gid); // the only safe removal handle (M2.6-P0-1)
         }
         c.isIndexed = true; // now live in the index (H-01 generation signal)
     }
@@ -1031,19 +1039,29 @@ contract Moderation is ReentrancyGuard {
         // already deleted it). Bound to a specific caseId at submit, so this can
         // only ever delete the exact entries the removal was approved against.
         if (!target.isIndexed) return;
-        uint256 n = target.topicKeys.length;
+        uint256 n = target.entryIds.length;
         for (uint256 i; i < n; ++i) {
-            _deleteEntry(target.topicKeys[i], c.targetCaseId);
+            // Delete by the registry-minted global id, not by our local caseId:
+            // another logic version may hold the same local id (M2.6-P0-1).
+            _deleteEntry(target.topicKeys[i], target.entryIds[i]);
         }
         target.isIndexed = false;
         _clearDedup(target); // the removed submission is resubmittable
     }
 
-    /// @dev Delete the entry for `caseId` under `topicKey`. The registry does the
-    ///      O(1) swap-and-pop via its position map (H-03) and no-ops if the entry
-    ///      is absent, so a removal whose target is already gone settles cleanly.
-    function _deleteEntry(bytes32 topicKey, uint256 caseId) internal {
-        indexReg.deleteEntry(topicKey, caseId);
+    /// @dev Delete the entry with global id `globalId` under `topicKey`. The
+    ///      registry does the O(1) swap-and-pop via its position map (H-03) and
+    ///      no-ops if the entry is absent, so a removal whose target is already gone
+    ///      settles cleanly.
+    function _deleteEntry(bytes32 topicKey, uint256 globalId) internal {
+        indexReg.deleteEntry(topicKey, globalId);
+    }
+
+    /// @notice The registry-minted global entry ids this case wrote (empty until it
+    ///         settles as an approval). These are the permanent, collision-free
+    ///         handles a client or a future logic version should use.
+    function caseEntryIds(uint256 caseId) external view returns (uint256[] memory) {
+        return cases[caseId].entryIds;
     }
 
     /// @dev uncontested iff no Reject vote was revealed in ANY round (§8.1).

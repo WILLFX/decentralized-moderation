@@ -29,13 +29,30 @@ contract IndexRegistry {
         uint40 approvalTime; // drives the supersafe age filter
         bool uncontested; // no Reject vote was ever revealed
         bool fullQuorum; // decided at full quorum, no under-quorum fallback (H-09)
-        uint256 caseId; // back-reference of the approving case
+        // M2.6-P0-1: identity is minted HERE, by the permanent registry. A logic
+        // contract's own caseId restarts at 0 on every redeployment, so keying the
+        // index by it made a replacement logic's first case collide with the
+        // original's — overwriting the reverse-map slot and orphaning the older
+        // entry (readable, un-deletable, and reported absent by isIndexed).
+        uint256 globalId; // registry-minted, unique for all time
+        address originLogic; // which logic adjudicated this entry
+        uint256 localCaseId; // that logic's own case id, for provenance
+        uint256 rulesVersion; // provenance: ruleset the decision was made under
+        uint256 guidelinesVersion; // provenance: guidelines in force at submission
     }
+
+    /// Monotonic, never reused. Entry 0 is never minted so `globalId == 0` is a
+    /// safe "absent" sentinel.
+    uint256 public nextEntryId = 1;
 
     mapping(bytes32 => Entry[]) internal indexByTopic;
     mapping(bytes32 => bool) internal topicSeen;
-    /// topic -> caseId -> position+1, so deletion is O(1) (H-03).
+    /// topic -> globalId -> position+1, so deletion is O(1) (H-03) AND cannot be
+    /// collided across logic versions (M2.6-P0-1).
     mapping(bytes32 => mapping(uint256 => uint256)) internal entryPosPlusOne;
+    /// globalId -> the topic it was written under, so a holder of the id alone can
+    /// locate and remove it (needed for cross-version removal).
+    mapping(uint256 => bytes32) public topicOfEntry;
 
     address public governance;
     uint256 public immutable timelockDelay;
@@ -51,8 +68,15 @@ contract IndexRegistry {
     address public pendingGovernance;
 
     event TopicCreated(bytes32 indexed topicKey);
-    event EntryWritten(uint256 indexed caseId, bytes32 indexed topicKey, bool uncontested, bool fullQuorum);
-    event EntryRemoved(uint256 indexed caseId, bytes32 indexed topicKey);
+    event EntryWritten(
+        uint256 indexed globalId,
+        bytes32 indexed topicKey,
+        address indexed originLogic,
+        uint256 localCaseId,
+        bool uncontested,
+        bool fullQuorum
+    );
+    event EntryRemoved(uint256 indexed globalId, bytes32 indexed topicKey);
     event LogicProposed(address indexed logic, uint256 eta);
     event LogicAuthorized(address indexed logic);
     event LogicRevoked(address indexed logic);
@@ -83,18 +107,24 @@ contract IndexRegistry {
 
     // --- logic-facing --------------------------------------------------------
 
+    /// @notice Write an approved entry and mint its permanent global id.
+    /// @return globalId The registry-minted identity. The caller MUST record this;
+    ///         it is the only safe handle for later removal.
     function writeEntry(
         bytes32 topicKey,
-        uint256 caseId,
+        uint256 localCaseId,
         bytes32 contentHash,
         bytes32 metaHash,
         bool uncontested,
-        bool fullQuorum
-    ) external onlyLogic {
+        bool fullQuorum,
+        uint256 rulesVersion,
+        uint256 guidelinesVersion
+    ) external onlyLogic returns (uint256 globalId) {
         if (!topicSeen[topicKey]) {
             topicSeen[topicKey] = true;
             emit TopicCreated(topicKey);
         }
+        globalId = nextEntryId++;
         indexByTopic[topicKey].push(
             Entry({
                 contentHash: contentHash,
@@ -102,17 +132,25 @@ contract IndexRegistry {
                 approvalTime: uint40(block.timestamp),
                 uncontested: uncontested,
                 fullQuorum: fullQuorum,
-                caseId: caseId
+                globalId: globalId,
+                originLogic: msg.sender,
+                localCaseId: localCaseId,
+                rulesVersion: rulesVersion,
+                guidelinesVersion: guidelinesVersion
             })
         );
-        entryPosPlusOne[topicKey][caseId] = indexByTopic[topicKey].length;
-        emit EntryWritten(caseId, topicKey, uncontested, fullQuorum);
+        entryPosPlusOne[topicKey][globalId] = indexByTopic[topicKey].length;
+        topicOfEntry[globalId] = topicKey;
+        emit EntryWritten(globalId, topicKey, msg.sender, localCaseId, uncontested, fullQuorum);
     }
 
     /// O(1) swap-and-pop (H-03). No-op if absent, so a removal whose target was
     /// already deleted settles cleanly.
-    function deleteEntry(bytes32 topicKey, uint256 caseId) external onlyLogic {
-        uint256 p = entryPosPlusOne[topicKey][caseId];
+    /// @notice Delete an entry by its permanent global id. Any authorized logic may
+    ///         remove any entry — including one written by a superseded logic — which
+    ///         is what makes legacy entries adjudicable after a migration.
+    function deleteEntry(bytes32 topicKey, uint256 globalId) external onlyLogic {
+        uint256 p = entryPosPlusOne[topicKey][globalId];
         if (p == 0) return;
         Entry[] storage arr = indexByTopic[topicKey];
         uint256 idx = p - 1;
@@ -120,11 +158,12 @@ contract IndexRegistry {
         if (idx != last) {
             Entry storage moved = arr[last];
             arr[idx] = moved;
-            entryPosPlusOne[topicKey][moved.caseId] = idx + 1;
+            entryPosPlusOne[topicKey][moved.globalId] = idx + 1;
         }
         arr.pop();
-        delete entryPosPlusOne[topicKey][caseId];
-        emit EntryRemoved(caseId, topicKey);
+        delete entryPosPlusOne[topicKey][globalId];
+        delete topicOfEntry[globalId];
+        emit EntryRemoved(globalId, topicKey);
     }
 
     // --- reads (permissionless, never gated) ---------------------------------
@@ -137,8 +176,22 @@ contract IndexRegistry {
         return indexByTopic[topicKey][i];
     }
 
-    function isIndexed(bytes32 topicKey, uint256 caseId) external view returns (bool) {
-        return entryPosPlusOne[topicKey][caseId] != 0;
+    function isIndexed(bytes32 topicKey, uint256 globalId) external view returns (bool) {
+        return entryPosPlusOne[topicKey][globalId] != 0;
+    }
+
+    /// @notice Provenance for an entry: who decided it, under which local case, and
+    ///         under which ruleset/guidelines. Permanent entries must remain
+    ///         interpretable after the logic that created them is gone.
+    function entryProvenance(bytes32 topicKey, uint256 globalId)
+        external
+        view
+        returns (address originLogic, uint256 localCaseId, uint256 rulesVersion, uint256 guidelinesVersion)
+    {
+        uint256 p = entryPosPlusOne[topicKey][globalId];
+        if (p == 0) return (address(0), 0, 0, 0);
+        Entry storage e = indexByTopic[topicKey][p - 1];
+        return (e.originLogic, e.localCaseId, e.rulesVersion, e.guidelinesVersion);
     }
 
     /// @notice Paginated slice of a topic (M-04): an unbounded view eventually

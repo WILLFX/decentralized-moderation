@@ -221,6 +221,26 @@ existing appeal ladder.
 
 ---
 
+### P1-5. Quorum counts seats, not independent moderators
+
+Ordinary round progression uses `revealedSeats >= minReveals`, so a single moderator
+holding three collateralized seats satisfies the default quorum alone. Only the
+`fullQuorum` (supersafe) gate requires independent revealers. An entry decided by one
+address therefore still enters the ordinary index. Either raise ordinary progression
+to an independent-address threshold, or state explicitly — in the README and in the
+client — that ordinary index membership carries no independence guarantee. This is a
+product decision, not a pure code fix; make it deliberately.
+
+### P1-6. Conservation should be `balance >= liabilities`, plus tracked surplus
+
+Both conservation identities are exact equalities today. Anyone can break that by
+transferring tokens directly to either contract — the protocol stays solvent but the
+assertion fails, and a broken invariant that fires on a harmless donation trains
+people to ignore it. Restate operational invariants as `balance >= liabilities` with
+surplus tracked separately, and add a sweep path for surplus (to the fee pot or
+governance) so donations cannot accumulate untracked. Update the test helpers to
+match.
+
 ## P2 — economics, semantics, hardening
 
 - **Keeper incentives.** The whole bounty goes to the final batch caller; earlier
@@ -244,8 +264,50 @@ existing appeal ladder.
   model the actual process; binomial conclusions are invalid.
 - **Code size.** 1,184 B of headroom under `via_ir`. CI must block on exact compiler
   version, optimizer settings, `via_ir`, and size.
+- **Track farming.** A moderator earns +1 track for coherent participation in a
+  single-round undisputed case, so easy self-submitted content can farm reputation.
+  Saturation and fees bound it, but it needs simulation against the *actual* duty-pool
+  and retry behaviour, not the pre-M2.5 model.
+- **Trust-model documentation must state the real invariant.** Today's docs imply the
+  registry isolates principal from replaceable logic. Until P0-4 and P0-5 land, the
+  honest statement is: *solvency holds only if every authorized logic is correct,
+  non-malicious, uses the same token, funds rewards before crediting, and never
+  touches another logic's obligations.* Rewrite the `StakeRegistry` header and
+  `DEVIATIONS.md` to say that, then tighten it as each fix lands.
 - **Economic re-validation** and an **independent re-audit of the three-contract
   architecture** — still outstanding, and now more clearly required than before.
+  The re-audit must be pointed at a specific commit; the last attempt reviewed
+  pre-M2.5 code and produced a stale replay.
+
+---
+
+## Test gaps the audit identified (each becomes a named test)
+
+The findings above map to concrete blind spots in the current 140-test suite. These
+are not optional extras — several findings exist *because* the fixture stopped short:
+
+1. Two logic contracts each writing their local case 0 to the same topic; then
+   deleting each independently (P0-1).
+2. Removing a legacy entry through a replacement logic (P0-1).
+3. Identical content re-indexed after migration because dedup restarted (P0-1).
+4. `setDutyUnits(0)` **after** selection, then no-show (P0-2).
+5. `requestExit(all free)` after selection, then no-show (P0-2).
+6. Repeated no-op `setDutyUnits(sameValue)` stalling every pending draw (P0-3).
+7. `release`, `reward`, `releaseDuty` each changing eligible weight against a
+   an already-public seed (P0-3).
+8. `reward()` called by an authorized logic that transferred nothing (P0-4).
+9. Cross-logic `release`/`freeze`/`releaseDuty`/`setTrack` during handover (P0-5).
+10. A short panel driven all the way through reveal and the next widen, to a terminal
+    state (P0-6) — the existing test establishes the precondition and stops.
+11. A case opened when the network has zero pledged capacity (P0-6).
+12. A committed moderator receiving widen seats, then settling — assert the extra
+    seats are either collateralized or penalized, never silently released (P1-1).
+13. Deployment with a token that differs from `stakeReg.token()` (P1-2).
+14. Deployment authorized in one registry but not the other (P1-2).
+15. A ruleset that passes validation but exceeds `MAX_TOTAL_DRAWS` at runtime through
+    target clamping (P1-3).
+16. Rejected content resubmitted at base fee (P1-4).
+17. A direct token transfer to either contract not breaking the invariant (P1-6).
 
 ---
 

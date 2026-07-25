@@ -908,11 +908,12 @@ contract Moderation is ReentrancyGuard {
                 totalSettling -= reward;
                 // The reward is the one value that CROSSES the contract boundary:
                 // it is pot money (fees + forfeited bonds) held here, becoming
-                // stake held there. Move the tokens FIRST, then credit them.
-                // Reversing the order would leave the registry crediting a
-                // balance it does not hold, and conservation would fail on the
-                // registry side of the pair.
-                address(token).safeTransfer(address(stakeReg), reward);
+                // stake held there. The registry now PULLS its own funding inside
+                // reward() and verifies the balance delta (M2.6-P0-4), so the
+                // funding requirement is enforced by the registry rather than
+                // trusted of the caller. We approve exactly the amount; reward()
+                // consumes it, so no standing allowance is left behind.
+                address(token).safeApprove(address(stakeReg), reward);
                 stakeReg.reward(a, reward);
             }
         } else {

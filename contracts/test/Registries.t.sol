@@ -216,13 +216,74 @@ contract RegistriesTest is Test {
         _stake(bob, 50 * XBZZ);
         uint256 bobBefore = stakeReg.totalStakeOf(bob);
 
-        bzz.mint(address(stakeReg), 5 * XBZZ); // fee money arriving with the reward
+        // M2.6-P0-4: the logic contract must HOLD the reward and let the registry
+        // pull it. Previously this test minted straight into the registry, which
+        // masked the fact that reward() never checked its own funding.
+        bzz.mint(oldLogic, 5 * XBZZ);
+        vm.prank(oldLogic);
+        bzz.approve(address(stakeReg), 5 * XBZZ);
         vm.prank(oldLogic);
         stakeReg.reward(alice, 5 * XBZZ);
 
         assertEq(stakeReg.totalStakeOf(alice), 105 * XBZZ, "reward credited");
         assertEq(stakeReg.totalStakeOf(bob), bobBefore, "nobody else's stake moved");
         assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// M2.6-P0-4. The registry must not credit stake it was not funded for.
+    /// Before this fix, an authorized logic — superseded, buggy, or malicious —
+    /// could mint withdrawable claims from nothing and drain real stakers'
+    /// principal via requestExit/withdraw. The funding rule lived only in a
+    /// comment; now the registry pulls and verifies it.
+    function test_unfunded_reward_reverts() public {
+        _stake(alice, 100 * XBZZ);
+        uint256 liabilitiesBefore = stakeReg.stakeBuckets();
+
+        // oldLogic is authorized but holds nothing and approved nothing.
+        vm.prank(oldLogic);
+        vm.expectRevert();
+        stakeReg.reward(alice, 5 * XBZZ);
+
+        assertEq(stakeReg.stakeBuckets(), liabilitiesBefore, "no liability was created");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation intact");
+    }
+
+    /// The full attack the audit described, end to end: an authorized logic mints
+    /// itself a balance and walks it out through the ordinary exit path, taking
+    /// other stakers' tokens. It must be impossible at step one.
+    function test_authorized_logic_cannot_mint_and_drain() public {
+        _stake(alice, 100 * XBZZ); // a real staker's principal sits in the registry
+        address attacker = makeAddr("attacker");
+        uint256 registryFunds = bzz.balanceOf(address(stakeReg));
+
+        // Step 1: the malicious logic tries to conjure a balance.
+        vm.prank(oldLogic);
+        vm.expectRevert();
+        stakeReg.reward(attacker, registryFunds);
+
+        // Nothing was created, so there is nothing to exit with.
+        assertEq(stakeReg.totalStakeOf(attacker), 0, "no phantom balance");
+        vm.prank(attacker);
+        vm.expectRevert(StakeRegistry.AmountZero.selector);
+        stakeReg.requestExit(0);
+
+        // Alice's principal is untouched and still fully backed.
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "still solvent");
+    }
+
+    /// Approving less than the credit must fail too — the registry verifies the
+    /// measured balance delta, not the caller's word.
+    function test_underfunded_reward_reverts() public {
+        _stake(alice, 100 * XBZZ);
+        bzz.mint(oldLogic, 2 * XBZZ);
+        vm.prank(oldLogic);
+        bzz.approve(address(stakeReg), 5 * XBZZ); // approves 5, holds only 2
+
+        vm.prank(oldLogic);
+        vm.expectRevert();
+        stakeReg.reward(alice, 5 * XBZZ);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation intact");
     }
 
     function test_frozen_stake_is_excluded_from_draws_until_thaw() public {

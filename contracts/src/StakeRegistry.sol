@@ -39,6 +39,25 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///    the new logic are authorized during the handover.
 /// 4. **No governance access to funds.** Governance can name the logic contract
 ///    and nothing else; it can never move, freeze, or credit a single wei itself.
+/// 5. **Credits must be funded.** `reward()` pulls its own tokens and verifies the
+///    measured balance delta (M2.6-P0-4). An authorized logic cannot conjure a
+///    withdrawable balance, so it cannot drain other stakers' principal through the
+///    ordinary exit path.
+///
+/// ## What this registry does NOT yet guarantee (be honest about it)
+///
+/// Obligations are still recorded as bare aggregates (`committed`, `frozen`,
+/// `dutyReserved`, `track`) with no obligation id and no originating-logic
+/// namespace. While two logics are authorized during a handover, either can
+/// release, freeze, or overwrite obligations created by the other — by malice OR by
+/// an ordinary bug — and the outgoing logic's honest settlement can then underflow.
+/// There is also no on-chain `canRevoke(logic)`: revocation relies on governance
+/// believing the old logic has drained.
+///
+/// So the true solvency statement today is: *principal cannot be minted, but
+/// obligation bookkeeping is only correct if every authorized logic is correct and
+/// stays inside its own cases.* M2.6-P0-5 (obligation-scoped accounting) is what
+/// closes the remaining gap; do not describe the isolation as complete until it does.
 contract StakeRegistry {
     using SafeTransferLib for address;
     using SortitionTree for SortitionTree.Tree;
@@ -163,6 +182,7 @@ contract StakeRegistry {
     error NoPendingProposal();
     error TimelockNotElapsed();
     error ZeroAddress();
+    error RewardNotFunded(); // reward() must be funded by the caller in the same call
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -341,8 +361,27 @@ contract StakeRegistry {
     /// Credit a reward to free balance. The logic contract must have transferred
     /// the corresponding tokens to this registry (rewards are external money —
     /// fees and forfeited bonds — never another moderator's principal).
+    /// @notice Credit a reward, pulling its funding from the caller in the same
+    ///         call. The logic contract must have approved this registry.
+    ///
+    ///         The funding is ENFORCED here, not assumed. Previously this function
+    ///         only incremented balances and the requirement to transfer first lived
+    ///         in a comment — so any authorized logic (buggy, superseded, or
+    ///         malicious) could mint withdrawable claims from nothing and drain real
+    ///         stakers via requestExit/withdraw. A safety property written in prose
+    ///         is not a safety property.
+    ///
+    ///         The measured balance delta also catches a caller funding with the
+    ///         wrong token, which would otherwise leave the registry insolvent in
+    ///         the asset it actually owes.
     function reward(address moderator, uint256 amount) external onlyLogic {
+        if (amount == 0) revert AmountZero();
         Moderator storage m = moderators[moderator];
+
+        uint256 before = token.balanceOf(address(this));
+        address(token).safeTransferFrom(msg.sender, address(this), amount);
+        if (token.balanceOf(address(this)) - before != amount) revert RewardNotFunded();
+
         m.free += amount;
         totalFreeStake += amount;
         _syncTree(moderator, m);

@@ -153,6 +153,42 @@ Two things the split had to get right:
 governor holds exactly what the `governance` address held before. The multisig
 still rotates, via `RulesetGovernor.transferGovernance`.
 
+### P0-3 spike: what a checkpointed sortition tree actually costs
+
+The work order prescribes "each case pins an epoch root at arm time; all draws
+for that seed use that immutable root", which requires a checkpointed sum tree.
+Measured rather than estimated (`test/spike/`, throwaway — delete once P0-3
+lands), 47 seats over 1,000 moderators, k=4:
+
+| history depth | checkpointed descent | live descent | ratio |
+|---|---|---|---|
+| 50 epochs | 1,095,830 | 473,402 | 2.31× |
+| 1,000 epochs | 1,122,031 | 488,225 | 2.29× |
+
+Two results, and the second is the one that matters:
+
+1. **The cost is flat in history depth.** 50 epochs and 1,000 epochs differ by
+   2%. The binary search is not what you pay for — the extra SLOADs for array
+   length and slot are. So checkpointing does not degrade as the protocol ages.
+2. **It fits the ceiling.** Tree descent is only ~488k of the 5.41M `realizeSeats`
+   measurement — most of that figure is P0-2's escrow writes and duty accounting,
+   not the draw. Checkpointing adds ~634k, landing around 6.0–6.5M, under the 8M
+   hard ceiling. An earlier estimate of "2-3× on 5.41M, therefore over the
+   ceiling" was wrong: it scaled the whole measurement by the ratio of one
+   component.
+
+**What actually rules it out is P0-2, not gas.** `drawPanel` shrinks a
+moderator's weight as its capacity is consumed, and drops exhausted moderators
+out of the tree for the rest of the draw (`stakeTree.set(seat, 0)`). Both are
+mid-draw mutations that a pinned historical root cannot see, so a checkpointed
+draw would re-draw a moderator past its escrowed capacity. Recovering that means
+excluding in memory during descent — i.e. rejection sampling — which changes the
+draw distribution and reintroduces the unbounded-attempts problem H-07 was
+designed around.
+
+The frozen-window alternative keeps the live tree as the root and leaves
+`drawPanel` exactly as it is.
+
 ### What is left to cut, if a later item needs it
 
 1. `submissionExists` / `entryCount` / `entryAt` forwarders — the registry serves

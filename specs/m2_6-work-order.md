@@ -399,8 +399,21 @@ match.
   against that cost, and plan a VRF/beacon path.
 - **Draws are capacity-depleting, not with-replacement.** Simulations and docs must
   model the actual process; binomial conclusions are invalid.
-- **Code size.** 1,184 B of headroom under `via_ir`. CI must block on exact compiler
-  version, optimizer settings, `via_ir`, and size.
+- **Code size.** 1,184 B of headroom under `via_ir` when this was written; see the
+  per-item table in `contracts/GAS_BUDGETS.md` for the live figure. CI must block on
+  exact compiler version, optimizer settings, `via_ir`, and size.
+
+  > **The size gate must name the deployed contracts.** There is no `.github/`
+  > in this repo yet, so this is forward-looking rather than a broken gate — but
+  > a naive `forge build --sizes` in CI **fails permanently for a non-reason**.
+  > The command already exits non-zero, and did at `b09ce31` before any M2.6 work:
+  > `ModerationHarness` is 26,783 B, over EIP-170. It is the test-only subclass
+  > carrying the storage injectors, it is never deployed, and `forge test` does
+  > not enforce the limit on it. Assert on `Moderation`, `StakeRegistry` and
+  > `IndexRegistry` specifically (parse the `--sizes` table, or use
+  > `forge build --sizes --json` and check those three keys). A gate that shells
+  > out to `forge build --sizes` and trusts its exit code is red from day one,
+  > and the first person to see it will disable it.
 - **Track farming.** A moderator earns +1 track for coherent participation in a
   single-round undisputed case, so easy self-submitted content can farm reputation.
   Saturation and fees bound it, but it needs simulation against the *actual* duty-pool

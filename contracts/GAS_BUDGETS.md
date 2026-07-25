@@ -43,6 +43,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | M2.5 merge (`b09ce31`) | 23,795 B | 781 B | 8,977 B | 4,287 B |
 | P0-4 + P0-1a | 23,795 B | 781 B | 8,977 B | 4,287 B |
 | **P0-1b** (registry-owned dedup) | **24,082 B** | **494 B** | 8,977 B | 4,893 B |
+| **size pass** (drop 2 broken views) | **23,438 B** | **1,138 B** | 8,977 B | 4,893 B |
 
 P0-1b cost `Moderation` **+287 B**: moving dedup into the registry replaces two
 storage operations with two cross-contract calls, and calldata encoding is bigger
@@ -56,9 +57,38 @@ than `SLOAD`/`SSTORE`. Three shapes were measured before settling:
 
 The last step is the general rule for the rest of the milestone: **when a boundary
 crossing costs `Moderation` bytes, put the wide return type on the registry side.**
-`IndexRegistry` has 19,683 B of margin; `Moderation` has 494 B. Deleting the
-`dedupOwner` compatibility view entirely would save a further 205 B, and is the
-first thing to reach for if an item cannot otherwise fit.
+`IndexRegistry` has 19,683 B of margin; `Moderation` has ~1 KB.
+
+### The size pass (M2.6), and what is left to cut
+
+P0-1c overran EIP-170 by 309 B, so the reduction pass the M2.5 port deferred was
+done then rather than at the end. Two forwarding views were removed — both
+already listed as defects in the work order's P2 section, so this deleted broken
+API rather than useful API:
+
+| removed | saved | why it was wrong, not just costly |
+|---|---|---|
+| `supersafeEntries(bytes32)` | ~440 B | called the registry with the whole topic length; the preserved M2 signature was not operationally safe at scale |
+| `dedupOwner(bytes32)` | ~205 B | a bare caseId cannot distinguish "unreserved" from "owned by case 0", and since P0-1b cannot name the owning logic either |
+
+Both reads are still available, better, from `IndexRegistry`:
+`supersafeEntries(topic, minAge, cursor, limit)` and `contentReservation(key)`.
+Reads there are permissionless and survive a logic upgrade, which is where a
+front end should have been pointed anyway.
+
+Remaining levers, cheapest first, if a later item does not fit:
+
+1. `submissionExists` / `entryCount` / `entryAt` forwarders — same argument as
+   above; the registry serves all three.
+2. The structural split the M2.5 port recorded: move governance (ruleset
+   proposal/validation) or settlement coordination into its own contract.
+   `_validateParams` alone is large, and P1-3 will grow it.
+
+> **`forge build --sizes` exits non-zero on `ModerationHarness`** (26,783 B). That
+> is the test-only subclass with the storage injectors, it is never deployed, and
+> `forge test` does not enforce EIP-170. Pre-existing, not a regression — but a CI
+> size gate (work order P2) must assert on the *deployed* contracts specifically
+> rather than on the command's exit code, or it will fail on the harness forever.
 
 ### Test-code rule this forces
 

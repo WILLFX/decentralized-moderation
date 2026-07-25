@@ -96,6 +96,25 @@ abstract contract ModerationTestBase is StackDeployer {
         caseId = mod.submit(Moderation.Kind.SUBMISSION, contentHash, metaHash, _topics(), 0, fee);
     }
 
+    /// The supersafe subset for a topic. `Moderation.supersafeEntries(bytes32)`
+    /// was removed in M2.6 (unbounded, and the contract is EIP-170-bound), so the
+    /// tests read the registry's paginated view the way a front end now must.
+    function _supersafe(ModerationHarness m, bytes32 topicKey)
+        internal
+        view
+        returns (IndexRegistry.Entry[] memory)
+    {
+        return indexReg.supersafeEntries(topicKey, m.getParams().supersafeAge, 0, indexReg.entryCount(topicKey));
+    }
+
+    /// The (logic, caseId) currently holding a content reservation, or (0,0).
+    /// Replaces the removed, ambiguous `Moderation.dedupOwner`.
+    function _dedupOwner(bytes32 key) internal view returns (address logic, uint256 caseId) {
+        bool exists;
+        (exists, logic, caseId) = indexReg.contentReservation(key);
+        if (!exists) return (address(0), 0);
+    }
+
     function _phase(uint256 caseId) internal view returns (Moderation.Phase p) {
         (, , p, , , , ) = mod.caseInfo(caseId);
     }

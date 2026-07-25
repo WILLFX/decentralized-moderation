@@ -1307,14 +1307,10 @@ contract Moderation is ReentrancyGuard {
         return indexReg.isContentReserved(dedupKey);
     }
 
-    /// @notice The caseId currently holding a dedup reservation.
-    /// @dev Preserved for the M2 ABI, and ambiguous by construction: it cannot
-    ///      distinguish "unreserved" from "owned by case 0", nor say WHICH logic
-    ///      holds it. Use `IndexRegistry.contentReservation` for either question.
-    function dedupOwner(bytes32 dedupKey) external view returns (uint256) {
-        return indexReg.reservationCaseId(dedupKey);
-    }
-
+    /// @dev `dedupOwner(bytes32)` was REMOVED in M2.6. It returned a bare caseId,
+    ///      which cannot distinguish "unreserved" from "owned by case 0" and, since
+    ///      the reservation became cross-version in P0-1b, cannot say which logic
+    ///      holds it either. `indexReg.contentReservation(key)` answers both.
     /// @dev H-11: consensus params for a case come from its pinned ruleset.
     function _cp(Case storage c) internal view returns (Params storage) {
         return rulesets[c.rulesVersion].p;
@@ -1416,16 +1412,12 @@ contract Moderation is ReentrancyGuard {
         return indexReg.entryAt(topicKey, i);
     }
 
-    /// Supersafe subset (§8.3): uncontested, full-quorum (H-09), and aged past
-    /// this contract's SUPERSAFE_AGE. Age is registry-caller policy, so the
-    /// parameter is supplied here rather than stored there — the index outlives
-    /// any particular parameter set.
-    /// @dev Unpaginated, preserving the M2 signature. A front end serving a large
-    ///      topic should read `indexReg.supersafeEntries(topic, minAge, cursor,
-    ///      limit)` directly (M-04).
-    function supersafeEntries(bytes32 topicKey) external view returns (IndexRegistry.Entry[] memory) {
-        return indexReg.supersafeEntries(topicKey, params.supersafeAge, 0, indexReg.entryCount(topicKey));
-    }
+    /// @dev The unpaginated `supersafeEntries(bytes32)` wrapper was REMOVED in
+    ///      M2.6. It called the registry with the entire topic length, so the
+    ///      preserved M2 signature was not operationally safe at scale — and it
+    ///      cost `Moderation` bytes it no longer has. Read the paginated
+    ///      `indexReg.supersafeEntries(topic, minAge, cursor, limit)` directly;
+    ///      `minAge` is `getParams().supersafeAge`.
 
     function caseGuidelinesVersion(uint256 caseId) external view returns (uint256) {
         return cases[caseId].guidelinesVersion;

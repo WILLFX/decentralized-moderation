@@ -29,14 +29,21 @@ contract IndexTest is ModerationTestBase {
     }
 
     // H-02: an obsolete removal must never clear a dedup reservation that a newer
-    // resubmission now owns. Dedup is keyed by owner (caseId+1), so only the
-    // current holder can release it.
+    // resubmission now owns. The reservation is keyed by its owner — (logic,
+    // caseId) since M2.6-P0-1b — so only the current holder can release it.
+    //
+    // Read through `_dedupOwner`, which reports the owning LOGIC as well as the
+    // case. The removed `mod.dedupOwner` returned a bare caseId, and the target
+    // here is case 0, so two of these assertions could not tell "T owns it" from
+    // "nobody owns it" and passed either way.
     function test_obsolete_removal_cannot_wipe_newer_reservation() public {
         bytes32 key = keccak256(abi.encode(CONTENT, META, TK));
 
         uint256 t = _runUndisputed(mods[0], Moderation.Vote.Approve);
         mod.claim(t);
-        assertEq(mod.dedupOwner(key), t, "T owns the reservation");
+        (address ownerLogic, uint256 ownerCase) = _dedupOwner(key);
+        assertEq(ownerLogic, address(mod), "T's reservation is held by this logic");
+        assertEq(ownerCase, t, "T owns the reservation");
 
         // Two removals opened against T while it is still indexed.
         uint256 rem1 = _submitRemoval(mods[1], t);
@@ -45,18 +52,23 @@ contract IndexTest is ModerationTestBase {
         // First removal frees the reservation.
         _settleRemovalApprove(rem1);
         assertEq(mod.entryCount(TK), 0);
-        assertEq(mod.dedupOwner(key), 0, "reservation freed after removal");
+        (ownerLogic,) = _dedupOwner(key);
+        assertEq(ownerLogic, address(0), "reservation freed after removal");
 
         // Same content resubmitted: N now owns the reservation and is indexed.
         uint256 nCase = _runUndisputed(mods[0], Moderation.Vote.Approve);
         mod.claim(nCase);
-        assertEq(mod.dedupOwner(key), nCase, "N now owns the reservation");
+        (ownerLogic, ownerCase) = _dedupOwner(key);
+        assertEq(ownerLogic, address(mod), "N's reservation is held by this logic");
+        assertEq(ownerCase, nCase, "N now owns the reservation");
         assertEq(mod.entryCount(TK), 1);
 
         // The obsolete removal (targets T) settles: it must not touch N's
         // reservation or entry.
         _settleRemovalApprove(rem2);
-        assertEq(mod.dedupOwner(key), nCase, "obsolete removal leaves N's reservation intact");
+        (ownerLogic, ownerCase) = _dedupOwner(key);
+        assertEq(ownerLogic, address(mod), "obsolete removal leaves the holder intact");
+        assertEq(ownerCase, nCase, "obsolete removal leaves N's reservation intact");
         assertEq(mod.entryCount(TK), 1, "N's entry untouched");
 
         // Proof the reservation is really held: a duplicate is rejected.
@@ -232,7 +244,7 @@ contract IndexTest is ModerationTestBase {
         assertFalse(e.fullQuorum, "one independent revealer is not full quorum");
 
         vm.warp(vm.getBlockTimestamp() + 200 hours);
-        assertEq(m.supersafeEntries(TK).length, 0, "under-quorum approval never supersafe, regardless of age");
+        assertEq(_supersafe(m, TK).length, 0, "under-quorum approval never supersafe, regardless of age");
     }
 
     // An appealed case whose EARLIER round was decided under quorum is also barred
@@ -256,7 +268,7 @@ contract IndexTest is ModerationTestBase {
         IndexRegistry.Entry memory e = m.entryAt(TK, 0);
         assertFalse(e.fullQuorum, "a degraded earlier round bars supersafe");
         vm.warp(vm.getBlockTimestamp() + 200 hours);
-        assertEq(m.supersafeEntries(TK).length, 0, "not supersafe");
+        assertEq(_supersafe(m, TK).length, 0, "not supersafe");
     }
 
     // --- supersafe view ------------------------------------------------------
@@ -266,10 +278,10 @@ contract IndexTest is ModerationTestBase {
         mod.claim(caseId);
         // Fresh uncontested entry: in the superset but not yet supersafe.
         assertEq(mod.entryCount(TK), 1);
-        assertEq(mod.supersafeEntries(TK).length, 0, "too young for supersafe");
+        assertEq(_supersafe(mod, TK).length, 0, "too young for supersafe");
 
         vm.warp(vm.getBlockTimestamp() + 96 hours);
-        assertEq(mod.supersafeEntries(TK).length, 1, "aged uncontested -> supersafe");
+        assertEq(_supersafe(mod, TK).length, 1, "aged uncontested -> supersafe");
     }
 
     function test_contested_entry_never_supersafe() public {
@@ -284,6 +296,6 @@ contract IndexTest is ModerationTestBase {
 
         vm.warp(vm.getBlockTimestamp() + 200 hours);
         assertEq(mod.entryCount(TK), 1, "in superset");
-        assertEq(mod.supersafeEntries(TK).length, 0, "contested is never supersafe, regardless of age");
+        assertEq(_supersafe(mod, TK).length, 0, "contested is never supersafe, regardless of age");
     }
 }

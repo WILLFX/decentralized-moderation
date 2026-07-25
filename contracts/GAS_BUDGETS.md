@@ -110,11 +110,20 @@ cost ~20 tests exactly this way. The rule is stated at the top of
 > The 1,184 B below is historical — see the M2.6 table above for the live figure,
 > which is the only one to trust. One pass of dead-API removal has already been
 > spent (P0-1c did not fit without it) and it bought ~645 B, which P0-1c then
-> consumed. P0-2, P0-3, P0-5, P0-6, P0-7 and P0-8 all still have to land in this
-> contract, and P0-2 (a duty-escrow bucket) and P0-5 (obligation handles on every
-> privileged call) are each larger than what remains. Deleting more views will not
-> cover it: the next item should begin by moving governance (ruleset
-> proposal/validation) or settlement coordination into its own contract.
+> consumed. P0-3, P0-5, P0-6, P0-7 and P0-8 all still have to land in this
+> contract, with ~233 B left.
+>
+> P0-2 fit only because a duty-escrow bucket is custody state: it cost
+> `StakeRegistry` +974 B and `Moderation` +84 B. Do not read that as a reprieve —
+> read it as the test for whether an item can be paid for on the registry side.
+> **P0-5 fails that test**: obligation handles change the signature of every
+> privileged call, so the cost lands on the caller. P0-3 (eligibility epochs) is
+> mostly registry state and may fit; P0-7 (a `VOID_SETTLING` phase with its own
+> participant cursor) is pure logic-contract growth and probably does not.
+>
+> The next item that does not fit must be paid for by the split, not by another
+> scrounging pass: move governance (ruleset proposal/validation) or settlement
+> coordination into its own contract.
 >
 > 1,184 B of headroom is thin — roughly one moderate feature. And a logic contract
 > that was 5,193 B over EIP-170 before this port, and fits now only by virtue of an

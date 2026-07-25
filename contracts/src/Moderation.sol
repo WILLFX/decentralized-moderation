@@ -242,6 +242,12 @@ contract Moderation is ReentrancyGuard {
         address[] seatHolders; // unique drawn addresses
         mapping(address => uint256) seats; // seat-holder -> seat count (may grow on widen)
         mapping(address => uint256) committedSeats; // H-08: seats collateralized at commit (tally is capped to this)
+        // M2.6-P0-2 (bypass 3): seats this holder was ASSIGNED at commit time but
+        // could not collateralize. Recorded at commit rather than derived from
+        // `seats[a] - committedSeats[a]` at settlement, so a later widen adding
+        // seats to an already-committed holder is not misread as a broken promise
+        // (that is P1-1's problem, and it has a different remedy).
+        mapping(address => uint256) unbackedSeats;
         mapping(address => uint256) talliedSeats; // seats counted for THIS voter at reveal (frozen; F2)
         mapping(address => bytes32) commits; // seat-holder -> commit hash
         mapping(address => Vote) reveals; // seat-holder -> revealed vote
@@ -622,6 +628,7 @@ contract Moderation is ReentrancyGuard {
         uint256 s = r.seats[msg.sender];
         if (s == 0) revert NotSeatHolder();
         if (r.committed[msg.sender]) revert AlreadyCommitted();
+        uint256 assigned = s;
 
         // H-07: seats are drawn stake-weighted WITH REPLACEMENT, so a moderator can
         // win more seats than its free stake can collateralize (a min-stake holder
@@ -632,7 +639,13 @@ contract Moderation is ReentrancyGuard {
         // reach quorum. Commit as many seats as the moderator can actually back;
         // the rest are simply not collateralized and (via H-08) never tallied.
         uint256 riskPerSeat = _cp(c).riskPerSeat;
-        uint256 affordable = _eligibleFreeOf(msg.sender) / riskPerSeat;
+        // M2.6-P0-2: the collateral for these seats was ESCROWED at draw time, so
+        // it is in `dutyBonded` and no longer in `free`. Counting only free stake
+        // here would reintroduce the exact H-07 liveness failure the partial-commit
+        // path exists to prevent — a moderator whose whole stake is bonded to its
+        // own assignments would compute `affordable == 0` and be unable to commit
+        // the seat it had already posted collateral for.
+        uint256 affordable = (_eligibleFreeOf(msg.sender) + stakeReg.dutyBondedOf(msg.sender)) / riskPerSeat;
         if (affordable == 0) revert InsufficientEligibleFree();
         if (affordable < s) s = affordable;
 
@@ -640,6 +653,12 @@ contract Moderation is ReentrancyGuard {
         stakeReg.lock(msg.sender, lock);
         r.committedAmt[msg.sender] = lock;
         r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
+        // M2.6-P0-2 (bypass 3): partial commit stays possible — it is what keeps a
+        // min-stake holder drawn twice able to serve at all — but the assignments
+        // it could not back are still assignments it fails. Settlement used to
+        // branch on `committed[a]` alone, so a holder assigned 10 seats that
+        // committed 1 had the other 9 disposed of as if they had been served.
+        r.unbackedSeats[msg.sender] = assigned - s;
         r.commits[msg.sender] = commitHash;
         r.committed[msg.sender] = true;
         r.committedCount++;
@@ -951,16 +970,14 @@ contract Moderation is ReentrancyGuard {
                 steps++;
                 if (r.committed[a]) {
                     _disposeSeat(c, r, a, fo, s);
-                } else {
-                    // H-07/H-10: drawn on pledged capacity but never committed.
-                    // The moderator volunteered for duty, so a no-show is its own
-                    // choice, not conscription — it takes the §6.3 brief freeze on
-                    // one seat's worth of stake. This is the penalty that makes
-                    // "dominate the appeal panel and simply refuse to commit"
-                    // (H-10) cost something.
-                    _penalizeNoShow(c, a, r.seats[a]);
                 }
-                _releaseDuty(a, r.seats[a]); // capacity returns either way
+                // H-07/H-10: drawn on pledged capacity but never committed. The
+                // moderator volunteered for duty, so a no-show is its own choice,
+                // not conscription — it takes the §6.3 brief freeze on one seat's
+                // worth of stake. This is the penalty that makes "dominate the
+                // appeal panel and simply refuse to commit" (H-10) cost something.
+                // Capacity and escrow settle in the same call either way (P0-2).
+                _settleDuty(c, a, r.seats[a], !r.committed[a] || r.unbackedSeats[a] > 0);
             }
             round++;
             idx = 0;
@@ -1190,13 +1207,14 @@ contract Moderation is ReentrancyGuard {
     ///      eligibility cost, never a transfer to anyone (principle 2 holds: no
     ///      internal attack profit). Bounded to what the moderator actually has, so
     ///      the penalty can never fail settlement.
-    function _penalizeNoShow(Case storage c, address a, uint256 seats) internal {
+    function _settleDuty(Case storage c, address a, uint256 seats, bool failed) internal {
         if (seats == 0) return;
         Params storage p = _cp(c);
-        // One seat's worth, regardless of seats held. The registry owns the
-        // opt-in check (never pledged -> nothing owed) and clamps the penalty to
-        // what the moderator actually has, so this can never fail settlement.
-        stakeReg.penalizeNoShow(a, p.riskPerSeat, block.timestamp + p.failedRevealFreeze);
+        // One seat's worth, regardless of seats held. The registry bounds the
+        // penalty by the escrow these seats actually posted, so this can never
+        // fail settlement and can never reach another case's collateral.
+        uint256 penalty = failed ? p.riskPerSeat : 0;
+        stakeReg.settleDuty(a, seats, penalty, block.timestamp + p.failedRevealFreeze);
     }
 
     function _coherent(Vote vote, Outcome finalOutcome) internal pure returns (bool) {
@@ -1305,9 +1323,9 @@ contract Moderation is ReentrancyGuard {
                 r.committedAmt[a] = 0;
                 _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
             } else {
-                _penalizeNoShow(c, a, r.seats[a]); // pledged, drawn, never committed
             }
-            _releaseDuty(a, r.seats[a]); // H-07: capacity returns when the case ends
+            // H-07: capacity and escrow both return when the case ends (P0-2).
+            _settleDuty(c, a, r.seats[a], !r.committed[a]);
         }
 
         uint256 pot = c.pot;
@@ -1362,11 +1380,6 @@ contract Moderation is ReentrancyGuard {
         // registry actually performed, so a later widen's draws stay disjoint
         // from this one's even when some attempts hit exhausted capacity.
         r.seatDrawCount += attempts;
-    }
-
-    /// @dev Release the duty capacity a seat-holder reserved for this round.
-    function _releaseDuty(address a, uint256 seats) internal {
-        stakeReg.releaseDuty(a, seats);
     }
 
     /// @dev Free stake usable as per-case collateral right now: excludes the

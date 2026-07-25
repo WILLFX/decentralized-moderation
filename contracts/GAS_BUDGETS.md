@@ -45,6 +45,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **P0-1b** (registry-owned dedup) | **24,082 B** | **494 B** | 8,977 B | 4,893 B |
 | **size pass** (drop 2 broken views) | **23,438 B** | **1,138 B** | 8,977 B | 4,893 B |
 | **P0-1c** (legacy removal path) | **24,259 B** | **317 B** | 8,977 B | 5,288 B |
+| **P0-2** (duty escrow) | **24,343 B** | **233 B** | 9,951 B | 5,288 B |
 
 P0-1b cost `Moderation` **+287 B**: moving dedup into the registry replaces two
 storage operations with two cross-contract calls, and calldata encoding is bigger
@@ -58,7 +59,10 @@ than `SLOAD`/`SSTORE`. Three shapes were measured before settling:
 
 The last step is the general rule for the rest of the milestone: **when a boundary
 crossing costs `Moderation` bytes, put the wide return type on the registry side.**
-`IndexRegistry` has 19,683 B of margin; `Moderation` has ~1 KB.
+`IndexRegistry` has 19,288 B of margin, `StakeRegistry` 14,625 B; `Moderation` has
+a few hundred. P0-2 is the clearest case so far: the duty-escrow bucket cost
+`StakeRegistry` +974 B and `Moderation` only +84 B, because the state and its
+transitions belong on the custody side and the logic contract only names them.
 
 ### The size pass (M2.6), and what is left to cut
 

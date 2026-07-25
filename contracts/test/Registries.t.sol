@@ -325,24 +325,41 @@ contract RegistriesTest is Test {
         vm.prank(oldLogic);
         (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0);
         assertEq(seats.length, 3, "seated exactly the pledged capacity");
-        (, uint256 reserved) = stakeReg.dutyOf(alice);
+        (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 3, "one unit reserved per seat");
+        assertEq(bonded, 3 * RISK_PER_SEAT, "and one unit's collateral ESCROWED per seat (P0-2)");
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "capacity exhausted -> out of the pool");
 
         // Releasing capacity puts the moderator back in the pool.
         vm.prank(oldLogic);
         stakeReg.releaseDuty(alice, 3);
-        (, reserved) = stakeReg.dutyOf(alice);
+        (, reserved, bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 0);
+        assertEq(bonded, 0, "escrow returned to free stake");
         assertGt(stakeReg.eligibleWeightOf(alice), 0, "eligible again once the case ends");
     }
 
     /// The no-show penalty (H-07/H-10): a pledged moderator that is drawn and does
     /// not serve pays a freeze of its OWN stake — never a transfer to anyone.
+    ///
+    /// Since M2.6-P0-2 the penalty is taken from the escrow the DRAW posted, so
+    /// the moderator has to actually be seated first. That is the point: there is
+    /// no longer a reachable-balance calculation for the moderator to manipulate.
     function test_no_show_penalty_freezes_own_stake_only() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         _stakeActivatePledge(bob, 100 * XBZZ);
         uint256 bobBefore = stakeReg.totalStakeOf(bob);
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("noshow"), 0); // seats alice or bob; both are pledged
+        // Penalize whoever was actually seated.
+        (,, uint256 aliceBond) = stakeReg.dutyOf(alice);
+        address seated = aliceBond > 0 ? alice : bob;
+        if (seated != alice) {
+            // Re-point the assertions at the seated moderator.
+            (alice, bob) = (bob, alice);
+            bobBefore = stakeReg.totalStakeOf(bob);
+        }
 
         vm.prank(oldLogic);
         stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
@@ -356,7 +373,9 @@ contract RegistriesTest is Test {
     }
 
     /// Stake that never opted in cannot be penalized — it was never drawable, so
-    /// submission spam cannot grief passive stakers.
+    /// submission spam cannot grief passive stakers. Under M2.6-P0-2 this holds by
+    /// construction rather than by a `dutyUnits == 0` guard: a moderator that was
+    /// never seated has nothing bonded, and the penalty can only reach escrow.
     function test_unpledged_stake_cannot_be_penalized() public {
         _stake(alice, 100 * XBZZ);
         vm.warp(vm.getBlockTimestamp() + ACTIVATION);
@@ -366,6 +385,239 @@ contract RegistriesTest is Test {
         stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, 0, "passive staker is untouchable");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    // --- M2.6-P0-2: duty reservation escrows real collateral -----------------
+    //
+    // `drawPanel` used to increment `dutyReserved` and move no tokens, so a seat's
+    // backing stayed in `free` and stayed user-controlled. The no-show penalty is
+    // the stated defence against appeal-panel obstruction (H-10); it cost nothing.
+
+    /// Seat one moderator and return it. Both are pledged, so the draw picks one
+    /// of them; the test asserts against whichever was actually seated.
+    function _seatOne(bytes32 seed) internal returns (address seated, address other) {
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, seed, 0);
+        (,, uint256 aliceBond) = stakeReg.dutyOf(alice);
+        return aliceBond > 0 ? (alice, bob) : (bob, alice);
+    }
+
+    /// The escrow itself: drawing moves collateral out of free stake.
+    function test_draw_escrows_collateral_out_of_free_stake() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("escrow"), 0);
+
+        (uint256 freeAfter,,,,,,,,) = stakeReg.moderatorInfo(alice);
+        (,, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, RISK_PER_SEAT, "one seat's collateral is escrowed");
+        assertEq(freeBefore - freeAfter, RISK_PER_SEAT, "and it left free stake");
+        assertEq(stakeReg.totalDutyBondedStake(), RISK_PER_SEAT, "tracked in its own bucket");
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "still the moderator's own money");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation across four buckets");
+    }
+
+    /// Bypass 1: `setDutyUnits(0)` after selection. It used to make
+    /// `penalizeNoShow` return on its `dutyUnits == 0` guard.
+    function test_bypass_setDutyUnits_zero_after_selection() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        (address seated,) = _seatOne(keccak256("b1"));
+
+        vm.prank(seated);
+        vm.expectRevert(StakeRegistry.DutyReserved.selector);
+        stakeReg.setDutyUnits(0);
+
+        // Reducing to below what live panels hold is refused; the escrow is intact.
+        (,, uint256 bonded) = stakeReg.dutyOf(seated);
+        assertEq(bonded, RISK_PER_SEAT, "escrow survives the un-pledge attempt");
+
+        vm.prank(oldLogic);
+        stakeReg.penalizeNoShow(seated, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, RISK_PER_SEAT, "the penalty is payable and applied");
+    }
+
+    /// Bypass 2: `requestExit(all free)` after selection. `penalizeNoShow` used to
+    /// subtract `exitAmount` from what it could reach, so the penalty silently
+    /// became a no-op — and the exit did not even have to complete.
+    function test_bypass_requestExit_after_selection() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        (address seated,) = _seatOne(keccak256("b2"));
+
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(seated);
+        vm.prank(seated);
+        stakeReg.requestExit(free); // everything still withdrawable
+
+        vm.prank(oldLogic);
+        stakeReg.penalizeNoShow(seated, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, RISK_PER_SEAT, "escrow is not reachable by the exit path");
+
+        // And the exit cannot carry the bonded collateral out.
+        vm.warp(vm.getBlockTimestamp() + COOLDOWN);
+        vm.prank(seated);
+        stakeReg.withdraw();
+        (,, uint256 bondedAfter) = stakeReg.dutyOf(seated);
+        assertEq(bondedAfter, 0, "bond was consumed by the penalty, not withdrawn");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Bypass 4: the same free stake backing several outstanding assignments.
+    /// Capacity was reserved without moving tokens, so one balance could back
+    /// every seat it was drawn for. A seat is now only issued if its collateral
+    /// can be escrowed, so backing cannot be double-spent across cases.
+    function test_bypass_same_backing_cannot_cover_two_assignments() public {
+        // Pledge two units against two units of stake — valid at pledge time —
+        // then reserve half of it for exit. Pledged CAPACITY is still 2, but the
+        // stake actually available to back an assignment is now 1 unit.
+        _stake(alice, 2 * RISK_PER_SEAT);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        stakeReg.activate(alice);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(2);
+        vm.prank(alice);
+        stakeReg.requestExit(RISK_PER_SEAT);
+
+        vm.prank(oldLogic);
+        (address[] memory seats,) = stakeReg.drawPanel(2, keccak256("b4"), 0);
+
+        // Before the escrow, capacity alone gated the draw: both seats were issued
+        // and both were "backed" by the same single unit of usable stake.
+        assertEq(seats.length, 1, "seated only what the stake can actually escrow");
+        (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(reserved, 1, "capacity consumed matches collateral posted");
+        assertEq(bonded, RISK_PER_SEAT, "every seated assignment is fully backed");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "no unbacked capacity remains drawable");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Escrow returns to free stake when the case ends, and only once.
+    function test_release_returns_escrow_exactly_once() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(2, keccak256("rel"), 0);
+
+        vm.startPrank(oldLogic);
+        stakeReg.releaseDuty(alice, 2);
+        stakeReg.releaseDuty(alice, 2); // a double release must not mint stake
+        vm.stopPrank();
+
+        (uint256 freeAfter,,,,,,,,) = stakeReg.moderatorInfo(alice);
+        (,, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, 0, "escrow fully returned");
+        assertEq(freeAfter, freeBefore, "and exactly restored, not doubled");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A committed seat's bond becomes committed stake rather than being released
+    /// twice: `lock` draws from the escrow that was posted for it.
+    function test_commit_converts_escrow_not_free_stake() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("conv"), 0);
+        (uint256 freeAfterDraw,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.lock(alice, RISK_PER_SEAT);
+
+        (uint256 free,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        (,, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(committed, RISK_PER_SEAT, "the vote is collateralized");
+        assertEq(bonded, 0, "out of escrow");
+        assertEq(free, freeAfterDraw, "free stake was not touched a second time");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Settling one case's assignment must not consume escrow belonging to
+    /// another case's outstanding seat.
+    ///
+    /// `dutyBonded` is a pool shared across every case a moderator is seated in.
+    /// Penalising and releasing as two calls reads that pool twice: the penalty
+    /// takes a seat's worth, and the release then still hands back a full
+    /// `riskPerSeat` — draining the OTHER case's collateral and silently
+    /// un-bonding its seat, so that case's own penalty later becomes a no-op.
+    /// Nothing is minted, so conservation still holds and the leak is invisible
+    /// unless the two are one operation.
+    function test_settling_one_case_cannot_drain_another_cases_escrow() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+
+        // Two separate cases each seat this moderator once.
+        vm.startPrank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("caseA"), 0);
+        stakeReg.drawPanel(1, keccak256("caseB"), 0);
+        vm.stopPrank();
+        (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(reserved, 2, "two outstanding assignments");
+        assertEq(bonded, 2 * RISK_PER_SEAT, "each with its own escrow");
+
+        // Case A settles; the moderator no-showed there.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+
+        (,, bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, RISK_PER_SEAT, "case B's escrow is untouched");
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, RISK_PER_SEAT, "A's penalty applied");
+
+        // Case B settles; its penalty is still payable, which is the point.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 2 * RISK_PER_SEAT, "B's penalty applied too");
+        (,, bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, 0);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A moderator that served gets its escrow back rather than frozen.
+    function test_settling_a_served_assignment_returns_the_escrow() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.startPrank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("served"), 0);
+        stakeReg.settleDuty(alice, 1, 0, vm.getBlockTimestamp() + 1 days); // no penalty
+        vm.stopPrank();
+
+        (uint256 free,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 0, "serving costs nothing");
+        assertEq(free, freeBefore, "escrow returned in full");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A moderator whose ENTIRE stake is escrowed against its own assignment must
+    /// still be able to commit it. The collateral is in `dutyBonded`, not `free`,
+    /// so a commit path that measures only free stake would refuse the very seat
+    /// the escrow was posted for — the H-07 liveness failure, reintroduced by the
+    /// escrow itself if the buckets are not both counted.
+    function test_fully_bonded_moderator_can_still_commit_its_seat() public {
+        _stake(alice, RISK_PER_SEAT); // exactly one unit, nothing spare
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        stakeReg.activate(alice);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(1);
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("bonded"), 0);
+
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(free, 0, "every token is escrowed");
+        assertEq(stakeReg.dutyBondedOf(alice), RISK_PER_SEAT, "and visible as backing");
+
+        // The commit converts that escrow; it must not need free stake.
+        vm.prank(oldLogic);
+        stakeReg.lock(alice, RISK_PER_SEAT);
+        (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(committed, RISK_PER_SEAT, "the seat it was drawn for is collateralized");
+        assertEq(stakeReg.dutyBondedOf(alice), 0);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
     }
 
     // --- index registry ------------------------------------------------------

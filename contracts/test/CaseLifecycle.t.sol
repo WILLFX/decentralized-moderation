@@ -383,29 +383,39 @@ contract CaseLifecycleTest is ModerationTestBase {
         _realizeSeats(caseId);
         address sh = mod.seatHolderAt(caseId, 0, 0);
 
-        // Force the seat count above what this holder can collateralize: give it
-        // 5 seats but only enough eligible free stake for a couple.
+        // Force the seat count above what this holder can collateralize. Note
+        // WHERE the excess comes from: injected widen seats, which are added to
+        // `r.seats` without going through `drawPanel` and therefore carry no
+        // escrow. Since M2.6-P0-2 a DRAWN seat always has its collateral bonded
+        // at draw time, so the draw can no longer overdraw a holder — widening
+        // is the remaining source, and that is P1-1's open finding.
         mod.__injectWidenSeats(caseId, 0, sh, 5);
         uint256 seats = mod.__seats(caseId, 0, sh);
         uint256 riskPerSeat = mod.getParams().riskPerSeat;
         (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(sh);
-        // Exit-reserve most of the stake so only 1 seat is affordable.
-        uint256 keep = riskPerSeat; // exactly one seat's worth
+        // Exit-reserve most of the stake so only one seat's worth stays free.
+        uint256 keep = riskPerSeat;
         vm.prank(sh);
         stakeReg.requestExit(free - keep);
-        assertLt(keep / riskPerSeat, seats, "holder is genuinely overdrawn");
+
+        // Backing is free stake PLUS the escrow already posted for this holder's
+        // real drawn seats — that escrow exists precisely to back them, and
+        // ignoring it here would make a fully-bonded holder unable to commit at
+        // all (the H-07 liveness failure this path exists to prevent).
+        uint256 affordable = (keep + stakeReg.dutyBondedOf(sh)) / riskPerSeat;
+        assertLt(affordable, seats, "holder is genuinely overdrawn");
 
         bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
         vm.prank(sh);
         mod.commitVote(caseId, h); // must NOT revert
 
-        // It committed exactly what it could afford, and the tally follows (H-08).
-        assertEq(mod.__committedSeats(caseId, 0, sh), keep / riskPerSeat, "committed only affordable seats");
+        // It committed exactly what it could back, and the tally follows (H-08).
+        assertEq(mod.__committedSeats(caseId, 0, sh), affordable, "committed only affordable seats");
         vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
         vm.prank(sh);
         mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
-        assertEq(mod.__talliedSeats(caseId, 0, sh), keep / riskPerSeat, "tally <= collateralized seats");
+        assertEq(mod.__talliedSeats(caseId, 0, sh), affordable, "tally <= collateralized seats");
     }
 
     // H-05: adaptive activation. An attacker with mature-but-unactivated stake

@@ -80,6 +80,21 @@ contract StakeRegistry {
         // stake that never opted in is never drawable.
         uint256 dutyUnits;
         uint256 dutyReserved;
+        // M2.6-P0-2: collateral ESCROWED against outstanding draw assignments,
+        // `riskPerSeat` per reserved seat. Before this bucket existed, `drawPanel`
+        // incremented `dutyReserved` but moved no tokens: the seat's backing stayed
+        // in `free`, and therefore stayed user-controlled. A selected moderator
+        // escaped the no-show penalty entirely by calling `setDutyUnits(0)` or
+        // `requestExit(free)` — the exit did not even have to complete, since
+        // `penalizeNoShow` subtracted `exitAmount` from what it could reach. The
+        // penalty is the stated defence against appeal-panel obstruction (H-10)
+        // and it cost nothing.
+        //
+        // Bonded stake is not free, not exitable, not reducible by
+        // `setDutyUnits`, and not available to another case. It leaves only by
+        // being committed (a vote), frozen (a no-show penalty), or released (the
+        // case ended).
+        uint256 dutyBonded;
         bool exists;
     }
 
@@ -91,6 +106,9 @@ contract StakeRegistry {
     uint256 public totalFreeStake;
     uint256 public totalCommittedStake;
     uint256 public totalFrozenStake;
+    /// M2.6-P0-2: escrowed against outstanding draw assignments. A fourth bucket,
+    /// so conservation still accounts for every token exactly once.
+    uint256 public totalDutyBondedStake;
 
     // Parameters this registry needs on its own (it must not depend on the logic
     // contract for the exit path — see trust model #2).
@@ -183,6 +201,7 @@ contract StakeRegistry {
     error TimelockNotElapsed();
     error ZeroAddress();
     error RewardNotFunded(); // reward() must be funded by the caller in the same call
+    error DutyReserved(); // M2.6-P0-2: cannot un-pledge capacity a live panel holds
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -291,6 +310,11 @@ contract StakeRegistry {
     function setDutyUnits(uint256 units) external {
         Moderator storage m = moderators[msg.sender];
         if (!m.exists) revert NoModerator();
+        // M2.6-P0-2 (bypass 1): capacity already held by live panels cannot be
+        // un-pledged. `setDutyUnits(0)` after selection used to make
+        // `penalizeNoShow` return immediately on its `dutyUnits == 0` guard, so a
+        // drawn moderator walked away from an assignment for free.
+        if (units < m.dutyReserved) revert DutyReserved();
         if (units > 0) {
             uint256 reserved = m.pending + m.exitAmount;
             uint256 usable = m.free > reserved ? m.free - reserved : 0;
@@ -321,15 +345,29 @@ contract StakeRegistry {
     // Logic-facing: the narrow privileged API
     // =========================================================================
 
-    /// Move `amount` free -> committed (backing a vote in an open case).
+    /// Move `amount` -> committed (backing a vote in an open case).
+    /// @dev M2.6-P0-2: drawn from `dutyBonded` first — that escrow exists for
+    ///      exactly this, and a case locking `riskPerSeat` per seat can never need
+    ///      more than was bonded for those seats (`Moderation._validateParams`
+    ///      rejects a ruleset whose `riskPerSeat` exceeds this registry's unit).
+    ///      Any remainder comes from free stake, which keeps the injector paths and
+    ///      any future non-duty lock working.
     function lock(address moderator, uint256 amount) external onlyLogic {
         Moderator storage m = moderators[moderator];
-        uint256 reserved = m.pending + m.exitAmount;
-        uint256 eligible = m.free > reserved ? m.free - reserved : 0;
-        if (eligible < amount) revert InsufficientEligibleFree();
-        m.free -= amount;
+        uint256 fromBond = amount > m.dutyBonded ? m.dutyBonded : amount;
+        uint256 fromFree = amount - fromBond;
+        if (fromFree > 0) {
+            uint256 reserved = m.pending + m.exitAmount;
+            uint256 eligible = m.free > reserved ? m.free - reserved : 0;
+            if (eligible < fromFree) revert InsufficientEligibleFree();
+            m.free -= fromFree;
+            totalFreeStake -= fromFree;
+        }
+        if (fromBond > 0) {
+            m.dutyBonded -= fromBond;
+            totalDutyBondedStake -= fromBond;
+        }
         m.committed += amount;
-        totalFreeStake -= amount;
         totalCommittedStake += amount;
         _syncTree(moderator, m);
         emit StakeLocked(moderator, amount);
@@ -419,7 +457,13 @@ contract StakeRegistry {
             address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + attempts))));
             attempts++;
             Moderator storage m = moderators[seat];
-            if (m.dutyUnits <= m.dutyReserved) {
+            // M2.6-P0-2 (bypass 4): a seat is only issued if its collateral can be
+            // ESCROWED right now. Reserving capacity while the backing stayed in
+            // `free` let the same stake back several outstanding assignments, be
+            // locked by whichever case committed first, or be exit-reserved.
+            uint256 reserved = m.pending + m.exitAmount;
+            uint256 usable = m.free > reserved ? m.free - reserved : 0;
+            if (m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
                 if (nExcluded < count) {
                     excluded[nExcluded++] = seat;
                     stakeTree.set(seat, 0);
@@ -427,6 +471,10 @@ contract StakeRegistry {
                 continue;
             }
             m.dutyReserved += 1;
+            m.free -= riskPerSeat;
+            m.dutyBonded += riskPerSeat;
+            totalFreeStake -= riskPerSeat;
+            totalDutyBondedStake += riskPerSeat;
             seats[drawn++] = seat;
             _syncTree(seat, m); // weight shrinks as capacity is consumed
         }
@@ -442,27 +490,91 @@ contract StakeRegistry {
         }
     }
 
-    /// Release duty capacity held by a finished round.
+    /// @notice Settle `units` finished assignments in ONE step: freeze `penalty` of
+    ///         the escrow those seats still hold as the no-show cost, and return
+    ///         the remainder to free stake.
+    /// @dev This exists because penalising and releasing must share a single
+    ///      clamp against the same balance. Calling `penalizeNoShow` and then
+    ///      `releaseDuty` reads `dutyBonded` twice, and `dutyBonded` is a pool
+    ///      shared by every case a moderator is currently seated in — so a seat
+    ///      whose bond had already been partly frozen would still release a full
+    ///      `riskPerSeat`, draining escrow belonging to a DIFFERENT case's
+    ///      outstanding seat and silently un-bonding it. Nothing is minted (the
+    ///      conservation identity still holds), which is exactly why the leak is
+    ///      invisible without this being one operation.
+    ///
+    ///      Bounding both parts by `seatBond` makes over-draw unrepresentable.
+    ///      Per-obligation accounting (P0-5) replaces the pooling entirely.
+    function settleDuty(address moderator, uint256 units, uint256 penalty, uint256 until) external onlyLogic {
+        Moderator storage m = moderators[moderator];
+        uint256 rel = units > m.dutyReserved ? m.dutyReserved : units;
+        m.dutyReserved -= rel;
+
+        uint256 seatBond = rel * riskPerSeat;
+        if (seatBond > m.dutyBonded) seatBond = m.dutyBonded;
+        if (seatBond == 0) {
+            _syncTree(moderator, m);
+            return;
+        }
+        m.dutyBonded -= seatBond;
+        totalDutyBondedStake -= seatBond;
+
+        uint256 p = penalty > seatBond ? seatBond : penalty;
+        if (p > 0) {
+            m.frozen += p;
+            totalFrozenStake += p;
+            if (until > m.frozenUntil) m.frozenUntil = until;
+            emit NoShowPenalized(moderator, p, m.frozenUntil);
+        }
+        uint256 back = seatBond - p;
+        if (back > 0) {
+            m.free += back;
+            totalFreeStake += back;
+        }
+        _syncTree(moderator, m);
+    }
+
+    /// Release duty capacity held by a finished round, returning the escrow that
+    /// is still bonded (M2.6-P0-2) to free stake.
+    /// @dev Both the unit count and the token amount are clamped. Seats whose bond
+    ///      already became `committed` (they voted) or `frozen` (they no-showed)
+    ///      are no longer bonded, so a round that releases all its seats correctly
+    ///      returns only the ones still outstanding. The clamp is what makes a
+    ///      double release harmless rather than an underflow — but it is also why
+    ///      it is silent, which P0-5's obligation handles are meant to fix.
     function releaseDuty(address moderator, uint256 units) external onlyLogic {
         Moderator storage m = moderators[moderator];
         uint256 rel = units > m.dutyReserved ? m.dutyReserved : units;
         m.dutyReserved -= rel;
+        uint256 amount = rel * riskPerSeat;
+        if (amount > m.dutyBonded) amount = m.dutyBonded;
+        if (amount > 0) {
+            m.dutyBonded -= amount;
+            m.free += amount;
+            totalDutyBondedStake -= amount;
+            totalFreeStake += amount;
+        }
         _syncTree(moderator, m);
     }
 
     /// @notice Penalize a moderator that pledged capacity, was drawn on it, and
     ///         never committed: freeze `amount` of its own FREE stake until
     ///         `until`. Never a transfer — no internal attack profit exists.
+    /// @dev M2.6-P0-2: taken from `dutyBonded` — the escrow posted when the seat
+    ///      was drawn — not from `free`. The old version read free stake minus
+    ///      `exitAmount`, so `requestExit(free)` after selection reduced the
+    ///      reachable balance to zero and the penalty silently became a no-op
+    ///      (bypass 2); the exit did not even have to complete. It also opened with
+    ///      `if (m.dutyUnits == 0) return`, which `setDutyUnits(0)` satisfied
+    ///      (bypass 1). Escrowed collateral is reachable by construction, so
+    ///      neither guard is needed and neither bypass exists.
     function penalizeNoShow(address moderator, uint256 amount, uint256 until) external onlyLogic {
         Moderator storage m = moderators[moderator];
-        if (m.dutyUnits == 0) return; // never opted in -> was not drawable
-        uint256 reserved = m.pending + m.exitAmount;
-        uint256 usable = m.free > reserved ? m.free - reserved : 0;
-        uint256 penalty = amount > usable ? usable : amount;
-        if (penalty == 0) return;
-        m.free -= penalty;
+        uint256 penalty = amount > m.dutyBonded ? m.dutyBonded : amount;
+        if (penalty == 0) return; // nothing bonded -> was never seated on this duty
+        m.dutyBonded -= penalty;
         m.frozen += penalty;
-        totalFreeStake -= penalty;
+        totalDutyBondedStake -= penalty;
         totalFrozenStake += penalty;
         if (until > m.frozenUntil) m.frozenUntil = until;
         _syncTree(moderator, m);
@@ -554,9 +666,16 @@ contract StakeRegistry {
         return moderators[a].track;
     }
 
-    function dutyOf(address a) external view returns (uint256 units, uint256 reserved) {
+    function dutyOf(address a) external view returns (uint256 units, uint256 reserved, uint256 bonded) {
         Moderator storage m = moderators[a];
-        return (m.dutyUnits, m.dutyReserved);
+        return (m.dutyUnits, m.dutyReserved, m.dutyBonded);
+    }
+
+    /// Escrow currently posted against outstanding draw assignments (M2.6-P0-2).
+    /// Single-word: the logic contract reads this on the commit path and is the
+    /// EIP-170-bound side of the boundary.
+    function dutyBondedOf(address a) external view returns (uint256) {
+        return moderators[a].dutyBonded;
     }
 
     function eligibleWeightOf(address a) external view returns (uint256) {
@@ -569,13 +688,13 @@ contract StakeRegistry {
 
     /// Conservation: every token held is somebody's stake, in exactly one bucket.
     function stakeBuckets() external view returns (uint256) {
-        return totalFreeStake + totalCommittedStake + totalFrozenStake;
+        return totalFreeStake + totalCommittedStake + totalFrozenStake + totalDutyBondedStake;
     }
 
     // --- internals -----------------------------------------------------------
 
     function _total(Moderator storage m) internal view returns (uint256) {
-        return m.free + m.committed + m.frozen;
+        return m.free + m.committed + m.frozen + m.dutyBonded;
     }
 
     /// Draw-eligible weight (H-07): free, unreserved stake CAPPED by remaining

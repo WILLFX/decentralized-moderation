@@ -39,6 +39,12 @@ contract IndexRegistry {
         uint256 localCaseId; // that logic's own case id, for provenance
         uint256 rulesVersion; // provenance: ruleset the decision was made under
         uint256 guidelinesVersion; // provenance: guidelines in force at submission
+        // M2.6-P0-1c: the reservation this entry is protected by. Deleting the
+        // entry frees it — that is the ONLY way a reservation can be released by
+        // anyone other than the case that took it, and it is what lets a
+        // replacement logic make a legacy entry's content submittable again after
+        // adjudicating its removal.
+        bytes32 dedupKey;
     }
 
     /// Monotonic, never reused. Entry 0 is never minted so `globalId == 0` is a
@@ -137,7 +143,8 @@ contract IndexRegistry {
         bool uncontested,
         bool fullQuorum,
         uint256 rulesVersion,
-        uint256 guidelinesVersion
+        uint256 guidelinesVersion,
+        bytes32 dedupKey
     ) external onlyLogic returns (uint256 globalId) {
         if (!topicSeen[topicKey]) {
             topicSeen[topicKey] = true;
@@ -155,7 +162,8 @@ contract IndexRegistry {
                 originLogic: msg.sender,
                 localCaseId: localCaseId,
                 rulesVersion: rulesVersion,
-                guidelinesVersion: guidelinesVersion
+                guidelinesVersion: guidelinesVersion,
+                dedupKey: dedupKey
             })
         );
         entryPosPlusOne[topicKey][globalId] = indexByTopic[topicKey].length;
@@ -168,11 +176,20 @@ contract IndexRegistry {
     /// @notice Delete an entry by its permanent global id. Any authorized logic may
     ///         remove any entry — including one written by a superseded logic — which
     ///         is what makes legacy entries adjudicable after a migration.
+    /// @dev Deleting an entry ALSO frees the content reservation it carries
+    ///      (M2.6-P0-1c). That is deliberate and is the only cross-logic release
+    ///      path: without it, a legacy entry removed by a replacement logic would
+    ///      leave its content permanently unsubmittable, because the reservation's
+    ///      owning logic no longer exists to release it. Binding the release to an
+    ///      actual deletion — rather than exposing a "release anyone's key" call —
+    ///      is what keeps H-02 intact: an obsolete removal deletes nothing (the
+    ///      position map is already clear) and therefore releases nothing.
     function deleteEntry(bytes32 topicKey, uint256 globalId) external onlyLogic {
         uint256 p = entryPosPlusOne[topicKey][globalId];
         if (p == 0) return;
         Entry[] storage arr = indexByTopic[topicKey];
         uint256 idx = p - 1;
+        bytes32 dedupKey = arr[idx].dedupKey;
         uint256 last = arr.length - 1;
         if (idx != last) {
             Entry storage moved = arr[last];
@@ -182,6 +199,10 @@ contract IndexRegistry {
         arr.pop();
         delete entryPosPlusOne[topicKey][globalId];
         delete topicOfEntry[globalId];
+        if (contentReservations[dedupKey].exists) {
+            emit ContentReleased(dedupKey, contentReservations[dedupKey].logic, contentReservations[dedupKey].caseId);
+            delete contentReservations[dedupKey];
+        }
         emit EntryRemoved(globalId, topicKey);
     }
 
@@ -235,6 +256,24 @@ contract IndexRegistry {
 
     function isContentReserved(bytes32 dedupKey) external view returns (bool) {
         return contentReservations[dedupKey].exists;
+    }
+
+    /// @notice Everything a logic contract needs to open a removal case against an
+    ///         entry it did not write (M2.6-P0-1c). Returns `topicKey == 0` when
+    ///         the id is not live, which is the caller's existence check —
+    ///         `globalId` starts at 1, so no live entry can sit under topic 0.
+    /// @dev The payload comes from the registry, not the caller, so a removal
+    ///      displays exactly what settlement will act on (H-01) even when the case
+    ///      record that produced the entry lives in a contract this one cannot read.
+    function legacyEntryInfo(uint256 globalId)
+        external
+        view
+        returns (bytes32 topicKey, bytes32 contentHash, bytes32 metaHash, address originLogic)
+    {
+        topicKey = topicOfEntry[globalId];
+        if (topicKey == bytes32(0)) return (bytes32(0), bytes32(0), bytes32(0), address(0));
+        Entry storage e = indexByTopic[topicKey][entryPosPlusOne[topicKey][globalId] - 1];
+        return (topicKey, e.contentHash, e.metaHash, e.originLogic);
     }
 
     /// @notice The owning case id alone, for the logic contract's compatibility

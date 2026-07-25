@@ -92,7 +92,7 @@ contract RegistriesTest is Test {
     /// the game is redeployed.
     function test_approvals_survive_a_logic_upgrade() public {
         vm.prank(oldLogic);
-        indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true, 0, 0);
+        indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true, 0, 0, bytes32(0));
         assertEq(indexReg.entryCount(TK), 1);
 
         _authorize(newLogic);
@@ -177,7 +177,7 @@ contract RegistriesTest is Test {
         vm.expectRevert(StakeRegistry.NotLogic.selector);
         stakeReg.reward(alice, 1);
         vm.expectRevert(IndexRegistry.NotLogic.selector);
-        indexReg.writeEntry(TK, 1, bytes32(0), bytes32(0), true, true, 0, 0);
+        indexReg.writeEntry(TK, 1, bytes32(0), bytes32(0), true, true, 0, 0, bytes32(0));
     }
 
     function test_unauthorized_caller_cannot_use_the_privileged_api() public {
@@ -372,9 +372,9 @@ contract RegistriesTest is Test {
 
     function test_supersafe_requires_uncontested_full_quorum_and_age() public {
         vm.startPrank(oldLogic);
-        indexReg.writeEntry(TK, 1, keccak256("a"), bytes32(0), true, true, 0, 0); // qualifies
-        indexReg.writeEntry(TK, 2, keccak256("b"), bytes32(0), false, true, 0, 0); // contested
-        indexReg.writeEntry(TK, 3, keccak256("c"), bytes32(0), true, false, 0, 0); // under-quorum
+        indexReg.writeEntry(TK, 1, keccak256("a"), bytes32(0), true, true, 0, 0, bytes32(0)); // qualifies
+        indexReg.writeEntry(TK, 2, keccak256("b"), bytes32(0), false, true, 0, 0, bytes32(0)); // contested
+        indexReg.writeEntry(TK, 3, keccak256("c"), bytes32(0), true, false, 0, 0, bytes32(0)); // under-quorum
         vm.stopPrank();
 
         assertEq(indexReg.supersafeEntries(TK, 96 hours, 0, 10).length, 0, "too young");
@@ -387,7 +387,7 @@ contract RegistriesTest is Test {
     function test_reads_are_paginated_and_never_gated() public {
         vm.startPrank(oldLogic);
         for (uint256 i = 0; i < 25; i++) {
-            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0);
+            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0, bytes32(0));
         }
         vm.stopPrank();
 
@@ -405,7 +405,7 @@ contract RegistriesTest is Test {
         uint256[] memory ids = new uint256[](5);
         vm.startPrank(oldLogic);
         for (uint256 i = 0; i < 5; i++) {
-            ids[i] = indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0);
+            ids[i] = indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0, bytes32(0));
         }
         indexReg.deleteEntry(TK, ids[0]); // front entry: swap-pop with the last
         vm.stopPrank();

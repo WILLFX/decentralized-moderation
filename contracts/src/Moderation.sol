@@ -293,6 +293,10 @@ contract Moderation is ReentrancyGuard {
         // logic deployment — so we record what the registry actually issued and
         // remove by that. Parallel to topicKeys.
         uint256[] entryIds;
+        // M2.6-P0-1c: for a removal aimed at an entry THIS logic did not write,
+        // the registry-minted id of that entry. 0 means "not a legacy removal" —
+        // safe as a sentinel because the registry mints from 1.
+        uint256 legacyEntryId;
         Round[] rounds; // one per depth reached
         // C-01: winning-appeal refunds+bonuses are pulled (not credited in a loop
         // at settlement, which was unbounded in contributor count). These running
@@ -400,6 +404,18 @@ contract Moderation is ReentrancyGuard {
         uint256 topicCount
     );
 
+    /// M2.6-P0-1c: a removal aimed at an entry a superseded logic wrote. Separate
+    /// from `RemovalTargeted` because the target is a permanent registry id, not a
+    /// local case id — indexers must not conflate the two number spaces.
+    event LegacyRemovalTargeted(
+        uint256 indexed caseId,
+        uint256 indexed globalEntryId,
+        address indexed originLogic,
+        bytes32 topicKey,
+        bytes32 contentHash,
+        bytes32 metaHash
+    );
+
     // --- submit --------------------------------------------------------------
 
     /// @notice Open a moderation case. `kind` is SUBMISSION (approve/reject new
@@ -474,31 +490,86 @@ contract Moderation is ReentrancyGuard {
         if (target.finalOutcome != Outcome.Approve || !target.isIndexed) revert TargetNotRemovable();
 
         uint256 n = target.topicKeys.length;
-        if (fee < minFee(n)) revert FeeTooLow();
-
-        address(token).safeTransferFrom(msg.sender, address(this), fee);
-
-        caseId = nextCaseId++;
-        Case storage c = cases[caseId];
-        c.id = caseId;
-        c.kind = Kind.REMOVAL;
-        c.submitter = msg.sender;
         // Derived from the bound target so client-displayed payload == settled action.
-        c.contentHash = target.contentHash;
-        c.metaHash = target.metaHash;
+        Case storage c;
+        (caseId, c) = _openRemoval(target.contentHash, target.metaHash, n, fee);
         for (uint256 i; i < n; ++i) {
             c.topicKeys.push(target.topicKeys[i]);
         }
         c.targetCaseId = targetCaseId;
+
+        _openRound(c, 0);
+        emit CaseSubmitted(caseId, Kind.REMOVAL, msg.sender, fee);
+        emit RemovalTargeted(caseId, targetCaseId, target.contentHash, target.metaHash, n);
+    }
+
+    /// @dev The half of removal-case creation that does not depend on how the
+    ///      target was addressed: charge the fee and lay down the case record.
+    ///      Shared by the local (`targetCaseId`) and legacy (`globalEntryId`)
+    ///      routes so the two cannot drift apart in what they pin — `Moderation`
+    ///      is EIP-170-bound, so a second near-copy of this block is not affordable.
+    ///      The caller pushes topic keys, sets its own target field, opens round 0
+    ///      and emits its own targeting event.
+    function _openRemoval(bytes32 contentHash, bytes32 metaHash, uint256 nTopics, uint256 fee)
+        internal
+        returns (uint256 caseId, Case storage c)
+    {
+        if (fee < minFee(nTopics)) revert FeeTooLow();
+        address(token).safeTransferFrom(msg.sender, address(this), fee);
+
+        caseId = nextCaseId++;
+        c = cases[caseId];
+        c.id = caseId;
+        c.kind = Kind.REMOVAL;
+        c.submitter = msg.sender;
+        c.contentHash = contentHash;
+        c.metaHash = metaHash;
         c.guidelinesVersion = guidelinesVersion;
         c.rulesVersion = currentRulesVersion; // H-11
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
+    }
+
+    /// @notice Open a REMOVAL case against an index entry written by a SUPERSEDED
+    ///         logic contract (M2.6-P0-1c), addressed by its permanent registry id.
+    ///
+    ///         `submitRemoval` resolves its target through this contract's own
+    ///         `cases[targetCaseId]`, which a replacement logic does not have: the
+    ///         case record stayed behind in the contract that was replaced. The
+    ///         registry has permitted cross-version deletion since P0-1a, but no
+    ///         public path reached it, so every entry inherited from a previous
+    ///         version was permanently unadjudicable — the index could grow but
+    ///         never be corrected across an upgrade, which defeats the point of
+    ///         making the index outlive the game.
+    ///
+    ///         Payload and topic are read from the registry, never from the caller,
+    ///         so what a client displays is what settlement acts on (H-01). One
+    ///         entry per case: entries are independent index memberships, and a
+    ///         legacy submission's other topics are addressed by their own ids.
+    ///
+    ///         Entries written by THIS logic are rejected here — they have a case
+    ///         record, so they go through `submitRemoval`, which binds the whole
+    ///         submission. Keeping the two disjoint stops a removal from being
+    ///         opened by a route that cannot maintain `isIndexed` on the target.
+    function submitLegacyRemoval(uint256 globalEntryId, uint256 fee)
+        external
+        nonReentrant
+        returns (uint256 caseId)
+    {
+        (bytes32 topicKey, bytes32 contentHash, bytes32 metaHash, address originLogic) =
+            indexReg.legacyEntryInfo(globalEntryId);
+        // topicKey == 0 means the id is not live: never minted, or already removed.
+        if (topicKey == bytes32(0) || originLogic == address(this)) revert TargetNotRemovable();
+
+        Case storage c;
+        (caseId, c) = _openRemoval(contentHash, metaHash, 1, fee);
+        c.topicKeys.push(topicKey);
+        c.legacyEntryId = globalEntryId;
 
         _openRound(c, 0);
         emit CaseSubmitted(caseId, Kind.REMOVAL, msg.sender, fee);
-        emit RemovalTargeted(caseId, targetCaseId, target.contentHash, target.metaHash, n);
+        emit LegacyRemovalTargeted(caseId, globalEntryId, originLogic, topicKey, contentHash, metaHash);
     }
 
     // --- phase transitions (permissionless pokes) ----------------------------
@@ -1029,7 +1100,18 @@ contract Moderation is ReentrancyGuard {
         uint256 n = c.topicKeys.length;
         for (uint256 i; i < n; ++i) {
             uint256 gid = indexReg.writeEntry(
-                c.topicKeys[i], c.id, c.contentHash, c.metaHash, uncontested, fullQuorum, c.rulesVersion, c.guidelinesVersion
+                c.topicKeys[i],
+                c.id,
+                c.contentHash,
+                c.metaHash,
+                uncontested,
+                fullQuorum,
+                c.rulesVersion,
+                c.guidelinesVersion,
+                // M2.6-P0-1c: bind the entry to the reservation protecting it, so
+                // deleting the entry frees the content even after the logic that
+                // reserved it is gone.
+                _dedupKey(c.contentHash, c.metaHash, c.topicKeys[i])
             );
             c.entryIds.push(gid); // the only safe removal handle (M2.6-P0-1)
         }
@@ -1037,6 +1119,14 @@ contract Moderation is ReentrancyGuard {
     }
 
     function _removeTarget(Case storage c) internal {
+        // M2.6-P0-1c: a legacy target has no case record here — it belongs to a
+        // superseded logic. Its permanent id is the whole binding, and the
+        // registry no-ops if it has already been deleted, which is the same
+        // concurrent-removal safety `isIndexed` gives the local path (H-01).
+        if (c.legacyEntryId != 0) {
+            _deleteEntry(c.topicKeys[0], c.legacyEntryId);
+            return;
+        }
         Case storage target = cases[c.targetCaseId];
         // H-01: no-op if the target is no longer indexed (a concurrent removal
         // already deleted it). Bound to a specific caseId at submit, so this can
@@ -1046,10 +1136,11 @@ contract Moderation is ReentrancyGuard {
         for (uint256 i; i < n; ++i) {
             // Delete by the registry-minted global id, not by our local caseId:
             // another logic version may hold the same local id (M2.6-P0-1).
+            // The deletion also frees that entry's reservation, so the removed
+            // submission is resubmittable (M2.6-P0-1c) — no separate clear needed.
             _deleteEntry(target.topicKeys[i], target.entryIds[i]);
         }
         target.isIndexed = false;
-        _clearDedup(target); // the removed submission is resubmittable
     }
 
     /// @dev Delete the entry with global id `globalId` under `topicKey`. The

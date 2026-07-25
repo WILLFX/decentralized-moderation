@@ -44,6 +44,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | P0-4 + P0-1a | 23,795 B | 781 B | 8,977 B | 4,287 B |
 | **P0-1b** (registry-owned dedup) | **24,082 B** | **494 B** | 8,977 B | 4,893 B |
 | **size pass** (drop 2 broken views) | **23,438 B** | **1,138 B** | 8,977 B | 4,893 B |
+| **P0-1c** (legacy removal path) | **24,259 B** | **317 B** | 8,977 B | 5,288 B |
 
 P0-1b cost `Moderation` **+287 B**: moving dedup into the registry replaces two
 storage operations with two cross-contract calls, and calldata encoding is bigger
@@ -101,11 +102,15 @@ silently returns a stale value and mis-sequences the test. Switching the pipelin
 cost ~20 tests exactly this way. The rule is stated at the top of
 `test/base/StackDeployer.sol`, which every suite inherits.
 
-> **Open follow-up, now close to blocking: size-reduction pass on `Moderation`.**
-> The 1,184 B recorded below is historical; the live figure is **494 B** (table
-> above) and P0-2, P0-3, P0-5, P0-6 and P0-7 all still have to land in this
-> contract. Expect to hit the limit mid-milestone. The natural seam is moving
-> governance or settlement coordination out into its own module.
+> **Open follow-up, now BLOCKING: structural split of `Moderation`.**
+> The 1,184 B below is historical — see the M2.6 table above for the live figure,
+> which is the only one to trust. One pass of dead-API removal has already been
+> spent (P0-1c did not fit without it) and it bought ~645 B, which P0-1c then
+> consumed. P0-2, P0-3, P0-5, P0-6, P0-7 and P0-8 all still have to land in this
+> contract, and P0-2 (a duty-escrow bucket) and P0-5 (obligation handles on every
+> privileged call) are each larger than what remains. Deleting more views will not
+> cover it: the next item should begin by moving governance (ruleset
+> proposal/validation) or settlement coordination into its own contract.
 >
 > 1,184 B of headroom is thin — roughly one moderate feature. And a logic contract
 > that was 5,193 B over EIP-170 before this port, and fits now only by virtue of an

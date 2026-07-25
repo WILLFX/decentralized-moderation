@@ -131,7 +131,9 @@ contract ModerationHarness is Moderation {
     /// @return globalId The registry-minted id — the ONLY valid deletion handle
     ///         (M2.6-P0-1). A local caseId is not usable for this.
     function __pushEntry(bytes32 topicKey, uint256 caseId) external returns (uint256 globalId) {
-        globalId = indexReg.writeEntry(topicKey, caseId, bytes32(caseId), bytes32(caseId), true, true, 0, 0);
+        globalId = indexReg.writeEntry(
+            topicKey, caseId, bytes32(caseId), bytes32(caseId), true, true, 0, 0, _dedupKey(bytes32(caseId), bytes32(caseId), topicKey)
+        );
     }
 
     function __deleteEntry(bytes32 topicKey, uint256 globalId) external {

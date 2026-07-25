@@ -162,6 +162,143 @@ contract MigrationTest is ModerationTestBase {
         _assertConservation();
     }
 
+    /// Stand up logic B, authorize it on both registries, revoke A, and point the
+    /// base helpers at B. Returns the outgoing logic.
+    function _migrateToNewLogic() internal returns (ModerationHarness modA, ModerationHarness modB) {
+        modA = mod;
+        modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
+        _authorizeLogic(stakeReg, indexReg, address(modB));
+        stakeReg.revokeLogic(address(modA));
+        indexReg.revokeLogic(address(modA));
+        mod = modB;
+    }
+
+    /// M2.6-P0-1c: a replacement logic can adjudicate an entry it did not write.
+    ///
+    /// The registry has permitted cross-version deletion since P0-1a, but the game
+    /// exposed no path to it: `submitRemoval` resolves its target through this
+    /// contract's own `cases[targetCaseId]`, and the case record for a legacy entry
+    /// stayed behind in the contract that was replaced. So every entry inherited
+    /// from a previous version was permanently unadjudicable — the index could grow
+    /// across an upgrade but never be corrected.
+    ///
+    /// The M2.5 test that appeared to prove this worked was calling
+    /// `indexReg.deleteEntry` under `vm.prank(address(modB))`. That impersonates
+    /// the logic contract and proves only that the REGISTRY permits the delete.
+    /// This test goes through `Moderation`'s public API, which is the claim.
+    function test_legacy_entry_is_removable_through_the_new_logic() public {
+        uint256 caseA = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseA);
+        uint256 gid = mod.caseEntryIds(caseA)[0];
+        assertTrue(indexReg.isIndexed(TK, gid), "A's entry is live in the index");
+
+        (ModerationHarness modA,) = _migrateToNewLogic();
+
+        // The local route cannot reach it: B's case array does not contain A's case.
+        uint256 fee = mod.minFee(1); // before the prank (trap 1)
+        _fund(mods[1], fee);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitRemoval(caseA, fee);
+
+        // The legacy route does — an ordinary adjudicated case, start to finish.
+        uint256 rem = _submitLegacyRemoval(mods[1], gid);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Approve);
+        _finalize(rem);
+        mod.claim(rem);
+
+        assertFalse(indexReg.isIndexed(TK, gid), "the legacy entry was removed by the new logic");
+        assertEq(indexReg.entryCount(TK), 0, "and it is gone from the topic");
+
+        // The reservation A took is freed too. A is revoked and could never release
+        // it itself, so without deletion-bound release the content would have been
+        // permanently unsubmittable — a removal that removes nothing.
+        bytes32 key = keccak256(abi.encode(CONTENT, META, TK));
+        assertFalse(indexReg.isContentReserved(key), "removal freed the legacy reservation");
+
+        uint256 fresh = _runUndisputed(mods[2], Moderation.Vote.Approve);
+        mod.claim(fresh);
+        assertEq(indexReg.entryCount(TK), 1, "the content can be submitted again, under B");
+        (, address ownerLogic,) = indexReg.contentReservation(key);
+        assertEq(ownerLogic, address(mod), "and B now holds the reservation");
+        assertTrue(ownerLogic != address(modA), "not the retired logic");
+        _assertConservation();
+    }
+
+    /// A REJECTED legacy removal leaves the entry and its reservation alone. The
+    /// path is a case, not a delete button.
+    function test_rejected_legacy_removal_leaves_the_entry_indexed() public {
+        uint256 caseA = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseA);
+        uint256 gid = mod.caseEntryIds(caseA)[0];
+
+        _migrateToNewLogic();
+
+        uint256 rem = _submitLegacyRemoval(mods[1], gid);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Reject);
+        _finalize(rem);
+        mod.claim(rem);
+
+        assertTrue(indexReg.isIndexed(TK, gid), "a rejected removal removes nothing");
+        assertEq(indexReg.entryCount(TK), 1);
+        assertTrue(
+            indexReg.isContentReserved(keccak256(abi.encode(CONTENT, META, TK))),
+            "and frees nothing"
+        );
+        _assertConservation();
+    }
+
+    /// The two removal routes are disjoint. An entry THIS logic wrote has a case
+    /// record, so it goes through `submitRemoval`, which binds the whole
+    /// submission and maintains `isIndexed` on the target; routing it through the
+    /// legacy path would delete an entry while leaving the target's case record
+    /// claiming it is still indexed.
+    function test_legacy_route_rejects_entries_this_logic_wrote() public {
+        uint256 caseA = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseA);
+        uint256 gid = mod.caseEntryIds(caseA)[0];
+
+        uint256 fee = mod.minFee(1);
+        _fund(mods[1], fee);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitLegacyRemoval(gid, fee);
+    }
+
+    /// An id that is not live is not adjudicable: never minted, or already removed.
+    /// Without this the fee would be taken for a case that can only ever no-op.
+    function test_legacy_route_rejects_ids_that_are_not_live() public {
+        uint256 caseA = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseA);
+        uint256 gid = mod.caseEntryIds(caseA)[0];
+
+        _migrateToNewLogic();
+
+        uint256 fee = mod.minFee(1);
+        _fund(mods[1], fee * 3);
+
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitLegacyRemoval(0, fee); // never minted: ids start at 1
+
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitLegacyRemoval(gid + 999, fee); // never minted
+
+        // Remove it, then try again: an already-removed id is not re-adjudicable.
+        uint256 rem = _submitLegacyRemoval(mods[1], gid);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Approve);
+        _finalize(rem);
+        mod.claim(rem);
+
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.TargetNotRemovable.selector);
+        mod.submitLegacyRemoval(gid, fee);
+    }
+
     /// The revoked logic contract is powerless afterwards: it cannot touch stake
     /// or the index even though it still holds its own case records.
     function test_revoked_logic_cannot_touch_either_registry() public {
@@ -177,7 +314,7 @@ contract MigrationTest is ModerationTestBase {
 
         vm.prank(address(mod));
         vm.expectRevert();
-        indexReg.writeEntry(TK, 999, CONTENT, META, true, true, 0, 0);
+        indexReg.writeEntry(TK, 999, CONTENT, META, true, true, 0, 0, bytes32(0));
     }
 
     /// Trust model #2, with a live case in flight: a moderator that dislikes an

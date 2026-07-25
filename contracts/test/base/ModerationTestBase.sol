@@ -96,6 +96,14 @@ abstract contract ModerationTestBase is StackDeployer {
         caseId = mod.submit(Moderation.Kind.SUBMISSION, contentHash, metaHash, _topics(), 0, fee);
     }
 
+    /// Open a legacy removal (M2.6-P0-1c) against a permanent registry entry id.
+    function _submitLegacyRemoval(address who, uint256 globalEntryId) internal returns (uint256 caseId) {
+        uint256 fee = mod.minFee(1); // before the prank: an external call in the arg list eats it
+        _fund(who, fee);
+        vm.prank(who);
+        caseId = mod.submitLegacyRemoval(globalEntryId, fee);
+    }
+
     /// The supersafe subset for a topic. `Moderation.supersafeEntries(bytes32)`
     /// was removed in M2.6 (unbounded, and the contract is EIP-170-bound), so the
     /// tests read the registry's paginated view the way a front end now must.

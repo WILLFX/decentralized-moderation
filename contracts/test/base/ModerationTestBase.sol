@@ -76,6 +76,16 @@ abstract contract ModerationTestBase is StackDeployer {
     }
 
     function _submit(address who) internal returns (uint256 caseId) {
+        return _submitContent(who, CONTENT, META);
+    }
+
+    /// Submit specific content. Dedup is registry-owned and permanent since
+    /// M2.6-P0-1b, so a test that wants a SECOND indexable case under the same
+    /// topic must vary the content — reusing it is now correctly refused.
+    function _submitContent(address who, bytes32 contentHash, bytes32 metaHash)
+        internal
+        returns (uint256 caseId)
+    {
         // Compute minFee before arming the prank: an external call in the arg
         // list would consume the prank and run submit as the test contract.
         uint256 fee = mod.minFee(1);
@@ -83,7 +93,7 @@ abstract contract ModerationTestBase is StackDeployer {
         vm.prank(who);
         bzz.approve(address(mod), type(uint256).max);
         vm.prank(who);
-        caseId = mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
+        caseId = mod.submit(Moderation.Kind.SUBMISSION, contentHash, metaHash, _topics(), 0, fee);
     }
 
     function _phase(uint256 caseId) internal view returns (Moderation.Phase p) {
@@ -170,7 +180,15 @@ abstract contract ModerationTestBase is StackDeployer {
 
     /// Submit an undisputed case, run round 0 with `vote`, and finalize it.
     function _runUndisputed(address submitter, Moderation.Vote vote) internal returns (uint256 caseId) {
-        caseId = _submit(submitter);
+        return _runUndisputedContent(submitter, CONTENT, META, vote);
+    }
+
+    /// As `_runUndisputed`, for specific content.
+    function _runUndisputedContent(address submitter, bytes32 contentHash, bytes32 metaHash, Moderation.Vote vote)
+        internal
+        returns (uint256 caseId)
+    {
+        caseId = _submitContent(submitter, contentHash, metaHash);
         _realizeSeats(caseId);
         _runRoundToAppealWindow(caseId, 0, vote);
         _finalize(caseId);

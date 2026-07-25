@@ -326,10 +326,11 @@ contract Moderation is ReentrancyGuard {
 
     mapping(uint256 => SettleState) internal settleState;
     mapping(uint256 => mapping(address => bool)) internal trackDecayed; // caseId -> participant -> track already decayed (dedup, O(1))
-    // Dedup (P3, §9.7): H(content, meta, topicKey) -> owning caseId + 1 (0 = free).
-    // H-02: keyed by OWNER, not a bare bool, so an obsolete case (e.g. a stale
-    // removal) can never clear a reservation a newer resubmission now holds.
-    mapping(bytes32 => uint256) internal dedupOwnerPlusOne;
+    // Dedup (P3, §9.7) now lives in IndexRegistry (M2.6-P0-1b). Held here, the
+    // reservation map died with the logic contract: a replacement started empty
+    // and happily re-indexed content already live in the permanent index. The
+    // registry keys it by (logic, caseId), so H-02 ownership survives migration
+    // rather than restarting. The views below forward, keeping the M2 ABI.
 
     // --- index (§8, README 3.8) ----------------------------------------------
     //
@@ -430,9 +431,6 @@ contract Moderation is ReentrancyGuard {
                 if (topicKeys[i] == topicKeys[j]) revert DuplicateTopic();
             }
         }
-        for (uint256 i; i < n; ++i) {
-            if (dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] != 0) revert DuplicateSubmission();
-        }
 
         address(token).safeTransferFrom(msg.sender, address(this), fee);
 
@@ -445,7 +443,12 @@ contract Moderation is ReentrancyGuard {
         c.metaHash = metaHash;
         for (uint256 i; i < n; ++i) {
             c.topicKeys.push(topicKeys[i]);
-            dedupOwnerPlusOne[_dedupKey(contentHash, metaHash, topicKeys[i])] = caseId + 1; // this case owns the reservation
+            // This case owns the reservation, in the registry that outlives us.
+            // M2.6-P0-1b: the registry refuses content already live in the
+            // PERMANENT index, even when this logic contract has never seen it.
+            if (!indexReg.tryReserveContent(_dedupKey(contentHash, metaHash, topicKeys[i]), caseId)) {
+                revert DuplicateSubmission();
+            }
         }
         c.guidelinesVersion = guidelinesVersion; // pinned at submit; never changes (§9.6)
         c.rulesVersion = currentRulesVersion; // H-11: pin the consensus ruleset
@@ -1287,10 +1290,10 @@ contract Moderation is ReentrancyGuard {
         if (c.kind != Kind.SUBMISSION) return;
         uint256 len = c.topicKeys.length;
         for (uint256 i; i < len; ++i) {
-            bytes32 k = _dedupKey(c.contentHash, c.metaHash, c.topicKeys[i]);
-            // H-02: only the current owner may release its reservation, so a stale
-            // case cannot wipe a key a newer resubmission now holds.
-            if (dedupOwnerPlusOne[k] == c.id + 1) delete dedupOwnerPlusOne[k];
+            // H-02 is enforced registry-side: the release no-ops unless THIS
+            // logic and THIS case own the key, so a stale case cannot wipe a
+            // reservation a newer resubmission now holds.
+            indexReg.releaseContent(_dedupKey(c.contentHash, c.metaHash, c.topicKeys[i]), c.id);
         }
     }
 
@@ -1298,16 +1301,18 @@ contract Moderation is ReentrancyGuard {
         return keccak256(abi.encode(contentHash, metaHash, topicKey));
     }
 
-    /// @notice True iff the (content, meta, topic) triple is currently reserved.
+    /// @notice True iff the (content, meta, topic) triple is currently reserved —
+    ///         by ANY logic version, not just this one (M2.6-P0-1b).
     function submissionExists(bytes32 dedupKey) external view returns (bool) {
-        return dedupOwnerPlusOne[dedupKey] != 0;
+        return indexReg.isContentReserved(dedupKey);
     }
 
-    /// @notice The caseId currently holding a dedup reservation (reverts-free: 0
-    ///         means unreserved; otherwise the owning caseId).
+    /// @notice The caseId currently holding a dedup reservation.
+    /// @dev Preserved for the M2 ABI, and ambiguous by construction: it cannot
+    ///      distinguish "unreserved" from "owned by case 0", nor say WHICH logic
+    ///      holds it. Use `IndexRegistry.contentReservation` for either question.
     function dedupOwner(bytes32 dedupKey) external view returns (uint256) {
-        uint256 v = dedupOwnerPlusOne[dedupKey];
-        return v == 0 ? 0 : v - 1;
+        return indexReg.reservationCaseId(dedupKey);
     }
 
     /// @dev H-11: consensus params for a case come from its pinned ruleset.

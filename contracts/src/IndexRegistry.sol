@@ -54,6 +54,23 @@ contract IndexRegistry {
     /// locate and remove it (needed for cross-version removal).
     mapping(uint256 => bytes32) public topicOfEntry;
 
+    /// M2.6-P0-1b: the live-content reservation lives HERE, not in the logic
+    /// contract. Held in `Moderation`, the dedup map restarted empty on every
+    /// redeployment, so a replacement logic re-indexed content that was already
+    /// live in this permanent index — the same content, twice, under one topic.
+    /// A reservation must outlive the logic that took it, exactly as entries do.
+    ///
+    /// H-02 ownership keying is preserved and widened to (logic, caseId): only
+    /// the case that took a reservation may release it, so neither a stale case
+    /// nor a replacement logic can free a key a live case still holds.
+    struct Reservation {
+        address logic; // the logic contract holding it
+        uint256 caseId; // that logic's own case id
+        bool exists; // explicit: case 0 is a real owner
+    }
+
+    mapping(bytes32 => Reservation) internal contentReservations;
+
     address public governance;
     uint256 public immutable timelockDelay;
     mapping(address => bool) public isLogic;
@@ -77,6 +94,8 @@ contract IndexRegistry {
         bool fullQuorum
     );
     event EntryRemoved(uint256 indexed globalId, bytes32 indexed topicKey);
+    event ContentReserved(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
+    event ContentReleased(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
     event LogicProposed(address indexed logic, uint256 eta);
     event LogicAuthorized(address indexed logic);
     event LogicRevoked(address indexed logic);
@@ -166,7 +185,64 @@ contract IndexRegistry {
         emit EntryRemoved(globalId, topicKey);
     }
 
+    // --- live-content reservation (M2.6-P0-1b) -------------------------------
+
+    /// @notice Reserve a content key against duplicate submission, permanently and
+    ///         across logic versions. This is the invariant: content live in the
+    ///         permanent index cannot be re-submitted into it, and a migration
+    ///         does not reset that.
+    /// @param dedupKey The logic's content key, e.g. H(contentHash, metaHash, topicKey).
+    /// @param localCaseId The reserving logic's own case id — the release handle.
+    /// @return True if reserved; false if the key is ALREADY held, by any logic
+    ///         including a superseded one. Callers must check — the `try` prefix
+    ///         is the signal. `Moderation` turns false into `DuplicateSubmission`;
+    ///         the boolean exists so it can, without paying twice at the contract
+    ///         boundary on the EIP-170-bound side.
+    function tryReserveContent(bytes32 dedupKey, uint256 localCaseId) external onlyLogic returns (bool) {
+        Reservation storage r = contentReservations[dedupKey];
+        if (r.exists) return false;
+        r.logic = msg.sender;
+        r.caseId = localCaseId;
+        r.exists = true;
+        emit ContentReserved(dedupKey, msg.sender, localCaseId);
+        return true;
+    }
+
+    /// @notice Release a reservation. No-op unless the caller is the logic that
+    ///         took it AND names the case that owns it (H-02): an obsolete case
+    ///         must never wipe a key a newer submission now holds, and after a
+    ///         migration a replacement logic must not be able to free another
+    ///         version's live content by guessing a case id.
+    function releaseContent(bytes32 dedupKey, uint256 localCaseId) external onlyLogic {
+        Reservation storage r = contentReservations[dedupKey];
+        if (!r.exists || r.logic != msg.sender || r.caseId != localCaseId) return;
+        delete contentReservations[dedupKey];
+        emit ContentReleased(dedupKey, msg.sender, localCaseId);
+    }
+
     // --- reads (permissionless, never gated) ---------------------------------
+
+    /// @notice The full reservation record. `exists` is explicit because case 0 is
+    ///         a legitimate owner and cannot be distinguished by caseId alone.
+    function contentReservation(bytes32 dedupKey)
+        external
+        view
+        returns (bool exists, address logic, uint256 caseId)
+    {
+        Reservation storage r = contentReservations[dedupKey];
+        return (r.exists, r.logic, r.caseId);
+    }
+
+    function isContentReserved(bytes32 dedupKey) external view returns (bool) {
+        return contentReservations[dedupKey].exists;
+    }
+
+    /// @notice The owning case id alone, for the logic contract's compatibility
+    ///         view. Single-word return: `Moderation` is the EIP-170-bound
+    ///         contract, so the decode cost is kept on this side of the boundary.
+    function reservationCaseId(bytes32 dedupKey) external view returns (uint256) {
+        return contentReservations[dedupKey].caseId;
+    }
 
     function entryCount(bytes32 topicKey) external view returns (uint256) {
         return indexByTopic[topicKey].length;

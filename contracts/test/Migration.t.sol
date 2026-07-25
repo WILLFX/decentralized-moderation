@@ -17,6 +17,7 @@ import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 /// the index away.
 contract MigrationTest is ModerationTestBase {
     bytes32 internal constant TK = keccak256("marine biology");
+    bytes32 internal constant CONTENT_B = keccak256("content-b");
 
     function test_live_migration_preserves_stake_and_index() public {
         // --- under logic A: a case runs all the way to an indexed approval ---
@@ -64,8 +65,10 @@ contract MigrationTest is ModerationTestBase {
         assertEq(indexReg.entryCount(TK), 1, "reads keep working across the handover");
 
         // --- logic B adjudicates a fresh case on the inherited stake ---------
+        // Distinct content: the SAME content is now permanently reserved by A's
+        // approval (M2.6-P0-1b) and B is correctly refused it — asserted below.
         mod = modB; // drive the base helpers against the new logic contract
-        uint256 caseB = _runUndisputed(mods[1], Moderation.Vote.Approve);
+        uint256 caseB = _runUndisputedContent(mods[1], CONTENT_B, META, Moderation.Vote.Approve);
         mod.claim(caseB);
         assertEq(uint256(_phase(caseB)), uint256(Moderation.Phase.SETTLED), "case B settled under logic B");
         assertEq(indexReg.entryCount(TK), 2, "logic B appends to the same index");
@@ -109,6 +112,54 @@ contract MigrationTest is ModerationTestBase {
             totalPrior += totalBefore[i];
         }
         assertGt(totalAfter, totalPrior, "B paid rewards into stake that never left the registry");
+    }
+
+    /// M2.6-P0-1b, end to end through the public API: content that is live in
+    /// the permanent index cannot be re-indexed after a logic upgrade.
+    ///
+    /// Before the fix, dedup lived in `Moderation.dedupOwnerPlusOne`, so logic B
+    /// booted with an empty map and accepted content logic A had already indexed
+    /// and never removed. The identical (content, meta, topic) triple then sat in
+    /// the topic twice, and the earlier version of this suite asserted that
+    /// duplicate as the expected outcome ("logic B appends to the same index").
+    function test_identical_content_cannot_be_reindexed_after_migration() public {
+        uint256 caseA = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseA);
+        assertEq(indexReg.entryCount(TK), 1, "A indexed the content");
+
+        bytes32 key = keccak256(abi.encode(CONTENT, META, TK));
+        (bool exists, address owner, uint256 ownerCase) = indexReg.contentReservation(key);
+        assertTrue(exists, "the reservation is held in the PERMANENT registry");
+        assertEq(owner, address(mod), "A holds it");
+        assertEq(ownerCase, caseA, "under its own case id");
+
+        // --- migrate: B authorized, A revoked. B has never seen this content --
+        ModerationHarness modA = mod;
+        ModerationHarness modB = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg);
+        _authorizeLogic(stakeReg, indexReg, address(modB));
+        stakeReg.revokeLogic(address(modA));
+        indexReg.revokeLogic(address(modA));
+
+        // Compute the fee BEFORE pranking: an external call in the argument list
+        // consumes the prank (see StackDeployer's header).
+        uint256 fee = modB.minFee(1);
+        bzz.mint(mods[1], fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(modB), type(uint256).max);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.DuplicateSubmission.selector);
+        modB.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
+
+        assertEq(indexReg.entryCount(TK), 1, "no duplicate entry was created");
+        (, address ownerAfter,) = indexReg.contentReservation(key);
+        assertEq(ownerAfter, address(modA), "the reservation outlives its logic's revocation");
+
+        // Distinct content is unaffected — this is dedup, not a freeze.
+        mod = modB;
+        uint256 caseB = _runUndisputedContent(mods[1], CONTENT_B, META, Moderation.Vote.Approve);
+        mod.claim(caseB);
+        assertEq(indexReg.entryCount(TK), 2, "B can still index NEW content");
+        _assertConservation();
     }
 
     /// The revoked logic contract is powerless afterwards: it cannot touch stake

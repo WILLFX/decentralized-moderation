@@ -33,6 +33,33 @@ undeployable here regardless.
 The port shrank `Moderation` by **3,783 B (−12.7%)** on the legacy pipeline; the
 IR pipeline takes it the rest of the way under the limit.
 
+### M2.6 headroom, measured per item (`forge build --sizes`, default profile)
+
+The remediation items all add code to `Moderation`, so the margin is tracked as it
+is spent. This is the binding constraint of the milestone, not a footnote.
+
+| After | `Moderation` | margin | `StakeRegistry` | `IndexRegistry` |
+|---|---|---|---|---|
+| M2.5 merge (`b09ce31`) | 23,795 B | 781 B | 8,977 B | 4,287 B |
+| P0-4 + P0-1a | 23,795 B | 781 B | 8,977 B | 4,287 B |
+| **P0-1b** (registry-owned dedup) | **24,082 B** | **494 B** | 8,977 B | 4,893 B |
+
+P0-1b cost `Moderation` **+287 B**: moving dedup into the registry replaces two
+storage operations with two cross-contract calls, and calldata encoding is bigger
+than `SLOAD`/`SSTORE`. Three shapes were measured before settling:
+
+| shape | `Moderation` | note |
+|---|---|---|
+| pre-check `isContentReserved` + reverting `reserveContent` | 24,270 B | two calls per topic |
+| single `tryReserveContent`, `DuplicateSubmission` kept | 24,163 B | one call, bool return |
+| + `reservationCaseId` single-word view for `dedupOwner` | **24,082 B** | shipped |
+
+The last step is the general rule for the rest of the milestone: **when a boundary
+crossing costs `Moderation` bytes, put the wide return type on the registry side.**
+`IndexRegistry` has 19,683 B of margin; `Moderation` has 494 B. Deleting the
+`dedupOwner` compatibility view entirely would save a further 205 B, and is the
+first thing to reach for if an item cannot otherwise fit.
+
 ### Test-code rule this forces
 
 `via_ir` means solc hoists `TIMESTAMP` and `NUMBER` — correctly, since both are
@@ -44,7 +71,12 @@ silently returns a stale value and mis-sequences the test. Switching the pipelin
 cost ~20 tests exactly this way. The rule is stated at the top of
 `test/base/StackDeployer.sol`, which every suite inherits.
 
-> **Open follow-up (not done in this pass): size-reduction pass on `Moderation`.**
+> **Open follow-up, now close to blocking: size-reduction pass on `Moderation`.**
+> The 1,184 B recorded below is historical; the live figure is **494 B** (table
+> above) and P0-2, P0-3, P0-5, P0-6 and P0-7 all still have to land in this
+> contract. Expect to hit the limit mid-milestone. The natural seam is moving
+> governance or settlement coordination out into its own module.
+>
 > 1,184 B of headroom is thin — roughly one moderate feature. And a logic contract
 > that was 5,193 B over EIP-170 before this port, and fits now only by virtue of an
 > optimizer pipeline, is telling us it still wants splitting: `Moderation` is

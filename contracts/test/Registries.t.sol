@@ -420,6 +420,83 @@ contract RegistriesTest is Test {
         assertFalse(indexReg.isIndexed(TK, ids[4]));
     }
 
+    // --- M2.6-P0-1b: the content reservation is as permanent as the entry ----
+
+    /// The reservation must not die with the logic that took it. Held in
+    /// `Moderation`, it restarted empty on every redeployment, so a replacement
+    /// logic re-indexed content already live in this index.
+    function test_content_reservation_survives_a_logic_upgrade() public {
+        bytes32 key = keccak256("content-key");
+
+        vm.prank(oldLogic);
+        bool first = indexReg.tryReserveContent(key, 0); // case 0 — a fresh logic starts there too
+        assertTrue(first, "first reservation succeeds");
+
+        (bool exists, address logic, uint256 caseId) = indexReg.contentReservation(key);
+        assertTrue(exists, "reserved");
+        assertEq(logic, oldLogic, "owned by the logic that took it");
+        assertEq(caseId, 0, "and by its own case 0");
+
+        _authorize(newLogic);
+        indexReg.revokeLogic(oldLogic);
+
+        assertTrue(indexReg.isContentReserved(key), "reservation survives the upgrade");
+        // Call BEFORE asserting: an external call inside the assert's argument
+        // list would consume the prank (StackDeployer header, trap 1).
+        vm.prank(newLogic);
+        bool second = indexReg.tryReserveContent(key, 0);
+        assertFalse(second, "the replacement logic is refused content already live in the index");
+    }
+
+    /// H-02 ownership keying, widened across versions: a replacement logic must
+    /// not be able to free live content by naming a case id it also holds. Both
+    /// logics number their first case 0, so this is the collision to close.
+    function test_replacement_logic_cannot_release_a_legacy_reservation() public {
+        bytes32 key = keccak256("content-key");
+        vm.prank(oldLogic);
+        indexReg.tryReserveContent(key, 0);
+
+        _authorize(newLogic);
+
+        // Same case id, different logic: a no-op, not a release.
+        vm.prank(newLogic);
+        indexReg.releaseContent(key, 0);
+        assertTrue(indexReg.isContentReserved(key), "another logic cannot free it");
+
+        // Right logic, wrong case: also a no-op (the stale-removal case, H-02).
+        vm.prank(oldLogic);
+        indexReg.releaseContent(key, 7);
+        assertTrue(indexReg.isContentReserved(key), "a different case cannot free it");
+
+        // Only the owning (logic, case) pair releases.
+        vm.prank(oldLogic);
+        indexReg.releaseContent(key, 0);
+        assertFalse(indexReg.isContentReserved(key), "the owner releases it");
+
+        // And then it is available again.
+        vm.prank(newLogic);
+        indexReg.tryReserveContent(key, 0);
+        (, address logicAfter,) = indexReg.contentReservation(key);
+        assertEq(logicAfter, newLogic, "freed content is reservable by the new logic");
+    }
+
+    /// Reservations are logic-facing state, not public: an arbitrary caller must
+    /// not be able to squat content keys or free live ones.
+    function test_content_reservation_is_logic_gated() public {
+        bytes32 key = keccak256("content-key");
+        vm.prank(alice);
+        vm.expectRevert(IndexRegistry.NotLogic.selector);
+        indexReg.tryReserveContent(key, 0);
+
+        vm.prank(oldLogic);
+        indexReg.tryReserveContent(key, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(IndexRegistry.NotLogic.selector);
+        indexReg.releaseContent(key, 0);
+        assertTrue(indexReg.isContentReserved(key), "still held");
+    }
+
     /// H-05: the seat seed is armed against `eligibilityAddVersion`, so EVERY
     /// path that adds draw-eligible weight must bump it. If one does not, an
     /// attacker can wait for a snapshot block's hash to become public and only

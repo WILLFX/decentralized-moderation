@@ -9,6 +9,7 @@ import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {StakeRegistryHarness} from "./harnesses/StakeRegistryHarness.sol";
+import {ProtocolLimits as L} from "../src/lib/ProtocolLimits.sol";
 
 /// Gas-bound and failure-mode suite (spec §10, work order M2-9). The load-bearing
 /// assertion is that worst-case settlement fits in ONE transaction under the 8M
@@ -362,6 +363,55 @@ contract GasBoundsTest is ModerationTestBase {
         vm.prank(c);
         mod.contributeAppealBond(caseId, floor / 4);
         emit log_named_uint("contributeAppealBond_gas", g - gasleft());
+    }
+
+    /// M2.6: a panel at the VALIDATOR'S CAP must fit one transaction.
+    ///
+    /// `MAX_PANEL` bounds what `_validateParams` will accept per depth, and H-11
+    /// pins a ruleset per case at submit — so if a ruleset at the cap cannot have
+    /// its seats drawn in one block, every case opened under it is permanently
+    /// unfinalizable with no path forward. That makes this the assertion that the
+    /// cap is honest: it is measured here, not assumed in a comment.
+    ///
+    /// Reads `ProtocolLimits.MAX_PANEL` directly so raising the constant without
+    /// re-measuring fails the suite.
+    function test_max_panel_draw_fits_the_ceiling() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+        // Enough capacity that the cap is reachable: a short panel would make this
+        // pass by drawing fewer seats than the bound it claims to test.
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("capmod", i)))));
+            b.mint(a, 1000 * XBZZ);
+            vm.prank(a);
+            b.approve(address(sr), type(uint256).max);
+            vm.prank(a);
+            sr.stake(80 * XBZZ);
+        }
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("capmod", i)))));
+            sr.activate(a);
+            vm.prank(a);
+            sr.setDutyUnits(8);
+        }
+        _settleEpoch(sr);
+
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectRound(caseId);
+        uint256 g = gasleft();
+        m.__drawPanel(caseId, 0, L.MAX_PANEL, keccak256("cap"));
+        uint256 used = g - gasleft();
+
+        emit log_named_uint("max_panel", L.MAX_PANEL);
+        emit log_named_uint("max_panel_draw_gas", used);
+        assertEq(
+            m.__seatCount(caseId, 0), L.MAX_PANEL, "the full cap was actually seated, not a short panel"
+        );
+        assertLt(used, HARD_CEILING, "a panel at MAX_PANEL must fit one transaction");
+        // Real margin, not a hairline pass: the per-seat cost rose twice in M2.6
+        // alone, and a cap sitting at 98% of the ceiling is one change from broken.
+        assertLt(used, (HARD_CEILING * 80) / 100, "and with margin for the per-seat cost to grow");
     }
 
     /// The seat-draw poke over a large tree (D9's 2M budget row): a full 47-seat

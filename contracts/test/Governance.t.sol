@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Moderation} from "../src/Moderation.sol";
 import {RulesetGovernor} from "../src/RulesetGovernor.sol";
+import {ProtocolLimits as L} from "../src/lib/ProtocolLimits.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 
 contract GovernanceTest is ModerationTestBase {
@@ -262,6 +263,49 @@ contract GovernanceTest is ModerationTestBase {
         // New governance can.
         vm.prank(newGov);
         governor.proposeGuidelines(keccak256("x"));
+    }
+
+    /// M2.6: `MAX_PANEL` is a solvency-of-liveness bound, not a style choice.
+    ///
+    /// It was 512, so governance could enact a ruleset whose `realizeSeats` cannot
+    /// fit in a block. H-11 pins a ruleset per case at submit, so every case opened
+    /// under it would be permanently unfinalizable with no path forward — no
+    /// attacker needed, just a plausible parameter choice. The cap is now derived
+    /// from a measured per-seat cost (~123k gas) against the 8M single-transaction
+    /// ceiling; `GasBounds.test_max_panel_draw_fits_the_ceiling` asserts a panel at
+    /// the cap actually fits.
+    function test_commit_target_above_the_drawable_cap_is_rejected() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        uint256[] memory tooBig = new uint256[](1);
+        tooBig[0] = L.MAX_PANEL + 1;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, tooBig, aws);
+
+        // The old cap is now firmly out of reach.
+        tooBig[0] = 512;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, tooBig, aws);
+
+        // A target AT the cap is accepted — the bound is exact, not conservative
+        // by accident.
+        uint256[] memory atCap = new uint256[](1);
+        atCap[0] = L.MAX_PANEL;
+        Moderation.Params memory q = mod.getParams();
+        q.maxDepth = 0;
+        q.minReveals = 1;
+        governor.proposeParameters(q, atCap, aws);
+    }
+
+    /// The ruleset the protocol actually ships must survive its own validator.
+    function test_default_ruleset_still_validates_under_the_cap() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+        assertEq(cts[cts.length - 1], 47, "deepest shipped target");
+        assertLe(cts[cts.length - 1], L.MAX_PANEL, "and it is within the cap");
+        governor.proposeParameters(p, cts, aws); // must not revert
     }
 
     // --- M2.6 split: the Moderation <-> RulesetGovernor boundary -------------

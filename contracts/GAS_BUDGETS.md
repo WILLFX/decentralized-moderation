@@ -172,6 +172,45 @@ Two costs, both measured:
   than the counter comparison it replaced. `StakeRegistry` grew 1,191 B, which is
   the right side for it.
 
+### MAX_PANEL, set from the measured curve (M2.6)
+
+`MAX_PANEL` was 512. `_validateParams` would therefore accept a ruleset whose
+`realizeSeats` cannot fit in a block — and H-11 pins a ruleset per case at submit,
+so every case opened under it is permanently unfinalizable with no path forward.
+No attacker required: a plausible parameter choice does it. Filed initially as a
+P1 note; it is a P0.
+
+Per-seat draw cost is flat across panel size (1,000-moderator tree,
+`test/spike/PanelCurve.t.sol`):
+
+| seats | gas | per seat |
+|---|---|---|
+| 47 | 5,784,708 | 123,078 |
+| 56 | 6,992,608 | 124,868 |
+| 64 | 7,825,247 | 122,269 |
+| 80 | 9,618,974 | 120,237 |
+| 96 | 11,712,334 | 122,003 |
+| 128 | 15,767,829 | 123,186 |
+
+Cost is dominated by per-seat storage writes (P0-2's escrow, P0-3's staged weight
+update), not tree descent, so it barely moves as the moderator set grows. Against
+the 8M ceiling the break-even is ~65 seats, and 64 already sits at 98% of it.
+
+**MAX_PANEL = 48**: 6,073,895 gas measured at the cap — 76% of the 8M ceiling and
+~35% of the Gnosis block limit, with room for the per-seat cost to keep rising (it
+rose twice in M2.6 alone). It still admits the shipped default ruleset, whose
+deepest target is 47. At the old 512 the same draw costs **55,231,377 gas** —
+3× the Gnosis block limit.
+
+`GasBounds.test_max_panel_draw_fits_the_ceiling` reads the constant directly, so
+raising it without re-measuring fails the suite.
+
+> **Raising MAX_PANEL requires cursor-based seat drawing (P1-2) to land first.**
+> `realizeSeats` attempts a whole commit target in one transaction, so until that
+> is batched the cap simply IS the ceiling divided by the per-seat cost. No larger
+> value can be made safe by validation alone. This converts P1-2 from an
+> optimisation into the named precondition for ever raising the cap.
+
 > **The 47-seat draw is now ~5.95M against an 8M hard ceiling.** P0-2 and P0-3
 > each added per-seat storage writes, and `realizeSeats` still attempts a whole
 > commit target in one transaction. `MAX_PANEL` is configured at 512 and the

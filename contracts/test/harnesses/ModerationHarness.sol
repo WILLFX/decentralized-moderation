@@ -152,6 +152,12 @@ contract ModerationHarness is Moderation {
         cases[caseId].rounds[depth].bondRefundOnly = true;
     }
 
+    /// Seats actually seated in a round — lets a gas bound assert it measured a
+    /// FULL panel rather than passing cheaply on a short one.
+    function __seatCount(uint256 caseId, uint256 depth) external view returns (uint256) {
+        return cases[caseId].rounds[depth].nSeats;
+    }
+
     function __seatSeed(uint256 caseId, uint256 depth) external view returns (bytes32) {
         return cases[caseId].rounds[depth].seatSeed;
     }

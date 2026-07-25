@@ -78,16 +78,44 @@ Outbound egress is proxied and several hosts the normal Foundry install relies o
 are policy-blocked, so the standard `foundryup` path does not work here. What was
 done instead, all through allowed hosts:
 
-- **`forge`/`anvil`**: `foundryup` downloads prebuilt binaries from GitHub
-  releases, which are blocked (403). Built from source instead:
-  `cargo install --git https://github.com/foundry-rs/foundry --tag v1.7.1 --locked forge anvil`
-  (github git access and `index.crates.io` are allowed).
 - **`solc`**: svm's default host `binaries.soliditylang.org` is blocked. The
-  0.8.28 binary was fetched from the GitHub `ethereum/solc-bin` mirror
+  0.8.28 binary is fetched from the GitHub `ethereum/solc-bin` mirror
   (`raw.githubusercontent.com`, allowed), **sha256-verified against the mirror's
   `list.json`**, and placed at `~/.svm/0.8.28/solc-0.8.28`. `foundry.toml` pins
   `solc_version = "0.8.28"` and sets `offline = true` so forge never probes the
   blocked host.
+
+  ```sh
+  mkdir -p ~/.svm/0.8.28
+  base=https://raw.githubusercontent.com/ethereum/solc-bin/gh-pages/linux-amd64
+  curl -sSL -o ~/.svm/0.8.28/solc-0.8.28 \
+    "$base/solc-linux-amd64-v0.8.28%2Bcommit.7893614a"
+  curl -sSL -o /tmp/list.json "$base/list.json"   # keep: needed for forge, below
+  # expect 9a0fb7e0db2c0641dbae1c5cc645dc686820c83af516226abb1c0a2f76636f25
+  sha256sum ~/.svm/0.8.28/solc-0.8.28
+  chmod +x ~/.svm/0.8.28/solc-0.8.28
+  ```
+
+- **`forge`/`anvil`**: `foundryup` downloads prebuilt binaries from GitHub
+  releases, which are blocked (403). Build from source instead — but the plain
+  `cargo install` **fails**: the `svm-rs-builds` build script fetches
+  `binaries.soliditylang.org/linux-amd64/list.json` at compile time and panics
+  on the blocked CONNECT. Point it at the mirror copy saved above:
+
+  ```sh
+  SVM_RELEASES_LIST_JSON=/tmp/list.json \
+    cargo install --git https://github.com/foundry-rs/foundry \
+      --tag v1.7.1 --locked forge anvil
+  ```
+
+  (github git access and `index.crates.io` are allowed.) The build takes ~30 min
+  on 4 cores. If it fails partway, `CARGO_TARGET_DIR` set to the
+  `/tmp/cargo-install*` path cargo names in its error message reuses the
+  artifacts instead of restarting.
+
+- **Submodules**: `lib/forge-std` and `lib/solady` are git submodules and a fresh
+  clone leaves them empty — `forge test` then fails on unresolvable imports.
+  `git submodule update --init --recursive` from the repo root.
 
 On an unrestricted machine, `foundryup && forge test` works normally; none of the
 above is a project requirement, only a sandbox workaround.

@@ -134,14 +134,38 @@ contract StakeRegistry {
     ///         ruleset was validated against it.
     uint256 public immutable riskPerSeat;
 
-    /// H-05: bumped whenever draw-eligible weight is ADDED, so the logic contract
-    /// can detect an eligibility change between arming a seed and drawing on it
-    /// and re-arm to fresh entropy. Every path that grows the drawable set must
-    /// bump it — `activate` (pending becomes drawable), `thaw` (a frozen
-    /// moderator re-enters), and `setDutyUnits` (capacity is pledged) — or an
-    /// attacker can wait for a seed's blockhash to become public and only then
-    /// reshape the tree in its favour (adaptive-activation grinding).
-    uint256 public eligibilityAddVersion;
+    // --- eligibility epochs (M2.6-P0-3) --------------------------------------
+    //
+    // H-05 was defended by `eligibilityAddVersion`, a counter the logic contract
+    // compared before drawing and re-armed on. It failed in both directions:
+    // `setDutyUnits(sameValue)` bumped it with no change, so any pledged
+    // moderator could re-arm EVERY pending case forever for gas; while `release`,
+    // `reward` and `releaseDuty` added draw-eligible weight and never bumped it
+    // at all, leaving the grind it existed to stop wide open. Weight REMOVALS
+    // (`setDutyUnits(0)`, `requestExit`, freezing) never bumped either, and those
+    // remap the whole weighted tree — grinding over tree states, not
+    // self-exclusion.
+    //
+    // Replaced by something structural. Draw-eligible weight now changes only at
+    // EPOCH BOUNDARIES, on a fixed block cadence nobody can influence: a change
+    // made during epoch `e` is staged and takes effect in `e + 1`. Within an
+    // epoch the eligible set is constant, so a draw armed and realized inside one
+    // epoch cannot be reshaped after its entropy becomes public — by anyone, in
+    // either direction. There is no change to detect and nothing to re-arm on,
+    // which is why the counter is gone rather than fixed.
+    uint256 public immutable epochBlocks;
+    /// Epochs up to and including this one have had their staged changes applied.
+    uint256 public appliedEpoch;
+    /// Moderators whose weight changed during epoch `e`, applied at the start of
+    /// `e + 1`. Keyed by epoch so changes staged mid-drain are not swept early.
+    mapping(uint256 => address[]) internal stagedByEpoch;
+    mapping(uint256 => mapping(address => bool)) internal isStaged;
+    uint256 internal drainCursor;
+    /// The weight each moderator's leaf carries for the CURRENT epoch. Written
+    /// only at drain time, and used to restore leaves a draw excluded transiently.
+    mapping(address => uint256) internal epochWeight;
+    /// Staged changes applied automatically per draw before a keeper is needed.
+    uint256 internal constant DRAIN_BUDGET = 64;
 
     // --- authorization -------------------------------------------------------
 
@@ -202,6 +226,7 @@ contract StakeRegistry {
     error ZeroAddress();
     error RewardNotFunded(); // reward() must be funded by the caller in the same call
     error DutyReserved(); // M2.6-P0-2: cannot un-pledge capacity a live panel holds
+    error EpochNotSettled(); // M2.6-P0-3: call advanceEpoch() to apply staged changes
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -219,8 +244,10 @@ contract StakeRegistry {
         uint256 _minStake,
         uint256 _activationDelay,
         uint256 _exitCooldown,
-        uint256 _riskPerSeat
+        uint256 _riskPerSeat,
+        uint256 _epochBlocks
     ) {
+        if (_epochBlocks == 0) revert AmountZero();
         if (address(_token) == address(0)) revert ZeroAddress();
         if (_riskPerSeat == 0) revert AmountZero();
         token = _token;
@@ -228,6 +255,8 @@ contract StakeRegistry {
         minStake = _minStake;
         activationDelay = _activationDelay;
         exitCooldown = _exitCooldown;
+        epochBlocks = _epochBlocks;
+        appliedEpoch = block.number / _epochBlocks;
         riskPerSeat = _riskPerSeat;
         governance = msg.sender;
         stakeTree.initialize(2);
@@ -262,7 +291,6 @@ contract StakeRegistry {
         if (block.timestamp < m.activatesAt) revert NotYetActivatable();
         m.pending = 0;
         _syncTree(moderator, m);
-        eligibilityAddVersion++; // H-05: eligible weight grew
         emit Activated(moderator, _eligibleWeight(m));
     }
 
@@ -319,7 +347,6 @@ contract StakeRegistry {
             uint256 reserved = m.pending + m.exitAmount;
             uint256 usable = m.free > reserved ? m.free - reserved : 0;
             if (usable < units * riskPerSeat) revert InsufficientEligibleFree();
-            eligibilityAddVersion++; // H-05
         }
         m.dutyUnits = units;
         _syncTree(msg.sender, m);
@@ -337,7 +364,6 @@ contract StakeRegistry {
         m.free += amount;
         totalFreeStake += amount;
         _syncTree(moderator, m);
-        eligibilityAddVersion++; // H-05: eligible weight grew
         emit Thawed(moderator, amount);
     }
 
@@ -447,6 +473,11 @@ contract StakeRegistry {
         onlyLogic
         returns (address[] memory seats, uint256 attempts)
     {
+        // The eligible set for this epoch must be complete before we sample it.
+        // Bounded work; a keeper finishes an oversized epoch via `advanceEpoch`.
+        _drainEpochs(DRAIN_BUDGET);
+        if (!epochSettled()) revert EpochNotSettled();
+
         seats = new address[](count);
         address[] memory excluded = new address[](count);
         uint256 nExcluded;
@@ -463,7 +494,12 @@ contract StakeRegistry {
             // locked by whichever case committed first, or be exit-reserved.
             uint256 reserved = m.pending + m.exitAmount;
             uint256 usable = m.free > reserved ? m.free - reserved : 0;
-            if (m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
+            // M2.6-P0-3: the tree is the epoch's sampling distribution, but the
+            // STRUCT is the authority for what may actually be seated. A freeze
+            // (or any other exclusion) applied mid-epoch is live here even though
+            // the leaf still carries last boundary's weight, so a penalised
+            // moderator cannot be seated for the remainder of the epoch.
+            if (block.timestamp < m.frozenUntil || m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
                 if (nExcluded < count) {
                     excluded[nExcluded++] = seat;
                     stakeTree.set(seat, 0);
@@ -476,11 +512,23 @@ contract StakeRegistry {
             totalFreeStake -= riskPerSeat;
             totalDutyBondedStake += riskPerSeat;
             seats[drawn++] = seat;
-            _syncTree(seat, m); // weight shrinks as capacity is consumed
+            // M2.6-P0-3: the persistent weight shrink is STAGED for the next
+            // epoch — the tree must not move inside an epoch. Within this draw
+            // the moderator is held out by the exclusion list instead, which is
+            // restored before returning, so the tree is unchanged on exit.
+            _stageSeated(seat);
+            if (m.dutyUnits <= m.dutyReserved || (m.free > m.pending + m.exitAmount ? m.free - m.pending - m.exitAmount : 0) < riskPerSeat)
+            {
+                if (nExcluded < count) {
+                    excluded[nExcluded++] = seat;
+                    stakeTree.set(seat, 0);
+                }
+            }
         }
+        // Restore every temporarily-excluded leaf to the weight this epoch
+        // started with, so the draw leaves the tree exactly as it found it.
         for (uint256 j; j < nExcluded; ++j) {
-            Moderator storage em = moderators[excluded[j]];
-            stakeTree.set(excluded[j], _eligibleWeight(em));
+            stakeTree.set(excluded[j], epochWeight[excluded[j]]);
         }
         if (drawn < count) {
             // Shrink to what was actually seated.
@@ -697,6 +745,91 @@ contract StakeRegistry {
         return m.free + m.committed + m.frozen + m.dutyBonded;
     }
 
+    /// @notice The epoch containing `block.number`. A fixed cadence: no
+    ///         participant, and no volume of activity, can move a boundary.
+    function currentEpoch() public view returns (uint256) {
+        return block.number / epochBlocks;
+    }
+
+    /// First block of the epoch AFTER the current one — where a seed that cannot
+    /// fit inside this epoch is deferred to.
+    function nextEpochStart() external view returns (uint256) {
+        return (currentEpoch() + 1) * epochBlocks;
+    }
+
+    /// @notice True once every change staged in earlier epochs has been applied,
+    ///         i.e. the eligible set for this epoch is complete and will not move
+    ///         again until the next boundary.
+    function epochSettled() public view returns (bool) {
+        return appliedEpoch == currentEpoch();
+    }
+
+    /// @notice Apply staged weight changes for elapsed epochs. Permissionless and
+    ///         batched; `drawPanel` runs it automatically within a bounded budget,
+    ///         so this is only needed when a single epoch staged more changes than
+    ///         that budget covers.
+    /// @dev Timing is not a lever. The set applied here was fixed before this
+    ///      epoch began, and applying it is all-or-nothing per epoch, so nobody
+    ///      can choose to reveal a change after seeing a seed's entropy.
+    function advanceEpoch(uint256 maxItems) external {
+        _drainEpochs(maxItems);
+    }
+
+    function _drainEpochs(uint256 maxItems) internal {
+        uint256 target = currentEpoch();
+        uint256 applied = appliedEpoch;
+        uint256 budget = maxItems;
+        while (applied < target && budget > 0) {
+            uint256 e = applied + 1; // the epoch whose stages become effective
+            address[] storage list = stagedByEpoch[e - 1];
+            uint256 n = list.length;
+            uint256 i = drainCursor;
+            while (i < n && budget > 0) {
+                address a = list[i];
+                delete isStaged[e - 1][a];
+                uint256 w = _eligibleWeight(moderators[a]);
+                epochWeight[a] = w;
+                stakeTree.set(a, w);
+                unchecked {
+                    ++i;
+                    --budget;
+                }
+            }
+            if (i < n) {
+                drainCursor = i;
+                appliedEpoch = applied;
+                return; // out of budget mid-epoch; a keeper finishes it
+            }
+            drainCursor = 0;
+            applied = e;
+        }
+        appliedEpoch = applied;
+    }
+
+    /// @dev Record that `a`'s draw-eligible weight has changed. The moderator's
+    ///      own accounting is already live; only the SORTITION TREE is deferred,
+    ///      to the start of the next epoch. That deferral is the whole of P0-3:
+    ///      within an epoch the eligible set cannot move, so a draw armed and
+    ///      realized inside one epoch cannot be reshaped after its entropy is
+    ///      public — in either direction, by anyone.
+    function _stage(address a) internal {
+        uint256 e = currentEpoch();
+        if (isStaged[e][a]) return;
+        isStaged[e][a] = true;
+        stagedByEpoch[e].push(a);
+    }
+
+    /// @dev As `_stage`, without the dedupe flag. The drain recomputes weight from
+    ///      live state, so a duplicate entry is idempotent — it only costs the
+    ///      drain an extra recompute. Used on the DRAW path, where the flag's cold
+    ///      SSTORE is paid once per seated moderator and the 47-seat panel is
+    ///      already the most expensive transaction in the protocol. Callers that a
+    ///      griefer could invoke repeatedly must use `_stage`, which bounds list
+    ///      growth; a seat cannot be repeated for free.
+    function _stageSeated(address a) internal {
+        stagedByEpoch[currentEpoch()].push(a);
+    }
+
     /// Draw-eligible weight (H-07): free, unreserved stake CAPPED by remaining
     /// pledged duty capacity, and zero while frozen.
     function _eligibleWeight(Moderator storage m) internal view returns (uint256) {
@@ -709,7 +842,14 @@ contract StakeRegistry {
         return usable < capacity ? usable : capacity;
     }
 
+    /// @dev Was an immediate `stakeTree.set`. Since M2.6-P0-3 the tree is only
+    ///      written at epoch boundaries (`_drainEpochs`) or transiently inside a
+    ///      draw, so every other caller stages instead. The moderator struct is
+    ///      still updated immediately by its caller — the struct is the authority
+    ///      for what may be seated (P0-2's escrow check reads it), the tree is
+    ///      only the sampling distribution.
     function _syncTree(address moderator, Moderator storage m) internal {
-        stakeTree.set(moderator, _eligibleWeight(m));
+        m; // weight is recomputed at drain time from live state
+        _stage(moderator);
     }
 }

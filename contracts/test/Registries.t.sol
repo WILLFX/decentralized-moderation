@@ -18,6 +18,7 @@ contract RegistriesTest is Test {
     uint256 internal constant ACTIVATION = 7 days;
     uint256 internal constant COOLDOWN = 7 days;
     uint256 internal constant RISK_PER_SEAT = 10 * XBZZ;
+    uint256 internal constant EPOCH_BLOCKS = 256; // M2.6-P0-3 eligibility-epoch cadence
 
     MockBZZ internal bzz;
     StakeRegistry internal stakeReg;
@@ -32,7 +33,9 @@ contract RegistriesTest is Test {
 
     function setUp() public {
         bzz = new MockBZZ();
-        stakeReg = new StakeRegistry(IERC20(address(bzz)), TIMELOCK, MIN_STAKE, ACTIVATION, COOLDOWN, RISK_PER_SEAT);
+        stakeReg = new StakeRegistry(
+            IERC20(address(bzz)), TIMELOCK, MIN_STAKE, ACTIVATION, COOLDOWN, RISK_PER_SEAT, EPOCH_BLOCKS
+        );
         indexReg = new IndexRegistry(TIMELOCK);
         _authorize(oldLogic);
     }
@@ -43,6 +46,12 @@ contract RegistriesTest is Test {
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         stakeReg.executeLogic();
         indexReg.executeLogic();
+    }
+
+    /// Cross an eligibility-epoch boundary and apply staged changes (M2.6-P0-3).
+    function _settleEpoch() internal {
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
     }
 
     function _stake(address who, uint256 amount) internal {
@@ -62,6 +71,7 @@ contract RegistriesTest is Test {
         uint256 units = amount / RISK_PER_SEAT;
         vm.prank(who);
         stakeReg.setDutyUnits(units);
+        _settleEpoch(); // pledged capacity is drawable from the next epoch
     }
 
     // --- the point of the split ---------------------------------------------
@@ -321,6 +331,7 @@ contract RegistriesTest is Test {
         stakeReg.activate(alice);
         vm.prank(alice);
         stakeReg.setDutyUnits(3); // only 3 seats pledged
+        _settleEpoch();
 
         vm.prank(oldLogic);
         (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0);
@@ -480,6 +491,10 @@ contract RegistriesTest is Test {
         stakeReg.activate(alice);
         vm.prank(alice);
         stakeReg.setDutyUnits(2);
+        _settleEpoch(); // capacity is live from here
+        // The exit reservation lands mid-epoch: the TREE still shows two units of
+        // capacity, but the struct — which is what `drawPanel` checks before
+        // escrowing — shows only one unit of usable stake.
         vm.prank(alice);
         stakeReg.requestExit(RISK_PER_SEAT);
 
@@ -603,6 +618,7 @@ contract RegistriesTest is Test {
         stakeReg.activate(alice);
         vm.prank(alice);
         stakeReg.setDutyUnits(1);
+        _settleEpoch();
 
         vm.prank(oldLogic);
         stakeReg.drawPanel(1, keccak256("bonded"), 0);
@@ -749,36 +765,110 @@ contract RegistriesTest is Test {
         assertTrue(indexReg.isContentReserved(key), "still held");
     }
 
-    /// H-05: the seat seed is armed against `eligibilityAddVersion`, so EVERY
-    /// path that adds draw-eligible weight must bump it. If one does not, an
-    /// attacker can wait for a snapshot block's hash to become public and only
-    /// then reshape the tree in its favour — the draw would proceed on entropy
-    /// the attacker already knew. activate() and thaw() were both silent here,
-    /// which retired the defence the moment staking moved off the monolith.
-    function test_eligibility_version_bumps_on_every_weight_add() public {
-        _stake(alice, 100 * XBZZ);
-        uint256 v0 = stakeReg.eligibilityAddVersion();
+    // --- M2.6-P0-3: eligibility is constant within an epoch -------------------
 
+    /// The property, stated directly rather than through a change counter: no
+    /// weight-changing path — in EITHER direction — moves the sortition tree
+    /// inside an epoch.
+    ///
+    /// This replaces `test_eligibility_version_bumps_on_every_weight_add`, which
+    /// asserted that `eligibilityAddVersion` was bumped. That counter was the
+    /// defence and it was broken both ways: `setDutyUnits(sameValue)` bumped it
+    /// with no change (so a griefer could re-arm every pending case forever),
+    /// while `release`, `reward` and `releaseDuty` grew the drawable set and never
+    /// bumped it at all. Decreases — `requestExit`, `freeze` — were never tracked
+    /// either, and removing an interval remaps the whole weighted tree.
+    function test_weight_changes_do_not_move_the_tree_within_an_epoch() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+
+        uint256 totalAtEpochStart = stakeReg.totalEligibleWeight();
+        uint256 aliceAtEpochStart = stakeReg.eligibleWeightOf(alice);
+        assertGt(totalAtEpochStart, 0, "there is a live eligible set to move");
+
+        // INCREASES: the paths the old counter missed entirely.
+        _stake(alice, 50 * XBZZ);
         vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice);
-        uint256 v1 = stakeReg.eligibilityAddVersion();
-        assertGt(v1, v0, "activate: pending stake becomes drawable");
+        // `reward` pulls its own funding (M2.6-P0-4), so fund the caller first.
+        bzz.mint(oldLogic, 5 * XBZZ);
+        vm.prank(oldLogic);
+        bzz.approve(address(stakeReg), type(uint256).max);
+        vm.startPrank(oldLogic);
+        stakeReg.reward(alice, 5 * XBZZ); // credit path: grew weight, never bumped the counter
+        stakeReg.setTrack(alice, 1);
+        vm.stopPrank();
 
+        // DECREASES: never tracked at all, and they remap the whole tree.
+        vm.prank(bob);
+        stakeReg.requestExit(20 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.lock(bob, RISK_PER_SEAT);
+        vm.prank(oldLogic);
+        stakeReg.freeze(bob, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+
+        // A no-op re-pledge: the exact call that used to re-arm every case.
         vm.prank(alice);
         stakeReg.setDutyUnits(10);
-        uint256 v2 = stakeReg.eligibilityAddVersion();
-        assertGt(v2, v1, "setDutyUnits: pledging capacity adds draw weight");
+        vm.prank(alice);
+        stakeReg.setDutyUnits(10);
 
-        vm.startPrank(oldLogic);
-        stakeReg.lock(alice, RISK_PER_SEAT);
-        stakeReg.freeze(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
-        vm.stopPrank();
-        uint256 v3 = stakeReg.eligibilityAddVersion();
-        assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> out of the pool");
+        assertEq(stakeReg.totalEligibleWeight(), totalAtEpochStart, "total unmoved within the epoch");
+        assertEq(stakeReg.eligibleWeightOf(alice), aliceAtEpochStart, "and so is every leaf");
 
-        vm.warp(vm.getBlockTimestamp() + 1 days + 1);
-        stakeReg.thaw(alice);
-        assertGt(stakeReg.eligibilityAddVersion(), v3, "thaw: a frozen moderator re-enters the pool");
+        // They are not lost — they land at the boundary, together.
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
+        assertTrue(
+            stakeReg.totalEligibleWeight() != totalAtEpochStart,
+            "staged changes take effect at the next epoch"
+        );
+    }
+
+    /// The griefing half: a no-op `setDutyUnits` used to bump the global counter
+    /// and force every pending case to re-arm. There is no counter to bump now,
+    /// and repeating it cannot disturb the epoch's eligible set.
+    function test_repeated_noop_setDutyUnits_cannot_disturb_the_epoch() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 before = stakeReg.totalEligibleWeight();
+
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(alice);
+            stakeReg.setDutyUnits(10);
+            assertEq(stakeReg.totalEligibleWeight(), before, "no-op re-pledge moves nothing");
+        }
+        assertTrue(stakeReg.epochSettled(), "and the epoch stays settled");
+    }
+
+    /// A draw leaves the tree exactly as it found it: seats are held out of the
+    /// rest of THIS draw by the exclusion list, and the persistent weight shrink
+    /// is staged for the next epoch (M2.6-P0-2 + P0-3).
+    function test_a_draw_does_not_move_the_tree_for_concurrent_cases() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        uint256 before = stakeReg.totalEligibleWeight();
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(3, keccak256("concurrent"), 0);
+
+        assertEq(stakeReg.totalEligibleWeight(), before, "the sampling distribution is unchanged mid-epoch");
+        // The escrow is real regardless — the struct is the authority for seating.
+        assertEq(stakeReg.totalDutyBondedStake(), 3 * RISK_PER_SEAT, "collateral was still escrowed");
+    }
+
+    /// `drawPanel` refuses to sample an epoch whose staged changes are not yet in.
+    function test_draw_refuses_an_unsettled_epoch() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS * 2);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(9); // stages into this epoch
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
+
+        assertFalse(stakeReg.epochSettled(), "an epoch boundary passed with changes staged");
+        // drawPanel drains within its budget, so a small backlog settles itself.
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("settles"), 0);
+        assertTrue(stakeReg.epochSettled(), "the draw applied the backlog itself");
     }
 
     function test_two_step_governance_transfer() public {

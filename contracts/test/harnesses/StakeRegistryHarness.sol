@@ -20,8 +20,9 @@ contract StakeRegistryHarness is StakeRegistry {
         uint256 _minStake,
         uint256 _activationDelay,
         uint256 _exitCooldown,
-        uint256 _riskPerSeat
-    ) StakeRegistry(_token, _timelockDelay, _minStake, _activationDelay, _exitCooldown, _riskPerSeat) {}
+        uint256 _riskPerSeat,
+        uint256 _epochBlocks
+    ) StakeRegistry(_token, _timelockDelay, _minStake, _activationDelay, _exitCooldown, _riskPerSeat, _epochBlocks) {}
 
     function __injectCommitted(address moderator, uint256 amount) external {
         Moderator storage m = moderators[moderator];

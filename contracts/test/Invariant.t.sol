@@ -51,6 +51,8 @@ contract InvariantTest is StackDeployer {
             vm.prank(actors[i]);
             stakeReg.setDutyUnits(units);
         }
+        // M2.6-P0-3: pledged capacity becomes drawable at the next epoch boundary.
+        _settleEpoch(stakeReg);
         assertGt(stakeReg.totalEligibleWeight(), 0, "campaign starts with a drawable set");
 
         // Fuzz only the handler's action functions.

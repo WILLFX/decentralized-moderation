@@ -67,7 +67,11 @@ abstract contract ModerationTestBase is StackDeployer {
             vm.prank(mods[i]);
             stakeReg.setDutyUnits(units);
         }
-        vm.roll(vm.getBlockNumber() + 1);
+        // M2.6-P0-3: newly staked/pledged weight becomes drawable at the NEXT
+        // eligibility epoch, not immediately — that deferral is the whole point.
+        // Cross the boundary and apply, so the fixture starts with a live pool.
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
     }
 
     function _topics() internal pure returns (bytes32[] memory t) {
@@ -131,13 +135,28 @@ abstract contract ModerationTestBase is StackDeployer {
         (, , , d, , , ) = mod.caseInfo(caseId);
     }
 
+    /// Drive DRAW -> COMMIT. M2.6-P0-3: staged eligibility changes are applied at
+    /// the epoch boundary by a permissionless keeper call, so settle the epoch
+    /// before poking — `drawPanel` refuses to sample an unsettled epoch.
     function _realizeSeats(uint256 caseId) internal {
-        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+        _rollToSeed(caseId);
         mod.realizeSeats(caseId);
         while (_phase(caseId) == Moderation.Phase.DRAW) {
-            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+            _rollToSeed(caseId);
             mod.realizeSeats(caseId);
         }
+    }
+
+    /// Roll past this round's snapshot block and apply any staged eligibility
+    /// changes. M2.6-P0-3: a seed whose window would straddle an epoch boundary is
+    /// DEFERRED to the next epoch, so the snapshot block can be well beyond
+    /// `seedLag` — rolling a fixed `SEED_LAG + 1` is no longer enough.
+    function _rollToSeed(uint256 caseId) internal {
+        (,,,,,,,, uint256 snapshotBlock,) = mod.roundInfo(caseId, _depth(caseId));
+        uint256 target = snapshotBlock + 1;
+        if (vm.getBlockNumber() < target) vm.roll(target);
+        else vm.roll(vm.getBlockNumber() + 1);
+        stakeReg.advanceEpoch(type(uint256).max);
     }
 
     function _commitAll(uint256 caseId, uint256 depth, Moderation.Vote vote) internal {

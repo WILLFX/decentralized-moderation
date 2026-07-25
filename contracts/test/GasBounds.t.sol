@@ -388,6 +388,8 @@ contract GasBoundsTest is ModerationTestBase {
             vm.prank(a);
             sr.setDutyUnits(2);
         }
+        // M2.6-P0-3: pledged capacity is drawable from the NEXT epoch.
+        _settleEpoch(sr);
         assertEq(sr.totalEligibleWeight(), 1000 * 20 * XBZZ, "all 1000 are actually drawable");
 
         // Inject a FINALIZED-then-reopened depth-3 round? Simpler: measure a

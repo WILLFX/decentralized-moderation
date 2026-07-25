@@ -40,6 +40,11 @@ abstract contract StackDeployer is Test {
     uint256 internal constant REG_RISK_PER_SEAT = 10 * 1e16;
     /// Was `Moderation.timelockDelay`, hardcoded to 7 days before the M2.6 split.
     uint256 internal constant GOV_TIMELOCK = 7 days;
+    /// M2.6-P0-3 eligibility-epoch cadence. 256 blocks is the natural ceiling: a
+    /// seed older than that has no `blockhash` left anyway (D4), so a longer epoch
+    /// could not keep a window valid. Must exceed `seedLag + REALIZE_SLACK` (2 + 64)
+    /// or no window would ever fit.
+    uint256 internal constant REG_EPOCH_BLOCKS = 256;
 
     /// The governor deployed alongside the most recent `_deployStack` call, for
     /// suites that drive governance. M2.6 moved ruleset authoring out of
@@ -70,7 +75,13 @@ abstract contract StackDeployer is Test {
 
     function _deployRegistries(MockBZZ bzz) internal returns (StakeRegistryHarness sr, IndexRegistry ir) {
         sr = new StakeRegistryHarness(
-            IERC20(address(bzz)), REG_TIMELOCK, REG_MIN_STAKE, REG_ACTIVATION, REG_COOLDOWN, REG_RISK_PER_SEAT
+            IERC20(address(bzz)),
+            REG_TIMELOCK,
+            REG_MIN_STAKE,
+            REG_ACTIVATION,
+            REG_COOLDOWN,
+            REG_RISK_PER_SEAT,
+            REG_EPOCH_BLOCKS
         );
         ir = new IndexRegistry(REG_TIMELOCK);
     }
@@ -83,6 +94,14 @@ abstract contract StackDeployer is Test {
         vm.warp(vm.getBlockTimestamp() + REG_TIMELOCK);
         sr.executeLogic();
         ir.executeLogic();
+    }
+
+    /// Cross an eligibility-epoch boundary and apply everything staged before it
+    /// (M2.6-P0-3). Weight changes only become drawable at a boundary, so any
+    /// fixture that stakes/pledges and then expects to be drawn must do this.
+    function _settleEpoch(StakeRegistry sr) internal {
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        sr.advanceEpoch(type(uint256).max);
     }
 
     /// Two-contract conservation (M2.5 port, §9.1). Stake custody moved to the

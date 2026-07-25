@@ -88,8 +88,11 @@ contract StakingTest is StackDeployer {
         vm.prank(alice);
         stakeReg.stake(100 * XBZZ);
 
-        // In the free bucket, but not draw-eligible yet.
+        // In the free bucket, but not draw-eligible yet. Two reasons now: the
+        // activation delay (H-07 pledge aside), and M2.6-P0-3 — weight becomes
+        // drawable only at the next eligibility-epoch boundary.
         assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ);
+        _settleEpoch(stakeReg);
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "pending: not in tree");
         assertEq(stakeReg.totalEligibleWeight(), 0);
 
@@ -106,6 +109,7 @@ contract StakingTest is StackDeployer {
         uint256 units = 100 * XBZZ / mod.getParams().riskPerSeat;
         vm.prank(alice);
         stakeReg.setDutyUnits(units);
+        _settleEpoch(stakeReg); // P0-3: drawable from the next epoch
         assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ, "pledged: full weight in tree");
         assertEq(stakeReg.totalEligibleWeight(), 100 * XBZZ);
     }

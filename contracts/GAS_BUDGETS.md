@@ -47,6 +47,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **P0-1c** (legacy removal path) | **24,259 B** | **317 B** | 8,977 B | 5,288 B |
 | **P0-2** (duty escrow) | **24,343 B** | **233 B** | 9,951 B | 5,288 B |
 | **structural split** (governor out) | **22,298 B** | **2,278 B** | 9,951 B | 5,288 B |
+| **P0-3** (eligibility epochs) | **21,908 B** | **2,668 B** | 11,142 B | 5,288 B |
 
 (The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 
@@ -152,6 +153,31 @@ Two things the split had to get right:
 `Moderation.governor` is immutable, so the split adds no trust surface: the
 governor holds exactly what the `governance` address held before. The multisig
 still rotates, via `RulesetGovernor.transferGovernance`.
+
+### P0-3 as shipped: frozen-window epochs
+
+Draw-eligible weight changes only at epoch boundaries (`epochBlocks = 256`), and a
+seed is armed so its whole window fits inside one epoch. Within an epoch the
+eligible set is constant, so there is nothing to grind and nothing to re-arm on.
+
+Two costs, both measured:
+
+- **The 47-seat draw goes 5.41M -> 5.95M** (+540k). Each seated moderator's
+  deferred weight update is one array push. The dedupe flag `_stage` uses would
+  have made it 7.01M; the draw path uses `_stageSeated`, which omits it because
+  the drain recomputes from live state and a duplicate entry is idempotent. A
+  griefer cannot exploit the missing flag — repeating a seat is not free.
+- **`Moderation` SHRANK by 390 B** (22,298 -> 21,908). The re-arm branch and
+  `eligVersionAtArm` were deleted outright, and epoch-fitted arming is smaller
+  than the counter comparison it replaced. `StakeRegistry` grew 1,191 B, which is
+  the right side for it.
+
+> **The 47-seat draw is now ~5.95M against an 8M hard ceiling.** P0-2 and P0-3
+> each added per-seat storage writes, and `realizeSeats` still attempts a whole
+> commit target in one transaction. `MAX_PANEL` is configured at 512 and the
+> largest thing ever measured is 47. Cursor-based seat drawing (work order P1-2)
+> is no longer an optimisation — it is what has to land before any panel target
+> materially above ~60 can be accepted by the validator.
 
 ### P0-3 spike: what a checkpointed sortition tree actually costs
 

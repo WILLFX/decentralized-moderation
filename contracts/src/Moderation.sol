@@ -37,6 +37,10 @@ contract Moderation is ReentrancyGuard {
     // H-06: randomness domain-separation purpose tags.
     uint8 internal constant SEED_SEATS = 1;
     uint8 internal constant SEED_OUTCOME = 2;
+    /// M2.6-P0-3: blocks guaranteed available, after a seed's snapshot block, for a
+    /// permissionless poke to realize it inside the same eligibility epoch. Beyond
+    /// this the window may be abandoned and re-armed into a later epoch.
+    uint256 internal constant REALIZE_SLACK = 64;
     // H-11: the immutable protocol caps live in `ProtocolLimits` (M2.6), shared
     // with `RulesetGovernor` — the contract that validates a ruleset and the
     // contract that enforces it must read the same numbers.
@@ -213,7 +217,7 @@ contract Moderation is ReentrancyGuard {
         uint256 seatDrawCount; // total seat draws performed (offset base for widen draws)
         uint256 widenCount; // widen re-draws used
         uint256 pendingDraw; // H-05: seats still to be drawn for this round (fresh entropy per draw, incl. each widen)
-        uint256 eligVersionAtArm; // H-05: eligibilityAddVersion when the seat seed was armed
+        uint256 epochAtArm; // H-05/P0-3: the eligibility epoch this seed belongs to
         uint256 seatSnapshotBlock; // block whose blockhash seeds the seat draw
         uint256 outcomeSnapshotBlock; // block whose blockhash seeds the outcome draw
         bytes32 seatSeed;
@@ -570,14 +574,19 @@ contract Moderation is ReentrancyGuard {
         if (block.number <= r.seatSnapshotBlock) revert SeedNotReady();
 
         bytes32 bh = blockhash(r.seatSnapshotBlock);
-        // H-05: re-arm to fresh entropy if the blockhash is stale (D4) OR if
-        // draw-eligible weight was ADDED since this seed was armed. The latter is
-        // what defeats adaptive activation: an attacker that waits for the
-        // blockhash to be public and then activates a favourable subset only
-        // invalidates the seed it was trying to exploit.
-        if (bh == 0 || stakeReg.eligibilityAddVersion() != r.eligVersionAtArm) {
-            r.seatSnapshotBlock = block.number + _cp(c).seedLag;
-            r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
+        // Re-arm if the blockhash has aged out of the 256-block window (D4), or if
+        // this seed's epoch has passed — nobody poked in time, so the window it was
+        // armed for no longer exists and the eligible set has moved on.
+        //
+        // M2.6-P0-3: there is deliberately NO "did eligibility change?" branch here
+        // any more. `eligibilityAddVersion` was that branch, and it was both
+        // griefable (any pledged moderator could re-arm every pending case forever
+        // with a no-op `setDutyUnits`) and incomplete (`release`, `reward` and
+        // `releaseDuty` all grew the drawable set and never bumped it). Eligibility
+        // is now constant across the window by construction, so there is no change
+        // that could occur for this branch to detect.
+        if (bh == 0 || stakeReg.currentEpoch() != r.epochAtArm) {
+            _armSeed(c, r);
             emit SeedRearmed(caseId, c.depth, false, r.seatSnapshotBlock);
             return;
         }
@@ -1203,14 +1212,40 @@ contract Moderation is ReentrancyGuard {
 
     // --- internal transitions ------------------------------------------------
 
+    /// @dev Arm a seat seed so its whole window — the snapshot block plus the
+    ///      slack a poke needs to realize it — lies inside ONE eligibility epoch
+    ///      (M2.6-P0-3). Draw-eligible weight changes only at epoch boundaries, so
+    ///      a window that does not straddle one sees a constant eligible set:
+    ///      nothing can be reshaped after the entropy is public, in either
+    ///      direction, and there is therefore nothing to detect and nothing to
+    ///      re-arm on. A window that would not fit is deferred to the start of the
+    ///      next epoch rather than armed and later invalidated.
+    ///
+    ///      `REALIZE_SLACK` is the stated bound: a case gets at least this many
+    ///      blocks after its snapshot in which to be realized. Sit longer and the
+    ///      window is abandoned and re-armed into a later epoch — the case is never
+    ///      stuck, it only waits.
+    function _armSeed(Case storage c, Round storage r) internal {
+        uint256 lag = _cp(c).seedLag;
+        uint256 epochLen = stakeReg.epochBlocks();
+        uint256 pos = block.number % epochLen;
+        if (epochLen - pos > lag + REALIZE_SLACK) {
+            r.seatSnapshotBlock = block.number + lag;
+            r.epochAtArm = block.number / epochLen;
+        } else {
+            uint256 start = (block.number / epochLen + 1) * epochLen;
+            r.seatSnapshotBlock = start + lag;
+            r.epochAtArm = start / epochLen;
+        }
+    }
+
     function _openRound(Case storage c, uint256 depth) internal {
         c.rounds.push();
         Round storage r = c.rounds[c.rounds.length - 1];
         uint256 target = _commitTarget(c, depth);
         r.nSeats = 0; // filled in by the draw: seats seated, not seats sought
         r.pendingDraw = target; // H-05
-        r.seatSnapshotBlock = block.number + _cp(c).seedLag;
-        r.eligVersionAtArm = stakeReg.eligibilityAddVersion(); // H-05
+        _armSeed(c, r);
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
@@ -1242,8 +1277,7 @@ contract Moderation is ReentrancyGuard {
             // withhold a reveal and trigger the widen. Back to DRAW; the poke
             // draws only the added seats.
             r.pendingDraw = add;
-            r.seatSnapshotBlock = block.number + _cp(c).seedLag;
-            r.eligVersionAtArm = stakeReg.eligibilityAddVersion();
+            _armSeed(c, r);
             c.phase = Phase.DRAW;
             emit Widened(c.id, c.depth, r.widenCount, r.nSeats); // seated so far
             emit RoundOpened(c.id, c.depth, add, r.seatSnapshotBlock); // seats SOUGHT

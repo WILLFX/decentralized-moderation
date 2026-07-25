@@ -418,15 +418,21 @@ contract CaseLifecycleTest is ModerationTestBase {
         assertEq(mod.__talliedSeats(caseId, 0, sh), affordable, "tally <= collateralized seats");
     }
 
-    // H-05: adaptive activation. An attacker with mature-but-unactivated stake
-    // waits until the seat seed's blockhash is public, then activates a favourable
-    // subset immediately before realizeSeats. The draw must NOT proceed on that
-    // now-known seed: adding draw-eligible weight re-arms fresh entropy, so the
-    // attacker only destroyed the seed it was trying to exploit.
-    function test_H05_activation_after_seed_known_rearms() public {
+    // H-05, restated for M2.6-P0-3. The old defence was a change counter: any
+    // eligibility change re-armed the seed to fresh entropy. It failed both ways —
+    // `setDutyUnits(sameValue)` bumped it with no change, so a griefer could
+    // re-arm every pending case forever; while `release`, `reward` and
+    // `releaseDuty` grew the drawable set and never bumped it at all.
+    //
+    // Eligibility now changes only at epoch boundaries, and a seed's window is
+    // armed to fit inside one epoch. So the attacker's activation cannot touch
+    // this draw — and, unlike the old behaviour, the draw is NOT delayed either.
+    // Nothing re-arms, because nothing can change.
+    function test_H05_activation_after_seed_known_cannot_reshape_the_draw() public {
         uint256 caseId = _submit(mods[0]);
 
-        // Stake matures but is deliberately left unactivated.
+        // Stake matures but is deliberately left unactivated and unpledged, so it
+        // carries no draw weight until the attacker chooses to add it.
         address lurker = makeAddr("lurker");
         bzz.mint(lurker, 1000 * XBZZ);
         vm.prank(lurker);
@@ -435,23 +441,58 @@ contract CaseLifecycleTest is ModerationTestBase {
         stakeReg.stake(500 * XBZZ);
         vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
 
-        // The seed's snapshot block is now mined: its blockhash is public.
-        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+        uint256 weightBefore = stakeReg.totalEligibleWeight();
+        uint256 units = 500 * XBZZ / mod.getParams().riskPerSeat; // before pranking
+
+        // Roll to just past the snapshot block: its blockhash is now public.
         (,,,,,,,, uint256 snapBefore,) = mod.roundInfo(caseId, 0);
+        vm.roll(snapBefore + 1);
 
-        // Attacker activates now, reshaping the tree against a known seed.
+        // The attacker activates AND pledges NOW — the full adaptive-activation
+        // move — trying to reshape the tree against a seed whose entropy it can
+        // already see. Under the duty pool it takes both steps to gain draw
+        // weight, and both must be powerless.
         stakeReg.activate(lurker);
+        vm.prank(lurker);
+        stakeReg.setDutyUnits(units);
+        assertEq(
+            stakeReg.totalEligibleWeight(),
+            weightBefore,
+            "the attacker's weight cannot enter this epoch's eligible set"
+        );
 
-        // The draw does not proceed — it re-arms to a fresh, unknown block.
+        // The draw proceeds immediately on the entropy it was armed for. No
+        // re-arm, no delay, and the attacker is not in the pool.
         mod.realizeSeats(caseId);
-        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "still in DRAW: seed re-armed");
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "draw proceeds, undisturbed");
         (,,,,,,,, uint256 snapAfter,) = mod.roundInfo(caseId, 0);
-        assertGt(snapAfter, snapBefore, "re-armed to a later, not-yet-known block");
+        assertEq(snapAfter, snapBefore, "the seed was never re-armed");
 
-        // With no further eligibility changes, the next poke draws normally.
-        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+        (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
+        for (uint256 i = 0; i < shCount; i++) {
+            assertTrue(mod.seatHolderAt(caseId, 0, i) != lurker, "attacker never seated");
+        }
+    }
+
+    /// The griefing half, end to end: a no-op `setDutyUnits` used to bump the
+    /// global counter and re-arm EVERY pending case. Repeating it must now leave a
+    /// pending draw completely alone.
+    function test_H05_noop_repledge_cannot_delay_a_pending_draw() public {
+        uint256 caseId = _submit(mods[0]);
+        (,,,,,,,, uint256 snapBefore,) = mod.roundInfo(caseId, 0);
+        vm.roll(snapBefore + 1);
+
+        uint256 units = mod.getParams().riskPerSeat; // compute before pranking
+        units = 3000 * XBZZ / units;
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(mods[1]);
+            stakeReg.setDutyUnits(units); // same value, repeatedly
+        }
+
         mod.realizeSeats(caseId);
-        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "draw proceeds on untainted entropy");
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "draw was not delayed");
+        (,,,,,,,, uint256 snapAfter,) = mod.roundInfo(caseId, 0);
+        assertEq(snapAfter, snapBefore, "and the seed was not re-armed");
     }
 
     // H-06: two cases opened in the SAME block share a snapshot block (hence the
@@ -505,7 +546,7 @@ contract CaseLifecycleTest is ModerationTestBase {
             vm.prank(few[i]);
             sr.setDutyUnits(1);
         }
-        vm.roll(vm.getBlockNumber() + 1);
+        _settleEpoch(sr); // P0-3: pledged capacity is drawable next epoch
 
         // Compute the fee BEFORE any prank: an external call in the argument
         // list would consume it.
@@ -531,7 +572,10 @@ contract CaseLifecycleTest is ModerationTestBase {
 
         // Capacity is fully reserved while the panel is live, so neither is
         // drawable again until the case ends.
-        assertEq(sr.totalEligibleWeight(), 0, "both moderators' capacity is in use");
+        // P0-3: the TREE does not shrink mid-epoch — the struct is the authority.
+        (, uint256 r0,) = sr.dutyOf(few[0]);
+        (, uint256 r1,) = sr.dutyOf(few[1]);
+        assertEq(r0 + r1, 2, "both moderators' capacity is in use");
     }
 
     function _phaseOfLocal(ModerationHarness m, uint256 caseId) internal view returns (Moderation.Phase p) {

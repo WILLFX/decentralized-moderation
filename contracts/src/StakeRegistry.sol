@@ -46,7 +46,8 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///
 /// ## What this registry does and does not guarantee (M2.6, be honest about it)
 ///
-/// Obligations ARE now scoped. Every one is keyed
+/// STAKE obligations ARE now scoped. `lock`, `release`, `freeze` and `settleDuty`
+/// each take a `caseRef` and resolve a handle keyed
 /// `keccak256(authEpoch, logic, moderator, caseRef)` (P0-5), so only the case that
 /// created an obligation can discharge it — across logic contracts during a
 /// handover, and across cases within one logic. `canRevoke(logic)` is a real
@@ -65,9 +66,28 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///   correct.
 /// - Governance still names the authorized logic, behind a timelock. That remains
 ///   the trust root.
-/// - `setTrack` and `reward` are per-moderator rather than per-obligation. Neither
-///   can move another case's principal, but a buggy logic can still write a wrong
-///   track or credit a reward it funded.
+/// - **`setTrack` is NOT scoped, and that is a live gap, not a rough edge.** It
+///   takes no `caseRef` and performs an absolute write, so `onlyLogic` is its only
+///   gate — and `onlyLogic` blocks a REVOKED logic, nothing more. Trust model #3
+///   keeps both logics authorized through a handover *deliberately*, so the risk is
+///   not a buggy contract: a concurrently authorized logic can overwrite any
+///   moderator's track while the outgoing one is still settling, by design of the
+///   handover rather than in spite of it. No test covers this and none can be
+///   written against the current signature.
+///
+///   It cannot move, freeze or credit a wei, so it is not a solvency problem. What
+///   it corrupts is the moderator's accumulated standing: `track` drives the §6.4
+///   freezing-power curve, so a wrong value changes the penalties an honest
+///   moderator can impose and must suffer, and it is the protocol's only
+///   reputation signal (design principle 4). Severity **High**, tracked as **K-5**
+///   in `specs/m2_6-work-order.md`. Unfixed here because `setTrack` is on the
+///   production path via `Moderation._touchTrack` (so deletion is not available the
+///   way it was for `penalizeNoShow`), because scoping it first needs the per-logic
+///   vs global track question settled, and because it does not fit `Moderation`'s
+///   remaining EIP-170 margin.
+/// - `reward` is likewise per-moderator rather than per-obligation, but it is
+///   funded-on-call and balance-checked (P0-4), so the worst an authorized logic
+///   does is credit a reward out of its own money.
 ///
 contract StakeRegistry {
     using SafeTransferLib for address;

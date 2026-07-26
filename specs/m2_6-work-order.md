@@ -117,6 +117,13 @@ global ID rather than overwrite. Move the live-content dedup key into the regist
 independently deletable, neither ghosted; a legacy entry is removable through the new
 logic; identical content cannot be re-indexed after migration.
 
+*(Verified 2026-07: all three hold. Claim 1 is asserted inside
+`Migration.test_live_migration_preserves_stake_and_index` — same `localCaseId`,
+distinct `globalId`, both `isIndexed`, deleted one at a time with no ghost left.
+Claims 2 and 3 are `test_legacy_entry_is_removable_through_the_new_logic` and
+`test_identical_content_cannot_be_reindexed_after_migration`. Every name on this
+line refers to something in `src/`.)*
+
 ### P0-2. Duty reservation must escrow real collateral
 
 **Confirmed.** `drawPanel` increments `dutyReserved` but moves no tokens; the seat's
@@ -151,10 +158,29 @@ prove.
    capacity is reserved, but nothing protects the stake behind assignments already
    made.
 
-**Tests.** Post-selection `setDutyUnits(0)`, post-selection `requestExit(all free)`,
-commit-one-of-ten, and cross-case consumption of the same backing all leave the
-penalty payable and applied; bonded collateral cannot be withdrawn, reduced, or
-double-spent.
+**Tests.** *(Corrected 2026-07 — one of the four named cases describes behaviour
+that was deliberately not built. See deviation #1 in the resolution record.)*
+
+- Post-selection `setDutyUnits(0)` → `test_bypass_setDutyUnits_zero_after_selection`.
+  The un-pledge is refused (`DutyReserved`), the escrow survives, and the penalty
+  applies.
+- Post-selection `requestExit(all free)` →
+  `test_bypass_requestExit_after_selection`. The exit cannot reach the escrow, and
+  a completed `withdraw()` does not carry it out.
+- Cross-case consumption of the same backing →
+  `test_bypass_same_backing_cannot_cover_two_assignments`, with
+  `test_settling_one_case_cannot_drain_another_cases_escrow` and
+  `test_release_returns_escrow_exactly_once` covering the double-spend direction.
+- **`commit-one-of-ten` does NOT "leave the penalty payable and applied", and no
+  test asserts that it does.** Bypass 3 was closed *structurally* rather than by a
+  penalty: once a seat is only issued when its collateral can be escrowed, every
+  assigned seat is backed and `commitVote` commits all of them, so a partial commit
+  is unreachable through the draw. Building the penalty path would have been dead
+  code. `test_H07_overdrawn_moderator_commits_what_it_can_afford` exercises the
+  clamp itself using `__injectWidenSeats` — a harness that bypasses the registry —
+  and `test_every_drawn_seat_is_backed_by_its_own_escrow_at_commit` asserts the
+  invariant that makes the production case unreachable. The counter this line
+  implied (`unbackedSeats`) was deleted in `M2.6-P0-2b`.
 
 ### P0-7. VOID must be batched like settlement
 
@@ -209,9 +235,34 @@ in `e+1`; each case pins an epoch root at arm time; all draws for that seed use 
 immutable root; no live operation can mutate it. Delete `eligibilityAddVersion`.
 Strike the D-8 residual note.
 
-**Tests.** Every weight-changing path (`activate`, `thaw`, `setDutyUnits` up/down,
-`requestExit`, `release`, `reward`, `releaseDuty`) cannot alter a draw whose entropy
-is already public; repeated no-op `setDutyUnits` cannot delay a draw.
+**Tests.** *(Corrected 2026-07 — this line names one function that does not exist
+and three paths the epoch test does not actually exercise. The property is
+structural, so per-path coverage is confirmatory rather than load-bearing, but the
+line claimed "every" and did not deliver it.)*
+
+`test_weight_changes_do_not_move_the_tree_within_an_epoch` holds the tree constant
+across `activate`, `reward`, `requestExit`, `lock`, `freeze`, and a repeated no-op
+`setDutyUnits`, then shows the staged changes landing together at the boundary.
+`test_a_draw_does_not_move_the_tree_for_concurrent_cases` adds the draw itself.
+The H-05 pair in `CaseLifecycle` drives it end to end through a live case:
+`test_H05_activation_after_seed_known_cannot_reshape_the_draw` and
+`test_H05_noop_repledge_cannot_delay_a_pending_draw` — the second is the "repeated
+no-op cannot delay a draw" claim, and it holds.
+
+Not as written:
+
+- **`releaseDuty` does not exist.** Folded into `settleDuty` in M2.6-P0-2. Third
+  occurrence of this stale name in the order (see also P0-5's Tests line).
+- **`thaw` and `release` are named but not exercised for this property.** `thaw`
+  appears only in `test_frozen_stake_is_excluded_from_draws_until_thaw`, which is
+  about draw exclusion, not epoch invariance; `release` appears throughout the
+  obligation tests but never inside an epoch-invariance assertion.
+- **`setDutyUnits` "up/down" is not covered as up or down** — the epoch test
+  repeats the same value, which is the griefing case, not a magnitude change.
+
+None of this weakens P0-3: eligibility is deferred by construction inside
+`_syncTree`, so every caller of it inherits the property whether or not a test
+names that caller. Recorded so a re-auditor sees the same list the code supports.
 
 ### P0-4. `reward()` must be funded atomically
 

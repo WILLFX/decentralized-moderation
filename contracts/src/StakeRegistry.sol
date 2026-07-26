@@ -171,7 +171,11 @@ contract StakeRegistry {
     /// `e + 1`. Keyed by epoch so changes staged mid-drain are not swept early.
     mapping(uint256 => address[]) internal stagedByEpoch;
     mapping(uint256 => mapping(address => bool)) internal isStaged;
-    uint256 internal drainCursor;
+    /// Position reached inside the epoch currently being drained. Public because it
+    /// is the only way to see that a partial drain PERSISTED (M2.6-P0-3b) — the
+    /// regression it guards against was invisible precisely because the discarded
+    /// work left no trace.
+    uint256 public drainCursor;
     /// The weight each moderator's leaf carries for the CURRENT epoch. Written
     /// only at drain time, and used to restore leaves a draw excluded transiently.
     mapping(address => uint256) internal epochWeight;
@@ -221,8 +225,6 @@ contract StakeRegistry {
     /// contract is not one — it is decremented at settlement INIT.
     mapping(address => uint256) public logicCommitted;
     mapping(address => uint256) public logicDutyReserved;
-    /// Staged changes applied automatically per draw before a keeper is needed.
-    uint256 internal constant DRAIN_BUDGET = 64;
 
     // --- authorization -------------------------------------------------------
 
@@ -585,8 +587,19 @@ contract StakeRegistry {
         returns (address[] memory seats, uint256 attempts)
     {
         // The eligible set for this epoch must be complete before we sample it.
-        // Bounded work; a keeper finishes an oversized epoch via `advanceEpoch`.
-        _drainEpochs(DRAIN_BUDGET);
+        //
+        // M2.6-P0-3b: a PRECONDITION, never a drain-then-check. This used to run
+        // `_drainEpochs(DRAIN_BUDGET)` first and revert if that was not enough —
+        // and the revert unwound the drain it had just done. Every draw redid the
+        // same first 64 items and threw them away again, so any epoch staging more
+        // than the budget halted every draw in the protocol until somebody made a
+        // separate `advanceEpoch` call, whose progress survives because it does not
+        // revert. Ordinary traffic reaches that: `_stageSeated` deliberately skips
+        // the dedupe flag, so one 48-seat panel plus normal staking activity passes
+        // 64 entries inside a single 256-block epoch with no attacker involved.
+        //
+        // Raising the budget would only move the cliff. Doing no rollback-able work
+        // here removes it: the caller drains through `advanceEpoch`, which commits.
         if (!epochSettled()) revert EpochNotSettled();
 
         seats = new address[](count);
@@ -901,12 +914,17 @@ contract StakeRegistry {
     }
 
     /// @notice Apply staged weight changes for elapsed epochs. Permissionless and
-    ///         batched; `drawPanel` runs it automatically within a bounded budget,
-    ///         so this is only needed when a single epoch staged more changes than
-    ///         that budget covers.
+    ///         batched, and the ONLY place the drain happens (M2.6-P0-3b):
+    ///         `drawPanel` treats a settled epoch as a precondition rather than
+    ///         draining inside a call that may then revert and discard the work.
+    ///         `Moderation.realizeSeats` calls this itself when it finds the epoch
+    ///         unsettled and returns, so a draw makes drain progress every poke and
+    ///         recovers on its own — no external keeper is required.
     /// @dev Timing is not a lever. The set applied here was fixed before this
     ///      epoch began, and applying it is all-or-nothing per epoch, so nobody
     ///      can choose to reveal a change after seeing a seed's entropy.
+    /// @param maxItems Bound on staged entries processed. Progress persists across
+    ///        calls through `drainCursor`, so any bound eventually completes.
     function advanceEpoch(uint256 maxItems) external {
         _drainEpochs(maxItems);
     }

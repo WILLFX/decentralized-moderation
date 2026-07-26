@@ -1004,10 +1004,23 @@ contract RegistriesTest is Test {
         vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
 
         assertFalse(stakeReg.epochSettled(), "an epoch boundary passed with changes staged");
-        // drawPanel drains within its budget, so a small backlog settles itself.
+
+        // M2.6-P0-3b: a settled epoch is a PRECONDITION of the draw, not something
+        // the draw arranges. This used to drain a bounded budget first and revert
+        // if that was not enough — discarding the drain along with the draw, so an
+        // oversized epoch could never complete and every draw stayed blocked. The
+        // assertion here was "the draw applied the backlog itself", which is the
+        // behaviour that made the discard possible.
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.EpochNotSettled.selector);
+        stakeReg.drawPanel(1, keccak256("settles"), 0, CASE_A);
+        assertEq(stakeReg.drainCursor(), 0, "and it did no work it would have had to unwind");
+
+        // The drain is its own permissionless call, and it commits.
+        stakeReg.advanceEpoch(type(uint256).max);
+        assertTrue(stakeReg.epochSettled(), "backlog applied");
         vm.prank(oldLogic);
         stakeReg.drawPanel(1, keccak256("settles"), 0, CASE_A);
-        assertTrue(stakeReg.epochSettled(), "the draw applied the backlog itself");
     }
 
     function test_two_step_governance_transfer() public {

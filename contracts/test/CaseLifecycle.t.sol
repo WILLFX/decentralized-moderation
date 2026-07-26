@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Moderation} from "../src/Moderation.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {StakeRegistryHarness} from "./harnesses/StakeRegistryHarness.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 
@@ -518,6 +519,98 @@ contract CaseLifecycleTest is ModerationTestBase {
             assertEq(bonded, 0, "and so did the escrow");
         }
         _assertConservation();
+    }
+
+    // --- M2.6-P0-3b: the epoch drain must not roll back its own work ----------
+
+    /// An epoch that staged more weight changes than one drain batch covers used
+    /// to halt every draw in the protocol.
+    ///
+    /// `drawPanel` drained a bounded budget and then reverted `EpochNotSettled` if
+    /// that had not finished the epoch — and the revert unwound the drain with it.
+    /// Every subsequent draw redid the same first batch and discarded it again. The
+    /// only way out was a separate `advanceEpoch` call, whose progress survives
+    /// because it does not revert. So the protocol needed an external keeper to
+    /// stay live, and nothing said so.
+    ///
+    /// The trigger is ordinary traffic. `_stageSeated` skips the dedupe flag by
+    /// design (the flag's cold SSTORE is not affordable per seat), so panels stage
+    /// one entry per seat, and joiners stage one each. This test uses joining alone
+    /// — no attacker, no oversized panel.
+    ///
+    /// NOTE: this test never calls `advanceEpoch`. That is the property.
+    function test_epoch_drain_progress_survives_a_failed_draw() public {
+        uint256 joiners = 200; // > EPOCH_DRAIN_STEPS, so one poke cannot finish it
+        for (uint256 i = 0; i < joiners; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("joiner", i)))));
+            bzz.mint(a, 1000 * XBZZ);
+            vm.prank(a);
+            bzz.approve(address(stakeReg), type(uint256).max);
+            vm.prank(a);
+            stakeReg.stake(100 * XBZZ);
+        }
+        // `vm.warp` does not advance the block, so every activation below stages
+        // inside ONE epoch — which is exactly the situation being tested.
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
+        for (uint256 i = 0; i < joiners; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("joiner", i)))));
+            stakeReg.activate(a);
+        }
+
+        uint256 caseId = _submit(mods[0]);
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS); // the staged epoch elapses
+        (,,,,,,,, uint256 snapshotBlock,) = mod.roundInfo(caseId, 0);
+        if (vm.getBlockNumber() <= snapshotBlock) vm.roll(snapshotBlock + 1);
+        assertFalse(stakeReg.epochSettled(), "a backlog is waiting");
+
+        // Poke 1. Pre-fix this reverted `EpochNotSettled` and threw away the batch
+        // it had just drained, so the assertions below were unreachable.
+        mod.realizeSeats(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "no seats yet");
+        assertFalse(stakeReg.epochSettled(), "one batch cannot clear 200 entries");
+        uint256 cursor = stakeReg.drainCursor();
+        assertGt(cursor, 0, "the batch it drained is PERSISTED, not unwound");
+
+        // Poke 2 resumes from the cursor rather than restarting.
+        mod.realizeSeats(caseId);
+        assertTrue(stakeReg.epochSettled(), "the backlog cleared across two pokes");
+
+        // And the draw completes off its own pokes. The rolls below only advance
+        // to each re-armed snapshot block, as any client would; `advanceEpoch` is
+        // never called, which is the property under test.
+        uint256 pokes;
+        while (_phase(caseId) == Moderation.Phase.DRAW) {
+            (,,,,,,,, uint256 snap,) = mod.roundInfo(caseId, 0);
+            if (vm.getBlockNumber() <= snap) vm.roll(snap + 1);
+            mod.realizeSeats(caseId);
+            assertLt(++pokes, 32, "the draw terminates without a keeper");
+        }
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "the draw recovered on its own");
+        assertGt(stakeReg.totalEligibleWeight(), 0, "and the joiners are drawable");
+    }
+
+    /// The same backlog, hit through the registry's own entry point: `drawPanel`
+    /// must refuse an unsettled epoch WITHOUT doing rollback-able work first.
+    function test_draw_panel_does_no_work_it_would_have_to_unwind() public {
+        for (uint256 i = 0; i < 40; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("late", i)))));
+            bzz.mint(a, 1000 * XBZZ);
+            vm.prank(a);
+            bzz.approve(address(stakeReg), type(uint256).max);
+            vm.prank(a);
+            stakeReg.stake(100 * XBZZ);
+        }
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        assertFalse(stakeReg.epochSettled());
+
+        uint256 caseId = mod.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        mod.__injectRound(caseId);
+        vm.expectRevert(StakeRegistry.EpochNotSettled.selector);
+        mod.__drawPanel(caseId, 0, 1, keccak256("seed"));
+
+        // Nothing moved. The old shape would have left this true only because the
+        // revert erased 64 items' worth of drain along with the failed draw.
+        assertEq(stakeReg.drainCursor(), 0, "no partial drain to lose");
     }
 
     // H-05, restated for M2.6-P0-3. The old defence was a change counter: any

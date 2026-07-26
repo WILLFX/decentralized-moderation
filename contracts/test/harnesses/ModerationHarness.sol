@@ -169,6 +169,12 @@ contract ModerationHarness is Moderation {
         return DRAW_SEATS_PER_BATCH;
     }
 
+    /// The per-poke epoch-drain budget (M2.6-P0-3b), so its gas bound is asserted
+    /// against the real constant rather than a number copied into the test.
+    function __epochDrainSteps() external pure returns (uint256) {
+        return EPOCH_DRAIN_STEPS;
+    }
+
     /// Open VOID disposal directly, to measure the transition in isolation
     /// (M2.6-P0-7) without driving a whole under-participation lifecycle.
     function __openVoid(uint256 caseId) external {

@@ -47,6 +47,14 @@ contract Moderation is ReentrancyGuard {
     /// that cost rose three times in M2.6 (escrow, staged weight, obligation
     /// handle), taking a cap-sized panel to 90% of the ceiling.
     uint256 internal constant DRAW_SEATS_PER_BATCH = 24;
+    /// M2.6-P0-3b: staged eligibility changes applied per `realizeSeats` poke when
+    /// the epoch is not yet settled. Sized from measurement, like the seat batch:
+    /// see `GasBounds.t.sol::test_realize_seats_epoch_drain_batch_is_under_ceiling`,
+    /// which asserts a full batch against the 8M single-transaction ceiling on the
+    /// worst tree the suite builds. A drained item costs one weight recompute plus
+    /// one O(log n) sortition-tree update, so this is the number that has to move if
+    /// the moderator set grows by orders of magnitude — not `DRAW_SEATS_PER_BATCH`.
+    uint256 internal constant EPOCH_DRAIN_STEPS = 128;
     // H-11: the immutable protocol caps live in `ProtocolLimits` (M2.6), shared
     // with `RulesetGovernor` — the contract that validates a ruleset and the
     // contract that enforces it must read the same numbers.
@@ -365,6 +373,9 @@ contract Moderation is ReentrancyGuard {
     event SeatsProgressed(uint256 indexed caseId, uint256 indexed depth, uint256 seated, uint256 remaining);
     event SeedRearmed(uint256 indexed caseId, uint256 indexed depth, bool outcomeSeed, uint256 newSnapshotBlock);
     event SeatsDrawn(uint256 indexed caseId, uint256 indexed depth, uint256 nSeats);
+    /// M2.6-P0-3b: this poke spent itself applying staged eligibility changes
+    /// instead of drawing. Poke again; the progress is committed.
+    event EpochDraining(uint256 indexed caseId, uint256 appliedEpoch);
     event CommitOpened(uint256 indexed caseId, uint256 indexed depth, uint256 deadline);
     event Committed(uint256 indexed caseId, address indexed moderator, uint256 seats);
     event RevealOpened(uint256 indexed caseId, uint256 indexed depth, uint256 deadline);
@@ -611,6 +622,19 @@ contract Moderation is ReentrancyGuard {
         if (c.phase != Phase.DRAW) revert WrongPhase();
         Round storage r = _cur(c);
         if (block.number <= r.seatSnapshotBlock) revert SeedNotReady();
+
+        // M2.6-P0-3b: the registry refuses to sample an epoch whose staged weight
+        // changes are not all applied. Drain toward that and RETURN rather than
+        // letting the draw revert — a revert would unwind the drain with it, and an
+        // epoch that stages more than one batch could then never complete, halting
+        // every draw in the protocol until an external keeper intervened. Returning
+        // commits the progress, so repeated pokes of this same function recover on
+        // their own. Nothing below this point has run yet, so nothing is discarded.
+        if (!stakeReg.epochSettled()) {
+            stakeReg.advanceEpoch(EPOCH_DRAIN_STEPS);
+            emit EpochDraining(caseId, stakeReg.appliedEpoch());
+            return;
+        }
 
         bytes32 bh = blockhash(r.seatSnapshotBlock);
         // Re-arm if the blockhash has aged out of the 256-block window (D4), or if

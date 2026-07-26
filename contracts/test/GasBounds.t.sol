@@ -477,6 +477,54 @@ contract GasBoundsTest is ModerationTestBase {
         assertLt(used, (HARD_CEILING * 80) / 100, "with real margin, restored by batching");
     }
 
+    /// M2.6-P0-3b: `EPOCH_DRAIN_STEPS` is what a `realizeSeats` poke spends when it
+    /// finds the epoch unsettled, so a full batch must fit one transaction — over a
+    /// tree big enough that each drained item pays a realistic O(log n) update.
+    function test_realize_seats_epoch_drain_batch_is_under_ceiling() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+
+        // A 1000-leaf tree, all already applied, so the batch measured below pays
+        // tree UPDATE cost rather than the cheaper first insert.
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("drainmod", i)))));
+            b.mint(a, 1000 * XBZZ);
+            vm.prank(a);
+            b.approve(address(sr), type(uint256).max);
+            vm.prank(a);
+            sr.stake(80 * XBZZ);
+        }
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("drainmod", i)))));
+            sr.activate(a);
+            vm.prank(a);
+            sr.setDutyUnits(8);
+        }
+        _settleEpoch(sr);
+
+        // Now stage a full batch's worth of changes inside one epoch and let it
+        // elapse, so the next poke has exactly `EPOCH_DRAIN_STEPS` to do.
+        uint256 batch = m.__epochDrainSteps();
+        for (uint256 i = 0; i < batch; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("drainmod", i)))));
+            vm.prank(a);
+            sr.setDutyUnits(7); // a real weight change, one staged entry each
+        }
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        assertFalse(sr.epochSettled(), "a full batch is waiting");
+
+        uint256 g = gasleft();
+        sr.advanceEpoch(batch);
+        uint256 used = g - gasleft();
+
+        emit log_named_uint("epoch_drain_batch_items", batch);
+        emit log_named_uint("epoch_drain_batch_gas", used);
+        assertTrue(sr.epochSettled(), "the batch cleared it, so this measured a FULL one");
+        assertLt(used, HARD_CEILING, "a drain batch must fit one transaction");
+        assertLt(used, (HARD_CEILING * 80) / 100, "with margin");
+    }
+
     /// A panel at the validator's cap completes in a bounded number of batches.
     function test_max_panel_completes_in_bounded_batches() public {
         uint256 caseId = _submit(mods[0]);

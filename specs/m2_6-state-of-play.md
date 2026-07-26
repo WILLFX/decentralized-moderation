@@ -4,22 +4,24 @@
 The last code change is `51af155`; everything after it is documentation.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
-> that pass found **four blocking regressions in items marked closed** plus three
-> fixes that no test discriminated. They are fixed on top of the tag; the last code
-> change in that pass is `4864d80` and everything after it is documentation, exactly
-> as at the tag itself. See the "Regressions found after the close" table in
+> that pass found **six blocking regressions in items marked closed** plus three
+> fixes that no test discriminated. They are fixed on top of the tag. See the
+> "Regressions found after the close" table in
 > `specs/m2_6-work-order.md`. The tag is deliberately **not moved** — it is the
 > commit the audit ran against, and moving it would invalidate that verification.
 > The pointers in this file still name it for that reason; a new tag is cut for the
 > fixed state. Everything from here down describes the state **at the tag** unless
 > it says otherwise.
 >
-> **The one thing to carry forward:** `Moderation` is at 24,107 bytes, 469 free,
-> up 811 across this batch. Three of the known-open items (K-1 keeper per-batch
-> payment, K-3 one settlement reference time, K-5 `setTrack` scoping) land in that
-> contract and do not fit. **A second structural split is a precondition for that
-> work**, not an optimisation to reach for afterwards — the seam candidates are set
-> out in the work order's "Size position" section.
+> **The one thing to carry forward:** `Moderation` is at 24,137 bytes, 439 free,
+> up 841 across this batch — and that margin is a consequence of the fixes in this
+> batch, not an independent constraint. It is cited as the reason K-5 and others
+> are deferred, so the reasoning is circular unless said out loud; the work order's
+> "Size position" section says it out loud. Three of the known-open items (K-1
+> keeper economics, K-3 one settlement reference time, K-5 `setTrack` scoping) land
+> in that contract and do not fit. **A second structural split is a precondition
+> for that work**, not an optimisation to reach for afterwards; the seam candidates
+> are in the same section.
 >
 > **K-5 is the highest-severity thing still open** and it is new to the record:
 > `StakeRegistry.setTrack` takes no `caseRef` and writes absolutely, so during a
@@ -57,7 +59,10 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass): **200 passing, 16 suites**.
+**Suite now** (tag + the post-close regression pass): **203 passing, 17 suites**.
+The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
+`CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline. A file
+move, not new coverage.
 
 (The peak during the milestone was 199 / 19. The difference is `test/spike/`, three
 throwaway suites that existed only to produce the gas numbers behind the
@@ -79,10 +84,10 @@ becomes something a reader mistakes for a test of the product.)
 despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
-After the post-close regression pass: `Moderation` 24,107 (469 free),
-`StakeRegistry` 12,448, `IndexRegistry` 6,174, `RulesetGovernor` 4,459.
+After the post-close regression pass: `Moderation` 24,137 (439 free),
+`StakeRegistry` 12,547, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
 
-`Moderation` is up 811 bytes across the batch and the margin is now the binding
+`Moderation` is up 841 bytes across the batch and the margin is now the binding
 constraint on anything further in the game contract — see the note at the top of
 this file, and the work order's "Size position" section for the seam candidates.
 
@@ -121,7 +126,11 @@ Added by the post-close pass:
 - **The epoch drain commits.** `drawPanel` treats a settled epoch as a
   precondition; `realizeSeats` drains and returns, so draws recover with no keeper.
 - **An abandoned draw releases without penalty on BOTH paths** out of
-  `resolveStalledDraw`, not only the depth-0 VOID.
+  `resolveStalledDraw`, not only the depth-0 VOID — and only when the round never
+  widened, because a widen proves a commit window opened and closed. The blanket
+  version was H-10 evasion.
+- **Governance cannot orphan live obligation handles.** `executeLogic` refuses to
+  re-authorize a logic that is already authorized and not drained.
 - **The privileged registry surface is now exactly**
   `lock / release / freeze / reward / setTrack / drawPanel / settleDuty /
   advanceEpoch`, plus the index registry's `openCase / closeCase / writeEntry /

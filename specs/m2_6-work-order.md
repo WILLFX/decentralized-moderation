@@ -611,12 +611,14 @@ numbers are recorded in `GAS_BUDGETS.md` and `ProtocolLimits`. At the
 `m2.6-close` tag (`a05343a`): 188 tests, 16 suites, `Moderation` 23,296 B.
 
 **Post-close.** An independent verification pass against that tag found four
-blocking regressions in items this record marked closed, plus three fixes with no
-discriminating test coverage. They are recorded in their own section below and are
+blocking regressions in items this record marked closed, plus two more found on
+re-reading (P0-5d, P0-6c) and three fixes with no discriminating test coverage. They are recorded in their own section below and are
 fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
 deliberately NOT moved, because it is the commit the audit ran against and moving
-it would invalidate that verification. Current state: **200 tests, 16 suites**,
-green at every commit, `Moderation` 24,107 B (469 free — see "Size position").
+it would invalidate that verification. Current state: **203 tests, 17 suites**,
+green at every commit, `Moderation` 24,137 B (439 free — see "Size position"). The
+seventeenth suite is `StalledDraw.t.sol`, split out of `CaseLifecycle.t.sol` when
+that contract outgrew the `via_ir` pipeline; a file move, not new coverage.
 
 ## P0 — all closed
 
@@ -649,9 +651,10 @@ Independently verified against `m2.6-close` (`a05343a`) by a separate session �
 worked. These are **not new scope**: each is a defect in an item this record
 already claimed closed, and four of them were live blockers.
 
-The last code change in this pass is `4864d80`; everything after it is
-documentation, as at the tag itself. The suite went 188 -> 200 tests over the same
-16 suites, green at every commit.
+The suite went 188 -> 203 tests, green at every commit. Suite count went 16 -> 17:
+`CaseLifecycle.t.sol` outgrew the `via_ir` pipeline ("Tag too large for reserved
+space") while P0-6c's tests were being added, so the P0-6 family moved to
+`StalledDraw.t.sol`. That is a file move, not a coverage change.
 
 | Item | Commit | The regression, and what closed it |
 |---|---|---|
@@ -660,6 +663,8 @@ documentation, as at the tag itself. The suite went 188 -> 200 tests over the sa
 | P0-6 covered one of its two paths | `0dae983` | `resolveStalledDraw` at depth 0 VOIDs and `_voidStep` checks `c.drawAbandoned`. At depth > 0 it calls `_failAppealRound`, so the case FINALIZES and drains through `_settleStep` — which did not check it, and froze one seat's stake per moderator seated in an appeal round whose draw was abandoned, for missing a commit window that never opened. |
 | Three fixes had no discriminating test | `a02573d` | `_fullQuorum`'s independent-revealer check (the fixture used one address with one seat, so `revealedCount` and `revealedSeats` were indistinguishable), `_armSeed` on the widen path (only `_openRound`'s call was covered), and `unbackedSeats` — which P0-2 **did** make unreachable, so it is deleted rather than kept, with the reachability argument and an invariant test in its place. Also fixes `_supersafe`, which read the suite-level registry rather than the one the passed-in harness writes to, so both H-09 `length == 0` assertions held vacuously. |
 | P0-5a left one unscoped selector | `4864d80` | `StakeRegistry.penalizeNoShow` was superseded by `settleDuty` in P0-2 and had had no caller since — but it kept a live selector, callable by any authorized logic, that wrote the POOLED `m.dutyBonded` with no `caseRef`. `dutyBonded` pools escrow across every case a moderator is seated in, so it could freeze collateral posted for a DIFFERENT case's outstanding seat: the exact class P0-5a made unrepresentable everywhere else. Filed as a P1 on the strength of "no production caller" — which is precisely the argument that failed for `settleDuty`'s own double-release, and the reason obligations are keyed per case rather than per logic. **Deleted**, not given a `caseRef`: a retrofitted version would be dead code with a live selector, the same hazard in a shape that reads as safe. `NoShowPenalized` survives, emitted by `settleDuty`, so no indexed event signature changes. |
+| P0-5a: governance could orphan live handles | `28717cb` | `executeLogic` bumped `authEpoch` unconditionally, and `authEpoch` is part of every obligation handle. Re-executing a proposal for an ALREADY-authorized logic — a duplicate proposal, a re-run script, a governance slip — renamed the whole namespace in one transaction and orphaned every live handle: `_debit` then reverted `NotYourObligation` on the rightful owner's own settlement, permanently, so committed stake was stranded, escrow could not be released, and the per-logic counters never reached zero — `canRevoke` stayed false forever and the contract could not even be retired out of the way. Nothing minted, conservation intact, invisible to the invariant campaign. Now refused when the target is already authorized and not drained; a first authorization from `NONE` is unaffected, which is the only case where the bump has a job (revocation requires `canRevoke`, so a logic at `NONE` has no live handles). Consequence named rather than hidden: a SETTLE_ONLY logic cannot be un-retired while it holds obligations — a governance action whose effect silently depends on drain state is worse than one that fails loudly. `IndexRegistry` has no `authEpoch` so it had no orphaning hole, and the audit's asymmetry (`caseOpen` not epoch-keyed, index flags surviving while stake handles die) **is now benign** — but only because P0-5b gated index revocation on drain, so a flag can never outlive its case. The same gate is added there anyway, to stop governance creating a stake/index desync by executing the pair. |
+| P0-6b's amnesty was H-10 evasion | `dd0ee13` | The abandoned-draw amnesty keyed on `c.drawAbandoned` alone. True for a round that stalled before COMMIT opened; false once it has widened, since a widen only happens after a commit window opened and closed. Moderators pledging exactly the depth-0 target could get seated, refuse to commit, let the round widen, and have the re-draw stall on the capacity they were still holding — `resolveStalledDraw` then released all of them, while `test_void_with_no_commits_penalizes_no_shows` freezes the identical refusal when the draw completes. The penalty depended on whether the attacker left capacity for the widen, which the attacker chooses. Gated on `r.widenCount == 0`. **Known imprecision, taken deliberately:** this over-penalises the widen tranche, drawn by the widen itself and never given a window. In the attack it has no false positives, because the attackers hold the capacity that stalls the re-draw so the widen tranche is empty by construction; where it does bite the cost is one seat's escrow for one `failedRevealFreeze`. Separating the tranches needs per-seat window provenance — the same mechanism P1-1(b) needs, filed there to be built once. |
 | Governor governance transfer | `017ae9e` | One-step and accepting `address(0)`, on the contract holding the whole ruleset authority — and `Moderation.governor` is immutable, so a mistyped or zero nominee could not be recovered from. Now propose / accept / cancel with a zero check, matching both registries. |
 
 Two documentation defects were fixed alongside: P1-1's description (below) and the
@@ -758,7 +763,7 @@ being fixed in this pass.
 
 | # | Item | Severity | Why not P0 |
 |---|---|---|---|
-| K-1 | **Keeper per-batch payment.** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. It is an efficiency and latency problem, not a stuck-funds one. A pro-rata bounty split across batches is the obvious fix and is a pure economics change. |
+| K-1 | **Keeper economics: unpaid work, and work decoupled from progress.** *(Two findings, merged — one gap.)* **(a)** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. **(b)** M2.6-P0-3b added a second unpaid path, and it is worse in kind: a `realizeSeats` poke that finds the epoch unsettled spends itself draining and **advances no case at all** — it seats nobody, moves no phase, and cannot become the terminal batch that earns the bounty. A full 128-item batch measures 1.83M gas over a 1000-leaf tree (~840k at the suite's fixture scale). The fix that removed the keeper REQUIREMENT therefore left keeper-shaped work with no reward attached to it. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. An efficiency and latency problem, not a stuck-funds one. (b) is additionally self-healing: the drain is permissionless, anyone can call `advanceEpoch` directly, and the epoch completes the moment somebody does. A pro-rata bounty split across batches addresses (a); (b) needs the drain to be attributable in the first place, since it is tied to no case today. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
 | K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and it does not fit the 469 bytes left in `Moderation`. It belongs with the split. |
@@ -783,8 +788,19 @@ work, not an optimisation to consider afterwards.
 
 ## Size position — read this before planning the P1 work
 
-`Moderation` is at **24,107 bytes, 469 free** against the EIP-170 limit of 24,576.
-It gained **811 bytes across this batch** (23,296 at the `m2.6-close` tag).
+`Moderation` is at **24,137 bytes, 439 free** against the EIP-170 limit of 24,576.
+It gained **841 bytes across this batch** (23,296 at the `m2.6-close` tag).
+
+**State the self-reference plainly, because it is one.** The margin is cited above
+as a reason K-5 and others are deferred — and the margin is what it is *because of
+the fixes in this batch*. `1,280 -> 439` was spent on P0-5b's index obligations,
+P0-3b's drain-and-return, P0-6b/P0-6c's amnesty conditions and P0-5d's gate. So
+"there is no room for K-5" is not an independent constraint discovered in the
+environment; it is a consequence of choices made here, and a different order of
+work would have produced a different answer. It is still the right call — a live
+strand and a protocol-wide draw halt outrank an unscoped reputation write — but the
+reasoning is circular unless it is written down, and an auditor is entitled to see
+it rather than infer it.
 
 That margin is the binding constraint on everything above, and it is not enough:
 
@@ -799,7 +815,7 @@ That margin is the binding constraint on everything above, and it is not enough:
   design question in front of it (per-logic or global track), which is a reason to
   take it deliberately alongside the split rather than squeeze it in.
 
-None of the three fits in 469 bytes, and byte-scrounging has already been done twice this
+None of the three fits in 439 bytes, and byte-scrounging has already been done twice this
 milestone (the second time it bought 233 B, at which point "attempt first and see"
 stopped being a test). **A second structural split is a precondition for the P1
 work, not a fallback.** The plan is to take it deliberately rather than discover
@@ -830,7 +846,9 @@ and hot-path storage stays put.
 ## Still open (P1/P2, none blocking)
 
 P1-1 (**re-scoped**: inert widen seats, and the reopened commit window — NOT
-"widen escrow", which was a misreading of a test harness), P1-3 (validator runtime
+"widen escrow", which was a misreading of a test harness; **P0-6c's over-penalised
+widen tranche is filed here too**, since separating tranches needs the same
+per-seat window provenance and should be built once), P1-3 (validator runtime
 state space — partly done via the MAX_PANEL and freeze bounds), P1-4 (retry
 economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadlines
 — shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference

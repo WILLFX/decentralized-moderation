@@ -594,7 +594,9 @@ deadlines), P1-8 (one penalty reference time), and the P2 list.
 
 Unchanged in substance: no deployment with material funds, and the index is not
 presented as reliable safe-search certification, until an independent re-audit of
-the four-contract architecture passes **against commit `51af155`**. What has
+the four-contract architecture passes **against commit `a1671e5`** (the
+milestone-close commit — `51af155` is the last code change and is byte-identical,
+but its docs still describe the mid-milestone system). What has
 changed is that the P0 set is now closed and the trust-model documentation matches
 the code — `StakeRegistry`'s header should be re-read as part of that review, since
 its "what this does NOT guarantee" section was written before P0-5 landed.

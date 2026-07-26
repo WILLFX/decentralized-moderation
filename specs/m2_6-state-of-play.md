@@ -1,6 +1,18 @@
 # M2.6 — state of play (milestone closed)
 
-**All P0 items are closed.** The re-audit should target commit **`51af155`**.
+**All P0 items are closed.** The re-audit should target commit **`a1671e5`** — the
+milestone-close commit, not the last code commit.
+
+That distinction matters. The last *code* change is `51af155` (P0-8) and the
+deployed bytecode is byte-identical between the two: the close commit touches only
+comments, docs and deleted test harnesses, and all four contract sizes match. But
+an auditor reads more than bytecode, and at `51af155` the repository actively
+misleads: the resolution record below does not exist, this file still describes the
+mid-milestone system, `test/spike/` is still present and looks like product tests,
+and `StakeRegistry`'s header still asserts that obligations are unscoped aggregates
+and that solvency holds "only if every authorized logic is correct" — the exact
+claim P0-5 falsified. Pointing a re-auditor at a header that contradicts the fix is
+how a false finding gets manufactured.
 
 Read `specs/m2_6-work-order.md` for the item-by-item spec; its **Resolution record**
 section at the end is the authoritative account of what landed, the four places the
@@ -113,7 +125,7 @@ because the fixtures were too generous to reach them.
 
 No deployment with material funds, and the index is not presented as reliable
 safe-search certification, until an independent re-audit of the **four-contract**
-architecture passes against **`51af155`**.
+architecture passes against **`a1671e5`**.
 
 Point the re-auditor at:
 1. This file and the work order's Resolution record — the deviations especially.

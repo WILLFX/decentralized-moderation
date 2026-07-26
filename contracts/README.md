@@ -3,7 +3,7 @@
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
-> Status: **M2.6 complete** (all P0 remediation items closed; re-audit target `51af155`). The state machine (staking, sortition, case
+> Status: **M2.6 complete** (all P0 remediation items closed; re-audit target `a1671e5`). The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
 > registries — with **188 passing tests** including a handler-driven invariant
@@ -46,7 +46,7 @@ Conservation therefore spans two balances:
 
     balanceOf(Moderation)    == openPotsTotal + totalPendingBond
                                 + totalPendingPayout + totalSettling
-    balanceOf(StakeRegistry) == free + committed + frozen
+    balanceOf(StakeRegistry) == free + committed + frozen + dutyBonded
 
 ## Tests
 
@@ -60,7 +60,7 @@ Conservation therefore spans two balances:
 | `Index.t.sol` | write-at-settlement, uncontested, removal, supersafe (§8) |
 | `Registries.t.sol` | the storage/logic split: no re-staking across an upgrade, approvals survive, timelocked repoint, exit independent of logic, governance cannot touch funds |
 | `Migration.t.sol` | a live logic migration: case settled under A, registries repointed, stake + index intact, new case settles under B |
-| `Governance.t.sol` | timelocked params, append-only guidelines, no pause (§9.9) |
+| `Governance.t.sol` | timelocked params via `RulesetGovernor`, append-only guidelines, no pause (§9.9), the apply boundary, the drawable-panel cap, and the M2.6-P0-8 freeze bounds |
 | `Invariant.t.sol` | handler campaign: conservation, partition, no-principal-lost (§9.1/2/3/11) |
 | `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |
 | `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact |

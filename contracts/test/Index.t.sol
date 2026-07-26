@@ -247,6 +247,56 @@ contract IndexTest is ModerationTestBase {
         assertEq(_supersafe(m, TK).length, 0, "under-quorum approval never supersafe, regardless of age");
     }
 
+    // H-09, the half the test above cannot reach. It uses ONE address holding ONE
+    // seat, so `revealedCount` and `revealedSeats` are both 1 and the assertion
+    // passes under either definition — the fix could be reverted with the suite
+    // still green.
+    //
+    // The property is that quorum counts independent REVEALERS, not seats: one
+    // multi-seat voter must not satisfy it alone. Seats are drawn with replacement,
+    // so a single moderator holding a whole small panel is an ordinary outcome, and
+    // supersafe is the strongest claim this protocol makes about a piece of content.
+    //
+    // Paired with a positive control that differs in exactly one dimension: the
+    // same number of revealed seats, spread across `minReveals` addresses.
+    function test_full_quorum_counts_revealers_not_seats() public {
+        uint256 minReveals = mod.getParams().minReveals;
+
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        sr;
+        uint256 solo = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(solo, TK);
+        m.__injectRound(solo);
+        // One address, a whole quorum's worth of SEATS.
+        m.__injectSeat(solo, 0, makeAddr("whale"), minReveals, 0, 1);
+        m.claim(solo);
+
+        (,, uint256 cCount, uint256 rCount,,,,,,) = m.roundInfo(solo, 0);
+        cCount;
+        assertEq(rCount, 1, "one independent revealer");
+        IndexRegistry.Entry memory e = m.entryAt(TK, 0);
+        assertFalse(e.fullQuorum, "one voter's seats are not a quorum, however many it holds");
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
+        assertEq(_supersafe(m, TK).length, 0, "and it never reaches supersafe");
+
+        // Control: the same revealed seats, spread across `minReveals` addresses.
+        bytes32 tk2 = keccak256("control topic");
+        uint256 spread = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(spread, tk2);
+        m.__injectRound(spread);
+        for (uint256 i = 0; i < minReveals; i++) {
+            m.__injectSeat(spread, 0, makeAddr(string(abi.encodePacked("indep", i))), 1, 0, 1);
+        }
+        m.claim(spread);
+
+        IndexRegistry.Entry memory e2 = m.entryAt(tk2, 0);
+        assertTrue(e2.fullQuorum, "the same seats across enough revealers IS a quorum");
+        vm.warp(vm.getBlockTimestamp() + 200 hours); // age past supersafeAge
+        assertEq(_supersafe(m, tk2).length, 1, "and it does reach supersafe");
+        assertEq(_supersafe(m, TK).length, 0, "while the multi-seat solo still does not");
+    }
+
     // An appealed case whose EARLIER round was decided under quorum is also barred
     // from supersafe, even if the final round had a full panel.
     function test_appealed_case_with_degraded_earlier_round_never_supersafe() public {

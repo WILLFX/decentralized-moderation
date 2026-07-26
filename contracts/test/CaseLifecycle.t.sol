@@ -431,6 +431,62 @@ contract CaseLifecycleTest is ModerationTestBase {
         assertEq(mod.__talliedSeats(caseId, 0, sh), affordable, "tally <= collateralized seats");
     }
 
+    /// M2.6-P0-2b: the invariant that makes the clamp above non-binding, and
+    /// therefore makes the `unbackedSeats` counter that recorded its shortfall
+    /// unreachable in production. Escrow ALONE — every scrap of free stake reserved
+    /// for exit — backs every seat the registry drew.
+    ///
+    /// The argument the deletion rests on: `drawPanel` escrows the registry's
+    /// `riskPerSeat` into THIS case's obligation for every seat it issues, that
+    /// escrow is spendable only by this case's `lock` or `settleDuty`, and a
+    /// ruleset may never lock more per seat than the registry's unit. So
+    /// `dutyBonded >= seats * caseRisk` at commit time, always.
+    ///
+    /// The only way to violate it is `__injectWidenSeats`, which writes `r.seats`
+    /// without going through the registry. Reasoning off that harness rather than
+    /// off production is what put the wrong description into P1-1.
+    function test_every_drawn_seat_is_backed_by_its_own_escrow_at_commit() public {
+        // Only two moderators are drawable, so a 5-seat panel MUST land several
+        // seats on the same address — the multi-seat holder is the case the clamp
+        // exists for, and leaving it to chance would let this pass vacuously.
+        for (uint256 i = 2; i < mods.length; i++) {
+            vm.prank(mods[i]);
+            stakeReg.setDutyUnits(0);
+        }
+        _settleEpoch(stakeReg);
+
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
+        assertGt(shCount, 0, "a panel was seated");
+
+        uint256 multiSeat;
+        for (uint256 i = 0; i < shCount; i++) {
+            address sh = mod.seatHolderAt(caseId, 0, i);
+            uint256 seats = mod.__seats(caseId, 0, sh);
+            if (seats > 1) multiSeat++;
+
+            // Strip every unbonded token: reserve all free stake for exit, so the
+            // escrow is the ONLY backing left.
+            (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(sh);
+            if (free > 0) {
+                vm.prank(sh);
+                stakeReg.requestExit(free);
+            }
+            assertEq(
+                stakeReg.dutyBondedOf(sh), seats * riskPerSeat, "escrow is exactly one unit per drawn seat"
+            );
+
+            bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
+            vm.prank(sh);
+            mod.commitVote(caseId, h);
+            assertEq(mod.__committedSeats(caseId, 0, sh), seats, "every drawn seat is collateralized");
+        }
+        assertGt(multiSeat, 0, "the multi-seat case IS exercised");
+        _assertConservation();
+    }
+
     // --- M2.6-P0-6: a draw that cannot complete still ends -------------------
 
     /// A case opened when the network has NO drawable capacity must reach a
@@ -580,6 +636,62 @@ contract CaseLifecycleTest is ModerationTestBase {
             assertEq(bonded, 0, "and so did the escrow");
         }
         _assertConservation();
+    }
+
+    /// M2.6-P0-3, the widen path. `_closeReveal` re-arms the seed when it widens,
+    /// and that arm must fit inside ONE eligibility epoch exactly as the arm at
+    /// `_openRound` does — otherwise a widen re-draw straddles a boundary, the
+    /// eligible set moves under a seed whose entropy source is already fixed, and
+    /// H-05 is open again on the one path a voter can trigger at will by
+    /// withholding a reveal.
+    ///
+    /// Only `_openRound`'s call was covered. This asserts the property at the widen
+    /// arm, driven from a block position late in an epoch so the "does not fit,
+    /// defer to the next epoch start" branch is the one taken.
+    function test_widen_arms_its_seed_inside_one_epoch() public {
+        uint256 epochLen = REG_EPOCH_BLOCKS;
+        uint256 slack = mod.__realizeSlack();
+        uint256 seedLag = mod.getParams().seedLag;
+
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+
+        // Land close to a boundary, so the widen's window cannot fit in the epoch
+        // it is armed from and must be deferred.
+        uint256 pos = vm.getBlockNumber() % epochLen;
+        uint256 toBoundary = epochLen - pos;
+        if (toBoundary > seedLag + slack) {
+            // One block INSIDE the boundary case, so an unfitted arm would leave
+            // strictly less than `slack` blocks — the margin assertion below bites
+            // as well as the deferral one.
+            vm.roll(vm.getBlockNumber() + (toBoundary - (seedLag + slack) + 1));
+        }
+        assertLe(
+            epochLen - (vm.getBlockNumber() % epochLen), seedLag + slack, "positioned where the window cannot fit"
+        );
+
+        // Nobody commits: the round widens and re-arms.
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+        mod.closeCommit(caseId);
+        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
+        mod.closeReveal(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "widened back to DRAW");
+        (,,,,, , uint256 widenCount,, uint256 snap,) = mod.roundInfo(caseId, 0);
+        assertEq(widenCount, 1, "and it is a widen, not a fresh round");
+
+        uint256 armEpoch = mod.__epochAtArm(caseId, 0);
+        assertEq(snap / epochLen, armEpoch, "the snapshot block lies in the epoch it was armed for");
+        assertGe(
+            (armEpoch + 1) * epochLen - snap, slack, "and the whole realize window fits inside that epoch"
+        );
+        assertGt(armEpoch, vm.getBlockNumber() / epochLen, "deferred to a later epoch rather than armed unfit");
+
+        // And the deferred window really is realizable: the draw completes there.
+        while (_phase(caseId) == Moderation.Phase.DRAW) {
+            _rollToSeed(caseId);
+            mod.realizeSeats(caseId);
+        }
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "widen re-draw seated");
     }
 
     // --- M2.6-P0-3b: the epoch drain must not roll back its own work ----------

@@ -111,12 +111,18 @@ abstract contract ModerationTestBase is StackDeployer {
     /// The supersafe subset for a topic. `Moderation.supersafeEntries(bytes32)`
     /// was removed in M2.6 (unbounded, and the contract is EIP-170-bound), so the
     /// tests read the registry's paginated view the way a front end now must.
+    ///
+    /// Reads the registry `m` ACTUALLY writes to, not the suite-level `indexReg`.
+    /// Several tests deploy their own stack and pass that `m` in; against the base
+    /// fixture's registry those entries do not exist, so every `length == 0`
+    /// assertion held vacuously and could not have caught a supersafe regression.
     function _supersafe(ModerationHarness m, bytes32 topicKey)
         internal
         view
         returns (IndexRegistry.Entry[] memory)
     {
-        return indexReg.supersafeEntries(topicKey, m.getParams().supersafeAge, 0, indexReg.entryCount(topicKey));
+        IndexRegistry ir = m.indexReg();
+        return ir.supersafeEntries(topicKey, m.getParams().supersafeAge, 0, ir.entryCount(topicKey));
     }
 
     /// The (logic, caseId) currently holding a content reservation, or (0,0).

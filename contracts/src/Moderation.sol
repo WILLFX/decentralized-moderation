@@ -249,12 +249,6 @@ contract Moderation is ReentrancyGuard {
         address[] seatHolders; // unique drawn addresses
         mapping(address => uint256) seats; // seat-holder -> seat count (may grow on widen)
         mapping(address => uint256) committedSeats; // H-08: seats collateralized at commit (tally is capped to this)
-        // M2.6-P0-2 (bypass 3): seats this holder was ASSIGNED at commit time but
-        // could not collateralize. Recorded at commit rather than derived from
-        // `seats[a] - committedSeats[a]` at settlement, so a later widen adding
-        // seats to an already-committed holder is not misread as a broken promise
-        // (that is P1-1's problem, and it has a different remedy).
-        mapping(address => uint256) unbackedSeats;
         mapping(address => uint256) talliedSeats; // seats counted for THIS voter at reveal (frozen; F2)
         mapping(address => bytes32) commits; // seat-holder -> commit hash
         mapping(address => Vote) reveals; // seat-holder -> revealed vote
@@ -731,7 +725,6 @@ contract Moderation is ReentrancyGuard {
         uint256 s = r.seats[msg.sender];
         if (s == 0) revert NotSeatHolder();
         if (r.committed[msg.sender]) revert AlreadyCommitted();
-        uint256 assigned = s;
 
         // H-07: seats are drawn stake-weighted WITH REPLACEMENT, so a moderator can
         // win more seats than its free stake can collateralize (a min-stake holder
@@ -750,18 +743,27 @@ contract Moderation is ReentrancyGuard {
         // the seat it had already posted collateral for.
         uint256 affordable = (_eligibleFreeOf(msg.sender) + stakeReg.dutyBondedOf(msg.sender)) / riskPerSeat;
         if (affordable == 0) revert InsufficientEligibleFree();
+        // The clamp survives as the guard it always was, but P0-2 made it
+        // NON-BINDING for any seat obtained through `drawPanel`, which is every
+        // production seat: the registry escrows its own `riskPerSeat` per seat at
+        // draw time into THIS case's obligation, that escrow can only be spent by
+        // this case's `lock` or its `settleDuty`, and a ruleset may never lock more
+        // per seat than the registry's unit (constructor + `_validateParams`). So
+        // `dutyBonded >= s * regRisk >= s * caseRisk` and `affordable >= s` always.
+        //
+        // M2.6-P0-2b: the `unbackedSeats` counter that recorded the shortfall is
+        // therefore gone rather than kept as defence in depth. It could only ever
+        // be non-zero via `__injectWidenSeats`, a test harness that writes
+        // `r.seats` without going through the registry, and unreachable code that
+        // settlement branches on is a false statement about the system —
+        // specifically, it read as evidence that widen seats are unbacked, which
+        // is what put the wrong description into P1-1.
         if (affordable < s) s = affordable;
 
         uint256 lock = riskPerSeat * s;
         stakeReg.lock(msg.sender, r.caseRef, lock);
         r.committedAmt[msg.sender] = lock;
         r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
-        // M2.6-P0-2 (bypass 3): partial commit stays possible — it is what keeps a
-        // min-stake holder drawn twice able to serve at all — but the assignments
-        // it could not back are still assignments it fails. Settlement used to
-        // branch on `committed[a]` alone, so a holder assigned 10 seats that
-        // committed 1 had the other 9 disposed of as if they had been served.
-        r.unbackedSeats[msg.sender] = assigned - s;
         r.commits[msg.sender] = commitHash;
         r.committed[msg.sender] = true;
         r.committedCount++;
@@ -1133,7 +1135,7 @@ contract Moderation is ReentrancyGuard {
                 // worth of stake. This is the penalty that makes "dominate the
                 // appeal panel and simply refuse to commit" (H-10) cost something.
                 // Capacity and escrow settle in the same call either way (P0-2).
-                _settleDuty(c, r.caseRef, a, r.seats[a], !abandoned && (!r.committed[a] || r.unbackedSeats[a] > 0));
+                _settleDuty(c, r.caseRef, a, r.seats[a], !abandoned && !r.committed[a]);
             }
             round++;
             idx = 0;

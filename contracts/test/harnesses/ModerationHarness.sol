@@ -189,6 +189,17 @@ contract ModerationHarness is Moderation {
         return cases[caseId].rounds[depth].seatSeed;
     }
 
+    /// The eligibility epoch a round's seat seed was armed for (M2.6-P0-3), and the
+    /// slack `_armSeed` guarantees after the snapshot block. Not on `roundInfo` —
+    /// that tuple is already at ten fields and this is a test-only property.
+    function __epochAtArm(uint256 caseId, uint256 depth) external view returns (uint256) {
+        return cases[caseId].rounds[depth].epochAtArm;
+    }
+
+    function __realizeSlack() external pure returns (uint256) {
+        return REALIZE_SLACK;
+    }
+
     function __talliedSeats(uint256 caseId, uint256 depth, address voter) external view returns (uint256) {
         return cases[caseId].rounds[depth].talliedSeats[voter];
     }

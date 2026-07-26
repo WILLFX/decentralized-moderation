@@ -389,6 +389,7 @@ contract Moderation is ReentrancyGuard {
     error PhaseDeadlinePassed(); // M-02: commit/reveal after the window has elapsed
     error BadKind(); // submit() is submissions-only; removals go through submitRemoval
     error TargetNotRemovable(); // removal target must be a settled, approved, indexed submission
+    error NotAcceptingSubmissions(); // M2.6-P0-5: retired or revoked; settle-only
 
     event RemovalTargeted(
         uint256 indexed caseId,
@@ -428,6 +429,7 @@ contract Moderation is ReentrancyGuard {
         // H-01: removals no longer accept caller-chosen content/meta/topics/target
         // (they were ignored at settlement, which resolved the target lazily — a
         // future-ID or payload-substitution vector). Use submitRemoval instead.
+        _requireOpen(); // M2.6-P0-5
         if (kind != Kind.SUBMISSION) revert BadKind();
         targetCaseId; // unused for submissions
         uint256 n = topicKeys.length;
@@ -478,6 +480,7 @@ contract Moderation is ReentrancyGuard {
     ///         or display a payload that differs from what settlement acts on
     ///         (H-01). Fee scales with the target's real topic count.
     function submitRemoval(uint256 targetCaseId, uint256 fee) external nonReentrant returns (uint256 caseId) {
+        _requireOpen(); // M2.6-P0-5
         if (targetCaseId >= nextCaseId) revert TargetNotRemovable();
         Case storage target = cases[targetCaseId];
         if (target.kind != Kind.SUBMISSION || target.phase != Phase.SETTLED) revert TargetNotRemovable();
@@ -551,6 +554,7 @@ contract Moderation is ReentrancyGuard {
         nonReentrant
         returns (uint256 caseId)
     {
+        _requireOpen(); // M2.6-P0-5
         (bytes32 topicKey, bytes32 contentHash, bytes32 metaHash, address originLogic) =
             indexReg.legacyEntryInfo(globalEntryId);
         // topicKey == 0 means the id is not live: never minted, or already removed.
@@ -1216,6 +1220,29 @@ contract Moderation is ReentrancyGuard {
     }
 
     // --- internal transitions ------------------------------------------------
+
+    /// @dev M2.6-P0-5: a case may only be OPENED while this contract is fully
+    ///      authorized on BOTH registries. Settlement deliberately does not check —
+    ///      an in-flight case must always be able to finish, which is what
+    ///      `SETTLE_ONLY` exists for.
+    ///
+    ///      This is also the fee-trap fix. `submit` never checked its own
+    ///      authorization, so a REVOKED logic still took fees for cases it could
+    ///      never seat, settle, or refund — every retired contract became a
+    ///      permanent trap with no path back out. It now refuses the money.
+    ///
+    ///      Checking both registries is what makes a desynchronized authorization
+    ///      fail closed: they are governed independently, so a logic can be
+    ///      authorized in one and not the other, and a case opened in that state
+    ///      would settle its stake and then fail its index write. True atomicity
+    ///      needs a shared authorization contract; until then this makes the
+    ///      unsafe state unreachable from the only path that creates exposure.
+    function _requireOpen() internal view {
+        if (
+            stakeReg.logicState(address(this)) != StakeRegistry.LogicState.OPEN_AND_SETTLE
+                || indexReg.logicState(address(this)) != IndexRegistry.LogicState.OPEN_AND_SETTLE
+        ) revert NotAcceptingSubmissions();
+    }
 
     /// @dev Arm a seat seed so its whole window — the snapshot block plus the
     ///      slack a poke needs to realize it — lies inside ONE eligibility epoch

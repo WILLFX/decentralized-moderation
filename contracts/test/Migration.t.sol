@@ -7,6 +7,7 @@ import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {RulesetGovernor} from "../src/RulesetGovernor.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
 
 /// The whole point of the M2.5 split, exercised end to end against live state
 /// rather than asserted about empty registries: run a real case to settlement
@@ -306,6 +307,99 @@ contract MigrationTest is ModerationTestBase {
         vm.prank(mods[1]);
         vm.expectRevert(Moderation.TargetNotRemovable.selector);
         mod.submitLegacyRemoval(gid, fee);
+    }
+
+    // --- M2.6-P0-5: the retirement lifecycle ---------------------------------
+
+    /// A retiring logic must reject new submissions and still settle what it has.
+    ///
+    /// With only on/off authorization there was no such state. Revoking a live
+    /// logic STRANDED its cases — its pot, committed stake, duty reservations and
+    /// unpaid appeal contributors sat in a contract that could no longer reach the
+    /// registries, and the replacement could not settle them because the case
+    /// storage lives in the old contract. Leaving it authorized instead let anyone
+    /// keep opening new cases in it, so it never provably drained.
+    function test_retiring_logic_rejects_submissions_but_still_settles() public {
+        uint256 caseId = _submit(mods[0]); // opened while fully authorized
+        _realizeSeats(caseId);
+
+        stakeReg.retireLogic(address(mod));
+        indexReg.retireLogic(address(mod));
+
+        // No new cases.
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[1], fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.NotAcceptingSubmissions.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT_B, META, _topics(), 0, fee);
+
+        // But the in-flight one runs to completion, which is the whole point.
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+        _finalize(caseId);
+        mod.claim(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.SETTLED), "in-flight case still settles");
+        _assertConservation();
+    }
+
+    /// A revoked logic must refuse fees rather than trap them.
+    ///
+    /// `submit` never checked its own authorization, so a revoked contract kept
+    /// taking money for cases it could never seat, settle or refund — every
+    /// retired contract became a permanent fee trap with no path back out.
+    function test_revoked_logic_refuses_fees_instead_of_trapping_them() public {
+        stakeReg.retireLogic(address(mod));
+        indexReg.retireLogic(address(mod));
+        stakeReg.revokeLogic(address(mod)); // nothing outstanding, so this is allowed
+        indexReg.revokeLogic(address(mod));
+
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[1], fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(mod), type(uint256).max);
+        uint256 balBefore = bzz.balanceOf(mods[1]);
+
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.NotAcceptingSubmissions.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
+
+        assertEq(bzz.balanceOf(mods[1]), balBefore, "not a wei was taken");
+        assertEq(bzz.balanceOf(address(mod)), 0, "and nothing is trapped in the dead logic");
+    }
+
+    /// Revocation is gated on a real drain signal, not on governance believing the
+    /// old logic has finished.
+    function test_cannot_revoke_a_logic_that_still_holds_obligations() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId); // seats drawn: duty reserved and escrowed
+
+        assertFalse(stakeReg.canRevoke(address(mod)), "obligations outstanding");
+        vm.expectRevert(StakeRegistry.LogicStillHasObligations.selector);
+        stakeReg.revokeLogic(address(mod));
+
+        // Drive it to settlement; only then does the signal flip.
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+        _finalize(caseId);
+        mod.claim(caseId);
+
+        assertTrue(stakeReg.canRevoke(address(mod)), "drained");
+        stakeReg.revokeLogic(address(mod));
+    }
+
+    /// Desynchronized authorization is unreachable from the path that creates
+    /// exposure: the registries are governed independently, so a logic can be live
+    /// in one and not the other. A case opened in that state would settle its
+    /// stake and then fail its index write.
+    function test_desynchronized_registry_authorization_rejects_submissions() public {
+        indexReg.retireLogic(address(mod)); // index says settle-only, stake still open
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[1], fee);
+        vm.prank(mods[1]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[1]);
+        vm.expectRevert(Moderation.NotAcceptingSubmissions.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
     }
 
     /// The revoked logic contract is powerless afterwards: it cannot touch stake

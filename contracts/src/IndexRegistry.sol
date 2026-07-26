@@ -79,7 +79,24 @@ contract IndexRegistry {
 
     address public governance;
     uint256 public immutable timelockDelay;
-    mapping(address => bool) public isLogic;
+
+    /// M2.6-P0-5: a logic contract's authorization has three states, not two.
+    ///
+    /// With only on/off, revoking a live logic STRANDED its cases — its pot, its
+    /// committed stake, its duty reservations and its unpaid appeal contributors
+    /// all sat in a contract that could no longer touch the registries, and the
+    /// replacement could not settle them because the case storage lives in the old
+    /// contract. Governance's only alternative was to leave the old logic fully
+    /// authorized, which let anyone keep opening NEW cases in it, so it never
+    /// provably drained. `SETTLE_ONLY` is the missing middle: finish what you
+    /// started, start nothing new.
+    enum LogicState {
+        NONE,
+        OPEN_AND_SETTLE,
+        SETTLE_ONLY
+    }
+
+    mapping(address => LogicState) public logicState;
 
     struct PendingLogic {
         address logic;
@@ -104,6 +121,7 @@ contract IndexRegistry {
     event ContentReleased(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
     event LogicProposed(address indexed logic, uint256 eta);
     event LogicAuthorized(address indexed logic);
+    event LogicRetiring(address indexed logic);
     event LogicRevoked(address indexed logic);
     event GovernanceTransferProposed(address indexed next);
     event GovernanceTransferred(address indexed next);
@@ -121,7 +139,7 @@ contract IndexRegistry {
     }
 
     modifier onlyLogic() {
-        if (!isLogic[msg.sender]) revert NotLogic();
+        if (logicState[msg.sender] == LogicState.NONE) revert NotLogic();
         _;
     }
 
@@ -365,7 +383,7 @@ contract IndexRegistry {
         PendingLogic memory pl = pendingLogic;
         if (!pl.exists) revert NoPendingProposal();
         if (block.timestamp < pl.eta) revert TimelockNotElapsed();
-        isLogic[pl.logic] = true;
+        logicState[pl.logic] = LogicState.OPEN_AND_SETTLE;
         delete pendingLogic;
         emit LogicAuthorized(pl.logic);
     }
@@ -374,8 +392,15 @@ contract IndexRegistry {
         delete pendingLogic;
     }
 
+    /// @notice Stop a logic writing new entries while it settles existing cases.
+    function retireLogic(address logic) external onlyGovernance {
+        if (logicState[logic] != LogicState.OPEN_AND_SETTLE) revert NotLogic();
+        logicState[logic] = LogicState.SETTLE_ONLY;
+        emit LogicRetiring(logic);
+    }
+
     function revokeLogic(address logic) external onlyGovernance {
-        isLogic[logic] = false;
+        logicState[logic] = LogicState.NONE;
         emit LogicRevoked(logic);
     }
 

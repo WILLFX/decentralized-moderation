@@ -131,7 +131,7 @@ contract RegistriesTest is Test {
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         stakeReg.executeLogic();
-        assertTrue(stakeReg.isLogic(newLogic));
+        assertTrue(stakeReg.logicState(newLogic) != StakeRegistry.LogicState.NONE);
     }
 
     /// Trust model #2: a moderator who rejects an announced migration can always
@@ -162,8 +162,8 @@ contract RegistriesTest is Test {
         stakeReg.lock(alice, CASE_A, 10 * XBZZ); // an in-flight case
 
         _authorize(newLogic); // both authorized now
-        assertTrue(stakeReg.isLogic(oldLogic), "old logic still authorized during handover");
-        assertTrue(stakeReg.isLogic(newLogic));
+        assertTrue(stakeReg.logicState(oldLogic) != StakeRegistry.LogicState.NONE, "old logic still authorized during handover");
+        assertTrue(stakeReg.logicState(newLogic) != StakeRegistry.LogicState.NONE);
 
         // The old logic settles its open case.
         vm.prank(oldLogic);
@@ -738,14 +738,18 @@ contract RegistriesTest is Test {
     /// cannot reach obligations from its previous life.
     function test_reauthorization_does_not_inherit_old_handles() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
-        vm.prank(oldLogic);
+        vm.startPrank(oldLogic);
         stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ); // drain: revocation now requires it
+        vm.stopPrank();
         uint256 epochBefore = stakeReg.authEpoch(oldLogic);
 
         stakeReg.revokeLogic(oldLogic);
         _authorize(oldLogic); // same address, authorized again
         assertGt(stakeReg.authEpoch(oldLogic), epochBefore, "a new namespace");
 
+        // The re-authorized contract starts empty: a case reference it used in its
+        // previous life resolves to a different handle entirely.
         vm.prank(oldLogic);
         vm.expectRevert(StakeRegistry.NotYourObligation.selector);
         stakeReg.release(alice, CASE_A, 10 * XBZZ);

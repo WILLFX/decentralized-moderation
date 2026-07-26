@@ -220,7 +220,24 @@ contract StakeRegistry {
 
     /// Authorized logic contracts. More than one may be authorized at a time so a
     /// migration can hand over while the outgoing logic settles its open cases.
-    mapping(address => bool) public isLogic;
+
+    /// M2.6-P0-5: a logic contract's authorization has three states, not two.
+    ///
+    /// With only on/off, revoking a live logic STRANDED its cases — its pot, its
+    /// committed stake, its duty reservations and its unpaid appeal contributors
+    /// all sat in a contract that could no longer touch the registries, and the
+    /// replacement could not settle them because the case storage lives in the old
+    /// contract. Governance's only alternative was to leave the old logic fully
+    /// authorized, which let anyone keep opening NEW cases in it, so it never
+    /// provably drained. `SETTLE_ONLY` is the missing middle: finish what you
+    /// started, start nothing new.
+    enum LogicState {
+        NONE,
+        OPEN_AND_SETTLE,
+        SETTLE_ONLY
+    }
+
+    mapping(address => LogicState) public logicState;
 
     struct PendingLogic {
         address logic;
@@ -247,6 +264,7 @@ contract StakeRegistry {
 
     event LogicProposed(address indexed logic, uint256 eta);
     event LogicAuthorized(address indexed logic);
+    event LogicRetiring(address indexed logic);
     event LogicRevoked(address indexed logic);
     event GovernanceTransferProposed(address indexed next);
     event GovernanceTransferred(address indexed next);
@@ -274,6 +292,7 @@ contract StakeRegistry {
     error DutyReserved(); // M2.6-P0-2: cannot un-pledge capacity a live panel holds
     error EpochNotSettled(); // M2.6-P0-3: call advanceEpoch() to apply staged changes
     error NotYourObligation(); // M2.6-P0-5: only the creating case may discharge it
+    error LogicStillHasObligations(); // M2.6-P0-5: cannot revoke a logic mid-flight
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -281,7 +300,7 @@ contract StakeRegistry {
     }
 
     modifier onlyLogic() {
-        if (!isLogic[msg.sender]) revert NotLogic();
+        if (logicState[msg.sender] == LogicState.NONE) revert NotLogic();
         _;
     }
 
@@ -634,6 +653,16 @@ contract StakeRegistry {
         logicCommitted[msg.sender] -= amount;
     }
 
+    /// @notice True when `logic` holds no live obligation, so revoking it cannot
+    ///         strand a case.
+    /// @dev The on-chain drain signal revocation previously lacked. Governance had
+    ///      to BELIEVE the outgoing logic had finished; `openPotsTotal` in the game
+    ///      contract could not tell it, because that is decremented at settlement
+    ///      INIT rather than completion.
+    function canRevoke(address logic) public view returns (bool) {
+        return logicCommitted[logic] == 0 && logicDutyReserved[logic] == 0;
+    }
+
     /// @notice Settle `units` finished assignments in ONE step: freeze `penalty` of
     ///         the escrow those seats still hold as the no-show cost, and return
     ///         the remainder to free stake.
@@ -731,7 +760,7 @@ contract StakeRegistry {
         PendingLogic memory pl = pendingLogic;
         if (!pl.exists) revert NoPendingProposal();
         if (block.timestamp < pl.eta) revert TimelockNotElapsed();
-        isLogic[pl.logic] = true;
+        logicState[pl.logic] = LogicState.OPEN_AND_SETTLE;
         authEpoch[pl.logic] += 1; // M2.6-P0-5: fresh handle namespace
         delete pendingLogic;
         emit LogicAuthorized(pl.logic);
@@ -743,8 +772,20 @@ contract StakeRegistry {
 
     /// Revoke a drained logic contract. Immediate: revocation only ever REDUCES
     /// privilege, so it needs no timelock.
+    /// @notice Stop a logic opening new cases while it settles the ones it has.
+    function retireLogic(address logic) external onlyGovernance {
+        if (logicState[logic] != LogicState.OPEN_AND_SETTLE) revert NotLogic();
+        logicState[logic] = LogicState.SETTLE_ONLY;
+        emit LogicRetiring(logic);
+    }
+
+    /// @dev Refuses while the logic still holds obligations. Revocation used to
+    ///      rely on governance BELIEVING the old logic had drained; `canRevoke` is
+    ///      the on-chain fact. (`openPotsTotal` in the game contract is not one —
+    ///      it is decremented at settlement init.)
     function revokeLogic(address logic) external onlyGovernance {
-        isLogic[logic] = false;
+        if (!canRevoke(logic)) revert LogicStillHasObligations();
+        logicState[logic] = LogicState.NONE;
         emit LogicRevoked(logic);
     }
 

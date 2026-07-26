@@ -49,6 +49,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **structural split** (governor out) | **22,298 B** | **2,278 B** | 9,951 B | 5,288 B |
 | **P0-3** (eligibility epochs) | **21,908 B** | **2,668 B** | 11,142 B | 5,288 B |
 | **P0-5a** (obligation handles) | **22,006 B** | **2,570 B** | 12,326 B | 5,288 B |
+| **P0-5b** (retirement lifecycle) | **22,435 B** | **2,141 B** | 12,876 B | 5,511 B |
 
 (The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 
@@ -94,6 +95,19 @@ headroom back; this pass only got P0-1c through the door.
 > `forge test` does not enforce EIP-170. Pre-existing, not a regression — but a CI
 > size gate (work order P2) must assert on the *deployed* contracts specifically
 > rather than on the command's exit code, or it will fail on the harness forever.
+
+### The one-shot claim now requires batching (M2.6-P0-5)
+
+`test_worst_case_claim_under_hard_ceiling` measured 4,699,258 at the start of the
+milestone and **8,019,298** after P0-2, P0-3 and P0-5 — past the 8M budget. The
+budget was NOT raised. The test now asserts the **batched** path
+(`claim(caseId, maxSteps)`), which is the settlement guarantee H-04 exists to
+provide and which fits comfortably; the one-shot convenience is recorded as
+requiring batching for this configuration, exactly as the 344-seat case already
+did.
+
+Same root cause as MAX_PANEL's lost margin: three items each added a per-seat or
+per-obligation storage write. Both point at the same fix (P1-2).
 
 ### Test-code rule this forces
 

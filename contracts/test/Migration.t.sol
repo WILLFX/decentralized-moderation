@@ -387,6 +387,102 @@ contract MigrationTest is ModerationTestBase {
         stakeReg.revokeLogic(address(mod));
     }
 
+    /// M2.6-P0-5b. The drain gate has to hold on BOTH registries, because a case's
+    /// final step touches both: `_settleFinish` writes the index entries and
+    /// releases the stake in the same call.
+    ///
+    /// Gating only the stake side left governance able to revoke index-side while a
+    /// case sat in SETTLING. The stake registry then refused revocation forever —
+    /// correctly, and uselessly: the case could no longer reach `writeEntry`, so
+    /// every `claim()` reverted `NotLogic`, so its stake obligations never closed,
+    /// so `StakeRegistry.canRevoke` never flipped. The stake-side gate did not
+    /// prevent the strand; it only made it permanent.
+    ///
+    /// Driven against a real mid-settlement case and a real `revokeLogic` call, not
+    /// asserted about the gate in isolation.
+    function test_index_revocation_refuses_a_case_that_is_mid_settlement() public {
+        uint256 caseId = _runUndisputed(mods[0], Moderation.Vote.Approve);
+
+        // Enter SETTLING and stop one seat-holder in: the case is past the point of
+        // no return and has not yet written its entries.
+        mod.claim(caseId, 1);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.SETTLING), "case is mid-settlement");
+        assertEq(indexReg.entryCount(TK), 0, "its index write has NOT happened yet");
+
+        // The stake side already refused. That was never the problem.
+        assertFalse(stakeReg.canRevoke(address(mod)), "stake obligations outstanding");
+        vm.expectRevert(StakeRegistry.LogicStillHasObligations.selector);
+        stakeReg.revokeLogic(address(mod));
+
+        // The index side must refuse for its own reason: this case still has to
+        // write through it. Before P0-5b this call SUCCEEDED, and the case was
+        // stranded from that moment on.
+        assertFalse(indexReg.canRevoke(address(mod)), "index obligations outstanding");
+        assertTrue(indexReg.caseIsOpen(address(mod), caseId), "the case is what is outstanding");
+        vm.expectRevert(IndexRegistry.LogicStillHasObligations.selector);
+        indexReg.revokeLogic(address(mod));
+
+        // Finish it. Only now do both signals flip, and they flip together.
+        while (_phase(caseId) == Moderation.Phase.SETTLING) mod.claim(caseId);
+        assertEq(indexReg.entryCount(TK), 1, "the entry _settleFinish owed the index");
+        assertFalse(indexReg.caseIsOpen(address(mod), caseId), "obligation discharged");
+        assertTrue(stakeReg.canRevoke(address(mod)), "stake drained");
+        assertTrue(indexReg.canRevoke(address(mod)), "index drained");
+
+        stakeReg.revokeLogic(address(mod));
+        indexReg.revokeLogic(address(mod));
+        _assertConservation();
+    }
+
+    /// A REMOVAL takes no content reservation but still DELETES at settlement, so
+    /// counting reservations would have left removals ungated. The obligation is
+    /// per case for exactly this reason.
+    function test_index_revocation_refuses_an_open_removal_which_holds_no_reservation() public {
+        uint256 target = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(target);
+        assertEq(indexReg.entryCount(TK), 1);
+
+        uint256 fee = mod.minFee(1);
+        _fund(mods[1], fee);
+        vm.prank(mods[1]);
+        uint256 removal = mod.submitRemoval(target, fee);
+
+        // No reservation was taken for the removal — the reserved key belongs to
+        // the target's entry.
+        assertTrue(indexReg.caseIsOpen(address(mod), removal), "but the obligation is recorded");
+        vm.expectRevert(IndexRegistry.LogicStillHasObligations.selector);
+        indexReg.revokeLogic(address(mod));
+
+        _realizeSeats(removal);
+        _runRoundToAppealWindow(removal, 0, Moderation.Vote.Approve);
+        _finalize(removal);
+        mod.claim(removal);
+        assertEq(indexReg.entryCount(TK), 0, "the removal deleted the entry it owed");
+        assertTrue(indexReg.canRevoke(address(mod)), "drained");
+        indexReg.revokeLogic(address(mod));
+    }
+
+    /// A VOIDed case discharges its index obligation too — `_voidFinish` releases
+    /// the reservation, and after that the case can never touch the index again.
+    function test_void_discharges_the_index_obligation() public {
+        uint256 caseId = _submit(mods[0]);
+        assertTrue(indexReg.caseIsOpen(address(mod), caseId));
+
+        // No drawable capacity anywhere -> the draw is abandoned -> VOID.
+        for (uint256 i = 0; i < mods.length; i++) {
+            vm.prank(mods[i]);
+            stakeReg.setDutyUnits(0);
+        }
+        _settleEpoch(stakeReg);
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+        mod.resolveStalledDraw(caseId);
+        while (_phase(caseId) == Moderation.Phase.VOID_SETTLING) mod.claim(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.VOID));
+
+        assertFalse(indexReg.caseIsOpen(address(mod), caseId), "VOID discharges it");
+        assertTrue(indexReg.canRevoke(address(mod)), "drained");
+    }
+
     /// Desynchronized authorization is unreachable from the path that creates
     /// exposure: the registries are governed independently, so a logic can be live
     /// in one and not the other. A case opened in that state would settle its

@@ -98,6 +98,38 @@ contract IndexRegistry {
 
     mapping(address => LogicState) public logicState;
 
+    /// M2.6-P0-5b: the index side needs its OWN drain signal.
+    ///
+    /// `SETTLE_ONLY` and `StakeRegistry.canRevoke` were built as if there were one
+    /// registry. There are two, governed independently, and a case's obligations
+    /// span both: settlement disposes stake here and writes entries THERE, in the
+    /// same final step (`Moderation._settleFinish`). Gating only the stake side
+    /// meant governance could revoke index-side while a case sat in `SETTLING` —
+    /// its stake obligations correctly refusing revocation, its index write now
+    /// impossible. Every subsequent `claim()` reverted `NotLogic`, so the case
+    /// never finished, so its stake obligations never closed, so
+    /// `StakeRegistry.canRevoke` never flipped either. The stake-side gate did not
+    /// prevent that; it only guaranteed the resulting deadlock was permanent.
+    ///
+    /// So the index tracks what it is owed the same way the stake registry does: a
+    /// count of cases that may still write, delete or release through it. The logic
+    /// contract opens one per case at submit and closes it when the case reaches a
+    /// terminal phase (SETTLED or VOID) — the two points where its index effects
+    /// are complete.
+    ///
+    /// A content reservation is deliberately NOT the unit of account. Removals take
+    /// no reservation at all yet still delete entries at settlement, and an approved
+    /// submission's reservation outlives its case by design (it belongs to the
+    /// ENTRY afterwards, and is freed by deleting it). Counting reservations would
+    /// therefore be wrong in both directions.
+    mapping(address => uint256) public logicOpenCases;
+    /// logic -> its own case id -> whether that case's index obligation is open.
+    /// Makes open/close idempotent, so a repeated call is a no-op rather than an
+    /// underflow that would brick settlement. Not authorization-epoch keyed the way
+    /// stake obligations are: revocation now requires the count to be zero, so a
+    /// re-authorized logic can never inherit a live flag.
+    mapping(address => mapping(uint256 => bool)) internal caseOpen;
+
     struct PendingLogic {
         address logic;
         uint256 eta;
@@ -119,6 +151,8 @@ contract IndexRegistry {
     event EntryRemoved(uint256 indexed globalId, bytes32 indexed topicKey);
     event ContentReserved(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
     event ContentReleased(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
+    event CaseOpened(address indexed logic, uint256 indexed localCaseId);
+    event CaseClosed(address indexed logic, uint256 indexed localCaseId);
     event LogicProposed(address indexed logic, uint256 eta);
     event LogicAuthorized(address indexed logic);
     event LogicRetiring(address indexed logic);
@@ -132,6 +166,7 @@ contract IndexRegistry {
     error TimelockNotElapsed();
     error ZeroAddress();
     error BadRange();
+    error LogicStillHasObligations(); // M2.6-P0-5b: cannot revoke a logic mid-flight
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -149,6 +184,38 @@ contract IndexRegistry {
     }
 
     // --- logic-facing --------------------------------------------------------
+
+    /// @notice Declare that `localCaseId` may still act on this index, so
+    ///         revocation cannot strand it (M2.6-P0-5b). Idempotent.
+    function openCase(uint256 localCaseId) external onlyLogic {
+        if (caseOpen[msg.sender][localCaseId]) return;
+        caseOpen[msg.sender][localCaseId] = true;
+        logicOpenCases[msg.sender] += 1;
+        emit CaseOpened(msg.sender, localCaseId);
+    }
+
+    /// @notice Discharge a case's index obligation: its effects are complete and
+    ///         it will never write, delete or release again. Idempotent, so a
+    ///         double close is a no-op rather than an underflow that would revert
+    ///         the settlement transaction carrying it.
+    function closeCase(uint256 localCaseId) external onlyLogic {
+        if (!caseOpen[msg.sender][localCaseId]) return;
+        delete caseOpen[msg.sender][localCaseId];
+        logicOpenCases[msg.sender] -= 1;
+        emit CaseClosed(msg.sender, localCaseId);
+    }
+
+    /// @notice True when `logic` has no case that could still act on this index.
+    ///         The index-side counterpart of `StakeRegistry.canRevoke`; both must
+    ///         hold before a logic is safe to revoke, because a case's final step
+    ///         touches both registries.
+    function canRevoke(address logic) public view returns (bool) {
+        return logicOpenCases[logic] == 0;
+    }
+
+    function caseIsOpen(address logic, uint256 localCaseId) external view returns (bool) {
+        return caseOpen[logic][localCaseId];
+    }
 
     /// @notice Write an approved entry and mint its permanent global id.
     /// @return globalId The registry-minted identity. The caller MUST record this;
@@ -399,7 +466,13 @@ contract IndexRegistry {
         emit LogicRetiring(logic);
     }
 
+    /// @dev Refuses while the logic still has a case that could act on the index.
+    ///      Revoking one whose settlement had not yet written its entries left that
+    ///      case unable to finish AND unable to release its stake, because
+    ///      `_settleFinish` does both in one step — the stake-side gate could not
+    ///      see the index-side hazard, and vice versa.
     function revokeLogic(address logic) external onlyGovernance {
+        if (!canRevoke(logic)) revert LogicStillHasObligations();
         logicState[logic] = LogicState.NONE;
         emit LogicRevoked(logic);
     }

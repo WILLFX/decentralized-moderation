@@ -490,6 +490,9 @@ contract Moderation is ReentrancyGuard {
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
+        // M2.6-P0-5b: this case can still write to the index, so the index must
+        // refuse to revoke us until it settles.
+        indexReg.openCase(caseId);
 
         _openRound(c, 0);
         emit CaseSubmitted(caseId, Kind.SUBMISSION, msg.sender, fee);
@@ -549,6 +552,10 @@ contract Moderation is ReentrancyGuard {
         c.pot = fee;
         openPotsTotal += fee;
         c.finalOutcome = Outcome.Unset;
+        // M2.6-P0-5b: a removal takes no content reservation but still DELETES at
+        // settlement, which is why the index obligation is per case rather than per
+        // reservation.
+        indexReg.openCase(caseId);
     }
 
     /// @notice Open a REMOVAL case against an index entry written by a SUPERSEDED
@@ -1148,6 +1155,7 @@ contract Moderation is ReentrancyGuard {
         totalSettling -= claimBounty; // drains this case's in-flight amount to 0
         c.pot = 0;
         _settleIndex(c);
+        indexReg.closeCase(c.id); // M2.6-P0-5b: index effects complete
         c.phase = Phase.SETTLED;
         if (claimBounty > 0) address(token).safeTransfer(msg.sender, claimBounty);
         emit Settled(c.id, c.finalOutcome, s.pot, claimBounty);
@@ -1547,6 +1555,7 @@ contract Moderation is ReentrancyGuard {
         c.pot = 0;
         openPotsTotal -= pot;
         _clearDedup(c);
+        indexReg.closeCase(c.id); // M2.6-P0-5b: index effects complete
         c.phase = Phase.VOID;
 
         if (bounty > 0) address(token).safeTransfer(msg.sender, bounty);

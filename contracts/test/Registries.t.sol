@@ -801,6 +801,72 @@ contract RegistriesTest is Test {
         stakeReg.release(alice, CASE_A, 10 * XBZZ);
     }
 
+    /// M2.6-P0-5d: governance must not be able to orphan live obligation handles.
+    ///
+    /// `executeLogic` bumped `authEpoch` unconditionally, and `authEpoch` is part of
+    /// every handle. Re-executing a proposal for an ALREADY-authorized logic — a
+    /// duplicate proposal, a re-run script, a governance mistake — renamed the whole
+    /// namespace in one transaction. Every live handle was orphaned: `_debit` then
+    /// reverted `NotYourObligation` on the rightful owner's own settlement,
+    /// permanently, so committed stake was stranded, escrow could not be released,
+    /// and the per-logic counters never reached zero — `canRevoke` stayed false
+    /// forever and the contract could not even be retired out of the way.
+    ///
+    /// Nothing is minted and conservation still holds, which is why it would not
+    /// show up in the invariant campaign.
+    function test_reauthorizing_a_live_logic_cannot_orphan_its_obligations() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.drawPanel(1, keccak256("live"), 0, CASE_A);
+        indexReg.openCase(1); // the same case, index-side (M2.6-P0-5b)
+        vm.stopPrank();
+        assertFalse(stakeReg.canRevoke(oldLogic), "a live case is outstanding");
+        assertFalse(indexReg.canRevoke(oldLogic), "index-side too");
+        uint256 epochBefore = stakeReg.authEpoch(oldLogic);
+
+        // The proposal is legitimate and the timelock is honoured; only the drain
+        // state makes it unsafe.
+        stakeReg.proposeLogic(oldLogic);
+        indexReg.proposeLogic(oldLogic);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        vm.expectRevert(StakeRegistry.LogicStillHasObligations.selector);
+        stakeReg.executeLogic();
+        // Both registries refuse together, so governance cannot desync them by
+        // executing the pair.
+        vm.expectRevert(IndexRegistry.LogicStillHasObligations.selector);
+        indexReg.executeLogic();
+
+        assertEq(stakeReg.authEpoch(oldLogic), epochBefore, "the namespace is intact");
+
+        // And the obligations it already held still settle normally, which is the
+        // property the bump would have destroyed.
+        vm.prank(oldLogic);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, vm.getBlockTimestamp() + 1 days);
+        vm.prank(oldLogic);
+        indexReg.closeCase(1);
+        assertTrue(stakeReg.canRevoke(oldLogic), "drained normally");
+        assertTrue(indexReg.canRevoke(oldLogic), "index-side too");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+
+        // Once drained, the same proposal executes: the gate is about live state,
+        // not about forbidding re-authorization.
+        stakeReg.executeLogic();
+        assertGt(stakeReg.authEpoch(oldLogic), epochBefore, "a fresh namespace, safely");
+    }
+
+    /// A FIRST authorization is unaffected — that is the only case where the
+    /// `authEpoch` bump has a job to do.
+    function test_first_authorization_from_none_still_bumps_the_namespace() public {
+        assertEq(uint256(stakeReg.logicState(newLogic)), uint256(StakeRegistry.LogicState.NONE));
+        uint256 before = stakeReg.authEpoch(newLogic);
+        _authorize(newLogic);
+        assertGt(stakeReg.authEpoch(newLogic), before, "fresh namespace on a first authorization");
+        assertEq(uint256(stakeReg.logicState(newLogic)), uint256(StakeRegistry.LogicState.OPEN_AND_SETTLE));
+    }
+
     /// The per-logic totals are a real drain signal, unlike `openPotsTotal`.
     function test_logic_totals_track_outstanding_obligations() public {
         _stakeActivatePledge(alice, 100 * XBZZ);

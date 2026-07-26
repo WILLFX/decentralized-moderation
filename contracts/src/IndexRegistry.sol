@@ -446,10 +446,37 @@ contract IndexRegistry {
         emit LogicProposed(logic, block.timestamp + timelockDelay);
     }
 
+    /// @dev M2.6-P0-5d, checked for the same hole and gated for a different reason.
+    ///
+    ///      This registry has **no `authEpoch`**, so there is no namespace to rename
+    ///      and the orphaning failure `StakeRegistry.executeLogic` had cannot occur
+    ///      here. `caseOpen` is keyed `(logic, localCaseId)` only.
+    ///
+    ///      That asymmetry — index flags surviving a re-authorization while stake
+    ///      handles die — is benign, but ONLY because `revokeLogic` on both sides is
+    ///      now gated on drain. A flag can never outlive its case: `logicOpenCases`
+    ///      reaches zero only when every `openCase` has been matched by a
+    ///      `closeCase`, which deletes the flag, and revocation to `NONE` requires
+    ///      that count to be zero. Before P0-5b gated this side, it was NOT benign:
+    ///      a logic could be revoked with open cases, re-authorized, and inherit
+    ///      `caseOpen[logic][0] == true` from its previous life — `openCase` would
+    ///      return early, the counter would never rise, and that case would be
+    ///      revocable straight through the gate.
+    ///
+    ///      The gate below is therefore not fixing an orphaning bug; it keeps the two
+    ///      registries' governance surfaces identical. Without it, one
+    ///      `executeLogic` pair against a live logic would revert stake-side and
+    ///      succeed index-side, leaving the logic OPEN_AND_SETTLE here and
+    ///      SETTLE_ONLY there. `Moderation._requireOpen` checks both, so that
+    ///      desync fails closed — but a desync governance can create by accident is
+    ///      worth not creating.
     function executeLogic() external onlyGovernance {
         PendingLogic memory pl = pendingLogic;
         if (!pl.exists) revert NoPendingProposal();
         if (block.timestamp < pl.eta) revert TimelockNotElapsed();
+        if (logicState[pl.logic] != LogicState.NONE && !canRevoke(pl.logic)) {
+            revert LogicStillHasObligations();
+        }
         logicState[pl.logic] = LogicState.OPEN_AND_SETTLE;
         delete pendingLogic;
         emit LogicAuthorized(pl.logic);

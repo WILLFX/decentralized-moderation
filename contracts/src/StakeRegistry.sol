@@ -813,10 +813,38 @@ contract StakeRegistry {
     ///         authorized so in-flight cases can settle under the old rules
     ///         (handover window, trust model #3). Governance revokes the old one
     ///         explicitly once it has drained.
+    /// @dev M2.6-P0-5d: re-authorizing a logic that is ALREADY authorized and has
+    ///      not drained is refused.
+    ///
+    ///      `authEpoch` is part of every obligation handle (`_ob`), so bumping it
+    ///      renames the whole namespace. Done to a logic with live obligations, every
+    ///      existing handle is orphaned in one transaction: `_debit` then reverts
+    ///      `NotYourObligation` on the rightful owner's own settlement, forever, so
+    ///      committed stake is stranded, escrow cannot be released, and
+    ///      `logicCommitted`/`logicDutyReserved` never reach zero — `canRevoke` stays
+    ///      false permanently and the contract can never even be retired out.
+    ///      Nothing is minted and conservation still holds, which is why it would be
+    ///      invisible.
+    ///
+    ///      Governance must not be able to reach an unfinalizable state — the same
+    ///      standard `MAX_PANEL` and the freeze bounds are held to. A FIRST
+    ///      authorization (from `NONE`) is unaffected, which is the only case where
+    ///      the bump has a job to do: revocation requires `canRevoke`, so a logic at
+    ///      `NONE` has no live handles and the fresh namespace exists to stop a
+    ///      re-authorized contract inheriting the dead ones from its previous life.
+    ///
+    ///      Consequence worth naming: a SETTLE_ONLY logic cannot be un-retired while
+    ///      it still holds obligations. That is deliberate — the alternative is a
+    ///      governance action whose effect silently depends on drain state, which is
+    ///      strictly worse than one that fails loudly. Authorize a fresh deployment,
+    ///      or wait for the drain.
     function executeLogic() external onlyGovernance {
         PendingLogic memory pl = pendingLogic;
         if (!pl.exists) revert NoPendingProposal();
         if (block.timestamp < pl.eta) revert TimelockNotElapsed();
+        if (logicState[pl.logic] != LogicState.NONE && !canRevoke(pl.logic)) {
+            revert LogicStillHasObligations();
+        }
         logicState[pl.logic] = LogicState.OPEN_AND_SETTLE;
         authEpoch[pl.logic] += 1; // M2.6-P0-5: fresh handle namespace
         delete pendingLogic;

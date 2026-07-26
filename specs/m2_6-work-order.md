@@ -267,10 +267,32 @@ Add logic states `NONE | OPEN_AND_SETTLE | SETTLE_ONLY`, moved atomically across
 authorized in one and not the other — a case can then settle its stake and fail its
 index write). `submit`/`submitRemoval` must reject when not `OPEN_AND_SETTLE`.
 
-**Tests.** Cross-logic release/freeze/releaseDuty/setTrack all revert; `canRevoke` is
-false until counters hit zero; a retiring logic rejects submissions but still settles;
-a revoked logic refuses fees rather than trapping them; desynchronized registry
-authorization is unreachable.
+**Tests.** *(Corrected 2026-07 — as originally written this line claimed more than
+was built, and named a function that does not exist. What follows is what is
+actually scoped and actually tested; see `test_cross_logic_discharge_reverts`.)*
+
+- **`release` and `freeze` revert** `NotYourObligation` cross-logic and cross-case.
+  Both take a `caseRef` and go through `_debit`.
+- **`lock` writes into the caller's own namespace** — a handle keyed by
+  `(authEpoch[msg.sender], msg.sender, moderator, caseRef)` — so it cannot add to
+  another logic's obligation.
+- **`settleDuty` does not revert cross-logic; it clamps to the caller's own
+  (empty) obligation and is a no-op.** That is the correct behaviour — settlement
+  must never be able to fail on a foreign call — but it is not a revert, and the
+  test asserts the victim's escrow is untouched rather than expecting one.
+- **`releaseDuty` no longer exists.** It was folded into `settleDuty` in
+  M2.6-P0-2, because penalising and releasing must share one clamp against one
+  balance. Its sibling `penalizeNoShow` was deleted in M2.6-P0-5c.
+- **`setTrack` is NOT scoped and there is no such test.** It takes no `caseRef` and
+  performs an absolute write (`StakeRegistry.sol:571`), so `onlyLogic` is the only
+  gate — which blocks a revoked logic and nothing else. During a handover both
+  logics are authorized, so B can overwrite any moderator's track. This is
+  **K-5** in the open table below; it was not built and cannot be tested as
+  written.
+
+Also tested: `canRevoke` is false until counters hit zero; a retiring logic rejects
+submissions but still settles; a revoked logic refuses fees rather than trapping
+them; desynchronized registry authorization is unreachable.
 
 ### P0-6. Bounded DRAW terminality
 
@@ -576,7 +598,8 @@ Independently verified against `m2.6-close` (`a05343a`) by a separate session �
 worked. These are **not new scope**: each is a defect in an item this record
 already claimed closed, and four of them were live blockers.
 
-Seven commits, `a05343a..4864d80`. The suite went 188 -> 200 tests over the same
+The last code change in this pass is `4864d80`; everything after it is
+documentation, as at the tag itself. The suite went 188 -> 200 tests over the same
 16 suites, green at every commit.
 
 | Item | Commit | The regression, and what closed it |
@@ -687,9 +710,11 @@ being fixed in this pass.
 | K-1 | **Keeper per-batch payment.** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. It is an efficiency and latency problem, not a stuck-funds one. A pro-rata bounty split across batches is the obvious fix and is a pure economics change. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
+| K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and it does not fit the 469 bytes left in `Moderation`. It belongs with the split. |
 
-K-1 and K-3 both land in `Moderation`, and it does not have room for them —
-see "Size position" below. A second structural split is a precondition for that
+K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which is the
+only caller of `setTrack`), and it does not have room for them — see "Size
+position" below. A second structural split is a precondition for that
 work, not an optimisation to consider afterwards.
 
 **Closed in this pass rather than carried:**
@@ -718,8 +743,12 @@ That margin is the binding constraint on everything above, and it is not enough:
 - **K-3 (one settlement reference time)** needs a `settleStartedAt` in
   `SettleState` and every `until` derived from it, across `_disposeSeat`,
   `_freezeSlice` and `_voidStep`. Also `Moderation`.
+- **K-5 (`setTrack` scoping)** changes a registry signature, so every call site
+  moves too — and `_touchTrack` is the sole caller, in `Moderation`. It also has a
+  design question in front of it (per-logic or global track), which is a reason to
+  take it deliberately alongside the split rather than squeeze it in.
 
-Neither fits in 469 bytes, and byte-scrounging has already been done twice this
+None of the three fits in 469 bytes, and byte-scrounging has already been done twice this
 milestone (the second time it bought 233 B, at which point "attempt first and see"
 stopped being a test). **A second structural split is a precondition for the P1
 work, not a fallback.** The plan is to take it deliberately rather than discover
@@ -754,7 +783,8 @@ P1-1 (**re-scoped**: inert widen seats, and the reopened commit window — NOT
 state space — partly done via the MAX_PANEL and freeze bounds), P1-4 (retry
 economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadlines
 — shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference
-time, = K-3), plus K-1 (keeper per-batch payment), and the P2 list.
+time, = K-3), plus K-1 (keeper per-batch payment) and K-5 (`setTrack` is not
+obligation-scoped — the residual of P0-5, severity High), and the P2 list.
 
 These go to the external reviewer as known-open rather than being worked in
 another internal round. K-4 was the exception and is closed, because it was a P0

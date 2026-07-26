@@ -5,8 +5,9 @@ The last code change is `51af155`; everything after it is documentation.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
 > that pass found **four blocking regressions in items marked closed** plus three
-> fixes that no test discriminated. They are fixed on top of the tag in seven
-> commits, `a05343a..4864d80`; see the "Regressions found after the close" table in
+> fixes that no test discriminated. They are fixed on top of the tag; the last code
+> change in that pass is `4864d80` and everything after it is documentation, exactly
+> as at the tag itself. See the "Regressions found after the close" table in
 > `specs/m2_6-work-order.md`. The tag is deliberately **not moved** — it is the
 > commit the audit ran against, and moving it would invalidate that verification.
 > The pointers in this file still name it for that reason; a new tag is cut for the
@@ -14,11 +15,19 @@ The last code change is `51af155`; everything after it is documentation.
 > it says otherwise.
 >
 > **The one thing to carry forward:** `Moderation` is at 24,107 bytes, 469 free,
-> up 811 across this batch. Two of the four known-open P1 items (K-1 keeper
-> per-batch payment, K-3 one settlement reference time) land in that contract and
-> do not fit. **A second structural split is a precondition for the P1 work**, not
-> an optimisation to reach for afterwards — the seam candidates are set out in the
-> work order's "Size position" section.
+> up 811 across this batch. Three of the known-open items (K-1 keeper per-batch
+> payment, K-3 one settlement reference time, K-5 `setTrack` scoping) land in that
+> contract and do not fit. **A second structural split is a precondition for that
+> work**, not an optimisation to reach for afterwards — the seam candidates are set
+> out in the work order's "Size position" section.
+>
+> **K-5 is the highest-severity thing still open** and it is new to the record:
+> `StakeRegistry.setTrack` takes no `caseRef` and writes absolutely, so during a
+> handover — when both logics are authorized by design — either can overwrite any
+> moderator's track. It is the one residual of P0-5's scoping. Not a fund drain;
+> track is not stake. But track drives the §6.4 freeze curve and is the protocol's
+> only accumulated-standing signal, so the harm is reputation corruption and
+> freezing-power manipulation.
 
 Two notes on that pointer. First, why not the last code commit: the deployed
 bytecode is byte-identical between `51af155` and the close, which touches only
@@ -95,7 +104,9 @@ A re-audit scoped to "the three-contract architecture" is scoped wrong; it is fo
 - **Eligibility changes only at fixed epoch boundaries** — constant by construction
   across any draw window, so there is nothing to grind and nothing to re-arm on.
 - **Obligations are keyed** `(authEpoch, logic, moderator, caseRef)`, closing both
-  cross-logic and cross-case discharge.
+  cross-logic and cross-case discharge — for `lock`, `release`, `freeze` and
+  `settleDuty`. **`setTrack` is the exception and is still unscoped** (K-5); the
+  work order's P0-5 "Tests" line used to imply otherwise and is corrected.
 - **Logic contracts retire** through `SETTLE_ONLY` before revocation, and revocation
   is gated on an on-chain drain signal.
 - **Every panel-scaled loop is batched**: seat draw, settlement, VOID disposal.
@@ -115,7 +126,8 @@ Added by the post-close pass:
   `lock / release / freeze / reward / setTrack / drawPanel / settleDuty /
   advanceEpoch`, plus the index registry's `openCase / closeCase / writeEntry /
   deleteEntry / tryReserveContent / releaseContent`. `releaseDuty` and
-  `penalizeNoShow` are gone; every write to duty escrow names its case.
+  `penalizeNoShow` are gone; every write to duty escrow now names its case. That
+  claim is about ESCROW — `setTrack` is on the list and is still unscoped (K-5).
 
 ## Judgment calls — don't silently reverse them
 

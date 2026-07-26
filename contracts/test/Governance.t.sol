@@ -298,6 +298,35 @@ contract GovernanceTest is ModerationTestBase {
         governor.proposeParameters(q, atCap, aws);
     }
 
+    /// M2.6-P0-7: with every panel-scaled loop batched, the binding constraint on
+    /// panel size is the AGGREGATE reachability check, not a single transaction.
+    /// The two bounds must compose: a target at the cap is fine on its own, and
+    /// still rejected when repeated across enough depths to blow MAX_TOTAL_DRAWS.
+    function test_aggregate_draw_bound_is_what_now_limits_large_panels() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        // A single depth at the cap: accepted.
+        uint256[] memory one = new uint256[](1);
+        one[0] = L.MAX_PANEL;
+        Moderation.Params memory q = p;
+        q.maxDepth = 0;
+        q.minReveals = 1;
+        governor.proposeParameters(q, one, aws);
+
+        // The cap repeated across depths: the aggregate check catches it.
+        uint256[] memory many = new uint256[](8);
+        for (uint256 i = 0; i < 8; i++) many[i] = L.MAX_PANEL;
+        Moderation.Params memory big = p;
+        big.maxDepth = 7;
+        big.maxWiden = 8;
+        big.minReveals = 1;
+        uint256[] memory aws8 = new uint256[](8);
+        for (uint256 i = 0; i < 8; i++) aws8[i] = 3 days;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(big, many, aws8);
+    }
+
     /// The ruleset the protocol actually ships must survive its own validator.
     function test_default_ruleset_still_validates_under_the_cap() public {
         Moderation.Params memory p = mod.getParams();

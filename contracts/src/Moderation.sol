@@ -202,7 +202,12 @@ contract Moderation is ReentrancyGuard {
         FINALIZED,
         SETTLING, // H-04: settlement in progress across batched claim() calls
         VOID,
-        SETTLED
+        SETTLED,
+        // M2.6-P0-7: VOID disposal in progress across batched claim() calls. A
+        // separate phase from SETTLING because the two dispose seats differently
+        // — SETTLING pays coherent voters, VOID freezes every committer — and
+        // collapsing them would make the settle loop branch per seat.
+        VOID_SETTLING
     }
 
     enum Vote {
@@ -365,6 +370,8 @@ contract Moderation is ReentrancyGuard {
     event AppealWindowOpened(uint256 indexed caseId, uint256 indexed depth, uint256 deadline);
     event Finalized(uint256 indexed caseId, Outcome finalOutcome);
     event Voided(uint256 indexed caseId);
+    /// M2.6-P0-7: VOID disposal opened; `participants` batches remain to drain.
+    event VoidOpened(uint256 indexed caseId, uint256 participants);
     event AppealBondContributed(
         uint256 indexed caseId, uint256 indexed depth, address indexed contributor, uint256 accepted, uint256 bondTotal
     );
@@ -938,6 +945,12 @@ contract Moderation is ReentrancyGuard {
 
     function _settle(uint256 caseId, uint256 maxSteps) internal {
         Case storage c = cases[caseId];
+        // M2.6-P0-7: a voided case drains through the same permissionless keeper
+        // entry point, so clients and keepers have one poke to call.
+        if (c.phase == Phase.VOID_SETTLING) {
+            _voidStep(c, maxSteps);
+            return;
+        }
         if (c.phase == Phase.FINALIZED) _settleInit(c);
         if (c.phase != Phase.SETTLING) revert CaseNotFinalized();
         _settleStep(c, maxSteps);
@@ -1412,33 +1425,73 @@ contract Moderation is ReentrancyGuard {
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
     }
 
+    /// @dev M2.6-P0-7: begin a VOID. O(1) — it only flips the phase.
+    ///
+    ///      This used to dispose every seat-holder inline, and it is called from
+    ///      `_closeReveal`, a PHASE TRANSITION. Exceeding the block limit therefore
+    ///      reverted the transition itself and stranded the case in an expired
+    ///      REVEAL with no other exit — strictly worse than an expensive
+    ///      settlement, which at least fails without destroying reachability. An
+    ///      adversarially widened depth-0 panel reaches it directly.
+    ///
+    ///      Of the two ways to bound it, the cursor could not simply be threaded
+    ///      through `closeReveal` the way `realizeSeats` threads one: a transition
+    ///      that returns half-done would leave the case in REVEAL while its
+    ///      participants were partly disposed, so every other REVEAL path
+    ///      (`commitVote` guards, widen, re-entry into `closeReveal`) would have to
+    ///      learn about a half-void state. Disposal moves into its own phase
+    ///      instead, exactly as the work order sketches: `closeReveal` becomes
+    ///      unconditionally O(1), and `VOID_SETTLING` drains behind the same
+    ///      bounded participant cursor `SETTLING` already uses.
     function _void(Case storage c) internal {
-        c.phase = Phase.VOID;
+        c.phase = Phase.VOID_SETTLING;
         c.finalOutcome = Outcome.Void;
+        settleState[c.id].idx = 0;
+        emit VoidOpened(c.id, _cur(c).seatHolders.length);
+    }
 
-        // A VOID happens only on zero reveals after MAX_WIDEN, so every committer
-        // in the round is a commit-and-vanish actor: each takes the §6.3 brief
-        // freeze (committed -> frozen), never a free release. Otherwise a
-        // coordinated panel could grief submissions to VOID at no cost.
+    /// @dev One bounded batch of VOID disposal. A VOID happens only on zero
+    ///      reveals after MAX_WIDEN, so every committer in the round is a
+    ///      commit-and-vanish actor: each takes the §6.3 brief freeze
+    ///      (committed -> frozen), never a free release. Otherwise a coordinated
+    ///      panel could grief submissions to VOID at no cost.
+    function _voidStep(Case storage c, uint256 maxSteps) internal {
         Round storage r = _cur(c);
+        SettleState storage s = settleState[c.id];
+        uint256 idx = s.idx;
         uint256 len = r.seatHolders.length;
-        for (uint256 i; i < len; ++i) {
-            address a = r.seatHolders[i];
+        uint256 steps;
+        uint256 freezeUntil = block.timestamp + _cp(c).failedRevealFreeze;
+        while (idx < len && steps < maxSteps) {
+            address a = r.seatHolders[idx];
             uint256 amt = r.committedAmt[a];
             if (amt > 0) {
                 r.committedAmt[a] = 0;
-                _freezeSlice(a, r.caseRef, amt, block.timestamp + _cp(c).failedRevealFreeze);
-            } else {
+                _freezeSlice(a, r.caseRef, amt, freezeUntil);
             }
             // H-07: capacity and escrow both return when the case ends (P0-2).
             _settleDuty(c, r.caseRef, a, r.seats[a], !r.committed[a]);
+            unchecked {
+                ++idx;
+                ++steps;
+            }
         }
+        s.idx = idx;
+        if (idx < len) {
+            emit SettleProgressed(c.id, c.depth, idx);
+            return;
+        }
+        _voidFinish(c);
+    }
 
+    /// @dev The pot side of a VOID, once every participant is disposed.
+    function _voidFinish(Case storage c) internal {
         uint256 pot = c.pot;
         uint256 bounty = (pot * _cp(c).claimBountyFrac) / WAD;
         c.pot = 0;
         openPotsTotal -= pot;
         _clearDedup(c);
+        c.phase = Phase.VOID;
 
         if (bounty > 0) address(token).safeTransfer(msg.sender, bounty);
         address(token).safeTransfer(c.submitter, pot - bounty);

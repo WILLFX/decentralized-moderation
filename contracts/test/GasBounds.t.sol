@@ -379,6 +379,57 @@ contract GasBoundsTest is ModerationTestBase {
         emit log_named_uint("contributeAppealBond_gas", g - gasleft());
     }
 
+    /// M2.6-P0-7: `closeReveal` must never do unbounded work, and VOID disposal
+    /// must drain in bounded batches.
+    ///
+    /// `_void` used to dispose every seat-holder inline, from inside `closeReveal`
+    /// — a PHASE TRANSITION. Exceeding the block limit reverted the transition
+    /// itself and stranded the case in an expired REVEAL with no other exit, which
+    /// is strictly worse than an expensive settlement: that at least fails without
+    /// destroying reachability.
+    function test_void_closes_o1_and_drains_in_bounded_batches() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+
+        uint256 pot = 100 * XBZZ;
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, pot);
+        b.mint(address(m), pot);
+        m.__injectRound(caseId);
+
+        // A panel at the validator's cap, every holder committed-and-vanished:
+        // the most expensive VOID an accepted ruleset can produce.
+        uint256 camt = 10 * XBZZ;
+        for (uint256 i = 0; i < L.MAX_PANEL; i++) {
+            address v = address(uint160(uint256(keccak256(abi.encode("voidcap", i)))));
+            m.__injectSeat(caseId, 0, v, 1, camt, 0); // committed, never revealed
+        }
+        b.mint(address(sr), L.MAX_PANEL * camt);
+
+        // Opening the VOID is O(1) in the panel: it only flips the phase.
+        uint256 g = gasleft();
+        m.__openVoid(caseId);
+        uint256 openGas = g - gasleft();
+        emit log_named_uint("void_open_gas", openGas);
+        assertLt(openGas, 100_000, "opening a VOID is O(1) in panel size");
+        assertEq(uint256(_phaseOf(m, caseId)), uint256(Moderation.Phase.VOID_SETTLING));
+
+        // Then it drains behind the cursor, every batch under the ceiling.
+        uint256 maxBatch;
+        uint256 batches;
+        while (_phaseOf(m, caseId) != Moderation.Phase.VOID) {
+            uint256 g2 = gasleft();
+            m.claim(caseId, 12);
+            uint256 used = g2 - gasleft();
+            if (used > maxBatch) maxBatch = used;
+            batches++;
+            assertLt(batches, 64, "the drain terminates");
+        }
+        emit log_named_uint("void_max_batch_gas", maxBatch);
+        emit log_named_uint("void_batches", batches);
+        assertLt(maxBatch, HARD_CEILING, "every VOID batch fits under the 8M ceiling");
+        assertLt(maxBatch, (HARD_CEILING * 80) / 100, "with real margin");
+    }
+
     /// M2.6-P1-2: the unit that must fit a transaction is now the seat-draw
     /// BATCH, not the whole panel.
     ///

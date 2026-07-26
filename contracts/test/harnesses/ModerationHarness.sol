@@ -169,6 +169,12 @@ contract ModerationHarness is Moderation {
         return DRAW_SEATS_PER_BATCH;
     }
 
+    /// Open VOID disposal directly, to measure the transition in isolation
+    /// (M2.6-P0-7) without driving a whole under-participation lifecycle.
+    function __openVoid(uint256 caseId) external {
+        _void(cases[caseId]);
+    }
+
     function __seatCount(uint256 caseId, uint256 depth) external view returns (uint256) {
         return cases[caseId].rounds[depth].nSeats;
     }

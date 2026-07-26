@@ -231,7 +231,7 @@ contract CaseLifecycleTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+                _rollToSeed(caseId);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
@@ -239,6 +239,10 @@ contract CaseLifecycleTest is ModerationTestBase {
             } else if (p == Moderation.Phase.REVEAL) {
                 vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
+            } else if (p == Moderation.Phase.VOID_SETTLING) {
+                // M2.6-P0-7: `closeReveal` no longer disposes participants inline;
+                // it opens VOID_SETTLING and a keeper drains the cursor.
+                mod.claim(caseId);
             } else {
                 revert("unexpected phase during void drive");
             }
@@ -298,7 +302,7 @@ contract CaseLifecycleTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+                _rollToSeed(caseId);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
@@ -306,6 +310,10 @@ contract CaseLifecycleTest is ModerationTestBase {
             } else if (p == Moderation.Phase.REVEAL) {
                 vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
+            } else if (p == Moderation.Phase.VOID_SETTLING) {
+                // M2.6-P0-7: `closeReveal` no longer disposes participants inline;
+                // it opens VOID_SETTLING and a keeper drains the cursor.
+                mod.claim(caseId);
             } else {
                 revert("unexpected phase");
             }
@@ -339,7 +347,7 @@ contract CaseLifecycleTest is ModerationTestBase {
             Moderation.Phase p = _phase(caseId);
             if (p == Moderation.Phase.DRAW) {
                 // H-05: each widen re-arms fresh entropy, so a widen returns to DRAW.
-                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+                _rollToSeed(caseId);
                 mod.realizeSeats(caseId);
             } else if (p == Moderation.Phase.COMMIT) {
                 vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
@@ -347,6 +355,10 @@ contract CaseLifecycleTest is ModerationTestBase {
             } else if (p == Moderation.Phase.REVEAL) {
                 vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
+            } else if (p == Moderation.Phase.VOID_SETTLING) {
+                // M2.6-P0-7: `closeReveal` no longer disposes participants inline;
+                // it opens VOID_SETTLING and a keeper drains the cursor.
+                mod.claim(caseId);
             } else {
                 revert("unexpected phase");
             }

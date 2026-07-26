@@ -22,37 +22,49 @@ library ProtocolLimits {
     uint256 internal constant MAX_RULE_WIDEN = 8;
     /// Per-depth commit target. **Set from measurement, not from a round number.**
     ///
-    /// This was 512, which meant `_validateParams` would accept a ruleset whose
-    /// seats could not be drawn in a block. H-11 pins a ruleset per case at
-    /// submit, so every case opened under one would be permanently unfinalizable
-    /// with no path forward — no attacker required, just a plausible parameter
-    /// choice by governance.
+    /// ## What currently sets this bound
     ///
-    /// **Since M2.6-P1-2 the seat draw is no longer what binds this.** `realizeSeats`
-    /// draws `DRAW_SEATS_PER_BATCH` seats per call behind a cursor, so the panel
-    /// can be any size the rest of the machinery supports and only a BATCH has to
-    /// fit — measured at 3,690,617 gas for 24 seats, 46% of the 8,000,000 ceiling.
-    /// Before batching, a 48-seat panel was a single 7,239,700-gas transaction at
-    /// 90% of it.
+    /// It has moved twice, so the useful thing to know is which loop binds it now:
+    /// **`MAX_TOTAL_DRAWS`, the aggregate-reachability check in
+    /// `_validateParams` — not any single transaction.** Since M2.6-P0-7 no
+    /// unbatched loop in `Moderation` scales with panel size. The three that did
+    /// are all behind bounded cursors:
     ///
-    /// **What binds it now is `_void`, and that is why 48 has not been raised.**
-    /// `_void` still loops the entire `seatHolders` array with no cursor, and it
-    /// runs INSIDE `closeReveal` — so exceeding the limit reverts the transition
-    /// and strands the case in an expired REVEAL with no other exit. Per-holder
-    /// disposal measures ~140,000 gas, flat (`test/spike/VoidCurve.t.sol`):
+    ///     seat draw   `realizeSeats`  P1-2   24 seats/call, 3,690,617 gas (46%)
+    ///     settlement  `claim`         H-04   40 seats/call
+    ///     VOID        `claim`         P0-7   opening is O(1) at 5,849 gas;
+    ///                                        disposal 12/call, 1,347,418 gas (17%)
     ///
-    ///     24 holders ->  3,515,321      96 holders -> 13,253,772
-    ///     48 holders ->  6,761,469
+    /// So a larger panel now costs more TRANSACTIONS, not a bigger one, and the
+    /// per-transaction ceiling no longer divides down into a seat count.
     ///
-    /// Break-even against the ceiling is ~57 holders; 48 sits at 85%. Raising the
-    /// cap now would recreate exactly the class of unfinalizable case this bound
-    /// exists to prevent, just on the VOID path instead of the draw path.
+    /// ## History, because the number moved for real reasons
     ///
-    /// > **Raising MAX_PANEL is now gated on batched VOID (work order P0-7), not
-    /// > on P1-2.** When `_void` gets the same phase-plus-cursor treatment as
-    /// > settlement and the draw, re-measure and raise this — at that point no
-    /// > single unbatched loop remains that scales with panel size.
-    uint256 internal constant MAX_PANEL = 48;
+    /// It was **512**, which let `_validateParams` accept a ruleset whose seats
+    /// could not be drawn in a block. H-11 pins a ruleset per case at submit, so
+    /// every case opened under one was permanently unfinalizable with no path
+    /// forward — no attacker needed, just a plausible parameter choice.
+    ///
+    /// It was then **48**, set from the measured per-seat draw cost against the
+    /// 8,000,000 single-transaction ceiling. That cost rose three times in M2.6
+    /// (P0-2 escrow, P0-3 staged weight, P0-5 obligation handle), ~123k -> ~151k
+    /// per seat, taking a cap-sized panel from 74% to 90% of the ceiling. P1-2
+    /// batched the draw; P0-7 batched VOID disposal, which was the remaining
+    /// unbatched loop and had been binding at ~140k per holder (48 holders =
+    /// 6,761,469, 85% of the ceiling — and worse than a costly settlement, because
+    /// `_void` ran inside `closeReveal` and a revert stranded the case).
+    ///
+    /// **128** is chosen with margin under what the aggregate check permits: a
+    /// ruleset holding this target across many depths still trips
+    /// `MAX_TOTAL_DRAWS` and is rejected, so the two bounds compose rather than
+    /// overlap. `GasBounds` reads this constant directly — raising it again
+    /// without re-measuring fails the suite.
+    ///
+    /// > If a future item adds an unbatched per-seat or per-holder loop, THAT
+    /// > becomes the binding constraint again and this number must be re-derived
+    /// > from it. Check `GAS_BUDGETS.md` for the current measurements before
+    /// > trusting the figure above.
+    uint256 internal constant MAX_PANEL = 128;
     uint256 internal constant MAX_RULE_TOPICS = 16;
     uint256 internal constant MAX_ARRAY_LEN = 16;
     uint256 internal constant MAX_WINDOW = 30 days;

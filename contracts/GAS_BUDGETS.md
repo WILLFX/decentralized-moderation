@@ -51,6 +51,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **P0-5a** (obligation handles) | **22,006 B** | **2,570 B** | 12,326 B | 5,288 B |
 | **P0-5b** (retirement lifecycle) | **22,435 B** | **2,141 B** | 12,876 B | 5,511 B |
 | **P1-2** (batched seat draw) | **22,569 B** | **2,007 B** | 12,876 B | 5,511 B |
+| **P0-7** (batched VOID) | **22,748 B** | **1,828 B** | 12,876 B | 5,511 B |
 
 (The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 
@@ -143,6 +144,39 @@ REVEAL. Per-holder disposal is ~140,000 gas, flat:
 Break-even ~57 holders; 48 sits at 85%. Raising the cap now would recreate the
 unfinalizable-case class on the VOID path instead of the draw path. **Raising it is
 gated on P0-7**, after which no unbatched loop scaling with panel size remains.
+*(P0-7 landed; see below — the cap is now 128 and the binding constraint has moved
+again, to the aggregate check.)*
+
+### P0-7: VOID is batched, and MAX_PANEL is no longer set by a transaction
+
+`_void` disposed every seat-holder inline, from inside `closeReveal` — a PHASE
+TRANSITION. Exceeding the block limit reverted the transition itself and stranded
+the case in an expired REVEAL with no other exit, which is strictly worse than an
+expensive settlement: that at least fails without destroying reachability.
+
+Two shapes were available. Threading a cursor through `closeReveal` would mean a
+transition that returns half-done, leaving the case in REVEAL with participants
+partly disposed — every other REVEAL path (`commitVote` guards, widen, re-entry
+into `closeReveal`) would have to learn about a half-void state. Disposal moved
+into its own `VOID_SETTLING` phase instead, as the work order sketches, draining
+behind the same bounded cursor `SETTLING` already uses and through the same
+permissionless `claim` poke.
+
+| | before | after |
+|---|---|---|
+| opening a VOID (inside `closeReveal`) | 5,135,701 at a 48-seat panel | **5,849, O(1) in panel size** |
+| disposal | same transaction, unbounded | 12/batch, **1,347,418 (17% of ceiling)** |
+
+**MAX_PANEL raised 48 -> 128.** No unbatched loop in `Moderation` scales with panel
+size any more — draw (P1-2), settlement (H-04) and VOID (P0-7) are all behind
+cursors — so a larger panel costs more TRANSACTIONS rather than a bigger one, and
+the ceiling no longer divides down into a seat count.
+
+**What binds it now: `MAX_TOTAL_DRAWS`, the aggregate-reachability check** — not
+any single transaction. The two bounds compose: a target at the cap is accepted on
+its own and still rejected when repeated across enough depths, which
+`test_aggregate_draw_bound_is_what_now_limits_large_panels` asserts. That is the
+fact a re-auditor needs: after two moves, which loop currently sets the bound.
 
 ### Test-code rule this forces
 

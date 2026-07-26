@@ -1,7 +1,16 @@
-# M2.6 — state of play (milestone closed)
+# M2.6 — state of play (milestone closed, plus a post-close regression pass)
 
 **All P0 items are closed.** The re-audit should target the **`m2.6-close` tag**.
 The last code change is `51af155`; everything after it is documentation.
+
+> **Post-close, read this first.** `m2.6-close` was independently verified, and
+> that pass found **three blocking regressions in items marked closed** plus three
+> fixes that no test discriminated. They are fixed on top of the tag; see the
+> "Regressions found after the close" table in `specs/m2_6-work-order.md`. The tag
+> is deliberately **not moved** — it is the commit the audit ran against, and
+> moving it would invalidate that verification. The pointers in this file still
+> name it for that reason; a new tag is cut for the fixed state. Everything from
+> here down describes the state **at the tag** unless it says otherwise.
 
 Two notes on that pointer. First, why not the last code commit: the deployed
 bytecode is byte-identical between `51af155` and the close, which touches only
@@ -28,9 +37,10 @@ deliberately.
 
 ## Where things stand
 
-**Branch:** `claude/m2-6-work-order-5amy1q`, based on `main` @ `b09ce31`.
-**Suite:** `forge test` = **188 passing, 16 suites**, default profile (`via_ir = true`),
-green at every commit. Baseline was 143 / 16.
+**Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
+**Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
+profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
+**Suite now** (tag + the post-close regression pass): **199 passing, 16 suites**.
 
 (The peak during the milestone was 199 / 19. The difference is `test/spike/`, three
 throwaway suites that existed only to produce the gas numbers behind the
@@ -51,6 +61,11 @@ becomes something a reader mistakes for a test of the product.)
 `Moderation` ends the milestone **smaller than it started** (23,795 -> 23,296)
 despite eleven items landing in it, because the structural split gave back more
 than they cost.
+
+After the post-close regression pass: `Moderation` 24,107 (469 free),
+`StakeRegistry` 12,745, `IndexRegistry` 6,174, `RulesetGovernor` 4,459. The margin
+is thin again and it is the binding constraint on anything further in the game
+contract.
 
 ## The architecture is now four contracts, not three
 
@@ -122,6 +137,22 @@ it had to be global, a dedup map that died with its contract, a collateral pool 
 could not say which case it backed, a version counter standing in for an epoch.
 Conservation held throughout all of them, which is exactly why they were invisible.
 Conservation is necessary and never sufficient.
+
+The post-close pass added two more, both of the same family:
+
+- **A gate on one of two registries is not a gate.** `StakeRegistry.canRevoke` was
+  correct and useless on its own: a case's final step touches both registries, so
+  revoking the ungated one stranded the case *and* pinned the gated one shut
+  forever. Check the whole boundary, not the half you built first.
+- **Bounded work followed by a revert is no work.** The epoch drain did 64 items
+  and then reverted if that was not enough, discarding them. It looked like
+  progress-plus-backpressure and was actually a permanent stall. If a function may
+  revert, it must not be the one making the progress.
+
+And one about tests rather than code: **three fixes could be reverted with the
+suite green.** A fixture that cannot distinguish the old behaviour from the new is
+not coverage, however green it is — the H-09 fixture used one address holding one
+seat, which satisfies "count revealers" and "count seats" identically.
 
 Two bugs in this milestone were found by reading rather than by a failing test — the
 cross-case escrow drain (written in P0-2, caught in P0-5) and the commit path

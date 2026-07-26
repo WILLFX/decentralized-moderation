@@ -56,7 +56,7 @@ as a mental model and directly testable in M2.
 | `FEE_PER_TOPIC` | Per-topic part of the fee floor | *(working)* |
 | `MAX_TOPICS` | Topics per submission | 5 |
 | `CLAIM_BOUNTY` | Bounty paid to the finalization claimant, from the pot | *(working)* |
-| `SUPERSAFE_AGE` | Age an uncontested entry must reach for supersafe view | 96 h |
+| `SUPERSAFE_AGE` | Age an uncontested, full-quorum entry must reach for supersafe view (§8.1, §8.3) | 96 h |
 
 `minFee = FEE_BASE + FEE_PER_TOPIC * nTopics` (P8). Submitters MAY overpay.
 `FEE_BASE` covers the depth-0 panel's minimum voter pay (`COMMIT_TARGET[0] ·
@@ -111,7 +111,14 @@ Entry {
   bytes32 contentHash
   bytes32 metaHash
   uint40  approvalTime
-  bool    uncontested   // true iff no reject vote AND never appealed; cleared by any contest
+  bool    uncontested   // true iff no Reject vote was ever revealed, in any round.
+                        // An appeal ALONE does not clear it — §8.1 is normative
+                        // and states why. (This line previously said "never
+                        // appealed; cleared by any contest", contradicting §8.1
+                        // and the implementation.)
+  bool    fullQuorum    // H-09: no round decided below MIN_REVEALS after max
+                        // widen, and the deciding round had >= MIN_REVEALS
+                        // independent revealers (§8.1)
   uint    caseId        // back-reference for removal/settlement
 }
 ```
@@ -433,17 +440,33 @@ provisional entry briefly polluted the index. Writing at settlement fixes both.
 
 On a submission finalizing **APPROVE**, write an `Entry` per topic:
 ```
-Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId }
+Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested,
+       fullQuorum, globalId, originLogic, localCaseId, rulesVersion,
+       guidelinesVersion, dedupKey }
 ```
 - `approvalTime` is the settlement time (used by the supersafe age filter, §8.3).
-- **`uncontested = true` iff no `Reject` vote was ever revealed in any round of
+- **THE NORMATIVE DEFINITION OF `uncontested`. It is stated once, here; §4 and
+  `README.md` §3.8 defer to it and must not restate it differently.**
+
+  **`uncontested = true` iff no `Reject` vote was ever revealed in any round of
   the case.** An **appeal alone does not clear it**: a frivolous appeal that draws
   a fresh panel which again reveals *no* reject vote leaves the entry uncontested.
   Rationale: `uncontested` exists to mark entries no dissenting voter ever
   opposed; unanimous rounds involve no probabilistic draw, so the "snuck back in
   via a lucky draw" concern the flag guards against cannot arise. This also closes
-  a griefing vector — under the old rule a vandal could permanently exclude any
-  entry from the supersafe view for the price of one abandoned appeal.
+  a griefing vector — under the alternative (process-uncontested: cleared by the
+  ACT of appealing) a vandal could permanently exclude any entry from the
+  supersafe view for the price of one abandoned appeal.
+  Implemented by `Moderation._noRejectEver`.
+- **`fullQuorum = true` iff** no round in the case was armed below `MIN_REVEALS`
+  after the widen cap (`underQuorum`), **and** the deciding round drew at least
+  `MIN_REVEALS` **independent revealers** — distinct addresses, not seats. Seats
+  are drawn with replacement, so one multi-seat voter must not satisfy quorum
+  alone (H-09). Implemented by `Moderation._fullQuorum`.
+- `globalId` is minted by `IndexRegistry`, not by the logic contract: a logic
+  contract's own case id restarts at 0 on every redeployment, so it is not a safe
+  index handle (M2.6-P0-1). `dedupKey` binds the entry to the content reservation
+  protecting it, so deleting the entry frees the content (M2.6-P0-1c).
 
 ### 8.2 At SETTLED
 
@@ -459,8 +482,13 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 ### 8.3 Search views (client-side, from view functions)
 
 - **Superset:** every current `Entry` under a topic.
-- **Supersafe subset:** `uncontested == true && now − approvalTime ≥ SUPERSAFE_AGE`.
-- Provisional badge (P7): `now − approvalTime < SUPERSAFE_AGE || !uncontested`.
+- **Supersafe subset:** `uncontested && fullQuorum && now − approvalTime ≥ SUPERSAFE_AGE`
+  (H-09 added the `fullQuorum` conjunct; see §8.1 for both flags). Served by
+  `IndexRegistry.supersafeEntries(topic, minAge, cursor, limit)` — paginated,
+  because an unbounded view over a large index exceeds practical RPC response
+  limits (M-04). `minAge` is a caller argument rather than registry state: age is
+  a display policy, and the index outlives any particular parameter set.
+- Provisional badge (P7): `now − approvalTime < SUPERSAFE_AGE || !uncontested || !fullQuorum`.
 
 ### 8.4 Topic hygiene (P2)
 

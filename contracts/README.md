@@ -3,12 +3,16 @@
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
-> Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag). The state machine (staking, sortition, case
+> Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
+> independently verified and three blocking regressions were found in items marked
+> closed. They are fixed on top of it; the tag is not moved, because it is the
+> commit the audit ran against. See the "Regressions found after the close" table
+> in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **188 passing tests** including a handler-driven invariant
-> campaign, a differential test against an independent Python reference, and a
-> live logic-migration test.
+> registries — with **199 passing tests** (188 at the tag) including a
+> handler-driven invariant campaign, a differential test against an independent
+> Python reference, and a live logic-migration test.
 >
 > See `specs/m2_6-work-order.md` (Resolution record) and
 > `specs/m2_6-state-of-play.md` for what landed, the four documented deviations
@@ -57,14 +61,14 @@ Conservation therefore spans two balances:
 | `CaseLifecycle.t.sol` | submit → draw → commit → reveal → tally, widen, VOID, two-seed ordering (§5) |
 | `Appeals.t.sol` | flip-bond aggregation, floor cap, reclaim, self-appeal, MAX_DEPTH (§5.4) |
 | `Settlement.t.sol` + `FreezeMath.t.sol` | WO-1 payout order, flip-flop conservation, freeze, track (§6) |
-| `Index.t.sol` | write-at-settlement, uncontested, removal, supersafe (§8) |
+| `Index.t.sol` | write-at-settlement, uncontested, removal, supersafe (§8); H-09 quorum counts independent revealers, not seats |
 | `Registries.t.sol` | the storage/logic split: no re-staking across an upgrade, approvals survive, timelocked repoint, exit independent of logic, governance cannot touch funds |
-| `Migration.t.sol` | a live logic migration: case settled under A, registries repointed, stake + index intact, new case settles under B |
-| `Governance.t.sol` | timelocked params via `RulesetGovernor`, append-only guidelines, no pause (§9.9), the apply boundary, the drawable-panel cap, and the M2.6-P0-8 freeze bounds |
+| `Migration.t.sol` | a live logic migration: case settled under A, registries repointed, stake + index intact, new case settles under B; the retirement lifecycle, and the drain gate on BOTH registries (M2.6-P0-5b) |
+| `Governance.t.sol` | timelocked params via `RulesetGovernor`, append-only guidelines, no pause (§9.9), the apply boundary, the drawable-panel cap, the M2.6-P0-8 freeze bounds, and the two-step governance transfer (M2.6-L-2) |
 | `Invariant.t.sol` | handler campaign: conservation, partition, no-principal-lost (§9.1/2/3/11) |
 | `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |
 | `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact |
-| `GasBounds.t.sol` | worst-case `claim()` under the 8M ceiling; §10 failure modes |
+| `GasBounds.t.sol` | worst-case `claim()` under the 8M ceiling; the seat-draw and epoch-drain batch bounds; §10 failure modes |
 
 Spec departures are catalogued in `DEVIATIONS.md`; gas budgets/actuals in
 `GAS_BUDGETS.md`. Regenerate differential vectors with

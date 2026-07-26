@@ -294,12 +294,55 @@ external intervention and refunds correctly.
 ## P1 — correctness and operational quality
 
 ### P1-1. Widen seats on an already-committed moderator
-Confirmed: settlement branches on `r.committed[a]` alone (`Moderation.sol:873`) and
-then releases **all** `r.seats[a]` (`:884`). Extra widen seats are reserved against
-network capacity, uncollateralized, untallied, unpenalized, and fully released — a
-free capacity sink a high-weight moderator can absorb, deliberately by withholding a
-reveal to force the widen. Fix: `topUpCommittedSeats` (lock the delta, raise
-`committedSeats`), or exclude already-committed addresses from later widen draws.
+**Re-scoped 2026-07 — the original description was wrong, and its error is
+recorded here because it propagated into the M2.6 resolution record and the
+`unbackedSeats` mechanism.**
+
+Wrong as written: *"uncollateralized ... the one place where a seat can still exist
+without backing."* **Widen seats ARE escrowed.** A widen sets `r.pendingDraw` and
+returns the round to DRAW (`_closeReveal`), so the added seats are drawn through
+`realizeSeats` -> `_drawSeats` -> `StakeRegistry.drawPanel`, which bonds
+`riskPerSeat` per seat like any other seat — onto the same `caseRef`, since it is
+the same round. There is no path that adds a seat without going through
+`drawPanel`.
+
+The claim came from reading `__injectWidenSeats`, a **test harness** that writes
+`r.seats` directly and therefore bypasses the escrow. Reasoning off a harness
+rather than off production is what produced it. `unbackedSeats` was then added as
+defence in depth against a condition that cannot occur; it is deleted in
+`M2.6-P0-2b`, with the reachability argument and an invariant test in its place.
+
+What P1-1 actually is — two distinct problems, both open:
+
+**(a) A widen seat on an already-committed moderator is inert but paid for.**
+`commitVote` has already run for that address, so the extra seat is never added to
+`committedSeats`, never tallied at reveal, and never penalized at settlement
+(`!r.committed[a]` is false). At settlement `_settleDuty` passes the POST-widen
+`r.seats[a]` with `penalty = 0`, so its escrow is released in full. Nothing is
+lost and nothing is minted — but the seat consumed one of the widen's slots and
+recruited no new voter, so a widen that adds `k` seats can recruit fewer than `k`
+fresh participants. A high-weight moderator absorbs these, and can induce them
+deliberately: commit, withhold the reveal to force the widen, soak its seats.
+Fix: `topUpCommittedSeats` (lock the delta, raise `committedSeats`), or exclude
+already-committed addresses from later widen draws.
+
+**(b) A widen reopens the commit window for first-tranche no-shows.**
+Not previously recorded anywhere. The widen returns the round to DRAW and the next
+`realizeSeats` sets a **fresh** `c.phaseDeadline` for COMMIT. `commitVote` gates
+only on `r.committed[msg.sender]`, which is still false for a first-tranche
+seat-holder that never committed — so it may commit in the later window. The
+consequences:
+  - the commit deadline is not a hard per-tranche deadline. A seat-holder can
+    wait out the first window, observe who committed and how many, and then decide;
+  - the H-10 no-show penalty is evadable. Failing to commit in your own window
+    costs one seat's escrow frozen; committing late instead costs nothing at that
+    point, and the worst later outcome is the failed-reveal freeze on committed
+    stake — a different and possibly smaller cost;
+  - and the withheld reveal that forced the widen is the same action that creates
+    the second chance, so (a) and (b) compose.
+Fix direction: record the tranche a seat was drawn in and gate `commitVote` on
+that tranche's deadline, which also gives P1-7 (widen tranche deadlines) its
+mechanism.
 
 ### P1-2. Deployment activation
 Confirmed: the constructor validates only `riskPerSeat` vs the registry's duty unit.
@@ -491,10 +534,16 @@ it landed in.
 
 Baseline `main` @ `b09ce31`: 143 tests, 16 suites. The milestone peaked at 199 / 19;
 the difference is `test/spike/`, deleted at close — throwaway harnesses whose gas
-numbers are recorded in `GAS_BUDGETS.md` and `ProtocolLimits`. Close: **188 tests, 16 suites**,
-green at every commit. `Moderation` 23,795 -> 23,296 B (margin 781 -> 1,280) —
-smaller than it started despite eight items landing in it, because the structural
-split gave back more than they cost.
+numbers are recorded in `GAS_BUDGETS.md` and `ProtocolLimits`. At the
+`m2.6-close` tag (`a05343a`): 188 tests, 16 suites, `Moderation` 23,296 B.
+
+**Post-close.** An independent verification pass against that tag found three
+blocking regressions in items this record marked closed, plus three fixes with no
+discriminating test coverage. They are recorded in their own section below and are
+fixed on top; the `m2.6-close` tag is deliberately NOT moved, because it is the
+commit the audit ran against and moving it would invalidate that verification.
+Current state: **199 tests, 16 suites**, green at every commit, `Moderation`
+24,107 B (469 free).
 
 ## P0 — all closed
 
@@ -520,6 +569,25 @@ Also landed, not in the original list but P0 in effect:
 | Structural split | `cef84d4` | `Moderation` hit EIP-170 at P0-1c. Ruleset authoring moved to `RulesetGovernor` |
 | P1-2 batched seat draw | `27f7e2f` | Promoted ahead of P0-6/7/8: two findings had named it a precondition, and P0-7's per-seat state would have been shaped around a constraint it removes |
 
+## Regressions found after the close, in items marked closed
+
+Independently verified against `m2.6-close` (`a05343a`) by a separate session —
+24 probe tests and 20 fix-reverts — and confirmed against the code before being
+worked. These are **not new scope**: each is a defect in an item this record
+already claimed closed, and each of the first three was a live blocker.
+
+| Item | Commit | The regression, and what closed it |
+|---|---|---|
+| P0-5b was built on ONE registry | `3d3710f` | `StakeRegistry.revokeLogic` required `canRevoke`; `IndexRegistry.revokeLogic` required nothing. Governance could revoke index-side with a case in SETTLING; `_settleFinish` writes entries AND releases stake in the same call, so from that moment every `claim()` reverted `NotLogic`, the case never finished, its stake obligations never closed, and `StakeRegistry.canRevoke` never flipped. The stake-side gate did not prevent the strand — it guaranteed the deadlock was permanent. `IndexRegistry` now has `logicOpenCases` / `canRevoke` / `LogicStillHasObligations`, opened per case at submit and closed at SETTLED or VOID. The unit is the **case**, not the content reservation: removals take no reservation yet still delete at settlement, and an approved submission's reservation outlives its case by design. |
+| P0-3's drain rolled back its own work | `bf003b3` | `drawPanel` drained `DRAIN_BUDGET` staged items and then reverted `EpochNotSettled` if that was not enough — unwinding the drain with the revert. Every draw redid the same first 64 items and discarded them again, so any epoch staging more than one budget halted **every draw in the protocol** until an external `advanceEpoch` call, whose progress survives only because it does not revert. Ordinary traffic reaches it: `_stageSeated` skips the dedupe flag by design, so one 48-seat panel plus normal joining passes 64 inside a 256-block epoch. Not closed by raising the budget — that moves the cliff. A settled epoch is now a precondition of `drawPanel`, which does no rollback-able work before checking it, and `realizeSeats` drains `EPOCH_DRAIN_STEPS = 128` and RETURNS, so repeated pokes recover with no keeper. |
+| P0-6 covered one of its two paths | `0dae983` | `resolveStalledDraw` at depth 0 VOIDs and `_voidStep` checks `c.drawAbandoned`. At depth > 0 it calls `_failAppealRound`, so the case FINALIZES and drains through `_settleStep` — which did not check it, and froze one seat's stake per moderator seated in an appeal round whose draw was abandoned, for missing a commit window that never opened. |
+| Three fixes had no discriminating test | `a02573d` | `_fullQuorum`'s independent-revealer check (the fixture used one address with one seat, so `revealedCount` and `revealedSeats` were indistinguishable), `_armSeed` on the widen path (only `_openRound`'s call was covered), and `unbackedSeats` — which P0-2 **did** make unreachable, so it is deleted rather than kept, with the reachability argument and an invariant test in its place. Also fixes `_supersafe`, which read the suite-level registry rather than the one the passed-in harness writes to, so both H-09 `length == 0` assertions held vacuously. |
+| Governor governance transfer | `017ae9e` | One-step and accepting `address(0)`, on the contract holding the whole ruleset authority — and `Moderation.governor` is immutable, so a mistyped or zero nominee could not be recovered from. Now propose / accept / cancel with a zero check, matching both registries. |
+
+Two documentation defects were fixed alongside: P1-1's description (below) and the
+`uncontested` definition, which `README.md` §3.8 and `specs/state-machine.md` §2
+each stated differently from §8.1 and from the implementation.
+
 ## Deviations from the prescription, and why
 
 **1. P0-2 bypass 3 (partial commit) closed structurally, not by penalty.**
@@ -528,10 +596,17 @@ penalised and released." Once a seat is only issued when its collateral can be
 escrowed, every assigned seat is backed and `commitVote` can always commit all of
 them — partial commit becomes unreachable through the draw. Adding a penalty path
 that can never fire would have been dead code asserting a property the escrow
-already guarantees. The `unbackedSeats` mechanism remains as defence in depth.
-Widen seats can still exceed backing; that is P1-1, still open, and
-`test_H07_overdrawn_moderator_commits_what_it_can_afford` was retargeted to say so
-rather than silently change meaning.
+already guarantees.
+
+*Amended 2026-07 (`M2.6-P0-2b`).* This deviation originally ended "the
+`unbackedSeats` mechanism remains as defence in depth. Widen seats can still
+exceed backing; that is P1-1." **Both halves were wrong.** Widen seats go through
+`drawPanel` and are escrowed like any other seat, so `unbackedSeats` was
+unreachable in production — reachable only through `__injectWidenSeats`, the test
+harness the claim was derived from. It is deleted, and the invariant that makes it
+unreachable is asserted instead
+(`test_every_drawn_seat_is_backed_by_its_own_escrow_at_commit`). P1-1 is re-scoped
+above to what it actually is.
 
 **2. P0-3 rejected the checkpointed sortition tree the order prescribes.**
 "Each case pins an epoch root" requires a checkpointable sum tree. Measured
@@ -578,20 +653,59 @@ missed. None is a P0.
   4,699,258 gas at milestone start, 8,019,298 now — past the 8M budget. The budget
   was not raised; the test asserts the BATCHED path, which is the guarantee H-04
   exists to provide. The convenience overload still works for smaller cases.
-- **P1-1: widen seats bypass escrow.** A widen can add seats to an
-  already-committed moderator; those seats are reserved against network capacity
-  but uncollateralized, untallied and unpenalized. P0-2 fixed the draw, not the
-  widen. This is the one place where a seat can still exist without backing.
+- **P1-1: widen seats are inert, and a widen reopens the commit window.**
+  Re-scoped above. The earlier text here ("uncollateralized ... the one place
+  where a seat can still exist without backing") was **wrong**: widen seats go
+  through `drawPanel` and carry escrow. Severity **P1** for both halves — nothing
+  is minted or lost, but (b) makes the H-10 no-show penalty evadable, which is a
+  weakening of a stated defence rather than an accounting error.
 - **`forge build --sizes` exits non-zero on `ModerationHarness`** (test-only,
   never deployed, pre-existing at `b09ce31`). A CI size gate must assert on the
   deployed contracts, not on this command's exit code.
+- **P0-6b's abandonment check is round-level, not tranche-level (P2).** A round
+  abandoned *after* a widen re-opened its draw releases its first tranche without
+  penalty too, even though that tranche did have a commit window and did no-show.
+  Deliberate: the conservative direction is never penalising someone who was not
+  asked, and separating the tranches needs the same per-seat window provenance
+  P1-1(b) needs. The two should be fixed together.
+- **`IndexRegistry`'s obligation counter trusts the logic to close what it opens
+  (P2).** Same shape as the stake registry's, and it fails **safe**: a logic that
+  leaks an open case blocks *its own* revocation, it cannot strand anything else,
+  and no other logic's obligations are reachable. Not a solvency property.
+
+## Knowingly open, carried forward with severity
+
+Named here so a re-auditor does not read them as misses. None is a P0; none is
+being fixed in this pass.
+
+| # | Item | Severity | Why not P0 |
+|---|---|---|---|
+| K-1 | **Keeper per-batch payment.** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. It is an efficiency and latency problem, not a stuck-funds one. A pro-rata bounty split across batches is the obvious fix and is a pure economics change. |
+| K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
+| K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
+| K-4 | **`penalizeNoShow` is live on the registry but unreachable from `Moderation`.** Superseded by `settleDuty` (P0-2/P0-5), which is atomic and obligation-scoped. It still reduces the **pooled** `m.dutyBonded` without scoping, so an authorized logic that called it could reach another case's escrow — the exact class P0-5 closed elsewhere. | **P1** | No production caller; only the registry's own tests reach it. It should be deleted or given a `caseRef` in the next registry change. Listed rather than removed now because the registry is the permanent contract and removing a public function is a deployed-ABI change. |
+
+**Closed in this pass rather than carried:** the governor's one-step
+`transferGovernance` accepting `address(0)` — fixed in `M2.6-L-2` as propose /
+accept / cancel with a zero check, matching both registries.
 
 ## Still open (P1/P2, none blocking)
 
-P1-1 (widen escrow), P1-3 (validator runtime state space — partly done via the
-MAX_PANEL and freeze bounds), P1-4 (retry economics), P1-5 (quorum counts seats,
-a product decision), P1-6 (`balance >= liabilities`), P1-7 (widen tranche
-deadlines), P1-8 (one penalty reference time), and the P2 list.
+P1-1 (**re-scoped**: inert widen seats, and the reopened commit window — NOT
+"widen escrow", which was a misreading of a test harness), P1-3 (validator runtime
+state space — partly done via the MAX_PANEL and freeze bounds), P1-4 (retry
+economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadlines
+— shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference
+time, = K-3), plus K-1 (keeper per-batch payment) and K-4 (`penalizeNoShow`), and
+the P2 list.
+
+**P1-5 (quorum counts seats) is CLOSED.** It was already implemented — H-09's
+`_fullQuorum` counts independent revealers, not seats — but the only test used one
+address holding one seat, so the fix could be reverted with the suite green.
+`M2.6-P0-2b` adds the discriminating test. The product decision it asked for is
+recorded in `specs/state-machine.md` §8.1, which is now the single normative
+statement of both `uncontested` and `fullQuorum`; `README.md` §3.8 and §2's `Entry`
+comment defer to it instead of contradicting it.
 
 ## Standing recommendation
 

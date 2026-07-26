@@ -1107,21 +1107,11 @@ contract Moderation is ReentrancyGuard {
         uint256 steps;
         while (round < nRounds) {
             Round storage r = c.rounds[round];
-            // M2.6-P0-6b: the LAST round is the one whose draw was abandoned, and
-            // it never opened a COMMIT window — so its seated moderators had
-            // nothing to fail to do. `_voidStep` has applied this since P0-6, but
-            // that path is only reached at depth 0. An abandoned appeal round goes
-            // to `_failAppealRound` -> FINALIZED -> here instead, and here penalised
-            // them for missing a window that never existed.
-            //
-            // Round-level, exactly as `_voidStep` is. A round that was abandoned
-            // AFTER a widen re-opened its draw also contains a first tranche that
-            // did have a window and did no-show; they are released too. That is the
-            // conservative direction — never penalise someone who was not asked —
-            // and separating the tranches would need per-seat window provenance,
-            // which is not what P0-6 bought. Recorded as a known imprecision in the
-            // work order rather than left implicit.
-            bool abandoned = c.drawAbandoned && round + 1 == nRounds;
+            // M2.6-P0-6b/P0-6c: amnesty for a round whose draw was abandoned —
+            // but only if it NEVER WIDENED. See `_voidStep` for the argument; this
+            // is the same rule on the appeal path, which reaches settlement through
+            // `_failAppealRound` -> FINALIZED instead of VOID.
+            bool amnesty = c.drawAbandoned && round + 1 == nRounds && r.widenCount == 0;
             uint256 nsh = r.seatHolders.length;
             while (idx < nsh) {
                 if (steps >= maxSteps) {
@@ -1142,7 +1132,7 @@ contract Moderation is ReentrancyGuard {
                 // worth of stake. This is the penalty that makes "dominate the
                 // appeal panel and simply refuse to commit" (H-10) cost something.
                 // Capacity and escrow settle in the same call either way (P0-2).
-                _settleDuty(c, r.caseRef, a, r.seats[a], !abandoned && !r.committed[a]);
+                _settleDuty(c, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a]);
             }
             round++;
             idx = 0;
@@ -1572,6 +1562,40 @@ contract Moderation is ReentrancyGuard {
         uint256 len = r.seatHolders.length;
         uint256 steps;
         uint256 freezeUntil = block.timestamp + _cp(c).failedRevealFreeze;
+        // M2.6-P0-6c: amnesty for an abandoned draw, gated on the round NEVER
+        // having widened.
+        //
+        // P0-6 gave a blanket amnesty on `c.drawAbandoned`, reasoning that a
+        // seated moderator cannot fail to do something it was never asked to do.
+        // True of a round that stalled before COMMIT ever opened; false once the
+        // round has widened, because a widen only happens AFTER a commit window
+        // opened and closed. `widenCount > 0` is therefore proof that at least one
+        // window existed, and the holders who sat through it are no-shows whatever
+        // becomes of the later draw.
+        //
+        // The blanket version was H-10 EVASION, and cheap: moderators pledging
+        // exactly the depth-0 target get seated, refuse to commit, the round
+        // widens, the re-draw stalls on the very capacity they are still holding,
+        // and `resolveStalledDraw` releases everyone. `test_void_with_no_commits_
+        // penalizes_no_shows` freezes that identical refusal when the draw happens
+        // to complete — so the penalty depended on whether the attacker left any
+        // capacity for the widen, which the attacker chooses.
+        //
+        // Known imprecision, taken deliberately: this OVER-penalises the widen
+        // tranche — moderators drawn by the widen itself, who were never given a
+        // window either. In the attack it has no false positives at all, because
+        // the attackers hold the capacity that makes the re-draw stall, so the
+        // widen tranche is empty by construction. Where it does bite, the cost is
+        // one seat's escrow frozen for one `failedRevealFreeze`.
+        //
+        // Separating the tranches needs per-seat window provenance — which round
+        // AND which tranche a seat was drawn in. That is the same mechanism P1-1(b)
+        // needs for the reopened commit window, and it is filed there to be built
+        // once. Choosing to over-penalise rather than under-penalise here is the
+        // opposite of the call made at the blanket-amnesty site, and deliberately
+        // so: there the harm was freezing someone who was never asked, here the
+        // harm is a free pass on a stated defence.
+        bool amnesty = c.drawAbandoned && r.widenCount == 0;
         while (idx < len && steps < maxSteps) {
             address a = r.seatHolders[idx];
             uint256 amt = r.committedAmt[a];
@@ -1580,9 +1604,7 @@ contract Moderation is ReentrancyGuard {
                 _freezeSlice(a, r.caseRef, amt, freezeUntil);
             }
             // H-07: capacity and escrow both return when the case ends (P0-2).
-            // P0-6: an abandoned draw never reached COMMIT, so a seated moderator
-            // had nothing to fail to do — release its duty, do not penalise it.
-            _settleDuty(c, r.caseRef, a, r.seats[a], !c.drawAbandoned && !r.committed[a]);
+            _settleDuty(c, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a]);
             unchecked {
                 ++idx;
                 ++steps;

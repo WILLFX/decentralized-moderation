@@ -28,22 +28,34 @@ library ProtocolLimits {
     /// unfinalizable with no path forward — no attacker required, just a
     /// plausible parameter choice by governance.
     ///
-    /// A seat costs ~123,000 gas to draw, flat across panel size (measured over a
-    /// 1,000-moderator tree; `test/spike/PanelCurve.t.sol`):
+    /// A seat costs ~151,000 gas to draw, flat across panel size (measured over a
+    /// 1,000-moderator tree; `test/spike/PanelCurve.t.sol`). The cost is dominated
+    /// by per-seat STORAGE WRITES, not by tree descent, so it barely moves as the
+    /// moderator set grows — but it has risen three times in M2.6 as each item
+    /// added one:
     ///
-    ///     47 seats -> 5,784,708     80 seats ->  9,618,974
-    ///     56 seats -> 6,992,608     96 seats -> 11,712,334
-    ///     64 seats -> 7,825,247    128 seats -> 15,767,829
+    ///     after P0-2/P0-3 (escrow + staged weight)   ~123,000/seat
+    ///     after P0-5      (per-case obligation slot) ~151,000/seat
     ///
-    /// The cost is dominated by per-seat storage writes — P0-2's collateral escrow
-    /// and P0-3's staged weight update — not by tree descent, so it barely moves as
-    /// the moderator set grows. Against the 8,000,000 single-transaction ceiling
-    /// the break-even is ~65 seats; 64 already sits at 98% of it.
+    /// Against the 8,000,000 single-transaction ceiling that puts the break-even
+    /// at ~53 seats. **48** is kept — a panel at the cap measures 7,239,700, which
+    /// still clears the ceiling, and the shipped default ruleset's deepest target
+    /// is 47.
     ///
-    /// 48 is chosen deliberately below that: 5.9M, 74% of the ceiling and ~35% of
-    /// the Gnosis block limit, leaving room for the per-seat cost to keep growing
-    /// (it rose twice in M2.6 alone). It still admits the shipped default ruleset,
-    /// whose deepest target is 47.
+    /// **The margin is gone, and that is the finding.** When this cap was set one
+    /// item ago it sat at 74% of the ceiling; P0-5's per-case obligation slot took
+    /// it to 90%. Lowering the cap to restore the margin would force the shipped
+    /// ruleset's 47-seat final panel down with it — a change to the appeal
+    /// ladder's statistics, which is a product decision and not a side effect a
+    /// storage-layout change should make. So the cap holds and the constraint
+    /// moves to what may be added next:
+    ///
+    /// > **No further per-seat storage write may land before cursor-based seat
+    /// > drawing (work order P1-2).** One more slot per seat (~+24k) puts a
+    /// > 48-seat panel at ~8.4M — over the ceiling — and every accepted ruleset at
+    /// > the cap becomes unexecutable, with H-11 pinning it per case. P1-2 was the
+    /// > precondition for RAISING the cap; it is now the precondition for keeping
+    /// > it.
     ///
     /// **Raising this requires cursor-based seat drawing (work order P1-2) to land
     /// first.** `realizeSeats` attempts a whole commit target in one transaction;

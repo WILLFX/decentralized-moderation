@@ -218,6 +218,11 @@ contract Moderation is ReentrancyGuard {
         uint256 widenCount; // widen re-draws used
         uint256 pendingDraw; // H-05: seats still to be drawn for this round (fresh entropy per draw, incl. each widen)
         uint256 epochAtArm; // H-05/P0-3: the eligibility epoch this seed belongs to
+        // M2.6-P0-5: this round's obligation reference in the stake registry,
+        // `(caseId << 8) | depth`. Stored once at open rather than threaded
+        // through every settlement helper — the settle loop is already at the IR
+        // stack limit, and a round always knows which round it is.
+        uint256 caseRef;
         uint256 seatSnapshotBlock; // block whose blockhash seeds the seat draw
         uint256 outcomeSnapshotBlock; // block whose blockhash seeds the outcome draw
         bytes32 seatSeed;
@@ -638,7 +643,7 @@ contract Moderation is ReentrancyGuard {
         if (affordable < s) s = affordable;
 
         uint256 lock = riskPerSeat * s;
-        stakeReg.lock(msg.sender, lock);
+        stakeReg.lock(msg.sender, r.caseRef, lock);
         r.committedAmt[msg.sender] = lock;
         r.committedSeats[msg.sender] = s; // H-08: only these seats are collateralized
         // M2.6-P0-2 (bypass 3): partial commit stays possible — it is what keeps a
@@ -965,7 +970,7 @@ contract Moderation is ReentrancyGuard {
                 // worth of stake. This is the penalty that makes "dominate the
                 // appeal panel and simply refuse to commit" (H-10) cost something.
                 // Capacity and escrow settle in the same call either way (P0-2).
-                _settleDuty(c, a, r.seats[a], !r.committed[a] || r.unbackedSeats[a] > 0);
+                _settleDuty(c, r.caseRef, a, r.seats[a], !r.committed[a] || r.unbackedSeats[a] > 0);
             }
             round++;
             idx = 0;
@@ -981,11 +986,11 @@ contract Moderation is ReentrancyGuard {
         uint256 amt = r.committedAmt[a];
         Vote vote = r.reveals[a];
         if (vote == Vote.None) {
-            _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
+            _freezeSlice(a, r.caseRef, amt, block.timestamp + _cp(c).failedRevealFreeze);
         } else if (_coherent(vote, fo)) {
             // Principal: pure bookkeeping inside the registry, no transfer — the
             // committed slice never left it.
-            stakeReg.release(a, amt);
+            stakeReg.release(a, r.caseRef, amt);
             uint256 reward = s.winnersSeats == 0 ? 0 : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
             if (reward > 0) {
                 s.distributed += reward;
@@ -1001,7 +1006,7 @@ contract Moderation is ReentrancyGuard {
                 stakeReg.reward(a, reward);
             }
         } else {
-            _freezeSlice(a, amt, block.timestamp + s.freezeDur);
+            _freezeSlice(a, r.caseRef, amt, block.timestamp + s.freezeDur);
         }
         _touchTrack(c, r, a, fo);
     }
@@ -1185,8 +1190,8 @@ contract Moderation is ReentrancyGuard {
         return c.rounds[c.depth].revealedCount >= _cp(c).minReveals;
     }
 
-    function _freezeSlice(address a, uint256 amt, uint256 until) internal {
-        stakeReg.freeze(a, amt, until); // committed -> frozen; never a transfer
+    function _freezeSlice(address a, uint256 caseRef, uint256 amt, uint256 until) internal {
+        stakeReg.freeze(a, caseRef, amt, until); // committed -> frozen; never a transfer
     }
 
     /// @dev H-07/H-10: penalize a seat-holder that pledged duty capacity, was
@@ -1195,14 +1200,14 @@ contract Moderation is ReentrancyGuard {
     ///      eligibility cost, never a transfer to anyone (principle 2 holds: no
     ///      internal attack profit). Bounded to what the moderator actually has, so
     ///      the penalty can never fail settlement.
-    function _settleDuty(Case storage c, address a, uint256 seats, bool failed) internal {
+    function _settleDuty(Case storage c, uint256 caseRef, address a, uint256 seats, bool failed) internal {
         if (seats == 0) return;
         Params storage p = _cp(c);
         // One seat's worth, regardless of seats held. The registry bounds the
         // penalty by the escrow these seats actually posted, so this can never
         // fail settlement and can never reach another case's collateral.
         uint256 penalty = failed ? p.riskPerSeat : 0;
-        stakeReg.settleDuty(a, seats, penalty, block.timestamp + p.failedRevealFreeze);
+        stakeReg.settleDuty(a, caseRef, seats, penalty, block.timestamp + p.failedRevealFreeze);
     }
 
     function _coherent(Vote vote, Outcome finalOutcome) internal pure returns (bool) {
@@ -1245,6 +1250,7 @@ contract Moderation is ReentrancyGuard {
         uint256 target = _commitTarget(c, depth);
         r.nSeats = 0; // filled in by the draw: seats seated, not seats sought
         r.pendingDraw = target; // H-05
+        r.caseRef = (c.id << 8) | depth; // M2.6-P0-5
         _armSeed(c, r);
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
@@ -1334,11 +1340,11 @@ contract Moderation is ReentrancyGuard {
             uint256 amt = r.committedAmt[a];
             if (amt > 0) {
                 r.committedAmt[a] = 0;
-                _freezeSlice(a, amt, block.timestamp + _cp(c).failedRevealFreeze);
+                _freezeSlice(a, r.caseRef, amt, block.timestamp + _cp(c).failedRevealFreeze);
             } else {
             }
             // H-07: capacity and escrow both return when the case ends (P0-2).
-            _settleDuty(c, a, r.seats[a], !r.committed[a]);
+            _settleDuty(c, r.caseRef, a, r.seats[a], !r.committed[a]);
         }
 
         uint256 pot = c.pot;
@@ -1375,7 +1381,7 @@ contract Moderation is ReentrancyGuard {
     ///      sampling and no unbounded gas: each exclusion happens at most once per
     ///      distinct moderator, and the loop is bounded by `count + exclusions`.
     function _drawSeats(Round storage r, uint256 count, bytes32 seed, uint256 offset) internal {
-        (address[] memory seats, uint256 attempts) = stakeReg.drawPanel(count, seed, offset);
+        (address[] memory seats, uint256 attempts) = stakeReg.drawPanel(count, seed, offset, r.caseRef);
         uint256 n = seats.length;
         for (uint256 i; i < n; ++i) {
             address seat = seats[i];

@@ -25,13 +25,13 @@ contract ModerationHarness is Moderation {
     // path production does rather than a parallel model.
 
     /// committed -> frozen until `until`, the settlement freeze (§6.4, D6).
-    function __freeze(address moderator, uint256 amount, uint256 until) external {
-        stakeReg.freeze(moderator, amount, until);
+    function __freeze(address moderator, uint256 caseRef, uint256 amount, uint256 until) external {
+        stakeReg.freeze(moderator, caseRef, amount, until);
     }
 
     /// free -> committed, the state a commitVote (§5.3, D5) creates.
-    function __commit(address moderator, uint256 amount) external {
-        stakeReg.lock(moderator, amount);
+    function __commit(address moderator, uint256 caseRef, uint256 amount) external {
+        stakeReg.lock(moderator, caseRef, amount);
     }
 
     function eligibleWeightInternal(address moderator) external view returns (uint256) {
@@ -56,6 +56,10 @@ contract ModerationHarness is Moderation {
 
     function __injectRound(uint256 caseId) external {
         cases[caseId].rounds.push();
+        // M2.6-P0-5: a real `_openRound` stamps the obligation reference; an
+        // injected round must too, or settlement debits the wrong handle.
+        uint256 depth = cases[caseId].rounds.length - 1;
+        cases[caseId].rounds[depth].caseRef = (caseId << 8) | depth;
     }
 
     /// revealCode: 0 = None (committed but failed to reveal), 1 = Approve, 2 = Reject.
@@ -71,6 +75,11 @@ contract ModerationHarness is Moderation {
             // Committed stake lives in the registry now; the caller mints the
             // matching tokens there so conservation holds from the first assert.
             StakeRegistryHarness(address(stakeReg)).__injectCommitted(voter, committedAmt);
+            // M2.6-P0-5: settlement debits THIS round's obligation, so the
+            // injected state must include one or the replay would revert.
+            StakeRegistryHarness(address(stakeReg)).__injectObligation(
+                address(this), voter, (caseId << 8) | depth, committedAmt
+            );
             r.committedCount++;
         }
         Vote v = Vote(revealCode);

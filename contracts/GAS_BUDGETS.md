@@ -48,6 +48,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **P0-2** (duty escrow) | **24,343 B** | **233 B** | 9,951 B | 5,288 B |
 | **structural split** (governor out) | **22,298 B** | **2,278 B** | 9,951 B | 5,288 B |
 | **P0-3** (eligibility epochs) | **21,908 B** | **2,668 B** | 11,142 B | 5,288 B |
+| **P0-5a** (obligation handles) | **22,006 B** | **2,570 B** | 12,326 B | 5,288 B |
 
 (The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 
@@ -196,11 +197,23 @@ Cost is dominated by per-seat storage writes (P0-2's escrow, P0-3's staged weigh
 update), not tree descent, so it barely moves as the moderator set grows. Against
 the 8M ceiling the break-even is ~65 seats, and 64 already sits at 98% of it.
 
-**MAX_PANEL = 48**: 6,073,895 gas measured at the cap — 76% of the 8M ceiling and
-~35% of the Gnosis block limit, with room for the per-seat cost to keep rising (it
-rose twice in M2.6 alone). It still admits the shipped default ruleset, whose
-deepest target is 47. At the old 512 the same draw costs **55,231,377 gas** —
-3× the Gnosis block limit.
+**MAX_PANEL = 48**: 7,239,700 gas measured at the cap after P0-5 (6,073,895 before
+it — the per-case obligation slot added ~24k/seat). Originally — 76% of the 8M ceiling and
+~35% of the Gnosis block limit. At the old 512 the same draw costs **55,231,377
+gas** — 3× the Gnosis block limit.
+
+**P0-5 spent the margin.** The per-seat draw cost has now risen three times in this
+milestone — P0-2's escrow, P0-3's staged weight update, P0-5's obligation slot —
+taking a cap-sized panel from 74% to 90% of the ceiling. The cap was NOT lowered to
+restore the margin, because the shipped ruleset's deepest target is 47 and dropping
+below it would change the appeal ladder's statistics: a product decision, not a
+side effect a storage-layout change should make. The constraint moved instead:
+
+> **No further per-seat storage write may land before cursor-based seat drawing
+> (P1-2).** One more slot per seat (~+24k) puts a 48-seat panel at ~8.4M, over the
+> ceiling — and H-11 pins the ruleset per case, so every case opened under an
+> accepted-but-unexecutable ruleset is stranded. P1-2 was the precondition for
+> RAISING the cap; it is now the precondition for keeping it.
 
 `GasBounds.test_max_panel_draw_fits_the_ceiling` reads the constant directly, so
 raising it without re-measuring fails the suite.

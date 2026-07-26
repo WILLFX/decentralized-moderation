@@ -409,9 +409,13 @@ contract GasBoundsTest is ModerationTestBase {
             m.__seatCount(caseId, 0), L.MAX_PANEL, "the full cap was actually seated, not a short panel"
         );
         assertLt(used, HARD_CEILING, "a panel at MAX_PANEL must fit one transaction");
-        // Real margin, not a hairline pass: the per-seat cost rose twice in M2.6
-        // alone, and a cap sitting at 98% of the ceiling is one change from broken.
-        assertLt(used, (HARD_CEILING * 80) / 100, "and with margin for the per-seat cost to grow");
+        // The margin assertion was 80% when the cap was set. P0-5's per-case
+        // obligation slot spent it — a cap-sized panel now measures ~7.24M, 90% of
+        // the ceiling. The bound is kept at 95% rather than relaxed to whatever
+        // passes, so it still fails before the real ceiling does and still forces
+        // a decision. See ProtocolLimits.MAX_PANEL: the next per-seat write must
+        // wait for cursor-based drawing (P1-2), because it would push this over.
+        assertLt(used, (HARD_CEILING * 95) / 100, "still short of the ceiling, but the margin is spent");
     }
 
     /// The seat-draw poke over a large tree (D9's 2M budget row): a full 47-seat
@@ -468,7 +472,7 @@ contract GasBoundsTest is ModerationTestBase {
         //
         // The load-bearing bound is the 8M single-transaction ceiling.
         assertLt(used, HARD_CEILING, "47-seat draw must fit one transaction");
-        assertLt(used, 6_000_000, "47-seat draw over 1000 moderators (soft budget, post-escrow)");
+        assertLt(used, 7_500_000, "47-seat draw over 1000 moderators (post-escrow, post-obligations)");
     }
 
     function _measureSubmit5Topics() internal {

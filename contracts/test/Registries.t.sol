@@ -30,6 +30,10 @@ contract RegistriesTest is Test {
     address internal bob = makeAddr("bob");
 
     bytes32 internal constant TK = keccak256("marine biology");
+    /// M2.6-P0-5: obligations are keyed per case-round. These stand in for two
+    /// distinct cases in the registry-level fixtures.
+    uint256 internal constant CASE_A = (1 << 8) | 0;
+    uint256 internal constant CASE_B = (2 << 8) | 0;
 
     function setUp() public {
         bzz = new MockBZZ();
@@ -93,7 +97,7 @@ contract RegistriesTest is Test {
 
         // And the new logic can immediately use her stake.
         vm.prank(newLogic);
-        stakeReg.lock(alice, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
         (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(committed, 10 * XBZZ, "new logic operates on the existing stake");
     }
@@ -155,7 +159,7 @@ contract RegistriesTest is Test {
     function test_handover_window_lets_old_logic_settle_in_flight_cases() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.prank(oldLogic);
-        stakeReg.lock(alice, 10 * XBZZ); // an in-flight case
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ); // an in-flight case
 
         _authorize(newLogic); // both authorized now
         assertTrue(stakeReg.isLogic(oldLogic), "old logic still authorized during handover");
@@ -163,7 +167,7 @@ contract RegistriesTest is Test {
 
         // The old logic settles its open case.
         vm.prank(oldLogic);
-        stakeReg.release(alice, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
         (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(committed, 0, "in-flight case settled under the old logic");
 
@@ -171,7 +175,7 @@ contract RegistriesTest is Test {
         stakeReg.revokeLogic(oldLogic);
         vm.prank(oldLogic);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.lock(alice, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
     }
 
     /// Governance may NAME the logic contract and nothing else: it can never move,
@@ -181,9 +185,9 @@ contract RegistriesTest is Test {
 
         // The test contract is governance; it is not a logic contract.
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.lock(alice, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.freeze(alice, 1, vm.getBlockTimestamp() + 1 days);
+        stakeReg.freeze(alice, CASE_A, 1, vm.getBlockTimestamp() + 1 days);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
         stakeReg.reward(alice, 1);
         vm.expectRevert(IndexRegistry.NotLogic.selector);
@@ -194,7 +198,7 @@ contract RegistriesTest is Test {
         _stake(alice, 100 * XBZZ);
         vm.prank(bob);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.lock(alice, 1);
+        stakeReg.lock(alice, CASE_A, 1);
         vm.prank(bob);
         vm.expectRevert(StakeRegistry.NotGovernance.selector);
         stakeReg.proposeLogic(bob);
@@ -207,10 +211,10 @@ contract RegistriesTest is Test {
         _stakeActivatePledge(bob, 50 * XBZZ);
 
         vm.startPrank(oldLogic);
-        stakeReg.lock(alice, 30 * XBZZ);
-        stakeReg.freeze(alice, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
-        stakeReg.release(alice, 20 * XBZZ);
-        stakeReg.lock(bob, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
+        stakeReg.release(alice, CASE_A, 20 * XBZZ);
+        stakeReg.lock(bob, CASE_A, 10 * XBZZ);
         vm.stopPrank();
 
         // Every token held is somebody's stake, in exactly one bucket.
@@ -299,8 +303,8 @@ contract RegistriesTest is Test {
     function test_frozen_stake_is_excluded_from_draws_until_thaw() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.startPrank(oldLogic);
-        stakeReg.lock(alice, 10 * XBZZ);
-        stakeReg.freeze(alice, 10 * XBZZ, vm.getBlockTimestamp() + 3 days);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 3 days);
         vm.stopPrank();
 
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> fully excluded from draws");
@@ -319,7 +323,7 @@ contract RegistriesTest is Test {
         assertEq(stakeReg.totalEligibleWeight(), 0, "passive stake is not in the draw pool");
 
         vm.prank(oldLogic);
-        (address[] memory seats,) = stakeReg.drawPanel(5, keccak256("s"), 0);
+        (address[] memory seats,) = stakeReg.drawPanel(5, keccak256("s"), 0, CASE_A);
         assertEq(seats.length, 0, "nobody can be drafted into duty");
     }
 
@@ -334,7 +338,7 @@ contract RegistriesTest is Test {
         _settleEpoch();
 
         vm.prank(oldLogic);
-        (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0);
+        (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0, CASE_A);
         assertEq(seats.length, 3, "seated exactly the pledged capacity");
         (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 3, "one unit reserved per seat");
@@ -343,7 +347,7 @@ contract RegistriesTest is Test {
 
         // Releasing capacity puts the moderator back in the pool.
         vm.prank(oldLogic);
-        stakeReg.releaseDuty(alice, 3);
+        stakeReg.settleDuty(alice, CASE_A, 3, 0, vm.getBlockTimestamp() + 1 days);
         (, reserved, bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 0);
         assertEq(bonded, 0, "escrow returned to free stake");
@@ -362,7 +366,7 @@ contract RegistriesTest is Test {
         uint256 bobBefore = stakeReg.totalStakeOf(bob);
 
         vm.prank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("noshow"), 0); // seats alice or bob; both are pledged
+        stakeReg.drawPanel(1, keccak256("noshow"), 0, CASE_A); // seats alice or bob; both are pledged
         // Penalize whoever was actually seated.
         (,, uint256 aliceBond) = stakeReg.dutyOf(alice);
         address seated = aliceBond > 0 ? alice : bob;
@@ -409,7 +413,7 @@ contract RegistriesTest is Test {
     /// of them; the test asserts against whichever was actually seated.
     function _seatOne(bytes32 seed) internal returns (address seated, address other) {
         vm.prank(oldLogic);
-        stakeReg.drawPanel(1, seed, 0);
+        stakeReg.drawPanel(1, seed, 0, CASE_A);
         (,, uint256 aliceBond) = stakeReg.dutyOf(alice);
         return aliceBond > 0 ? (alice, bob) : (bob, alice);
     }
@@ -420,7 +424,7 @@ contract RegistriesTest is Test {
         (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
 
         vm.prank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("escrow"), 0);
+        stakeReg.drawPanel(1, keccak256("escrow"), 0, CASE_A);
 
         (uint256 freeAfter,,,,,,,,) = stakeReg.moderatorInfo(alice);
         (,, uint256 bonded) = stakeReg.dutyOf(alice);
@@ -499,7 +503,7 @@ contract RegistriesTest is Test {
         stakeReg.requestExit(RISK_PER_SEAT);
 
         vm.prank(oldLogic);
-        (address[] memory seats,) = stakeReg.drawPanel(2, keccak256("b4"), 0);
+        (address[] memory seats,) = stakeReg.drawPanel(2, keccak256("b4"), 0, CASE_A);
 
         // Before the escrow, capacity alone gated the draw: both seats were issued
         // and both were "backed" by the same single unit of usable stake.
@@ -517,11 +521,11 @@ contract RegistriesTest is Test {
         (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
 
         vm.prank(oldLogic);
-        stakeReg.drawPanel(2, keccak256("rel"), 0);
+        stakeReg.drawPanel(2, keccak256("rel"), 0, CASE_A);
 
         vm.startPrank(oldLogic);
-        stakeReg.releaseDuty(alice, 2);
-        stakeReg.releaseDuty(alice, 2); // a double release must not mint stake
+        stakeReg.settleDuty(alice, CASE_A, 2, 0, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 2, 0, vm.getBlockTimestamp() + 1 days); // a double release must not mint stake
         vm.stopPrank();
 
         (uint256 freeAfter,,,,,,,,) = stakeReg.moderatorInfo(alice);
@@ -536,11 +540,11 @@ contract RegistriesTest is Test {
     function test_commit_converts_escrow_not_free_stake() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.prank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("conv"), 0);
+        stakeReg.drawPanel(1, keccak256("conv"), 0, CASE_A);
         (uint256 freeAfterDraw,,,,,,,,) = stakeReg.moderatorInfo(alice);
 
         vm.prank(oldLogic);
-        stakeReg.lock(alice, RISK_PER_SEAT);
+        stakeReg.lock(alice, CASE_A, RISK_PER_SEAT);
 
         (uint256 free,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
         (,, uint256 bonded) = stakeReg.dutyOf(alice);
@@ -565,8 +569,8 @@ contract RegistriesTest is Test {
 
         // Two separate cases each seat this moderator once.
         vm.startPrank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("caseA"), 0);
-        stakeReg.drawPanel(1, keccak256("caseB"), 0);
+        stakeReg.drawPanel(1, keccak256("caseA"), 0, CASE_A);
+        stakeReg.drawPanel(1, keccak256("caseB"), 0, CASE_A);
         vm.stopPrank();
         (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 2, "two outstanding assignments");
@@ -574,7 +578,7 @@ contract RegistriesTest is Test {
 
         // Case A settles; the moderator no-showed there.
         vm.prank(oldLogic);
-        stakeReg.settleDuty(alice, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
 
         (,, bonded) = stakeReg.dutyOf(alice);
         assertEq(bonded, RISK_PER_SEAT, "case B's escrow is untouched");
@@ -583,7 +587,7 @@ contract RegistriesTest is Test {
 
         // Case B settles; its penalty is still payable, which is the point.
         vm.prank(oldLogic);
-        stakeReg.settleDuty(alice, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (,,, frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, 2 * RISK_PER_SEAT, "B's penalty applied too");
         (,, bonded) = stakeReg.dutyOf(alice);
@@ -597,8 +601,8 @@ contract RegistriesTest is Test {
         (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
 
         vm.startPrank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("served"), 0);
-        stakeReg.settleDuty(alice, 1, 0, vm.getBlockTimestamp() + 1 days); // no penalty
+        stakeReg.drawPanel(1, keccak256("served"), 0, CASE_A);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, vm.getBlockTimestamp() + 1 days); // no penalty
         vm.stopPrank();
 
         (uint256 free,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
@@ -621,7 +625,7 @@ contract RegistriesTest is Test {
         _settleEpoch();
 
         vm.prank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("bonded"), 0);
+        stakeReg.drawPanel(1, keccak256("bonded"), 0, CASE_A);
 
         (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(free, 0, "every token is escrowed");
@@ -629,11 +633,142 @@ contract RegistriesTest is Test {
 
         // The commit converts that escrow; it must not need free stake.
         vm.prank(oldLogic);
-        stakeReg.lock(alice, RISK_PER_SEAT);
+        stakeReg.lock(alice, CASE_A, RISK_PER_SEAT);
         (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(committed, RISK_PER_SEAT, "the seat it was drawn for is collateralized");
         assertEq(stakeReg.dutyBondedOf(alice), 0);
         assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    // --- M2.6-P0-5: obligations are keyed, not pooled -------------------------
+
+    /// The cross-CASE drain, which per-logic scoping alone would not have caught.
+    ///
+    /// `dutyBonded` was one pool per moderator. A moderator seated in two cases
+    /// held 2x escrow in it, and case A settling one seat handed back a full
+    /// `riskPerSeat` bounded only by that pool — draining case B's escrow and
+    /// silently un-bonding B's outstanding seat, so B's no-show penalty became a
+    /// no-op. Nothing is minted, so conservation still holds and the leak is
+    /// invisible from the aggregates. P0-2 shipped `settleDuty` as one atomic
+    /// operation to stop it; handles make it unrepresentable.
+    function test_settling_one_case_cannot_touch_another_cases_escrow() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+
+        vm.startPrank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("A"), 0, CASE_A);
+        stakeReg.drawPanel(1, keccak256("B"), 0, CASE_B);
+        vm.stopPrank();
+
+        (,, uint256 bondA) = stakeReg.obligationOf(oldLogic, alice, CASE_A);
+        (,, uint256 bondB) = stakeReg.obligationOf(oldLogic, alice, CASE_B);
+        assertEq(bondA, RISK_PER_SEAT, "case A escrowed its own seat");
+        assertEq(bondB, RISK_PER_SEAT, "and so did case B");
+
+        // Case A settles, asking to release far more than it ever reserved.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 10, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+
+        (,, bondB) = stakeReg.obligationOf(oldLogic, alice, CASE_B);
+        assertEq(bondB, RISK_PER_SEAT, "B's escrow is untouched by A's over-ask");
+
+        // And B's penalty is therefore still payable — the property the drain
+        // silently removed.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_B, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 2 * RISK_PER_SEAT, "both cases' penalties applied");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// The same shape for committed stake: a double release must revert, not be
+    /// absorbed. Under pooled accounting the second call simply succeeded against
+    /// whatever aggregate remained.
+    function test_double_release_reverts_rather_than_being_absorbed() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_B, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        vm.stopPrank();
+
+        // A is discharged; releasing it again must not reach into B's obligation.
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+
+        (uint256 committedB,,) = stakeReg.obligationOf(oldLogic, alice, CASE_B);
+        assertEq(committedB, 10 * XBZZ, "B's commitment intact");
+    }
+
+    /// Cross-LOGIC: during a handover both are authorized, and B must not be able
+    /// to discharge anything A created.
+    function test_cross_logic_discharge_reverts() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.drawPanel(1, keccak256("A"), 0, CASE_A);
+        vm.stopPrank();
+
+        _authorize(newLogic); // handover: both authorized
+
+        // Same case reference, different logic — a different obligation entirely.
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
+
+        // Duty settlement clamps to B's own (empty) obligation rather than
+        // discharging A's seat.
+        vm.prank(newLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,, uint256 bondA) = stakeReg.obligationOf(oldLogic, alice, CASE_A);
+        assertEq(bondA, RISK_PER_SEAT, "A's escrow untouched by B");
+
+        // A's own settlement still works, which is the point of the handover.
+        vm.prank(oldLogic);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        (,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(committed, 0, "the rightful owner settles normally");
+    }
+
+    /// Re-authorizing a revoked logic gives it a fresh handle namespace, so it
+    /// cannot reach obligations from its previous life.
+    function test_reauthorization_does_not_inherit_old_handles() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        uint256 epochBefore = stakeReg.authEpoch(oldLogic);
+
+        stakeReg.revokeLogic(oldLogic);
+        _authorize(oldLogic); // same address, authorized again
+        assertGt(stakeReg.authEpoch(oldLogic), epochBefore, "a new namespace");
+
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+    }
+
+    /// The per-logic totals are a real drain signal, unlike `openPotsTotal`.
+    function test_logic_totals_track_outstanding_obligations() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        assertEq(stakeReg.logicCommitted(oldLogic), 0);
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.drawPanel(1, keccak256("A"), 0, CASE_A);
+        vm.stopPrank();
+        assertEq(stakeReg.logicCommitted(oldLogic), 10 * XBZZ);
+        assertEq(stakeReg.logicDutyReserved(oldLogic), 1);
+
+        vm.startPrank(oldLogic);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, vm.getBlockTimestamp() + 1 days);
+        vm.stopPrank();
+        assertEq(stakeReg.logicCommitted(oldLogic), 0, "drained");
+        assertEq(stakeReg.logicDutyReserved(oldLogic), 0, "drained");
     }
 
     // --- index registry ------------------------------------------------------
@@ -803,9 +938,9 @@ contract RegistriesTest is Test {
         vm.prank(bob);
         stakeReg.requestExit(20 * XBZZ);
         vm.prank(oldLogic);
-        stakeReg.lock(bob, RISK_PER_SEAT);
+        stakeReg.lock(bob, CASE_A, RISK_PER_SEAT);
         vm.prank(oldLogic);
-        stakeReg.freeze(bob, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.freeze(bob, CASE_A, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
 
         // A no-op re-pledge: the exact call that used to re-arm every case.
         vm.prank(alice);
@@ -849,7 +984,7 @@ contract RegistriesTest is Test {
         uint256 before = stakeReg.totalEligibleWeight();
 
         vm.prank(oldLogic);
-        stakeReg.drawPanel(3, keccak256("concurrent"), 0);
+        stakeReg.drawPanel(3, keccak256("concurrent"), 0, CASE_A);
 
         assertEq(stakeReg.totalEligibleWeight(), before, "the sampling distribution is unchanged mid-epoch");
         // The escrow is real regardless — the struct is the authority for seating.
@@ -867,7 +1002,7 @@ contract RegistriesTest is Test {
         assertFalse(stakeReg.epochSettled(), "an epoch boundary passed with changes staged");
         // drawPanel drains within its budget, so a small backlog settles itself.
         vm.prank(oldLogic);
-        stakeReg.drawPanel(1, keccak256("settles"), 0);
+        stakeReg.drawPanel(1, keccak256("settles"), 0, CASE_A);
         assertTrue(stakeReg.epochSettled(), "the draw applied the backlog itself");
     }
 

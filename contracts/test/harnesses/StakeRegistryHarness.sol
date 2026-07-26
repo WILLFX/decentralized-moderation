@@ -24,6 +24,13 @@ contract StakeRegistryHarness is StakeRegistry {
         uint256 _epochBlocks
     ) StakeRegistry(_token, _timelockDelay, _minStake, _activationDelay, _exitCooldown, _riskPerSeat, _epochBlocks) {}
 
+    /// Fabricate the obligation record a real `lock` would have created, so
+    /// injected settlement fixtures exercise the same debit path (M2.6-P0-5).
+    function __injectObligation(address logic, address moderator, uint256 caseRef, uint256 committed) external {
+        obligations[obligationKey(logic, moderator, caseRef)].committed += uint112(committed);
+        logicCommitted[logic] += committed;
+    }
+
     function __injectCommitted(address moderator, uint256 amount) external {
         Moderator storage m = moderators[moderator];
         m.exists = true;

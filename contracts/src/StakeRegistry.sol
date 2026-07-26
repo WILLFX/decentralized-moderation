@@ -164,6 +164,52 @@ contract StakeRegistry {
     /// The weight each moderator's leaf carries for the CURRENT epoch. Written
     /// only at drain time, and used to restore leaves a draw excluded transiently.
     mapping(address => uint256) internal epochWeight;
+
+    // --- obligation handles (M2.6-P0-5) --------------------------------------
+    //
+    // `lock`, `release`, `freeze` and `settleDuty` carried no obligation identity
+    // — only per-moderator aggregates. Two distinct failures followed.
+    //
+    // ACROSS LOGICS: during a handover both are authorized, so logic B could
+    // release stake logic A had committed, freeze A's committed stake under B's
+    // case, or discharge A's duty reservations. A's later honest settlement then
+    // underflowed and reverted, stranding the case. Malice was never needed; an
+    // ordinary bug in either contract did it.
+    //
+    // ACROSS CASES, within ONE logic: `dutyBonded` was a single pool per
+    // moderator, so a case settling one seat could hand back escrow belonging to
+    // a different case's outstanding seat, silently un-bonding it — that case's
+    // no-show penalty then became a no-op. Nothing was minted, so conservation
+    // still held and the leak was invisible. It was written once in P0-2 and
+    // caught by reading, not by a test.
+    //
+    // Keying every obligation by (authorization epoch, logic, moderator, case)
+    // makes both unrepresentable rather than merely absent from today's call
+    // sites. The per-moderator aggregates remain as the ACCOUNTING layer —
+    // conservation and draw weight are computed from them — while these handles
+    // are the AUTHORIZATION layer.
+    /// Packed into ONE storage slot deliberately. `drawPanel` touches an
+    /// obligation for every seated moderator, so the difference between one cold
+    /// SSTORE and three is ~40,000 gas per seat on the most expensive transaction
+    /// in the protocol — it moves `MAX_PANEL` directly.
+    ///
+    /// Ranges: xBZZ has 16 decimals and a supply around 6.25e23 base units, so
+    /// `uint112` (~5.2e33) cannot be reached by any real amount; seats per case
+    /// are bounded by `MAX_PANEL`, far inside `uint32`.
+    struct Obligation {
+        uint112 committed; // stake locked against this specific case
+        uint112 dutyBonded; // escrow posted for its seats
+        uint32 dutyUnits; // seats outstanding for it
+    }
+
+    mapping(bytes32 => Obligation) internal obligations;
+    /// Bumped each time a logic is authorized, so a contract re-authorized after
+    /// revocation cannot inherit handles from its previous life.
+    mapping(address => uint256) public authEpoch;
+    /// Per-logic totals: a real on-chain drain signal. `openPotsTotal` in the game
+    /// contract is not one — it is decremented at settlement INIT.
+    mapping(address => uint256) public logicCommitted;
+    mapping(address => uint256) public logicDutyReserved;
     /// Staged changes applied automatically per draw before a keeper is needed.
     uint256 internal constant DRAIN_BUDGET = 64;
 
@@ -227,6 +273,7 @@ contract StakeRegistry {
     error RewardNotFunded(); // reward() must be funded by the caller in the same call
     error DutyReserved(); // M2.6-P0-2: cannot un-pledge capacity a live panel holds
     error EpochNotSettled(); // M2.6-P0-3: call advanceEpoch() to apply staged changes
+    error NotYourObligation(); // M2.6-P0-5: only the creating case may discharge it
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -371,6 +418,31 @@ contract StakeRegistry {
     // Logic-facing: the narrow privileged API
     // =========================================================================
 
+    /// @notice The obligation key for `moderator` under the CALLING logic's case.
+    /// @param caseRef The caller's own case identity. `Moderation` packs
+    ///        `(caseId << 8) | depth`; the registry treats it opaquely and only
+    ///        needs it to be unique per case-round within one logic.
+    /// @dev Includes `authEpoch[msg.sender]`, so a logic re-authorized after
+    ///      revocation starts a fresh namespace and cannot reach obligations from
+    ///      its previous life.
+    function obligationKey(address logic, address moderator, uint256 caseRef) public view returns (bytes32) {
+        return keccak256(abi.encode(authEpoch[logic], logic, moderator, caseRef));
+    }
+
+    function _ob(address moderator, uint256 caseRef) internal view returns (Obligation storage) {
+        return obligations[keccak256(abi.encode(authEpoch[msg.sender], msg.sender, moderator, caseRef))];
+    }
+
+    /// Read an obligation (permissionless).
+    function obligationOf(address logic, address moderator, uint256 caseRef)
+        external
+        view
+        returns (uint256 committed, uint256 dutyUnits, uint256 dutyBonded)
+    {
+        Obligation storage o = obligations[obligationKey(logic, moderator, caseRef)];
+        return (o.committed, o.dutyUnits, o.dutyBonded);
+    }
+
     /// Move `amount` -> committed (backing a vote in an open case).
     /// @dev M2.6-P0-2: drawn from `dutyBonded` first — that escrow exists for
     ///      exactly this, and a case locking `riskPerSeat` per seat can never need
@@ -378,9 +450,13 @@ contract StakeRegistry {
     ///      rejects a ruleset whose `riskPerSeat` exceeds this registry's unit).
     ///      Any remainder comes from free stake, which keeps the injector paths and
     ///      any future non-duty lock working.
-    function lock(address moderator, uint256 amount) external onlyLogic {
+    function lock(address moderator, uint256 caseRef, uint256 amount) external onlyLogic {
         Moderator storage m = moderators[moderator];
-        uint256 fromBond = amount > m.dutyBonded ? m.dutyBonded : amount;
+        Obligation storage o = _ob(moderator, caseRef);
+        // M2.6-P0-5: spend THIS case's escrow. Drawing from the moderator's pooled
+        // `dutyBonded` would let one case's commit consume collateral posted for
+        // another case's outstanding seat.
+        uint256 fromBond = amount > o.dutyBonded ? o.dutyBonded : amount;
         uint256 fromFree = amount - fromBond;
         if (fromFree > 0) {
             uint256 reserved = m.pending + m.exitAmount;
@@ -390,9 +466,12 @@ contract StakeRegistry {
             totalFreeStake -= fromFree;
         }
         if (fromBond > 0) {
+            o.dutyBonded -= uint112(fromBond);
             m.dutyBonded -= fromBond;
             totalDutyBondedStake -= fromBond;
         }
+        o.committed += uint112(amount);
+        logicCommitted[msg.sender] += amount;
         m.committed += amount;
         totalCommittedStake += amount;
         _syncTree(moderator, m);
@@ -400,8 +479,9 @@ contract StakeRegistry {
     }
 
     /// Move `amount` committed -> free (case settled coherently).
-    function release(address moderator, uint256 amount) external onlyLogic {
+    function release(address moderator, uint256 caseRef, uint256 amount) external onlyLogic {
         Moderator storage m = moderators[moderator];
+        _debit(_ob(moderator, caseRef), amount);
         m.committed -= amount;
         m.free += amount;
         totalCommittedStake -= amount;
@@ -411,8 +491,9 @@ contract StakeRegistry {
     }
 
     /// Move `amount` committed -> frozen until `until` (penalty; never a transfer).
-    function freeze(address moderator, uint256 amount, uint256 until) external onlyLogic {
+    function freeze(address moderator, uint256 caseRef, uint256 amount, uint256 until) external onlyLogic {
         Moderator storage m = moderators[moderator];
+        _debit(_ob(moderator, caseRef), amount);
         m.committed -= amount;
         m.frozen += amount;
         totalCommittedStake -= amount;
@@ -468,7 +549,7 @@ contract StakeRegistry {
     ///         restored before returning), so seats land only where collateral
     ///         exists — no rejection sampling, and attempts are bounded at 2×count.
     /// @return seats The drawn addresses, one entry per seat (duplicates possible).
-    function drawPanel(uint256 count, bytes32 seed, uint256 offset)
+    function drawPanel(uint256 count, bytes32 seed, uint256 offset, uint256 caseRef)
         external
         onlyLogic
         returns (address[] memory seats, uint256 attempts)
@@ -511,6 +592,11 @@ contract StakeRegistry {
             m.dutyBonded += riskPerSeat;
             totalFreeStake -= riskPerSeat;
             totalDutyBondedStake += riskPerSeat;
+            // M2.6-P0-5: the seat and its escrow belong to THIS case.
+            Obligation storage ob = _ob(seat, caseRef);
+            ob.dutyUnits += 1;
+            ob.dutyBonded += uint112(riskPerSeat);
+            logicDutyReserved[msg.sender] += 1;
             seats[drawn++] = seat;
             // M2.6-P0-3: the persistent weight shrink is STAGED for the next
             // epoch — the tree must not move inside an epoch. Within this draw
@@ -538,6 +624,16 @@ contract StakeRegistry {
         }
     }
 
+    /// @dev Discharge committed stake from THIS case's obligation. Reverts rather
+    ///      than reaching into another case's or another logic's — the failure this
+    ///      replaces succeeded here and underflowed in the rightful owner's
+    ///      settlement later, where the cause was no longer visible.
+    function _debit(Obligation storage o, uint256 amount) internal {
+        if (o.committed < amount) revert NotYourObligation();
+        o.committed -= uint112(amount);
+        logicCommitted[msg.sender] -= amount;
+    }
+
     /// @notice Settle `units` finished assignments in ONE step: freeze `penalty` of
     ///         the escrow those seats still hold as the no-show cost, and return
     ///         the remainder to free stake.
@@ -553,17 +649,27 @@ contract StakeRegistry {
     ///
     ///      Bounding both parts by `seatBond` makes over-draw unrepresentable.
     ///      Per-obligation accounting (P0-5) replaces the pooling entirely.
-    function settleDuty(address moderator, uint256 units, uint256 penalty, uint256 until) external onlyLogic {
+    function settleDuty(address moderator, uint256 caseRef, uint256 units, uint256 penalty, uint256 until)
+        external
+        onlyLogic
+    {
         Moderator storage m = moderators[moderator];
-        uint256 rel = units > m.dutyReserved ? m.dutyReserved : units;
+        Obligation storage o = _ob(moderator, caseRef);
+        // M2.6-P0-5: bounded by what THIS case reserved and escrowed. Bounding by
+        // the moderator's pooled totals is what let a settlement hand back escrow
+        // belonging to another case's outstanding seat.
+        uint256 rel = units > o.dutyUnits ? o.dutyUnits : units;
+        o.dutyUnits -= uint32(rel);
+        logicDutyReserved[msg.sender] -= rel;
         m.dutyReserved -= rel;
 
         uint256 seatBond = rel * riskPerSeat;
-        if (seatBond > m.dutyBonded) seatBond = m.dutyBonded;
+        if (seatBond > o.dutyBonded) seatBond = o.dutyBonded;
         if (seatBond == 0) {
             _syncTree(moderator, m);
             return;
         }
+        o.dutyBonded -= uint112(seatBond);
         m.dutyBonded -= seatBond;
         totalDutyBondedStake -= seatBond;
 
@@ -578,29 +684,6 @@ contract StakeRegistry {
         if (back > 0) {
             m.free += back;
             totalFreeStake += back;
-        }
-        _syncTree(moderator, m);
-    }
-
-    /// Release duty capacity held by a finished round, returning the escrow that
-    /// is still bonded (M2.6-P0-2) to free stake.
-    /// @dev Both the unit count and the token amount are clamped. Seats whose bond
-    ///      already became `committed` (they voted) or `frozen` (they no-showed)
-    ///      are no longer bonded, so a round that releases all its seats correctly
-    ///      returns only the ones still outstanding. The clamp is what makes a
-    ///      double release harmless rather than an underflow — but it is also why
-    ///      it is silent, which P0-5's obligation handles are meant to fix.
-    function releaseDuty(address moderator, uint256 units) external onlyLogic {
-        Moderator storage m = moderators[moderator];
-        uint256 rel = units > m.dutyReserved ? m.dutyReserved : units;
-        m.dutyReserved -= rel;
-        uint256 amount = rel * riskPerSeat;
-        if (amount > m.dutyBonded) amount = m.dutyBonded;
-        if (amount > 0) {
-            m.dutyBonded -= amount;
-            m.free += amount;
-            totalDutyBondedStake -= amount;
-            totalFreeStake += amount;
         }
         _syncTree(moderator, m);
     }
@@ -649,6 +732,7 @@ contract StakeRegistry {
         if (!pl.exists) revert NoPendingProposal();
         if (block.timestamp < pl.eta) revert TimelockNotElapsed();
         isLogic[pl.logic] = true;
+        authEpoch[pl.logic] += 1; // M2.6-P0-5: fresh handle namespace
         delete pendingLogic;
         emit LogicAuthorized(pl.logic);
     }

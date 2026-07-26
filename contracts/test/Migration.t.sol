@@ -319,7 +319,7 @@ contract MigrationTest is ModerationTestBase {
 
         vm.prank(address(mod));
         vm.expectRevert();
-        stakeReg.lock(mods[0], MIN_STAKE);
+        stakeReg.lock(mods[0], 0, MIN_STAKE);
 
         vm.prank(address(mod));
         vm.expectRevert();

@@ -3,14 +3,16 @@
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
-> Status: **M2.5 complete.** The state machine (staking, sortition, case
+> Status: **M2.6 complete** (all P0 remediation items closed; re-audit target `51af155`). The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with 165 passing tests including a handler-driven invariant
+> registries — with **188 passing tests** including a handler-driven invariant
 > campaign, a differential test against an independent Python reference, and a
 > live logic-migration test.
 >
-> M2.6 remediation is in progress: see `specs/m2_6-work-order.md`.
+> See `specs/m2_6-work-order.md` (Resolution record) and
+> `specs/m2_6-state-of-play.md` for what landed, the four documented deviations
+> from the prescription, and the open residuals.
 >
 > Builds with `via_ir = true` (EIP-170: `Moderation` does not fit the 24,576-byte
 > limit without it). The suite runs on the same pipeline that ships. One

@@ -44,20 +44,31 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///    withdrawable balance, so it cannot drain other stakers' principal through the
 ///    ordinary exit path.
 ///
-/// ## What this registry does NOT yet guarantee (be honest about it)
+/// ## What this registry does and does not guarantee (M2.6, be honest about it)
 ///
-/// Obligations are still recorded as bare aggregates (`committed`, `frozen`,
-/// `dutyReserved`, `track`) with no obligation id and no originating-logic
-/// namespace. While two logics are authorized during a handover, either can
-/// release, freeze, or overwrite obligations created by the other — by malice OR by
-/// an ordinary bug — and the outgoing logic's honest settlement can then underflow.
-/// There is also no on-chain `canRevoke(logic)`: revocation relies on governance
-/// believing the old logic has drained.
+/// Obligations ARE now scoped. Every one is keyed
+/// `keccak256(authEpoch, logic, moderator, caseRef)` (P0-5), so only the case that
+/// created an obligation can discharge it — across logic contracts during a
+/// handover, and across cases within one logic. `canRevoke(logic)` is a real
+/// on-chain drain signal, and `SETTLE_ONLY` lets an outgoing logic finish its cases
+/// without accepting new ones.
 ///
-/// So the true solvency statement today is: *principal cannot be minted, but
-/// obligation bookkeeping is only correct if every authorized logic is correct and
-/// stays inside its own cases.* M2.6-P0-5 (obligation-scoped accounting) is what
-/// closes the remaining gap; do not describe the isolation as complete until it does.
+/// So the solvency statement is now: *principal cannot be minted (P0-4), and no
+/// authorized logic can discharge an obligation it did not create (P0-5).* That is
+/// materially stronger than the pre-M2.6 position, which was "correct only if every
+/// authorized logic is correct and stays inside its own cases".
+///
+/// What is still true and must not be overstated:
+///
+/// - A logic contract can still mis-account WITHIN its own namespace. Scoping stops
+///   it reaching another case's collateral; it does not make its own bookkeeping
+///   correct.
+/// - Governance still names the authorized logic, behind a timelock. That remains
+///   the trust root.
+/// - `setTrack` and `reward` are per-moderator rather than per-obligation. Neither
+///   can move another case's principal, but a buggy logic can still write a wrong
+///   track or credit a reward it funded.
+///
 contract StakeRegistry {
     using SafeTransferLib for address;
     using SortitionTree for SortitionTree.Tree;

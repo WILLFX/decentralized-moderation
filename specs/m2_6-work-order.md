@@ -475,3 +475,126 @@ independent. P1-1 depends on P0-2's bonding. Everything else follows.
 No deployment with material funds, and the index is not presented as reliable
 safe-search certification, until P0 closes and an independent re-audit of the
 three-contract architecture passes. Treat the current code as an advanced prototype.
+
+---
+
+# Resolution record (M2.6 close)
+
+Every P0 item is closed. This section is the authoritative record of what landed
+and, where the implementation departs from the prescription above, why. **A
+re-auditor should read the deviations as decisions, not as misses** — each was
+measured or reasoned about explicitly, and each is reproducible from the commit
+it landed in.
+
+Baseline `main` @ `b09ce31`: 143 tests, 16 suites. The milestone peaked at 199 / 19;
+the difference is `test/spike/`, deleted at close — throwaway harnesses whose gas
+numbers are recorded in `GAS_BUDGETS.md` and `ProtocolLimits`. Close: **188 tests, 16 suites**,
+green at every commit. `Moderation` 23,795 -> 23,296 B (margin 781 -> 1,280) —
+smaller than it started despite eight items landing in it, because the structural
+split gave back more than they cost.
+
+## P0 — all closed
+
+| Item | Commit | What landed |
+|---|---|---|
+| P0-1a CRITICAL global entry identity | `81ef77e` | `IndexRegistry` mints a permanent `globalId`; the position map is keyed by it; entries carry origin/provenance |
+| P0-1b registry-owned dedup | `bc0f5a4` | Content reservation moved to `IndexRegistry`, keyed `(logic, caseId)`; survives migration |
+| P0-1c legacy removal | `f6b4a62` | `submitLegacyRemoval(globalEntryId, fee)`; deletion frees the reservation |
+| P0-2 duty escrow | `5778dc9` | `dutyBonded` bucket; all four bypasses closed |
+| P0-3 eligibility epochs | `e4bcf2e` | Weight changes take effect only at fixed-cadence epoch boundaries; `eligibilityAddVersion` deleted |
+| P0-4 funded `reward()` | `d1317c1` | Pulls its own funding, verifies the measured balance delta |
+| P0-5a obligation handles | `f363522` | `keccak256(authEpoch, logic, moderator, caseRef)`; cross-logic AND cross-case isolation |
+| P0-5b retirement lifecycle | `b5315e1` | `NONE \| OPEN_AND_SETTLE \| SETTLE_ONLY`, `canRevoke`, fee rejection |
+| P0-6 stalled-draw terminality | `49a9627` | `resolveStalledDraw`, permissionless and deadline-gated |
+| P0-7 batched VOID | `9e2f475` | `VOID_SETTLING` phase; `closeReveal` is O(1) |
+| P0-8 freeze bounds | `51af155` | Upper bound, composite bound, full-precision `mulDiv`, defensive clamp |
+
+Also landed, not in the original list but P0 in effect:
+
+| Item | Commit | Why |
+|---|---|---|
+| MAX_PANEL clamp | `31ba212` | Filed as a P1 note; it is a P0. `_validateParams` accepted panels whose draw cost 55,231,377 gas — 3x the Gnosis block limit — and H-11 pins the ruleset per case, so every case under one was unfinalizable |
+| Structural split | `cef84d4` | `Moderation` hit EIP-170 at P0-1c. Ruleset authoring moved to `RulesetGovernor` |
+| P1-2 batched seat draw | `27f7e2f` | Promoted ahead of P0-6/7/8: two findings had named it a precondition, and P0-7's per-seat state would have been shaped around a constraint it removes |
+
+## Deviations from the prescription, and why
+
+**1. P0-2 bypass 3 (partial commit) closed structurally, not by penalty.**
+The order says "partial commit stays possible, unfulfilled assignments still get
+penalised and released." Once a seat is only issued when its collateral can be
+escrowed, every assigned seat is backed and `commitVote` can always commit all of
+them — partial commit becomes unreachable through the draw. Adding a penalty path
+that can never fire would have been dead code asserting a property the escrow
+already guarantees. The `unbackedSeats` mechanism remains as defence in depth.
+Widen seats can still exceed backing; that is P1-1, still open, and
+`test_H07_overdrawn_moderator_commits_what_it_can_afford` was retargeted to say so
+rather than silently change meaning.
+
+**2. P0-3 rejected the checkpointed sortition tree the order prescribes.**
+"Each case pins an epoch root" requires a checkpointable sum tree. Measured
+(`aadeb48`): descent costs 2.29x the live tree and is flat in history depth, so it
+would have FIT the ceiling — an earlier estimate that it would not was wrong and
+is corrected in that commit. What rules it out is the P0-2 interaction: `drawPanel`
+shrinks weight and drops exhausted moderators mid-draw, and a pinned historical
+root cannot see either, so a checkpointed draw would re-seat a moderator past its
+escrowed capacity. Recovering that means in-memory exclusion during descent — i.e.
+rejection sampling — which changes the draw distribution and reintroduces the
+unbounded-attempts problem H-07 was built to avoid. Frozen-window epochs give the
+same property with no snapshot storage.
+
+**3. The structural split kept ruleset STORAGE in `Moderation`.**
+The M2.5 note names governance as the seam. Authoring moved; storage did not.
+`_cp()` reads the pinned ruleset on every phase transition, so moving `rulesets`
+behind a call would turn a hot-path `SLOAD` into a cross-contract call returning a
+nineteen-field struct — more bytes at the call sites than the split saved, and a
+great deal of gas. The governor validates and pushes the result into `Moderation`'s
+storage. One bound (`riskPerSeat <= stakeReg.riskPerSeat()`) is re-checked on
+arrival, because it is the only validation failure that is a solvency problem
+rather than a liveness one.
+
+**4. MAX_PANEL was raised, not just clamped — and the binding constraint moved
+twice.** 512 -> 48 (measured per-seat draw cost) -> 128 (after P1-2 and P0-7
+batched every panel-scaled loop). It is now bound by `MAX_TOTAL_DRAWS`, the
+aggregate-reachability check, and not by any single transaction.
+`ProtocolLimits.MAX_PANEL` leads with which loop sets the bound, because after two
+moves that is the fact worth knowing. `GasBounds` reads the constant directly, so
+raising it again without re-measuring fails the suite.
+
+## Residuals — known, deliberate, and open
+
+These are named because they were found and reasoned about, not because they were
+missed. None is a P0.
+
+- **Intra-case capacity depletion (P2).** An observer can consume a specific
+  moderator's pledged capacity by drawing it into another case first, changing
+  whether that address is *accepted* rather than whether it is *drawn*. Batching
+  the seat draw (P1-2) makes this reachable within one case's draw as well as
+  between cases. It costs the attacker a real fee and a random panel of its own,
+  and the seed and eligible set remain unmanipulable.
+- **The one-shot `claim(caseId)` requires batching at depth-3 / 86 seats.**
+  4,699,258 gas at milestone start, 8,019,298 now — past the 8M budget. The budget
+  was not raised; the test asserts the BATCHED path, which is the guarantee H-04
+  exists to provide. The convenience overload still works for smaller cases.
+- **P1-1: widen seats bypass escrow.** A widen can add seats to an
+  already-committed moderator; those seats are reserved against network capacity
+  but uncollateralized, untallied and unpenalized. P0-2 fixed the draw, not the
+  widen. This is the one place where a seat can still exist without backing.
+- **`forge build --sizes` exits non-zero on `ModerationHarness`** (test-only,
+  never deployed, pre-existing at `b09ce31`). A CI size gate must assert on the
+  deployed contracts, not on this command's exit code.
+
+## Still open (P1/P2, none blocking)
+
+P1-1 (widen escrow), P1-3 (validator runtime state space — partly done via the
+MAX_PANEL and freeze bounds), P1-4 (retry economics), P1-5 (quorum counts seats,
+a product decision), P1-6 (`balance >= liabilities`), P1-7 (widen tranche
+deadlines), P1-8 (one penalty reference time), and the P2 list.
+
+## Standing recommendation
+
+Unchanged in substance: no deployment with material funds, and the index is not
+presented as reliable safe-search certification, until an independent re-audit of
+the four-contract architecture passes **against commit `51af155`**. What has
+changed is that the P0 set is now closed and the trust-model documentation matches
+the code — `StakeRegistry`'s header should be re-read as part of that review, since
+its "what this does NOT guarantee" section was written before P0-5 landed.

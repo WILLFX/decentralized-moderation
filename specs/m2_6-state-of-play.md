@@ -1,102 +1,127 @@
-# M2.6 — state of play (session handoff)
+# M2.6 — state of play (milestone closed)
 
-Read this first, then `specs/m2_6-work-order.md`, which is the actual spec and is
-already merged from both audits with verified line references.
+**All P0 items are closed.** The re-audit should target commit **`51af155`**.
+
+Read `specs/m2_6-work-order.md` for the item-by-item spec; its **Resolution record**
+section at the end is the authoritative account of what landed, the four places the
+implementation deviates from the prescription and why, and the residuals left open
+deliberately.
 
 ## Where things stand
 
-**Branch:** `claude/determined-curie-nkf71s` (restarted from `main` @ `b09ce31`
-after PR #6 merged). **Baseline: `forge test` = 143 passing, 16 suites**, default
-profile (`via_ir = true`). Reproduce that number before touching anything.
+**Branch:** `claude/m2-6-work-order-5amy1q`, based on `main` @ `b09ce31`.
+**Suite:** `forge test` = **188 passing, 16 suites**, default profile (`via_ir = true`),
+green at every commit. Baseline was 143 / 16.
+
+(The peak during the milestone was 199 / 19. The difference is `test/spike/`, three
+throwaway suites that existed only to produce the gas numbers behind the
+checkpointed-tree rejection, the MAX_PANEL curve and the VOID curve. Those numbers
+are recorded in `contracts/GAS_BUDGETS.md` and `ProtocolLimits`; the code that
+produced them is deleted, because a measurement harness that outlives its decision
+becomes something a reader mistakes for a test of the product.)
 
 **Sizes** (EIP-170 limit 24,576):
 
 | contract | bytes | margin |
 |---|---|---|
-| Moderation | 23,795 | **781** |
-| StakeRegistry | 8,977 | 15,599 |
-| IndexRegistry | 4,287 | 20,289 |
+| Moderation | 23,296 | 1,280 |
+| StakeRegistry | 12,876 | 11,700 |
+| IndexRegistry | 5,511 | 19,065 |
+| RulesetGovernor | 4,210 | 20,366 |
 
-### Done
+`Moderation` ends the milestone **smaller than it started** (23,795 -> 23,296)
+despite eleven items landing in it, because the structural split gave back more
+than they cost.
 
-- **P0-4** (`d1317c1`) — `reward()` pulls its own funding and verifies the measured
-  balance delta. Closed the only path to minting withdrawable claims. `Moderation`
-  now approves-then-calls instead of pre-transferring.
-- **P0-1a** (`81ef77e`) — the Critical's corruption mechanism. `IndexRegistry` mints
-  a permanent `globalId`; the position map is keyed by it; entries carry
-  `originLogic` / `localCaseId` / `rulesVersion` / `guidelinesVersion` provenance.
-  `Moderation` records the minted ids (`Case.entryIds`, view `caseEntryIds`) and
-  deletes by them.
+## The architecture is now four contracts, not three
 
-### Next, in order
+`RulesetGovernor` was split out of `Moderation` when it hit EIP-170 mid-milestone.
+The seam is **authoring vs enforcement**: proposing/validating/timelocking a ruleset
+is cold and validation-heavy, enforcing one is on every hot path. Ruleset *storage*
+deliberately stayed in `Moderation` — `_cp()` reads it per phase transition.
 
-1. **P0-1b — registry-owned dedup.** Dedup still lives in `Moderation`
-   (`dedupOwnerPlusOne`), so a replacement logic starts with an empty map and will
-   accept content already live in the permanent index. Move the reservation into
-   `IndexRegistry`, keyed to the permanent entry/content generation.
-2. **P0-1c — end-to-end legacy removal.** `submitRemoval` resolves its target through
-   the *current* logic's `cases[targetCaseId]`, so a new logic has no public path to
-   adjudicate an entry written by a superseded one. The registry now *permits* it
-   (any authorized logic can delete any `globalId`); the game does not *expose* it.
-   Note the continuation audit's sharp catch: the M2.5 test that appeared to prove
-   cross-version removal was impersonating the logic address and calling the registry
-   directly. Do not repeat that — the test must go through `Moderation`'s public API.
-3. **P0-2** duty escrow (four bypasses — see the work order; one of them was created
-   by the M2.5 partial-commit fix).
-4. **P0-3** eligibility epochs, **P0-5** retirement lifecycle, **P0-6** bounded DRAW
-   terminality, **P0-7** batched VOID, **P0-8** freeze arithmetic bounds.
+A re-audit scoped to "the three-contract architecture" is scoped wrong; it is four.
 
-## Judgment calls made so far — don't silently reverse them
+## What changed, in one line each
+
+- **Identity** is minted by the permanent registry, not by replaceable logic.
+- **Dedup** lives in the registry too, so it survives a migration.
+- **Legacy entries** are adjudicable through a replacement logic.
+- **Duty reservations escrow real collateral**; all four bypasses are closed.
+- **Eligibility changes only at fixed epoch boundaries** — constant by construction
+  across any draw window, so there is nothing to grind and nothing to re-arm on.
+- **Obligations are keyed** `(authEpoch, logic, moderator, caseRef)`, closing both
+  cross-logic and cross-case discharge.
+- **Logic contracts retire** through `SETTLE_ONLY` before revocation, and revocation
+  is gated on an on-chain drain signal.
+- **Every panel-scaled loop is batched**: seat draw, settlement, VOID disposal.
+- **A draw that cannot complete now ends**, permissionlessly.
+- **The freeze arithmetic is bounded at both ends**, including the composite product
+  the old validator could not see.
+
+## Judgment calls — don't silently reverse them
+
+Beyond the four deviations recorded in the work order:
 
 - **`globalId` starts at 1**, so `0` is a safe "absent" sentinel everywhere.
-- **Any authorized logic may delete any entry by global id.** That is deliberate: it
-  is the registry-side prerequisite for P0-1c. The *authorization* to remove is
-  enforced by the game (an adjudicated removal case), not by the registry.
-- **`StakeRegistry.riskPerSeat` is immutable** and `Moderation._validateParams`
-  rejects any ruleset with a larger `riskPerSeat`. The two values are different roles
-  (duty-unit worth vs per-case lock) and must not be collapsed — collapsing them
-  breaks H-11 per-case pinning.
-- **`StakeRegistry`'s header documents what is NOT yet guaranteed** (unscoped
-  obligations during handover). Tighten that text as P0-5 lands; do not delete it.
-
-## Size is becoming a real constraint
-
-781 bytes of headroom. P0-1b/1c, escrow buckets, epochs and a retirement state
-machine all add code to `Moderation`. **Expect to hit the limit mid-milestone.** The
-size-reduction pass (recorded in `m2_5-port-work-order.md`) has moved from hygiene to
-likely-blocking; the natural seam is moving governance or settlement coordination
-into its own module. Measure with `forge build --sizes` after every item so you find
-out early rather than at the end.
+- **Any authorized logic may delete any entry by global id.** Deliberate: it is the
+  registry-side prerequisite for cross-version removal. The *authorization* to
+  remove is enforced by the game (an adjudicated removal case), not the registry.
+- **`StakeRegistry.riskPerSeat` is immutable** and a ruleset may not exceed it. The
+  two `riskPerSeat` values are different roles and must not be collapsed.
+- **The moderator struct is the authority for what may be seated; the sortition tree
+  is only the sampling distribution.** This is what makes P0-3's deferred tree
+  updates safe alongside P0-2's escrow, and it is load-bearing in `drawPanel`.
+- **`ProtocolLimits.MAX_PANEL` leads with which loop currently sets the bound.** It
+  has moved twice; the number alone is not the useful fact.
 
 ## Traps that have already cost time
 
 1. **`vm.prank` is consumed by an external call in the argument list.** Compute
    `mod.computeCommit(...)`, `getParams()`, `minFee()` into a local BEFORE pranking.
 2. **`vm.warp`/`vm.roll` are invisible to hoisted `block.timestamp`/`block.number`
-   under `via_ir`.** Always use `vm.getBlockTimestamp()` / `vm.getBlockNumber()`. The
-   failure is silent — more tests break than fail. The rule is documented in
-   `StackDeployer.sol` and the README.
-3. **Stack-too-deep** in `_settleInit` — cache `Params storage p = _cp(c)` once.
+   under `via_ir`.** Always use `vm.getBlockTimestamp()` / `vm.getBlockNumber()`.
+   The failure is silent.
+3. **Stack-too-deep** in the settle loop. It is at the IR limit — this is why P0-5's
+   `caseRef` is stamped on the Round rather than threaded through the helpers.
 4. **`indexed` is a reserved word**; the case flag is `isIndexed`.
 5. **A widen returns the round to `DRAW`** (fresh entropy). Drive loops must handle
-   `DRAW` mid-round; guards need ~24 iterations.
-6. **Fixtures can go quiet.** The invariant campaign silently stopped adjudicating
-   cases when the duty pledge became a draw precondition, and reported zero reverts
-   across 65,536 calls while doing nothing. There is now an anti-vacuity test — if you
-   change draw eligibility again, re-check that the campaign still settles cases.
+   `DRAW` mid-round.
+6. **Fixtures can go quiet.** The invariant campaign once silently stopped
+   adjudicating cases while reporting zero reverts. There is an anti-vacuity test.
+7. **New in M2.6:** weight staged in an epoch is not drawable until the next
+   boundary, so any fixture that stakes and then expects a draw must call
+   `_settleEpoch`. And a seed whose window would straddle a boundary is DEFERRED,
+   so rolling a fixed `SEED_LAG + 1` is no longer enough — use `_rollToSeed`.
 
-## The standing lesson
+## The standing lesson, updated
 
-Two milestones running, the same failure: **a safety property was written in a
-comment instead of enforced in code.** `reward()` said "caller must transfer first"
-and checked nothing. Every item must end in a contract-level invariant plus a test
-that fails on the pre-fix code. "Conservation still holds" is necessary, never
-sufficient.
+Two milestones running, the lesson was *a safety property written in a comment
+instead of enforced in code*. M2.6 adds a second one: **an aggregate is not an
+identity.** Every P0 here reduces to the same shape — a caseId that was local where
+it had to be global, a dedup map that died with its contract, a collateral pool that
+could not say which case it backed, a version counter standing in for an epoch.
+Conservation held throughout all of them, which is exactly why they were invisible.
+Conservation is necessary and never sufficient.
 
-## Standing recommendation — unchanged
+Two bugs in this milestone were found by reading rather than by a failing test — the
+cross-case escrow drain (written in P0-2, caught in P0-5) and the commit path
+measuring the wrong bucket after the escrow moved. Both were invisible to the suite
+because the fixtures were too generous to reach them.
+
+## Standing recommendation
 
 No deployment with material funds, and the index is not presented as reliable
-safe-search certification, until P0 closes and an independent re-audit of the
-three-contract architecture passes against a named commit. The last re-audit attempt
-reviewed pre-M2.5 code and produced a stale replay; point the next one at a specific
-commit and tell it what has already landed.
+safe-search certification, until an independent re-audit of the **four-contract**
+architecture passes against **`51af155`**.
+
+Point the re-auditor at:
+1. This file and the work order's Resolution record — the deviations especially.
+2. `contracts/GAS_BUDGETS.md` — every bound is measured, and it records which loop
+   sets each one.
+3. `StakeRegistry`'s header "what this does NOT yet guarantee" section, which was
+   written before P0-5 and should be re-read now that obligation scoping has landed.
+
+The open P1/P2 items are listed in the work order. **P1-1 (widen seats bypass
+escrow) is the most substantive**: it is the one remaining place a seat can exist
+without backing.

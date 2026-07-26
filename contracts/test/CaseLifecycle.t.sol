@@ -521,6 +521,67 @@ contract CaseLifecycleTest is ModerationTestBase {
         _assertConservation();
     }
 
+    /// M2.6-P0-6b. The same property as the test above, on the path P0-6 did not
+    /// reach.
+    ///
+    /// `resolveStalledDraw` at depth 0 VOIDs, and `_voidStep` checks
+    /// `c.drawAbandoned`. At depth > 0 it calls `_failAppealRound` instead — the
+    /// prior outcome stands — so the case FINALIZES and drains through
+    /// `_settleStep`, which did not check it. Moderators seated in an appeal round
+    /// whose draw was abandoned were frozen for missing a commit window that never
+    /// opened.
+    function test_abandoned_appeal_draw_does_not_penalise_on_the_settle_path() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+        _appeal(caseId, mods[1]); // depth 1 opens, seeking 11 seats
+        assertEq(_depth(caseId), 1, "an appeal round is open");
+
+        // Squeeze pledged capacity so the depth-1 draw comes back SHORT and the
+        // round stays in DRAW: `realizeSeats` returns when a batch seats some but
+        // not all of the target. Everyone keeps the capacity their depth-0 seats
+        // already hold (P0-2 refuses to un-pledge that), and two moderators keep a
+        // little spare — so a few seats are drawn and the rest never are.
+        for (uint256 i = 0; i < mods.length; i++) {
+            (, uint256 reserved,) = stakeReg.dutyOf(mods[i]);
+            vm.prank(mods[i]);
+            stakeReg.setDutyUnits(i < 2 ? reserved + 2 : reserved);
+        }
+        _settleEpoch(stakeReg);
+
+        // Crossing the epoch boundary above invalidated the seed armed with the
+        // appeal, so the first pokes only re-arm it. Poke until seats land, then
+        // stop: the batch that seats some but not all of the target leaves the
+        // round in DRAW, which is the state being tested.
+        uint256 tries;
+        while (mod.__seatCount(caseId, 1) == 0 && _phase(caseId) == Moderation.Phase.DRAW) {
+            _rollToSeed(caseId);
+            mod.realizeSeats(caseId);
+            assertLt(++tries, 8, "the depth-1 draw seats somebody");
+        }
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "still short of the target");
+        (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 1);
+        assertGt(shCount, 0, "but moderators WERE seated in it");
+
+        // Nobody pokes again; the deadline passes and the appeal round is abandoned.
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+        mod.resolveStalledDraw(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.FINALIZED), "prior outcome stands");
+
+        while (_phase(caseId) != Moderation.Phase.SETTLED) mod.claim(caseId);
+
+        // Round 0 was unanimous and coherent with the surviving outcome, so no
+        // participant anywhere in this case deserves a freeze.
+        for (uint256 i = 0; i < mods.length; i++) {
+            (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(mods[i]);
+            assertEq(frozen, 0, "seated in an abandoned appeal draw, never asked to commit");
+            (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(mods[i]);
+            assertEq(reserved, 0, "duty capacity returned");
+            assertEq(bonded, 0, "and so did the escrow");
+        }
+        _assertConservation();
+    }
+
     // --- M2.6-P0-3b: the epoch drain must not roll back its own work ----------
 
     /// An epoch that staged more weight changes than one drain batch covers used

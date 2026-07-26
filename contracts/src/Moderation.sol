@@ -1098,6 +1098,21 @@ contract Moderation is ReentrancyGuard {
         uint256 steps;
         while (round < nRounds) {
             Round storage r = c.rounds[round];
+            // M2.6-P0-6b: the LAST round is the one whose draw was abandoned, and
+            // it never opened a COMMIT window — so its seated moderators had
+            // nothing to fail to do. `_voidStep` has applied this since P0-6, but
+            // that path is only reached at depth 0. An abandoned appeal round goes
+            // to `_failAppealRound` -> FINALIZED -> here instead, and here penalised
+            // them for missing a window that never existed.
+            //
+            // Round-level, exactly as `_voidStep` is. A round that was abandoned
+            // AFTER a widen re-opened its draw also contains a first tranche that
+            // did have a window and did no-show; they are released too. That is the
+            // conservative direction — never penalise someone who was not asked —
+            // and separating the tranches would need per-seat window provenance,
+            // which is not what P0-6 bought. Recorded as a known imprecision in the
+            // work order rather than left implicit.
+            bool abandoned = c.drawAbandoned && round + 1 == nRounds;
             uint256 nsh = r.seatHolders.length;
             while (idx < nsh) {
                 if (steps >= maxSteps) {
@@ -1118,7 +1133,7 @@ contract Moderation is ReentrancyGuard {
                 // worth of stake. This is the penalty that makes "dominate the
                 // appeal panel and simply refuse to commit" (H-10) cost something.
                 // Capacity and escrow settle in the same call either way (P0-2).
-                _settleDuty(c, r.caseRef, a, r.seats[a], !r.committed[a] || r.unbackedSeats[a] > 0);
+                _settleDuty(c, r.caseRef, a, r.seats[a], !abandoned && (!r.committed[a] || r.unbackedSeats[a] > 0));
             }
             round++;
             idx = 0;

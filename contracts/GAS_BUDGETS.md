@@ -50,6 +50,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **P0-3** (eligibility epochs) | **21,908 B** | **2,668 B** | 11,142 B | 5,288 B |
 | **P0-5a** (obligation handles) | **22,006 B** | **2,570 B** | 12,326 B | 5,288 B |
 | **P0-5b** (retirement lifecycle) | **22,435 B** | **2,141 B** | 12,876 B | 5,511 B |
+| **P1-2** (batched seat draw) | **22,569 B** | **2,007 B** | 12,876 B | 5,511 B |
 
 (The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 
@@ -108,6 +109,40 @@ did.
 
 Same root cause as MAX_PANEL's lost margin: three items each added a per-seat or
 per-obligation storage write. Both point at the same fix (P1-2).
+
+### P1-2: the seat draw is batched, and the binding constraint moved
+
+`realizeSeats` attempted a whole commit target in one transaction, so `MAX_PANEL`
+was nothing more than the block limit divided by the per-seat cost — and that cost
+rose three times in M2.6 (P0-2 escrow, P0-3 staged weight, P0-5 obligation handle),
+taking a cap-sized panel from 74% to 90% of the ceiling. Two separate findings had
+already named batching as the precondition; it was done before P0-6/7/8 so those
+would not be shaped around a constraint it removes.
+
+Same template as batched settlement: bounded steps behind a cursor. `seatDrawCount`
+IS the cursor — it counts every attempt the registry has made for the round, so
+successive batches consume disjoint segments of one deterministic sequence.
+
+| | before | after |
+|---|---|---|
+| unit that must fit a transaction | whole panel, 7,239,700 (90%) | one batch of 24, **3,690,617 (46%)** |
+
+The 80% margin assertion is restored, against the batch.
+
+**What binds `MAX_PANEL` now is `_void`, so it has NOT been raised.** `_void` still
+loops the whole `seatHolders` array with no cursor, and runs INSIDE `closeReveal`
+— exceeding the limit reverts the transition and strands the case in an expired
+REVEAL. Per-holder disposal is ~140,000 gas, flat:
+
+| holders | gas |
+|---|---|
+| 24 | 3,515,321 |
+| 48 | 6,761,469 |
+| 96 | 13,253,772 |
+
+Break-even ~57 holders; 48 sits at 85%. Raising the cap now would recreate the
+unfinalizable-case class on the VOID path instead of the draw path. **Raising it is
+gated on P0-7**, after which no unbatched loop scaling with panel size remains.
 
 ### Test-code rule this forces
 

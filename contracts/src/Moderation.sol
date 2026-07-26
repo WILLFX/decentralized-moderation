@@ -41,6 +41,12 @@ contract Moderation is ReentrancyGuard {
     /// permissionless poke to realize it inside the same eligibility epoch. Beyond
     /// this the window may be abandoned and re-armed into a later epoch.
     uint256 internal constant REALIZE_SLACK = 64;
+    /// M2.6-P1-2: seats drawn per `realizeSeats` call. `realizeSeats` used to
+    /// attempt a whole commit target in one transaction, which made the panel-size
+    /// cap nothing more than the block limit divided by the per-seat cost — and
+    /// that cost rose three times in M2.6 (escrow, staged weight, obligation
+    /// handle), taking a cap-sized panel to 90% of the ceiling.
+    uint256 internal constant DRAW_SEATS_PER_BATCH = 24;
     // H-11: the immutable protocol caps live in `ProtocolLimits` (M2.6), shared
     // with `RulesetGovernor` — the contract that validates a ruleset and the
     // contract that enforces it must read the same numbers.
@@ -345,6 +351,8 @@ contract Moderation is ReentrancyGuard {
 
     event CaseSubmitted(uint256 indexed caseId, Kind kind, address indexed submitter, uint256 fee);
     event RoundOpened(uint256 indexed caseId, uint256 indexed depth, uint256 nSeats, uint256 seatSnapshotBlock);
+    /// M2.6-P1-2: a seat-draw batch landed but the panel is not full yet.
+    event SeatsProgressed(uint256 indexed caseId, uint256 indexed depth, uint256 seated, uint256 remaining);
     event SeedRearmed(uint256 indexed caseId, uint256 indexed depth, bool outcomeSeed, uint256 newSnapshotBlock);
     event SeatsDrawn(uint256 indexed caseId, uint256 indexed depth, uint256 nSeats);
     event CommitOpened(uint256 indexed caseId, uint256 indexed depth, uint256 deadline);
@@ -594,6 +602,38 @@ contract Moderation is ReentrancyGuard {
         // `releaseDuty` all grew the drawable set and never bumped it). Eligibility
         // is now constant across the window by construction, so there is no change
         // that could occur for this branch to detect.
+        // M2.6-P1-2: the draw is now multi-transaction, so be explicit about what
+        // a later batch may and may not depend on.
+        //
+        // PINNED for the whole batch group: `seatSnapshotBlock` (the entropy
+        // source), `epochAtArm` (the eligible set), and `pendingDraw` (the target
+        // fixed when the round opened). The seed is recomputed from those pinned
+        // inputs each batch and is therefore identical across them; batches differ
+        // only in `seatDrawCount`, the cursor.
+        //
+        // A later batch READS the live moderator struct for capacity and escrow —
+        // that is required by P0-2, where the struct is the authority for what may
+        // be seated — and the sortition tree, which P0-3 holds constant for the
+        // whole epoch. It does NOT read a re-derived seed, a re-armed block, or a
+        // changed eligible set.
+        //
+        // So observing partial seating buys nothing: the remainder is already
+        // determined by (pinned seed, cursor) over a tree that cannot move, and
+        // every weight change an observer might make is staged to the next epoch.
+        // The one thing an observer CAN still do is consume a specific moderator's
+        // pledged capacity by drawing it into another case first, which changes
+        // whether that address is *accepted* rather than whether it is *drawn*.
+        // That is the pre-existing capacity-depletion property (work order P2),
+        // now reachable within one case's draw as well as between cases; it costs
+        // the attacker a real fee and a random panel of its own.
+        //
+        // Re-arm when the blockhash has aged out of the 256-block window (D4) or
+        // the arm epoch has passed. Seats already drawn KEEP their seats and their
+        // escrow, and only the remainder re-arms: its new seed's entropy is not
+        // public at the moment it is armed, so the H-05 property holds for that
+        // group too. Continuing a half-drawn panel on a stale seed across an epoch
+        // boundary is what would break it — that is precisely the case this
+        // branch refuses.
         if (bh == 0 || stakeReg.currentEpoch() != r.epochAtArm) {
             _armSeed(c, r);
             emit SeedRearmed(caseId, c.depth, false, r.seatSnapshotBlock);
@@ -604,9 +644,29 @@ contract Moderation is ReentrancyGuard {
         // H-06: domain-separate the raw blockhash so two cases snapshotting the
         // same block (or the same case at different depths) never draw identical
         // panels. The purpose tag keeps seat vs outcome entropy independent.
-        // The offset makes each widen's draw disjoint from earlier ones.
+        // Recomputed identically each batch from pinned inputs.
         r.seatSeed = _domainSeed(caseId, c.depth, SEED_SEATS, bh);
-        _drawSeats(r, r.pendingDraw, r.seatSeed, r.seatDrawCount);
+
+        // M2.6-P1-2: draw at most DRAW_SEATS_PER_BATCH seats per call, on the
+        // batched-settlement template (bounded steps + a cursor). `seatDrawCount`
+        // IS the cursor: it counts every draw attempt the registry has performed
+        // for this round, so successive batches consume disjoint segments of one
+        // deterministic sequence and never re-draw the same offset.
+        uint256 want = r.pendingDraw;
+        uint256 take = want > DRAW_SEATS_PER_BATCH ? DRAW_SEATS_PER_BATCH : want;
+        uint256 before = r.nSeats;
+        _drawSeats(r, take, r.seatSeed, r.seatDrawCount);
+        uint256 seated = r.nSeats - before;
+        r.pendingDraw = want - seated;
+
+        // A batch that seated nobody means pledged capacity is exhausted for this
+        // epoch — it cannot grow again inside one (P0-3 stages every increase to
+        // the next boundary), so continuing would only burn attempts. Seat the
+        // short panel and let the widen path do its job.
+        if (r.pendingDraw != 0 && seated != 0) {
+            emit SeatsProgressed(caseId, c.depth, r.nSeats, r.pendingDraw);
+            return;
+        }
         r.pendingDraw = 0;
 
         c.phase = Phase.COMMIT;

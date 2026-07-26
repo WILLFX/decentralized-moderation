@@ -23,46 +23,35 @@ library ProtocolLimits {
     /// Per-depth commit target. **Set from measurement, not from a round number.**
     ///
     /// This was 512, which meant `_validateParams` would accept a ruleset whose
-    /// `realizeSeats` cannot fit in a block. H-11 pins a ruleset per case at
-    /// submit, so every case opened under such a ruleset would be permanently
-    /// unfinalizable with no path forward — no attacker required, just a
-    /// plausible parameter choice by governance.
+    /// seats could not be drawn in a block. H-11 pins a ruleset per case at
+    /// submit, so every case opened under one would be permanently unfinalizable
+    /// with no path forward — no attacker required, just a plausible parameter
+    /// choice by governance.
     ///
-    /// A seat costs ~151,000 gas to draw, flat across panel size (measured over a
-    /// 1,000-moderator tree; `test/spike/PanelCurve.t.sol`). The cost is dominated
-    /// by per-seat STORAGE WRITES, not by tree descent, so it barely moves as the
-    /// moderator set grows — but it has risen three times in M2.6 as each item
-    /// added one:
+    /// **Since M2.6-P1-2 the seat draw is no longer what binds this.** `realizeSeats`
+    /// draws `DRAW_SEATS_PER_BATCH` seats per call behind a cursor, so the panel
+    /// can be any size the rest of the machinery supports and only a BATCH has to
+    /// fit — measured at 3,690,617 gas for 24 seats, 46% of the 8,000,000 ceiling.
+    /// Before batching, a 48-seat panel was a single 7,239,700-gas transaction at
+    /// 90% of it.
     ///
-    ///     after P0-2/P0-3 (escrow + staged weight)   ~123,000/seat
-    ///     after P0-5      (per-case obligation slot) ~151,000/seat
+    /// **What binds it now is `_void`, and that is why 48 has not been raised.**
+    /// `_void` still loops the entire `seatHolders` array with no cursor, and it
+    /// runs INSIDE `closeReveal` — so exceeding the limit reverts the transition
+    /// and strands the case in an expired REVEAL with no other exit. Per-holder
+    /// disposal measures ~140,000 gas, flat (`test/spike/VoidCurve.t.sol`):
     ///
-    /// Against the 8,000,000 single-transaction ceiling that puts the break-even
-    /// at ~53 seats. **48** is kept — a panel at the cap measures 7,239,700, which
-    /// still clears the ceiling, and the shipped default ruleset's deepest target
-    /// is 47.
+    ///     24 holders ->  3,515,321      96 holders -> 13,253,772
+    ///     48 holders ->  6,761,469
     ///
-    /// **The margin is gone, and that is the finding.** When this cap was set one
-    /// item ago it sat at 74% of the ceiling; P0-5's per-case obligation slot took
-    /// it to 90%. Lowering the cap to restore the margin would force the shipped
-    /// ruleset's 47-seat final panel down with it — a change to the appeal
-    /// ladder's statistics, which is a product decision and not a side effect a
-    /// storage-layout change should make. So the cap holds and the constraint
-    /// moves to what may be added next:
+    /// Break-even against the ceiling is ~57 holders; 48 sits at 85%. Raising the
+    /// cap now would recreate exactly the class of unfinalizable case this bound
+    /// exists to prevent, just on the VOID path instead of the draw path.
     ///
-    /// > **No further per-seat storage write may land before cursor-based seat
-    /// > drawing (work order P1-2).** One more slot per seat (~+24k) puts a
-    /// > 48-seat panel at ~8.4M — over the ceiling — and every accepted ruleset at
-    /// > the cap becomes unexecutable, with H-11 pinning it per case. P1-2 was the
-    /// > precondition for RAISING the cap; it is now the precondition for keeping
-    /// > it.
-    ///
-    /// **Raising this requires cursor-based seat drawing (work order P1-2) to land
-    /// first.** `realizeSeats` attempts a whole commit target in one transaction;
-    /// until that is batched, the cap IS the block limit divided by the per-seat
-    /// cost, and no larger value can be made safe by validation alone.
-    /// `GasBounds.test_max_panel_draw_fits_the_ceiling` asserts this bound rather
-    /// than assuming it.
+    /// > **Raising MAX_PANEL is now gated on batched VOID (work order P0-7), not
+    /// > on P1-2.** When `_void` gets the same phase-plus-cursor treatment as
+    /// > settlement and the draw, re-measure and raise this — at that point no
+    /// > single unbatched loop remains that scales with panel size.
     uint256 internal constant MAX_PANEL = 48;
     uint256 internal constant MAX_RULE_TOPICS = 16;
     uint256 internal constant MAX_ARRAY_LEN = 16;

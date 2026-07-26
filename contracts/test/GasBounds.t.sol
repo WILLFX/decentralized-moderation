@@ -379,21 +379,20 @@ contract GasBoundsTest is ModerationTestBase {
         emit log_named_uint("contributeAppealBond_gas", g - gasleft());
     }
 
-    /// M2.6: a panel at the VALIDATOR'S CAP must fit one transaction.
+    /// M2.6-P1-2: the unit that must fit a transaction is now the seat-draw
+    /// BATCH, not the whole panel.
     ///
-    /// `MAX_PANEL` bounds what `_validateParams` will accept per depth, and H-11
-    /// pins a ruleset per case at submit — so if a ruleset at the cap cannot have
-    /// its seats drawn in one block, every case opened under it is permanently
-    /// unfinalizable with no path forward. That makes this the assertion that the
-    /// cap is honest: it is measured here, not assumed in a comment.
+    /// `realizeSeats` used to attempt an entire commit target in one call, which
+    /// made `MAX_PANEL` nothing more than the block limit divided by the per-seat
+    /// cost — and that cost rose three times in M2.6, taking a cap-sized panel to
+    /// 90% of the ceiling. Batching decouples the two: the panel can be any size
+    /// the rest of the machinery supports, and only a batch has to fit.
     ///
-    /// Reads `ProtocolLimits.MAX_PANEL` directly so raising the constant without
-    /// re-measuring fails the suite.
-    function test_max_panel_draw_fits_the_ceiling() public {
+    /// Reads the batch size from the contract, so changing it without re-measuring
+    /// fails the suite.
+    function test_seat_draw_batch_fits_the_ceiling() public {
         MockBZZ b = new MockBZZ();
         (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
-        // Enough capacity that the cap is reachable: a short panel would make this
-        // pass by drawing fewer seats than the bound it claims to test.
         for (uint256 i = 0; i < 1000; i++) {
             address a = address(uint160(uint256(keccak256(abi.encode("capmod", i)))));
             b.mint(a, 1000 * XBZZ);
@@ -411,25 +410,37 @@ contract GasBoundsTest is ModerationTestBase {
         }
         _settleEpoch(sr);
 
+        uint256 batch = m.__drawBatchSize();
         uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
         m.__injectRound(caseId);
         uint256 g = gasleft();
-        m.__drawPanel(caseId, 0, L.MAX_PANEL, keccak256("cap"));
+        m.__drawPanel(caseId, 0, batch, keccak256("batch"));
         uint256 used = g - gasleft();
 
-        emit log_named_uint("max_panel", L.MAX_PANEL);
-        emit log_named_uint("max_panel_draw_gas", used);
-        assertEq(
-            m.__seatCount(caseId, 0), L.MAX_PANEL, "the full cap was actually seated, not a short panel"
-        );
-        assertLt(used, HARD_CEILING, "a panel at MAX_PANEL must fit one transaction");
-        // The margin assertion was 80% when the cap was set. P0-5's per-case
-        // obligation slot spent it — a cap-sized panel now measures ~7.24M, 90% of
-        // the ceiling. The bound is kept at 95% rather than relaxed to whatever
-        // passes, so it still fails before the real ceiling does and still forces
-        // a decision. See ProtocolLimits.MAX_PANEL: the next per-seat write must
-        // wait for cursor-based drawing (P1-2), because it would push this over.
-        assertLt(used, (HARD_CEILING * 95) / 100, "still short of the ceiling, but the margin is spent");
+        emit log_named_uint("draw_batch_seats", batch);
+        emit log_named_uint("draw_batch_gas", used);
+        assertEq(m.__seatCount(caseId, 0), batch, "a FULL batch was seated, not a short one");
+        assertLt(used, HARD_CEILING, "a seat-draw batch must fit one transaction");
+        // The 80% margin is restored: batching is what bought it back, and it is
+        // what keeps the next per-seat write from being blocked on a size cliff.
+        assertLt(used, (HARD_CEILING * 80) / 100, "with real margin, restored by batching");
+    }
+
+    /// A panel at the validator's cap completes in a bounded number of batches.
+    function test_max_panel_completes_in_bounded_batches() public {
+        uint256 caseId = _submit(mods[0]);
+        uint256 batches;
+        while (_phase(caseId) == Moderation.Phase.DRAW) {
+            _rollToSeed(caseId);
+            uint256 g = gasleft();
+            mod.realizeSeats(caseId);
+            uint256 used = g - gasleft();
+            batches++;
+            assertLt(used, HARD_CEILING, "every seat-draw batch fits");
+            assertLt(batches, 64, "the draw terminates");
+        }
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "panel complete");
+        emit log_named_uint("batches_for_default_panel", batches);
     }
 
     /// The seat-draw poke over a large tree (D9's 2M budget row): a full 47-seat

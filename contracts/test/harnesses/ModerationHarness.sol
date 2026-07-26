@@ -163,6 +163,12 @@ contract ModerationHarness is Moderation {
 
     /// Seats actually seated in a round — lets a gas bound assert it measured a
     /// FULL panel rather than passing cheaply on a short one.
+    /// The per-transaction seat-draw unit (M2.6-P1-2), so gas bounds assert
+    /// against the real batch size rather than a number copied into the test.
+    function __drawBatchSize() external pure returns (uint256) {
+        return DRAW_SEATS_PER_BATCH;
+    }
+
     function __seatCount(uint256 caseId, uint256 depth) external view returns (uint256) {
         return cases[caseId].rounds[depth].nSeats;
     }

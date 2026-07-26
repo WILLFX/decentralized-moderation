@@ -4,13 +4,21 @@
 The last code change is `51af155`; everything after it is documentation.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
-> that pass found **three blocking regressions in items marked closed** plus three
-> fixes that no test discriminated. They are fixed on top of the tag; see the
-> "Regressions found after the close" table in `specs/m2_6-work-order.md`. The tag
-> is deliberately **not moved** — it is the commit the audit ran against, and
-> moving it would invalidate that verification. The pointers in this file still
-> name it for that reason; a new tag is cut for the fixed state. Everything from
-> here down describes the state **at the tag** unless it says otherwise.
+> that pass found **four blocking regressions in items marked closed** plus three
+> fixes that no test discriminated. They are fixed on top of the tag in seven
+> commits, `a05343a..4864d80`; see the "Regressions found after the close" table in
+> `specs/m2_6-work-order.md`. The tag is deliberately **not moved** — it is the
+> commit the audit ran against, and moving it would invalidate that verification.
+> The pointers in this file still name it for that reason; a new tag is cut for the
+> fixed state. Everything from here down describes the state **at the tag** unless
+> it says otherwise.
+>
+> **The one thing to carry forward:** `Moderation` is at 24,107 bytes, 469 free,
+> up 811 across this batch. Two of the four known-open P1 items (K-1 keeper
+> per-batch payment, K-3 one settlement reference time) land in that contract and
+> do not fit. **A second structural split is a precondition for the P1 work**, not
+> an optimisation to reach for afterwards — the seam candidates are set out in the
+> work order's "Size position" section.
 
 Two notes on that pointer. First, why not the last code commit: the deployed
 bytecode is byte-identical between `51af155` and the close, which touches only
@@ -40,7 +48,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass): **199 passing, 16 suites**.
+**Suite now** (tag + the post-close regression pass): **200 passing, 16 suites**.
 
 (The peak during the milestone was 199 / 19. The difference is `test/spike/`, three
 throwaway suites that existed only to produce the gas numbers behind the
@@ -63,9 +71,11 @@ despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
 After the post-close regression pass: `Moderation` 24,107 (469 free),
-`StakeRegistry` 12,745, `IndexRegistry` 6,174, `RulesetGovernor` 4,459. The margin
-is thin again and it is the binding constraint on anything further in the game
-contract.
+`StakeRegistry` 12,448, `IndexRegistry` 6,174, `RulesetGovernor` 4,459.
+
+`Moderation` is up 811 bytes across the batch and the margin is now the binding
+constraint on anything further in the game contract — see the note at the top of
+this file, and the work order's "Size position" section for the seam candidates.
 
 ## The architecture is now four contracts, not three
 
@@ -92,6 +102,20 @@ A re-audit scoped to "the three-contract architecture" is scoped wrong; it is fo
 - **A draw that cannot complete now ends**, permissionlessly.
 - **The freeze arithmetic is bounded at both ends**, including the composite product
   the old validator could not see.
+
+Added by the post-close pass:
+
+- **Both registries gate revocation**, not just the stake side — a case's final step
+  writes to both, so one gate was no gate.
+- **The epoch drain commits.** `drawPanel` treats a settled epoch as a
+  precondition; `realizeSeats` drains and returns, so draws recover with no keeper.
+- **An abandoned draw releases without penalty on BOTH paths** out of
+  `resolveStalledDraw`, not only the depth-0 VOID.
+- **The privileged registry surface is now exactly**
+  `lock / release / freeze / reward / setTrack / drawPanel / settleDuty /
+  advanceEpoch`, plus the index registry's `openCase / closeCase / writeEntry /
+  deleteEntry / tryReserveContent / releaseContent`. `releaseDuty` and
+  `penalizeNoShow` are gone; every write to duty escrow names its case.
 
 ## Judgment calls — don't silently reverse them
 
@@ -153,6 +177,13 @@ And one about tests rather than code: **three fixes could be reverted with the
 suite green.** A fixture that cannot distinguish the old behaviour from the new is
 not coverage, however green it is — the H-09 fixture used one address holding one
 seat, which satisfies "count revealers" and "count seats" identically.
+
+And one about triage: **a selector nothing calls is still a selector.**
+`penalizeNoShow` was filed P1 because it had no production caller, then deleted as
+a P0 — it wrote pooled `dutyBonded` with no `caseRef`, which is the class P0-5a
+exists to make unrepresentable, and "no caller" is exactly the reasoning that
+failed for `settleDuty`'s double-release. Reachability by any authorized logic is
+the property; today's call graph is not.
 
 Two bugs in this milestone were found by reading rather than by a failing test — the
 cross-case escrow drain (written in P0-2, caught in P0-5) and the commit path

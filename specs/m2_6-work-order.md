@@ -537,13 +537,13 @@ the difference is `test/spike/`, deleted at close — throwaway harnesses whose 
 numbers are recorded in `GAS_BUDGETS.md` and `ProtocolLimits`. At the
 `m2.6-close` tag (`a05343a`): 188 tests, 16 suites, `Moderation` 23,296 B.
 
-**Post-close.** An independent verification pass against that tag found three
+**Post-close.** An independent verification pass against that tag found four
 blocking regressions in items this record marked closed, plus three fixes with no
 discriminating test coverage. They are recorded in their own section below and are
-fixed on top; the `m2.6-close` tag is deliberately NOT moved, because it is the
-commit the audit ran against and moving it would invalidate that verification.
-Current state: **199 tests, 16 suites**, green at every commit, `Moderation`
-24,107 B (469 free).
+fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
+deliberately NOT moved, because it is the commit the audit ran against and moving
+it would invalidate that verification. Current state: **200 tests, 16 suites**,
+green at every commit, `Moderation` 24,107 B (469 free — see "Size position").
 
 ## P0 — all closed
 
@@ -574,7 +574,10 @@ Also landed, not in the original list but P0 in effect:
 Independently verified against `m2.6-close` (`a05343a`) by a separate session —
 24 probe tests and 20 fix-reverts — and confirmed against the code before being
 worked. These are **not new scope**: each is a defect in an item this record
-already claimed closed, and each of the first three was a live blocker.
+already claimed closed, and four of them were live blockers.
+
+Seven commits, `a05343a..4864d80`. The suite went 188 -> 200 tests over the same
+16 suites, green at every commit.
 
 | Item | Commit | The regression, and what closed it |
 |---|---|---|
@@ -582,6 +585,7 @@ already claimed closed, and each of the first three was a live blocker.
 | P0-3's drain rolled back its own work | `bf003b3` | `drawPanel` drained `DRAIN_BUDGET` staged items and then reverted `EpochNotSettled` if that was not enough — unwinding the drain with the revert. Every draw redid the same first 64 items and discarded them again, so any epoch staging more than one budget halted **every draw in the protocol** until an external `advanceEpoch` call, whose progress survives only because it does not revert. Ordinary traffic reaches it: `_stageSeated` skips the dedupe flag by design, so one 48-seat panel plus normal joining passes 64 inside a 256-block epoch. Not closed by raising the budget — that moves the cliff. A settled epoch is now a precondition of `drawPanel`, which does no rollback-able work before checking it, and `realizeSeats` drains `EPOCH_DRAIN_STEPS = 128` and RETURNS, so repeated pokes recover with no keeper. |
 | P0-6 covered one of its two paths | `0dae983` | `resolveStalledDraw` at depth 0 VOIDs and `_voidStep` checks `c.drawAbandoned`. At depth > 0 it calls `_failAppealRound`, so the case FINALIZES and drains through `_settleStep` — which did not check it, and froze one seat's stake per moderator seated in an appeal round whose draw was abandoned, for missing a commit window that never opened. |
 | Three fixes had no discriminating test | `a02573d` | `_fullQuorum`'s independent-revealer check (the fixture used one address with one seat, so `revealedCount` and `revealedSeats` were indistinguishable), `_armSeed` on the widen path (only `_openRound`'s call was covered), and `unbackedSeats` — which P0-2 **did** make unreachable, so it is deleted rather than kept, with the reachability argument and an invariant test in its place. Also fixes `_supersafe`, which read the suite-level registry rather than the one the passed-in harness writes to, so both H-09 `length == 0` assertions held vacuously. |
+| P0-5a left one unscoped selector | `4864d80` | `StakeRegistry.penalizeNoShow` was superseded by `settleDuty` in P0-2 and had had no caller since — but it kept a live selector, callable by any authorized logic, that wrote the POOLED `m.dutyBonded` with no `caseRef`. `dutyBonded` pools escrow across every case a moderator is seated in, so it could freeze collateral posted for a DIFFERENT case's outstanding seat: the exact class P0-5a made unrepresentable everywhere else. Filed as a P1 on the strength of "no production caller" — which is precisely the argument that failed for `settleDuty`'s own double-release, and the reason obligations are keyed per case rather than per logic. **Deleted**, not given a `caseRef`: a retrofitted version would be dead code with a live selector, the same hazard in a shape that reads as safe. `NoShowPenalized` survives, emitted by `settleDuty`, so no indexed event signature changes. |
 | Governor governance transfer | `017ae9e` | One-step and accepting `address(0)`, on the contract holding the whole ruleset authority — and `Moderation.governor` is immutable, so a mistyped or zero nominee could not be recovered from. Now propose / accept / cancel with a zero check, matching both registries. |
 
 Two documentation defects were fixed alongside: P1-1's description (below) and the
@@ -683,11 +687,65 @@ being fixed in this pass.
 | K-1 | **Keeper per-batch payment.** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. It is an efficiency and latency problem, not a stuck-funds one. A pro-rata bounty split across batches is the obvious fix and is a pure economics change. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
-| K-4 | **`penalizeNoShow` is live on the registry but unreachable from `Moderation`.** Superseded by `settleDuty` (P0-2/P0-5), which is atomic and obligation-scoped. It still reduces the **pooled** `m.dutyBonded` without scoping, so an authorized logic that called it could reach another case's escrow — the exact class P0-5 closed elsewhere. | **P1** | No production caller; only the registry's own tests reach it. It should be deleted or given a `caseRef` in the next registry change. Listed rather than removed now because the registry is the permanent contract and removing a public function is a deployed-ABI change. |
 
-**Closed in this pass rather than carried:** the governor's one-step
-`transferGovernance` accepting `address(0)` — fixed in `M2.6-L-2` as propose /
-accept / cancel with a zero check, matching both registries.
+K-1 and K-3 both land in `Moderation`, and it does not have room for them —
+see "Size position" below. A second structural split is a precondition for that
+work, not an optimisation to consider afterwards.
+
+**Closed in this pass rather than carried:**
+
+- The governor's one-step `transferGovernance` accepting `address(0)` — fixed in
+  `M2.6-L-2` as propose / accept / cancel with a zero check, matching both
+  registries.
+- **K-4, `penalizeNoShow`, reclassified from P1 to P0 and deleted** (`4864d80`).
+  It was filed P1 on the strength of "no production caller". That is the argument
+  that failed for `settleDuty`'s own double-release — an unscoped write to pooled
+  `dutyBonded`, reachable by any authorized logic through a live selector, is the
+  class P0-5a exists to make unrepresentable, and a selector nothing calls today is
+  still a selector. Deleted rather than scoped, because a `caseRef` version would
+  be dead code with a live selector.
+
+## Size position — read this before planning the P1 work
+
+`Moderation` is at **24,107 bytes, 469 free** against the EIP-170 limit of 24,576.
+It gained **811 bytes across this batch** (23,296 at the `m2.6-close` tag).
+
+That margin is the binding constraint on everything above, and it is not enough:
+
+- **K-1 (keeper per-batch payment)** touches `_settleStep`, `_settleFinish`,
+  `_voidStep`/`_voidFinish` and `realizeSeats` — every batched path — and needs
+  per-batch accrual state plus a payout split. It lands in `Moderation`.
+- **K-3 (one settlement reference time)** needs a `settleStartedAt` in
+  `SettleState` and every `until` derived from it, across `_disposeSeat`,
+  `_freezeSlice` and `_voidStep`. Also `Moderation`.
+
+Neither fits in 469 bytes, and byte-scrounging has already been done twice this
+milestone (the second time it bought 233 B, at which point "attempt first and see"
+stopped being a test). **A second structural split is a precondition for the P1
+work, not a fallback.** The plan is to take it deliberately rather than discover
+the cliff mid-item.
+
+The seam is not yet chosen. The candidates, in the order they look plausible:
+
+1. **Settlement** (`_settleInit` / `_settleStep` / `_disposeSeat` / `_settleFinish`
+   / `claimAppealPayout`) into a settlement module. It is the largest cold-ish
+   blob left, it is where both K-1 and K-3 land, and it already communicates
+   through `SettleState` — a defined interface rather than an arbitrary cut.
+   Against it: it touches nearly all of `Case`, so the storage would have to stay
+   in `Moderation` and be read across the boundary, which is what ruled out moving
+   ruleset storage in the first split.
+2. **Appeals** (`contributeAppealBond` / `appealFloor` / `claimAppealPayout` /
+   `_failAppealRound`). Smaller and more self-contained, with money that is
+   already tracked separately (`totalPendingBond`, `totalPendingPayout`). Buys
+   less.
+3. **Submission entry points** (`submit` / `submitRemoval` / `submitLegacyRemoval`
+   / `_openRemoval`). Cold, and the validation is bulky — but they write case
+   storage on creation, so the same cross-boundary problem applies in its worst
+   form.
+
+Whichever is taken, the rule the first split established holds: `Moderation` is
+the EIP-170-bound side, so wide return types and cold validation belong elsewhere,
+and hot-path storage stays put.
 
 ## Still open (P1/P2, none blocking)
 
@@ -696,8 +754,11 @@ P1-1 (**re-scoped**: inert widen seats, and the reopened commit window — NOT
 state space — partly done via the MAX_PANEL and freeze bounds), P1-4 (retry
 economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadlines
 — shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference
-time, = K-3), plus K-1 (keeper per-batch payment) and K-4 (`penalizeNoShow`), and
-the P2 list.
+time, = K-3), plus K-1 (keeper per-batch payment), and the P2 list.
+
+These go to the external reviewer as known-open rather than being worked in
+another internal round. K-4 was the exception and is closed, because it was a P0
+misfiled as a P1.
 
 **P1-5 (quorum counts seats) is CLOSED.** It was already implemented — H-09's
 `_fullQuorum` counts independent revealers, not seats — but the only test used one

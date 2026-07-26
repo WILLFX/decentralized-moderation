@@ -10,7 +10,7 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **199 passing tests** (188 at the tag) including a
+> registries — with **200 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a differential test against an independent
 > Python reference, and a live logic-migration test.
 >
@@ -51,6 +51,11 @@ Conservation therefore spans two balances:
     balanceOf(Moderation)    == openPotsTotal + totalPendingBond
                                 + totalPendingPayout + totalSettling
     balanceOf(StakeRegistry) == free + committed + frozen + dutyBonded
+
+`Moderation` is at **24,107 bytes, 469 free** against EIP-170. That margin — not
+gas — is the binding constraint on further work in the game contract; the two
+open P1 items that land in it do not fit, and a second structural split is the
+planned precondition. See `specs/m2_6-work-order.md`, "Size position".
 
 ## Tests
 

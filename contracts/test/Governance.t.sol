@@ -250,7 +250,10 @@ contract GovernanceTest is ModerationTestBase {
 
     function test_transfer_governance() public {
         address newGov = makeAddr("newGov");
-        governor.transferGovernance(newGov);
+        governor.proposeGovernance(newGov);
+        assertEq(governor.governance(), address(this), "not transferred until accepted");
+        vm.prank(newGov);
+        governor.acceptGovernance();
         assertEq(governor.governance(), newGov);
 
         // Old governance (this contract) can no longer propose.
@@ -263,6 +266,37 @@ contract GovernanceTest is ModerationTestBase {
         // New governance can.
         vm.prank(newGov);
         governor.proposeGuidelines(keccak256("x"));
+    }
+
+    /// The governor holds the protocol's whole ruleset authority, and
+    /// `Moderation.governor` is immutable — so a governor handed to an address
+    /// nobody controls cannot be replaced, and ruleset and guidelines governance is
+    /// bricked permanently. The one-step `transferGovernance` it was split out of
+    /// `Moderation` with accepted any address, `address(0)` included, and took
+    /// effect immediately. Both registries have had propose/accept since the
+    /// L-series; this brings the governor in line.
+    function test_governance_transfer_is_two_step_and_rejects_zero() public {
+        vm.expectRevert(RulesetGovernor.ZeroAddress.selector);
+        governor.proposeGovernance(address(0));
+        assertEq(governor.governance(), address(this), "still ours");
+
+        // A nomination alone changes nothing, and only the nominee can claim it.
+        address newGov = makeAddr("newGov2");
+        governor.proposeGovernance(newGov);
+        assertEq(governor.pendingGovernance(), newGov);
+        assertEq(governor.governance(), address(this), "a mistyped nominee is still recoverable");
+
+        vm.prank(makeAddr("impostor"));
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        governor.acceptGovernance();
+
+        // Recoverable right up until it is accepted.
+        governor.cancelGovernanceTransfer();
+        assertEq(governor.pendingGovernance(), address(0));
+        vm.prank(newGov);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        governor.acceptGovernance();
+        assertEq(governor.governance(), address(this), "authority never left");
     }
 
     /// M2.6: `MAX_PANEL` is a solvency-of-liveness bound, not a style choice.

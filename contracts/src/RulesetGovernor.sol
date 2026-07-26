@@ -32,7 +32,8 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 ///
 /// `Moderation.governor` is immutable, so this contract's authority is exactly
 /// what the `governance` address held before the split — no more. The multisig
-/// still rotates, through `transferGovernance` here.
+/// still rotates, through `proposeGovernance`/`acceptGovernance` here — two-step
+/// and zero-checked, matching both registries.
 ///
 /// `Moderation.applyRuleset` re-checks the one bound whose violation is a
 /// solvency failure rather than a liveness one (`riskPerSeat` must not exceed the
@@ -41,6 +42,8 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 /// that cannot cover them.
 contract RulesetGovernor {
     address public governance; // multisig
+    /// Nominated successor, pending its own acceptance (L-series two-step).
+    address public pendingGovernance;
     uint256 public immutable timelockDelay;
 
     /// Bound once, after `Moderation` is deployed pointing at this governor.
@@ -70,6 +73,7 @@ contract RulesetGovernor {
     event ParametersCancelled();
     event GuidelinesProposed(bytes32 hash, uint256 eta);
     event GuidelinesExecuted(uint256 indexed version, bytes32 hash);
+    event GovernanceTransferProposed(address indexed next);
     event GovernanceTransferred(address indexed newGovernance);
     event ModerationBound(address indexed moderation);
 
@@ -159,9 +163,34 @@ contract RulesetGovernor {
         delete pendingGuidelines;
     }
 
-    function transferGovernance(address next) external onlyGovernance {
-        governance = next;
-        emit GovernanceTransferred(next);
+    /// @notice Nominate the next governance address. Two-step and zero-checked, to
+    ///         match both registries.
+    /// @dev The old one-step `transferGovernance` accepted any address, including
+    ///      `address(0)`, and took effect immediately. This contract holds the
+    ///      protocol's entire ruleset authority — a typo handed it to an address
+    ///      nobody controls, and `address(0)` bricked ruleset and guidelines
+    ///      governance permanently, with no recovery path because `Moderation.governor`
+    ///      is immutable and cannot be repointed at a replacement governor.
+    ///      `StakeRegistry` and `IndexRegistry` have had propose/accept since the
+    ///      L-series; the governor was left behind when it was split out of
+    ///      `Moderation` in M2.6, which is the one place it mattered most.
+    function proposeGovernance(address next) external onlyGovernance {
+        if (next == address(0)) revert ZeroAddress();
+        pendingGovernance = next;
+        emit GovernanceTransferProposed(next);
+    }
+
+    /// @notice Claim nominated governance. Only the nominee can, which is what
+    ///         proves the address is controlled before it holds the authority.
+    function acceptGovernance() external {
+        if (msg.sender != pendingGovernance) revert NotGovernance();
+        governance = msg.sender;
+        pendingGovernance = address(0);
+        emit GovernanceTransferred(msg.sender);
+    }
+
+    function cancelGovernanceTransfer() external onlyGovernance {
+        pendingGovernance = address(0);
     }
 
     // --- validation ----------------------------------------------------------

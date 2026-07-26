@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Moderation} from "./Moderation.sol";
 import {ProtocolLimits as L} from "./lib/ProtocolLimits.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 
 /// @title RulesetGovernor
 /// @notice Governance AUTHORING for the moderation game: proposing, validating
@@ -193,7 +194,11 @@ contract RulesetGovernor {
         if (p.riskPerSeat > moderation.stakeReg().riskPerSeat()) revert RiskPerSeatExceedsDutyUnit();
         if (p.minReveals == 0) revert BadParams();
         if (p.bondMultiplier == 0 || p.bondMultiplier > L.MAX_BOND_MULT) revert BadParams();
-        if (p.freezeCap < L.WAD) revert BadParams(); // power multiplier >= 1
+        // M2.6-P0-8: both ends. The lower bound alone let an accepted ruleset
+        // overflow `FreezeMath` inside `_settleInit`, which runs before the case
+        // reaches a recoverable state — every settlement attempt would revert,
+        // permanently, and H-11 pins the ruleset per case.
+        if (p.freezeCap < L.WAD || p.freezeCap > L.MAX_FREEZE_MULTIPLIER) revert BadParams();
         if (p.trackDecay > L.WAD) revert BadParams(); // decay is a fraction
         if (p.claimBountyFrac + p.bonusFrac > L.WAD) revert BadParams(); // distributable stays >= 0
 
@@ -207,6 +212,10 @@ contract RulesetGovernor {
         if (p.failedRevealFreeze > L.MAX_FREEZE || p.freezeBase == 0 || p.freezeBase > L.MAX_FREEZE) {
             revert BadParams();
         }
+        // M2.6-P0-8: and the AMPLIFIED result, which is what settlement actually
+        // computes. `MAX_FREEZE` bounded the base and the failed-reveal freeze but
+        // never `freezeBase * freezeCap`.
+        if (FixedPointMathLib.fullMulDiv(p.freezeBase, p.freezeCap, L.WAD) > L.MAX_FREEZE) revert BadParams();
         // minReveals must be reachable within the fully-widened depth-0 panel.
         if (p.minReveals > commitTargets[0] * (1 + p.maxWiden)) revert BadParams();
 

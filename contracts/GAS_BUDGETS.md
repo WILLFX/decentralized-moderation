@@ -53,6 +53,7 @@ is spent. This is the binding constraint of the milestone, not a footnote.
 | **P1-2** (batched seat draw) | **22,569 B** | **2,007 B** | 12,876 B | 5,511 B |
 | **P0-7** (batched VOID) | **22,748 B** | **1,828 B** | 12,876 B | 5,511 B |
 | **P0-6** (stalled-draw terminality) | **23,132 B** | **1,444 B** | 12,876 B | 5,511 B |
+| **P0-8** (freeze bounds) | **23,296 B** | **1,280 B** | 12,876 B | 5,511 B |
 
 (The split also adds `RulesetGovernor`: 3,993 B, 20,583 B of margin.)
 

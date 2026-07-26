@@ -69,6 +69,14 @@ library ProtocolLimits {
     uint256 internal constant MAX_ARRAY_LEN = 16;
     uint256 internal constant MAX_WINDOW = 30 days;
     uint256 internal constant MAX_FREEZE = 365 days;
+    /// M2.6-P0-8: upper bound on `freezeCap`, the freezing-power multiplier.
+    /// `_validateParams` checked only `freezeCap >= WAD` — a LOWER bound with no
+    /// upper one — so an accepted ruleset could overflow `FreezeMath` inside
+    /// `_settleInit`, which runs before a case reaches any recoverable state.
+    /// Every settlement attempt would then revert, permanently. `MAX_FREEZE`
+    /// bounded `freezeBase` and `failedRevealFreeze` but never the AMPLIFIED
+    /// result, which is the product of the two.
+    uint256 internal constant MAX_FREEZE_MULTIPLIER = 100 * WAD;
     uint256 internal constant MAX_BOND_MULT = 100;
     uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window
     uint256 internal constant MAX_TOTAL_DRAWS = 4000; // reachable settlement bound

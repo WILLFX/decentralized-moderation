@@ -327,6 +327,58 @@ contract GovernanceTest is ModerationTestBase {
         governor.proposeParameters(big, many, aws8);
     }
 
+    // --- M2.6-P0-8: the freeze arithmetic is bounded at both ends -------------
+
+    /// `freezeCap` had only a LOWER bound (`>= WAD`). `FreezeMath` computes
+    /// `(freezeCap - WAD) * oneMinusExp` and then `freezeBase * power`, and
+    /// `_settleInit` calls it BEFORE the case reaches any recoverable state — so an
+    /// accepted-but-large cap made every settlement attempt revert, permanently,
+    /// with H-11 pinning that ruleset per case. `MAX_FREEZE` bounded `freezeBase`
+    /// and `failedRevealFreeze` but never the amplified product of the two.
+    function test_unbounded_freeze_cap_is_rejected() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        // The overflow case: a cap so large the multiplication cannot be done.
+        p.freezeCap = type(uint256).max;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+
+        // Just past the multiplier bound.
+        p = mod.getParams();
+        p.freezeCap = L.MAX_FREEZE_MULTIPLIER + 1;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+
+        // And the composite bound: each factor legal on its own, the PRODUCT not.
+        // This is the one the old validator could not see at all.
+        p = mod.getParams();
+        p.freezeCap = L.MAX_FREEZE_MULTIPLIER;   // legal
+        p.freezeBase = L.MAX_FREEZE;             // legal
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+    }
+
+    /// The maximum ACCEPTED freeze configuration must still settle — the bound has
+    /// to be tight enough to prevent the brick and loose enough to be usable.
+    function test_maximum_accepted_freeze_configuration_settles() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+        p.freezeCap = L.MAX_FREEZE_MULTIPLIER;
+        p.freezeBase = L.MAX_FREEZE / (L.MAX_FREEZE_MULTIPLIER / 1e18); // product exactly at the bound
+        governor.proposeParameters(p, cts, aws);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        governor.executeParameters();
+
+        // A full case under that ruleset settles rather than reverting forever.
+        uint256 caseId = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.SETTLED), "settles at the freeze bound");
+        _assertConservation();
+    }
+
     /// The ruleset the protocol actually ships must survive its own validator.
     function test_default_ruleset_still_validates_under_the_cap() public {
         Moderation.Params memory p = mod.getParams();

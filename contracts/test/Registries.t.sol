@@ -377,7 +377,7 @@ contract RegistriesTest is Test {
         }
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
 
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, RISK_PER_SEAT, "one seat's worth frozen");
@@ -391,13 +391,16 @@ contract RegistriesTest is Test {
     /// submission spam cannot grief passive stakers. Under M2.6-P0-2 this holds by
     /// construction rather than by a `dutyUnits == 0` guard: a moderator that was
     /// never seated has nothing bonded, and the penalty can only reach escrow.
+    /// Since P0-5a it is stronger still — the penalty can only reach escrow THIS
+    /// case posted, so an empty obligation makes it a no-op regardless of what the
+    /// moderator holds elsewhere.
     function test_unpledged_stake_cannot_be_penalized() public {
         _stake(alice, 100 * XBZZ);
         vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice);
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, 0, "passive staker is untouchable");
         assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
@@ -435,8 +438,10 @@ contract RegistriesTest is Test {
         assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation across four buckets");
     }
 
-    /// Bypass 1: `setDutyUnits(0)` after selection. It used to make
-    /// `penalizeNoShow` return on its `dutyUnits == 0` guard.
+    /// Bypass 1: `setDutyUnits(0)` after selection. It used to make the
+    /// then-current penalty function return on its `dutyUnits == 0` guard.
+    /// Driven through `settleDuty`, the production path, since M2.6-P0-5c deleted
+    /// the unscoped one.
     function test_bypass_setDutyUnits_zero_after_selection() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         _stakeActivatePledge(bob, 100 * XBZZ);
@@ -451,14 +456,55 @@ contract RegistriesTest is Test {
         assertEq(bonded, RISK_PER_SEAT, "escrow survives the un-pledge attempt");
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(seated, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(seated, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
         assertEq(frozen, RISK_PER_SEAT, "the penalty is payable and applied");
     }
 
-    /// Bypass 2: `requestExit(all free)` after selection. `penalizeNoShow` used to
-    /// subtract `exitAmount` from what it could reach, so the penalty silently
-    /// became a no-op — and the exit did not even have to complete.
+    /// M2.6-P0-5c: the unscoped no-show penalty must stay deleted, and the
+    /// property its deletion restores must hold.
+    ///
+    /// `penalizeNoShow` had lost its caller — `settleDuty` supersedes it — but kept
+    /// a live selector that wrote the POOLED `m.dutyBonded` with no `caseRef`.
+    /// `dutyBonded` pools escrow across every case a moderator is seated in, so any
+    /// authorized logic could freeze collateral posted for a different case's
+    /// outstanding seat: the exact class P0-5a made unrepresentable everywhere else.
+    /// It was deleted rather than given a `caseRef`, because a scoped version would
+    /// be dead code with a live selector.
+    ///
+    /// This test fails if it is ever reintroduced under its old signature.
+    function test_unscoped_no_show_penalty_selector_is_gone() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        (address seated,) = _seatOne(keccak256("p05c"));
+        uint256 until = vm.getBlockTimestamp() + 1 days;
+
+        bytes memory unscoped =
+            abi.encodeWithSignature("penalizeNoShow(address,uint256,uint256)", seated, RISK_PER_SEAT, until);
+        vm.prank(oldLogic);
+        (bool ok,) = address(stakeReg).call(unscoped);
+        assertFalse(ok, "no such function and no fallback: pooled dutyBonded is unreachable");
+
+        // The surviving path cannot substitute for it either: naming the WRONG case
+        // reaches nothing, because the escrow belongs to CASE_A's obligation.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(seated, CASE_B, 1, RISK_PER_SEAT, until);
+        (,, uint256 bonded) = stakeReg.dutyOf(seated);
+        assertEq(bonded, RISK_PER_SEAT, "another case's settlement cannot reach this case's escrow");
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, 0, "and it cannot freeze it either");
+
+        // Named correctly, it settles — so the capability was not lost, only scoped.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(seated, CASE_A, 1, RISK_PER_SEAT, until);
+        (,,, frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, RISK_PER_SEAT, "the owning case can still penalise");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Bypass 2: `requestExit(all free)` after selection. The then-current penalty
+    /// function subtracted `exitAmount` from what it could reach, so the penalty
+    /// silently became a no-op — and the exit did not even have to complete.
     function test_bypass_requestExit_after_selection() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         _stakeActivatePledge(bob, 100 * XBZZ);
@@ -469,7 +515,7 @@ contract RegistriesTest is Test {
         stakeReg.requestExit(free); // everything still withdrawable
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(seated, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(seated, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
         assertEq(frozen, RISK_PER_SEAT, "escrow is not reachable by the exit path");
 

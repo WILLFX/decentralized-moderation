@@ -185,7 +185,14 @@ contract Moderation is ReentrancyGuard {
     //
     // What remains here is the narrow privileged API this contract is authorized
     // to call: lock / release / freeze / reward / setTrack / drawPanel /
-    // releaseDuty / penalizeNoShow.
+    // settleDuty / advanceEpoch, plus openCase / closeCase / writeEntry /
+    // deleteEntry / tryReserveContent / releaseContent on the index registry.
+    //
+    // `releaseDuty` and `penalizeNoShow` are gone — folded into and superseded by
+    // `settleDuty`, which discharges a case's seats in one obligation-scoped step
+    // (M2.6-P0-2, P0-5a, and the deletion in P0-5c). This list is the whole
+    // privileged surface; if it grows, the trust model in each registry's header
+    // is what has to be re-argued.
 
 
     // =========================================================================

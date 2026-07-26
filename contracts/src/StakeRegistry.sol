@@ -96,15 +96,17 @@ contract StakeRegistry {
         // incremented `dutyReserved` but moved no tokens: the seat's backing stayed
         // in `free`, and therefore stayed user-controlled. A selected moderator
         // escaped the no-show penalty entirely by calling `setDutyUnits(0)` or
-        // `requestExit(free)` — the exit did not even have to complete, since
-        // `penalizeNoShow` subtracted `exitAmount` from what it could reach. The
-        // penalty is the stated defence against appeal-panel obstruction (H-10)
-        // and it cost nothing.
+        // `requestExit(free)` — the exit did not even have to complete, since the
+        // then-current penalty function subtracted `exitAmount` from what it could
+        // reach. The penalty is the stated defence against appeal-panel
+        // obstruction (H-10) and it cost nothing.
         //
         // Bonded stake is not free, not exitable, not reducible by
         // `setDutyUnits`, and not available to another case. It leaves only by
         // being committed (a vote), frozen (a no-show penalty), or released (the
-        // case ended).
+        // case ended) — and since M2.6-P0-5c every one of those moves goes through
+        // an obligation handle, so this pooled figure is an ACCOUNTING total that
+        // nothing writes without naming the case it belongs to.
         uint256 dutyBonded;
         bool exists;
     }
@@ -418,9 +420,11 @@ contract StakeRegistry {
         Moderator storage m = moderators[msg.sender];
         if (!m.exists) revert NoModerator();
         // M2.6-P0-2 (bypass 1): capacity already held by live panels cannot be
-        // un-pledged. `setDutyUnits(0)` after selection used to make
-        // `penalizeNoShow` return immediately on its `dutyUnits == 0` guard, so a
-        // drawn moderator walked away from an assignment for free.
+        // un-pledged. `setDutyUnits(0)` after selection used to make the
+        // then-current penalty function return immediately on its
+        // `dutyUnits == 0` guard, so a drawn moderator walked away from an
+        // assignment for free. `settleDuty` needs no such guard — it can only
+        // reach escrow the draw actually posted for a named case.
         if (units < m.dutyReserved) revert DutyReserved();
         if (units > 0) {
             uint256 reserved = m.pending + m.exitAmount;
@@ -690,15 +694,22 @@ contract StakeRegistry {
     /// @notice Settle `units` finished assignments in ONE step: freeze `penalty` of
     ///         the escrow those seats still hold as the no-show cost, and return
     ///         the remainder to free stake.
-    /// @dev This exists because penalising and releasing must share a single
-    ///      clamp against the same balance. Calling `penalizeNoShow` and then
-    ///      `releaseDuty` reads `dutyBonded` twice, and `dutyBonded` is a pool
-    ///      shared by every case a moderator is currently seated in — so a seat
-    ///      whose bond had already been partly frozen would still release a full
-    ///      `riskPerSeat`, draining escrow belonging to a DIFFERENT case's
-    ///      outstanding seat and silently un-bonding it. Nothing is minted (the
-    ///      conservation identity still holds), which is exactly why the leak is
-    ///      invisible without this being one operation.
+    /// @dev THE only way duty escrow is discharged. This exists because penalising
+    ///      and releasing must share a single clamp against the same balance. The
+    ///      two separate calls it replaced (`penalizeNoShow` then `releaseDuty`)
+    ///      read `dutyBonded` twice, and `dutyBonded` is a pool shared by every
+    ///      case a moderator is currently seated in — so a seat whose bond had
+    ///      already been partly frozen would still release a full `riskPerSeat`,
+    ///      draining escrow belonging to a DIFFERENT case's outstanding seat and
+    ///      silently un-bonding it. Nothing is minted (the conservation identity
+    ///      still holds), which is exactly why the leak is invisible without this
+    ///      being one operation.
+    ///
+    ///      Both are now gone: `releaseDuty` folded into this, and `penalizeNoShow`
+    ///      deleted in M2.6-P0-5c. It had lost its caller but kept a live selector
+    ///      writing the pooled `dutyBonded` with no `caseRef`, so the cross-case
+    ///      drain this function exists to prevent stayed reachable by any
+    ///      authorized logic through it.
     ///
     ///      Bounding both parts by `seatBond` makes over-draw unrepresentable.
     ///      Per-obligation accounting (P0-5) replaces the pooling entirely.
@@ -741,29 +752,31 @@ contract StakeRegistry {
         _syncTree(moderator, m);
     }
 
-    /// @notice Penalize a moderator that pledged capacity, was drawn on it, and
-    ///         never committed: freeze `amount` of its own FREE stake until
-    ///         `until`. Never a transfer — no internal attack profit exists.
-    /// @dev M2.6-P0-2: taken from `dutyBonded` — the escrow posted when the seat
-    ///      was drawn — not from `free`. The old version read free stake minus
-    ///      `exitAmount`, so `requestExit(free)` after selection reduced the
-    ///      reachable balance to zero and the penalty silently became a no-op
-    ///      (bypass 2); the exit did not even have to complete. It also opened with
-    ///      `if (m.dutyUnits == 0) return`, which `setDutyUnits(0)` satisfied
-    ///      (bypass 1). Escrowed collateral is reachable by construction, so
-    ///      neither guard is needed and neither bypass exists.
-    function penalizeNoShow(address moderator, uint256 amount, uint256 until) external onlyLogic {
-        Moderator storage m = moderators[moderator];
-        uint256 penalty = amount > m.dutyBonded ? m.dutyBonded : amount;
-        if (penalty == 0) return; // nothing bonded -> was never seated on this duty
-        m.dutyBonded -= penalty;
-        m.frozen += penalty;
-        totalDutyBondedStake -= penalty;
-        totalFrozenStake += penalty;
-        if (until > m.frozenUntil) m.frozenUntil = until;
-        _syncTree(moderator, m);
-        emit NoShowPenalized(moderator, penalty, m.frozenUntil);
-    }
+    // M2.6-P0-5c: `penalizeNoShow` was DELETED here.
+    //
+    // It was the H-07/H-10 no-show penalty before `settleDuty` replaced it, and by
+    // M2.6 it had no caller — `Moderation._settleDuty` routes every disposal
+    // through `settleDuty`, which is atomic (penalise and release share one clamp
+    // against one balance) and obligation-scoped.
+    //
+    // What made removal a P0 rather than cleanup is that it wrote the POOLED
+    // `m.dutyBonded` with no `caseRef`:
+    //
+    //     uint256 penalty = amount > m.dutyBonded ? m.dutyBonded : amount;
+    //     m.dutyBonded -= penalty;
+    //
+    // `dutyBonded` pools a moderator's escrow across every case it is currently
+    // seated in, so any authorized logic could freeze collateral posted for a
+    // DIFFERENT case's outstanding seat — the exact class P0-5a made
+    // unrepresentable everywhere else, still reachable through one live selector.
+    // "No production caller" is not a defence: it is precisely the argument that
+    // failed for `settleDuty`'s own double-release, which is why obligations are
+    // keyed per case rather than per logic.
+    //
+    // Deleted rather than given a `caseRef`, because a scoped version would be
+    // dead code with a live selector — the same hazard in a shape that reads as
+    // safe. `NoShowPenalized` survives: `settleDuty` emits it, so the event
+    // signature clients index is unchanged.
 
     // =========================================================================
     // Governance: may name the logic contract, and nothing else

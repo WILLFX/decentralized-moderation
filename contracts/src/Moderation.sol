@@ -302,6 +302,11 @@ contract Moderation is ReentrancyGuard {
         // the registry-minted id of that entry. 0 means "not a legacy removal" —
         // safe as a sentinel because the registry mints from 1.
         uint256 legacyEntryId;
+        // M2.6-P0-6: this round's draw was abandoned because the network had no
+        // drawable capacity before the deadline. Seat-holders that WERE seated get
+        // their duty released without a no-show penalty — they never reached a
+        // COMMIT phase, so there was nothing for them to fail to do.
+        bool drawAbandoned;
         Round[] rounds; // one per depth reached
         // C-01: winning-appeal refunds+bonuses are pulled (not credited in a loop
         // at settlement, which was unbounded in contributor count). These running
@@ -372,6 +377,8 @@ contract Moderation is ReentrancyGuard {
     event Voided(uint256 indexed caseId);
     /// M2.6-P0-7: VOID disposal opened; `participants` batches remain to drain.
     event VoidOpened(uint256 indexed caseId, uint256 participants);
+    /// M2.6-P0-6: a draw was abandoned for want of network capacity.
+    event DrawAbandoned(uint256 indexed caseId, uint256 indexed depth, uint256 seated);
     event AppealBondContributed(
         uint256 indexed caseId, uint256 indexed depth, address indexed contributor, uint256 accepted, uint256 bondTotal
     );
@@ -394,6 +401,7 @@ contract Moderation is ReentrancyGuard {
     error BadVote();
     error DeadlineNotReached();
     error NoEligibleModerators();
+    error PhaseDeadlineNotPassed(); // M2.6-P0-6: the draw may still complete
     error InsufficientEligibleFree();
     error AppealsClosed();
     error AppealWindowClosed();
@@ -729,6 +737,38 @@ contract Moderation is ReentrancyGuard {
 
         emit Committed(caseId, msg.sender, s);
         if (r.committedCount == r.seatHolders.length) _toReveal(c);
+    }
+
+    /// @notice End a case whose draw can never complete (M2.6-P0-6).
+    ///
+    ///         `realizeSeats` reverts `NoEligibleModerators` when the network has
+    ///         no drawable capacity, and a case could sit in DRAW on that revert
+    ///         indefinitely — its fee taken, its own duty reservations helping keep
+    ///         the tree empty, and no autonomous path out. A case opened when no
+    ///         capacity existed at all was in the same position from the start.
+    ///
+    ///         P1-2 already closed the PARTIAL-capacity half: a batch that seats
+    ///         nobody ends the draw and seats a short panel, so under-participation
+    ///         proceeds through widen as designed. This closes the ZERO-capacity
+    ///         half, which that could not reach.
+    ///
+    ///         Permissionless and deadline-gated, so the end state is reachable by
+    ///         anyone rather than depending on the submitter or on governance.
+    function resolveStalledDraw(uint256 caseId) external nonReentrant {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.DRAW) revert WrongPhase();
+        if (block.timestamp < c.phaseDeadline) revert PhaseDeadlineNotPassed();
+
+        c.drawAbandoned = true;
+        emit DrawAbandoned(caseId, c.depth, _cur(c).nSeats);
+        if (c.depth == 0) {
+            // No prior outcome to fall back to: VOID and refund the submitter.
+            _void(c);
+        } else {
+            // The appeal layer failed to adjudicate; the prior outcome stands and
+            // the funding bond's capital is refunded.
+            _failAppealRound(c, _cur(c));
+        }
     }
 
     /// @notice The commit hash a voter must submit: bound to chain, contract,
@@ -1352,6 +1392,11 @@ contract Moderation is ReentrancyGuard {
         r.pendingDraw = target; // H-05
         r.caseRef = (c.id << 8) | depth; // M2.6-P0-5
         _armSeed(c, r);
+        // M2.6-P0-6: a draw that can never complete must still end. Deliberately
+        // set here and on widen, NOT in `_armSeed` — a case whose seed keeps
+        // re-arming for want of capacity would otherwise push its own deadline
+        // forward forever, which is exactly the stall being closed.
+        c.phaseDeadline = block.timestamp + _cp(c).commitTimeout;
         r.outcome = Outcome.Unset;
         r.appealFor = Outcome.Unset;
         c.depth = depth;
@@ -1385,6 +1430,7 @@ contract Moderation is ReentrancyGuard {
             r.pendingDraw = add;
             _armSeed(c, r);
             c.phase = Phase.DRAW;
+            c.phaseDeadline = block.timestamp + _cp(c).commitTimeout; // P0-6
             emit Widened(c.id, c.depth, r.widenCount, r.nSeats); // seated so far
             emit RoundOpened(c.id, c.depth, add, r.seatSnapshotBlock); // seats SOUGHT
             return;
@@ -1410,13 +1456,21 @@ contract Moderation is ReentrancyGuard {
             // layer failed, the appeal did not lose on the merits. Restore the
             // prior outcome for liveness, but refund the funding bond's capital
             // (no bonus) instead of forfeiting it to the prior winners (H-10).
-            Round storage prev = c.rounds[c.depth - 1];
-            prev.bondRefundOnly = true;
-            r.outcome = prev.outcome;
-            c.finalOutcome = prev.outcome;
-            c.phase = Phase.FINALIZED;
-            emit Finalized(c.id, c.finalOutcome);
+            _failAppealRound(c, r);
         }
+    }
+
+    /// @dev An appeal round that produced no adjudication: the layer failed, the
+    ///      appeal did not lose on the merits. Restore the prior outcome for
+    ///      liveness, and refund the funding bond's capital (no bonus) rather than
+    ///      forfeiting it to the prior winners (H-10).
+    function _failAppealRound(Case storage c, Round storage r) internal {
+        Round storage prev = c.rounds[c.depth - 1];
+        prev.bondRefundOnly = true;
+        r.outcome = prev.outcome;
+        c.finalOutcome = prev.outcome;
+        c.phase = Phase.FINALIZED;
+        emit Finalized(c.id, c.finalOutcome);
     }
 
     function _armOutcome(Case storage c, Round storage r) internal {
@@ -1470,7 +1524,9 @@ contract Moderation is ReentrancyGuard {
                 _freezeSlice(a, r.caseRef, amt, freezeUntil);
             }
             // H-07: capacity and escrow both return when the case ends (P0-2).
-            _settleDuty(c, r.caseRef, a, r.seats[a], !r.committed[a]);
+            // P0-6: an abandoned draw never reached COMMIT, so a seated moderator
+            // had nothing to fail to do — release its duty, do not penalise it.
+            _settleDuty(c, r.caseRef, a, r.seats[a], !c.drawAbandoned && !r.committed[a]);
             unchecked {
                 ++idx;
                 ++steps;

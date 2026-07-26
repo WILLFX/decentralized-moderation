@@ -430,6 +430,96 @@ contract CaseLifecycleTest is ModerationTestBase {
         assertEq(mod.__talliedSeats(caseId, 0, sh), affordable, "tally <= collateralized seats");
     }
 
+    // --- M2.6-P0-6: a draw that cannot complete still ends -------------------
+
+    /// A case opened when the network has NO drawable capacity must reach a
+    /// terminal state without external intervention, and anyone must be able to
+    /// push it there.
+    ///
+    /// `realizeSeats` reverts `NoEligibleModerators` in this state, so the case
+    /// sat in DRAW with its fee taken and no autonomous way out.
+    function test_case_with_no_network_capacity_reaches_a_terminal_state() public {
+        // Every moderator un-pledges: the tree empties at the next epoch.
+        uint256 units = mod.getParams().riskPerSeat; // before pranking
+        units;
+        for (uint256 i = 0; i < mods.length; i++) {
+            vm.prank(mods[i]);
+            stakeReg.setDutyUnits(0);
+        }
+        _settleEpoch(stakeReg);
+        assertEq(stakeReg.totalEligibleWeight(), 0, "no drawable capacity anywhere");
+
+        uint256 caseId = _submit(mods[0]);
+        uint256 submitterBefore = bzz.balanceOf(mods[0]);
+
+        // The draw genuinely cannot proceed.
+        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+        stakeReg.advanceEpoch(type(uint256).max);
+        vm.expectRevert(Moderation.NoEligibleModerators.selector);
+        mod.realizeSeats(caseId);
+
+        // Before the deadline the case is still allowed to hope.
+        vm.expectRevert(Moderation.PhaseDeadlineNotPassed.selector);
+        mod.resolveStalledDraw(caseId);
+
+        // After it, ANYONE can end the case — here a party with no stake in it.
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        mod.resolveStalledDraw(caseId);
+        while (_phase(caseId) == Moderation.Phase.VOID_SETTLING) {
+            vm.prank(stranger);
+            mod.claim(caseId);
+        }
+
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.VOID), "terminal");
+        assertGt(bzz.balanceOf(mods[0]), submitterBefore, "the submitter got the pot back");
+        _assertConservation();
+    }
+
+    /// Moderators seated before a draw was abandoned are released, not penalised:
+    /// the case never reached COMMIT, so there was nothing for them to fail to do.
+    function test_abandoned_draw_releases_seated_duty_without_penalty() public {
+        uint256 caseId = _submit(mods[0]);
+        _rollToSeed(caseId);
+        stakeReg.advanceEpoch(type(uint256).max);
+        mod.realizeSeats(caseId); // a panel IS seated here
+
+        // Drain the capacity of everyone NOT already holding a seat. P0-2 refuses
+        // to let a seated moderator un-pledge below what a live panel holds, which
+        // is exactly right — so the seated ones keep their reservations and are the
+        // participants whose disposal this test is about.
+        for (uint256 i = 0; i < mods.length; i++) {
+            (, uint256 reserved,) = stakeReg.dutyOf(mods[i]);
+            if (reserved == 0) {
+                vm.prank(mods[i]);
+                stakeReg.setDutyUnits(0);
+            }
+        }
+        _settleEpoch(stakeReg);
+
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+            vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
+            mod.closeReveal(caseId); // zero reveals -> widen -> back to DRAW
+        }
+        if (_phase(caseId) != Moderation.Phase.DRAW) return; // widen exhausted: not this path
+
+        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+        mod.resolveStalledDraw(caseId);
+        while (_phase(caseId) == Moderation.Phase.VOID_SETTLING) mod.claim(caseId);
+
+        for (uint256 i = 0; i < mods.length; i++) {
+            (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(mods[i]);
+            assertEq(frozen, 0, "seated-but-never-asked moderators are not penalised");
+            (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(mods[i]);
+            assertEq(reserved, 0, "duty capacity returned");
+            assertEq(bonded, 0, "and so did the escrow");
+        }
+        _assertConservation();
+    }
+
     // H-05, restated for M2.6-P0-3. The old defence was a change counter: any
     // eligibility change re-armed the seed to fresh entropy. It failed both ways —
     // `setDutyUnits(sameValue)` bumped it with no change, so a griefer could

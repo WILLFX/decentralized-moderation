@@ -424,7 +424,7 @@ match.
   non-malicious, uses the same token, funds rewards before crediting, and never
   touches another logic's obligations.* Rewrite the `StakeRegistry` header and
   `DEVIATIONS.md` to say that, then tighten it as each fix lands.
-- **Economic re-validation** and an **independent re-audit of the three-contract
+- **Economic re-validation** and an **independent re-audit of the four-contract
   architecture** — still outstanding, and now more clearly required than before.
   The re-audit must be pointed at a specific commit; the last attempt reviewed
   pre-M2.5 code and produced a stale replay.
@@ -474,7 +474,10 @@ independent. P1-1 depends on P0-2's bonding. Everything else follows.
 
 No deployment with material funds, and the index is not presented as reliable
 safe-search certification, until P0 closes and an independent re-audit of the
-three-contract architecture passes. Treat the current code as an advanced prototype.
+four-contract architecture passes. Treat the current code as an advanced prototype.
+(Both counts said "three" when this order was written. M2.6 split `RulesetGovernor`
+out of `Moderation` at EIP-170, so a review scoped to three contracts would leave
+the governor — which holds all ruleset validation — unreviewed.)
 
 ---
 
@@ -594,9 +597,10 @@ deadlines), P1-8 (one penalty reference time), and the P2 list.
 
 Unchanged in substance: no deployment with material funds, and the index is not
 presented as reliable safe-search certification, until an independent re-audit of
-the four-contract architecture passes **against commit `a1671e5`** (the
-milestone-close commit — `51af155` is the last code change and is byte-identical,
-but its docs still describe the mid-milestone system). What has
+the four-contract architecture passes **against the `m2.6-close` tag**. The last
+code change is `51af155`; everything after it is documentation. A tag is used
+rather than a hash because a commit cannot contain its own hash, so no pointer
+written inside the history can name the commit it lives in. What has
 changed is that the P0 set is now closed and the trust-model documentation matches
 the code — `StakeRegistry`'s header should be re-read as part of that review, since
 its "what this does NOT guarantee" section was written before P0-5 landed.

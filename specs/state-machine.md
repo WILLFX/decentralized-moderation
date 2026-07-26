@@ -474,23 +474,41 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 
 ## 9. Invariants (must hold at every block)
 
-1. **Conservation:** `tokenBalance(contract) == totalFreeStake + Σ committed +
-   Σ frozen + Σ live case pots`. No idle treasury (README §4).
+1. **Conservation:** spans two balances since the M2.5 split, and four stake
+   buckets since M2.6-P0-2 added escrow:
+   `balanceOf(Moderation) == openPotsTotal + totalPendingBond + totalPendingPayout
+   + totalSettling` and
+   `balanceOf(StakeRegistry) == totalFreeStake + totalCommittedStake +
+   totalFrozenStake + totalDutyBondedStake`. No idle treasury (README §4).
 2. **No internal transfer:** no execution path moves stake principal from one
    moderator to another. Rewards credited to voters come only from `pot` (fees +
    forfeited bonds). *(Test: property test that Σ principal per address is
    non-decreasing except by that address's own `requestExit`/withdraw.)*
-3. **Stake sub-state partition:** for every moderator, `free + committed + frozen`
-   equals their tracked stake; each unit in exactly one sub-state.
+3. **Stake sub-state partition:** for every moderator,
+   `free + committed + frozen + dutyBonded` equals their tracked stake; each unit
+   in exactly one sub-state. `dutyBonded` is the collateral escrowed against
+   outstanding draw assignments (M2.6-P0-2): not free, not exitable, not reducible
+   by `setDutyUnits`, and not available to another case.
 4. **Freeze is release-only-forward:** a frozen balance can only become free after
    `frozenUntil`; it can never be paid out to anyone.
 5. **Withdrawals never pausable** (P6): `requestExit`/`withdraw` have no admin gate.
 6. **Guidelines pinning:** a case's `guidelinesVersion` never changes after submit.
-7. **Dedup:** `submissionExists[H(content,meta,topicKey)]` prevents a duplicate
+7. **Dedup:** a reservation on `H(content,meta,topicKey)` prevents a duplicate
    (content,meta,topic) triple (P3); different topics for same content are
-   distinct keys and each pays its own fee.
-8. **Finalizability:** every case that reaches FINALIZED can be SETTLED within one
-   block's gas (bounded by `MAX_TOPICS` and seat-panel sizes) — no stranded pots.
+   distinct keys and each pays its own fee. Since M2.6-P0-1b the reservation is
+   held by `IndexRegistry`, not the logic contract, so it is exactly as permanent
+   as the index entry it protects: a logic upgrade does not reset it, and content
+   live in the index cannot be re-submitted by a replacement logic. It is keyed by
+   its owning `(logic, caseId)` and released only by that case, or by deletion of
+   the entry it protects.
+8. **Finalizability:** every case that reaches FINALIZED can be SETTLED, and every
+   case that cannot proceed reaches a terminal state — no stranded pots. The
+   guarantee is *bounded batches*, not one block: settlement (H-04), seat drawing
+   (M2.6-P1-2) and VOID disposal (M2.6-P0-7) each advance a cursor a bounded number
+   of steps per call, and every one of those pokes is permissionless. A draw that
+   can never complete for want of network capacity ends via `resolveStalledDraw`
+   (M2.6-P0-6). Some large configurations REQUIRE batching rather than merely
+   permitting it — see `contracts/GAS_BUDGETS.md`.
 9. **Governance bound (P6):** only the §1 numeric parameters are mutable, and new
    `guidelinesHashByVersion` entries may be added (never mutated), all via
    multisig+timelock; core transitions in §3/§5 are immutable and withdrawals are
@@ -503,6 +521,16 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 11. **Funds conservation:** for every settled case, `fee + Σ bonds == Σ refunds +
     claim bounty + Σ rewards` — no path mints or destroys value (WO-1). *(Test:
     `test_settlement_conserves_funds`.)*
+12. **Obligation ownership (M2.6-P0-5):** every committed-stake and duty obligation
+    is keyed `keccak256(authEpoch, logic, moderator, caseRef)`, and only the case
+    that created one may discharge it. No authorized logic can release, freeze or
+    settle an obligation belonging to another logic (during a handover both are
+    authorized) or to another case of its own. Aggregates alone cannot express
+    this, which is why the pooled form leaked silently: nothing was minted, so
+    conservation still held. *(Tests:
+    `test_cross_logic_discharge_reverts`,
+    `test_settling_one_case_cannot_touch_another_cases_escrow`,
+    `test_double_release_reverts_rather_than_being_absorbed`.)*
 
 ---
 
@@ -510,7 +538,12 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 
 - Finalization/settlement at `nTopics == MAX_TOPICS` and largest subset
   (`COMMIT_TARGET[MAX_DEPTH]`) stays under block gas limit (Invariant 8).
-- A case that reaches MAX_DEPTH with maximal reveals settles in one `claim()`.
+- A case that reaches MAX_DEPTH with maximal reveals settles in bounded batches of
+  `claim(caseId, maxSteps)`. **Not** in one `claim()`: the depth-3 / 86-seat
+  configuration measured 4,699,258 gas at the start of M2.6 and 8,019,298 after the
+  per-seat escrow, staged weight and obligation writes landed. Batching is the
+  guarantee; the one-shot overload is a convenience that no longer covers the
+  largest cases (`contracts/GAS_BUDGETS.md`).
 - Widen-on-under-participation cannot loop unboundedly.
 - Duplicate submission rejected (P3). Over-`MAX_TOPICS` rejected (P2).
 - Removal of a non-existent / already-removed entry is a no-op / reverts cleanly.

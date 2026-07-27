@@ -235,6 +235,61 @@ in `e+1`; each case pins an epoch root at arm time; all draws for that seed use 
 immutable root; no live operation can mutate it. Delete `eligibilityAddVersion`.
 Strike the D-8 residual note.
 
+> **H-03A — reopened 2026-07, fixed in `M2.6-P0-3c`.** This item was recorded as
+> closed, and the resolution record repeated its claim that eligibility is "constant
+> by construction across any draw window, so there is nothing to grind". **The tree
+> is constant. The seatable set is not, and that was enough.**
+>
+> `drawPanel` reads the LIVE moderator struct to decide whether a drawn address may
+> actually be seated (`m.dutyUnits <= m.dutyReserved`, and `usable < riskPerSeat`).
+> That read is correct and P0-2 requires it — a seat may only be issued if its
+> collateral can be escrowed at that moment. But a rejected address was removed with
+> `stakeTree.set(seat, 0)`, and that **remaps every subsequent interval of the
+> draw**.
+>
+> `setDutyUnits` only refuses `units < dutyReserved`, so a moderator holding no seat
+> (`dutyReserved == 0`) could wait for its seed's blockhash to become public and then
+> zero its duty, shifting the whole remainder of the panel. `requestExit(free)` is a
+> second lever with the same effect through `usable`. With `k` identities an attacker
+> selects among subsets of a public-seed draw for gas plus one epoch of eligibility.
+>
+> The design comment at the seatability check stated the architecture honestly — the
+> tree is the epoch's distribution, the struct is the authority for what may be
+> seated. The error was the conclusion drawn from it, and it was carried into two
+> documents.
+>
+> **The fix does not touch the seatability read.** It records the epoch of each
+> SELF-DIRECTED reduction (`voluntaryCutEpoch`, written only by `setDutyUnits`
+> downward and by `requestExit` — nothing else lowers seatability by the moderator's
+> own choice) and, for a moderator that cut in the current epoch, denies the seat
+> **without removing its leaf**. It can still exclude itself; it can no longer remap
+> anyone else. P0-2 is untouched, because no seat is ever issued without escrow, and
+> the exit path is untouched, because `requestExit`/`withdraw` semantics do not
+> change — only the within-draw side effect does.
+>
+> A **freeze still excludes and still remaps**, deliberately: it is imposed by
+> settlement rather than chosen, and it is the one exclusion P0-2/P0-3 require to be
+> live so a penalised moderator cannot keep being seated for the rest of the epoch.
+>
+> Epoch granularity is exactly right, and shows why P0-3's arm-window rule is
+> load-bearing here rather than incidental: `_armSeed` keeps a seed's whole window
+> inside one epoch, so a cut recorded in an EARLIER epoch necessarily happened before
+> the seed was armed and cannot be a response to it.
+>
+> Two conservative imprecisions, both stated rather than hidden. A moderator that cut
+> voluntarily this epoch is left in the tree even when it later becomes unseatable
+> for an unrelated, involuntary reason — costing attempts, never seats. And it is
+> also left in after being seated to its own new limit, which is why the check covers
+> the post-seating exclusion too: cutting 5 units to 1 would otherwise still choose
+> the attempt at which the remap happens.
+>
+> Tests: two draws off one armed seed, identical in every respect but a post-seed
+> `setDutyUnits(0)` (and, separately, `requestExit(free)`) from an unseated holder.
+> Both fail on the pre-fix code at the FIRST non-attacker seat. A third asserts the
+> freeze exclusion still fires; a fourth asserts the cut itself still lands in full
+> at the next boundary, so nothing is being ignored — only its remapping side effect
+> is neutralised.
+
 **Tests.** *(Corrected 2026-07 — this line names one function that does not exist
 and three paths the epoch test does not actually exercise. The property is
 structural, so per-path coverage is confirmatory rather than load-bearing, but the
@@ -611,11 +666,12 @@ numbers are recorded in `GAS_BUDGETS.md` and `ProtocolLimits`. At the
 `m2.6-close` tag (`a05343a`): 188 tests, 16 suites, `Moderation` 23,296 B.
 
 **Post-close.** An independent verification pass against that tag found four
-blocking regressions in items this record marked closed, plus two more found on
-re-reading (P0-5d, P0-6c) and three fixes with no discriminating test coverage. They are recorded in their own section below and are
+blocking regressions in items this record marked closed, plus three more found on
+re-reading (P0-5d, P0-6c, P0-3c) and three fixes with no discriminating test
+coverage. They are recorded in their own section below and are
 fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
 deliberately NOT moved, because it is the commit the audit ran against and moving
-it would invalidate that verification. Current state: **203 tests, 17 suites**,
+it would invalidate that verification. Current state: **207 tests, 17 suites**,
 green at every commit, `Moderation` 24,137 B (439 free — see "Size position"). The
 seventeenth suite is `StalledDraw.t.sol`, split out of `CaseLifecycle.t.sol` when
 that contract outgrew the `via_ir` pipeline; a file move, not new coverage.
@@ -651,7 +707,7 @@ Independently verified against `m2.6-close` (`a05343a`) by a separate session �
 worked. These are **not new scope**: each is a defect in an item this record
 already claimed closed, and four of them were live blockers.
 
-The suite went 188 -> 203 tests, green at every commit. Suite count went 16 -> 17:
+The suite went 188 -> 207 tests, green at every commit. Suite count went 16 -> 17:
 `CaseLifecycle.t.sol` outgrew the `via_ir` pipeline ("Tag too large for reserved
 space") while P0-6c's tests were being added, so the P0-6 family moved to
 `StalledDraw.t.sol`. That is a file move, not a coverage change.
@@ -665,6 +721,7 @@ space") while P0-6c's tests were being added, so the P0-6 family moved to
 | P0-5a left one unscoped selector | `4864d80` | `StakeRegistry.penalizeNoShow` was superseded by `settleDuty` in P0-2 and had had no caller since — but it kept a live selector, callable by any authorized logic, that wrote the POOLED `m.dutyBonded` with no `caseRef`. `dutyBonded` pools escrow across every case a moderator is seated in, so it could freeze collateral posted for a DIFFERENT case's outstanding seat: the exact class P0-5a made unrepresentable everywhere else. Filed as a P1 on the strength of "no production caller" — which is precisely the argument that failed for `settleDuty`'s own double-release, and the reason obligations are keyed per case rather than per logic. **Deleted**, not given a `caseRef`: a retrofitted version would be dead code with a live selector, the same hazard in a shape that reads as safe. `NoShowPenalized` survives, emitted by `settleDuty`, so no indexed event signature changes. |
 | P0-5a: governance could orphan live handles | `28717cb` | `executeLogic` bumped `authEpoch` unconditionally, and `authEpoch` is part of every obligation handle. Re-executing a proposal for an ALREADY-authorized logic — a duplicate proposal, a re-run script, a governance slip — renamed the whole namespace in one transaction and orphaned every live handle: `_debit` then reverted `NotYourObligation` on the rightful owner's own settlement, permanently, so committed stake was stranded, escrow could not be released, and the per-logic counters never reached zero — `canRevoke` stayed false forever and the contract could not even be retired out of the way. Nothing minted, conservation intact, invisible to the invariant campaign. Now refused when the target is already authorized and not drained; a first authorization from `NONE` is unaffected, which is the only case where the bump has a job (revocation requires `canRevoke`, so a logic at `NONE` has no live handles). Consequence named rather than hidden: a SETTLE_ONLY logic cannot be un-retired while it holds obligations — a governance action whose effect silently depends on drain state is worse than one that fails loudly. `IndexRegistry` has no `authEpoch` so it had no orphaning hole, and the audit's asymmetry (`caseOpen` not epoch-keyed, index flags surviving while stake handles die) **is now benign** — but only because P0-5b gated index revocation on drain, so a flag can never outlive its case. The same gate is added there anyway, to stop governance creating a stake/index desync by executing the pair. |
 | P0-6b's amnesty was H-10 evasion | `dd0ee13` | The abandoned-draw amnesty keyed on `c.drawAbandoned` alone. True for a round that stalled before COMMIT opened; false once it has widened, since a widen only happens after a commit window opened and closed. Moderators pledging exactly the depth-0 target could get seated, refuse to commit, let the round widen, and have the re-draw stall on the capacity they were still holding — `resolveStalledDraw` then released all of them, while `test_void_with_no_commits_penalizes_no_shows` freezes the identical refusal when the draw completes. The penalty depended on whether the attacker left capacity for the widen, which the attacker chooses. Gated on `r.widenCount == 0`. **Known imprecision, taken deliberately:** this over-penalises the widen tranche, drawn by the widen itself and never given a window. In the attack it has no false positives, because the attackers hold the capacity that stalls the re-draw so the widen tranche is empty by construction; where it does bite the cost is one seat's escrow for one `failedRevealFreeze`. Separating the tranches needs per-seat window provenance — the same mechanism P1-1(b) needs, filed there to be built once. |
+| P0-3 was closed on an overstated claim (H-03A) | `<P0-3c>` | The record said eligibility is "constant by construction across any draw window, so there is nothing to grind". The sortition TREE is constant; the SEATABLE SET is not. `drawPanel` reads the live struct to decide seatability — correct, and required by P0-2 — but rejected an unseatable address with `stakeTree.set(seat, 0)`, which remaps every subsequent interval. `setDutyUnits` only refuses `units < dutyReserved`, so an unseated moderator could zero its duty after its seed's blockhash was public and steer the rest of the panel; `requestExit(free)` is the same lever through `usable`. With `k` identities that is a choice among subsets of a public-seed draw for gas plus one epoch of eligibility. Fixed by recording the epoch of each self-directed reduction and denying such a moderator its seat WITHOUT removing its leaf — it excludes itself and remaps nothing. The seatability read is unchanged, so P0-2 holds; a freeze still excludes, since it is imposed rather than chosen. **The prose was the other half of the defect**: the design comment at the check was accurate, the conclusion drawn from it was not, and it had been copied into two documents. Both corrected. |
 | Governor governance transfer | `017ae9e` | One-step and accepting `address(0)`, on the contract holding the whole ruleset authority — and `Moderation.governor` is immutable, so a mistyped or zero nominee could not be recovered from. Now propose / accept / cancel with a zero check, matching both registries. |
 
 Two documentation defects were fixed alongside: P1-1's description (below) and the

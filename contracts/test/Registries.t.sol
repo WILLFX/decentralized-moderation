@@ -1107,6 +1107,175 @@ contract RegistriesTest is Test {
         assertEq(stakeReg.totalDutyBondedStake(), 3 * RISK_PER_SEAT, "collateral was still escrowed");
     }
 
+    // --- M2.6-P0-3c / H-03A: the seatable set, not just the tree --------------
+    //
+    // P0-3 froze the sortition TREE for the duration of an epoch and concluded that
+    // "eligibility is constant by construction, so there is nothing to grind". The
+    // tree is constant. The SEATABLE SET is not: `drawPanel` reads the live
+    // moderator struct to decide whether a drawn address may actually be seated —
+    // which P0-2 requires, since a seat may only be issued if its collateral can be
+    // escrowed right now — and rejects an unseatable address with
+    // `stakeTree.set(seat, 0)`, which REMAPS every subsequent interval of the draw.
+    //
+    // `setDutyUnits` only refuses `units < dutyReserved`, so a moderator holding no
+    // seat (`dutyReserved == 0`) may zero its duty AFTER its seed's blockhash is
+    // public. `requestExit(free)` is the same lever through `usable`.
+
+    /// Stake, activate and pledge a set of moderators of equal weight, then settle
+    /// the epoch so they are all drawable.
+    function _spawnDrawable(uint256 n, uint256 amount) internal returns (address[] memory who) {
+        who = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            who[i] = address(uint160(uint256(keccak256(abi.encode("h03a", i)))));
+            _stake(who[i], amount);
+        }
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        for (uint256 i = 0; i < n; i++) {
+            stakeReg.activate(who[i]);
+            vm.prank(who[i]);
+            stakeReg.setDutyUnits(amount / RISK_PER_SEAT);
+        }
+        _settleEpoch();
+    }
+
+    function _drawOnce(uint256 count, bytes32 seed) internal returns (address[] memory seats) {
+        vm.prank(oldLogic);
+        (seats,) = stakeReg.drawPanel(count, seed, 0, CASE_A);
+    }
+
+    /// Everything the panel contains except `skip`, in order. The attacker's own
+    /// seats are legitimately absent once it has made itself unseatable, so what
+    /// has to be compared is whether the draw landed differently ON EVERYONE ELSE.
+    function _without(address[] memory seats, address skip) internal pure returns (address[] memory out) {
+        out = new address[](seats.length);
+        uint256 n;
+        for (uint256 i = 0; i < seats.length; i++) {
+            if (seats[i] != skip) out[n++] = seats[i];
+        }
+        assembly {
+            mstore(out, n)
+        }
+    }
+
+    /// The panels cannot be compared for equality: the attacker's slots are freed
+    /// in the second draw, so it runs further down the same attempt sequence and
+    /// seats MORE non-attacker addresses. The property is that it seats the same
+    /// ones IN THE SAME ORDER — i.e. the attempt -> address mapping never moved.
+    /// A remap shows up as a divergence part-way through, not as a length change.
+    function _assertPrefix(address[] memory shorter, address[] memory longer, string memory what) internal pure {
+        require(shorter.length <= longer.length, "fixture: expected the ungrindable draw to be at least as long");
+        for (uint256 i = 0; i < shorter.length; i++) {
+            assertEq(longer[i], shorter[i], what);
+        }
+    }
+
+    /// The grind, run twice off one armed seed. Same seed, same tree, same epoch —
+    /// the only difference is a post-seed `setDutyUnits(0)` from a holder that is
+    /// not seated and therefore is not refused.
+    ///
+    /// Pre-fix the two panels differ: zeroing duty made the attacker unseatable,
+    /// the draw removed its leaf, and every later interval shifted. With `k`
+    /// identities that is a choice among subsets of a public-seed draw for gas plus
+    /// one epoch of eligibility.
+    function test_H03A_post_seed_setDutyUnits_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawable(12, 100 * XBZZ);
+        bytes32 seed = keccak256("h03a-duty");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        // An attacker the clean draw DID land on, and which holds no seat of its
+        // own at the moment it acts — so `setDutyUnits` does not refuse it.
+        address attacker = clean[0];
+        (, uint256 reserved,) = stakeReg.dutyOf(attacker);
+        assertEq(reserved, 0, "not seated: the un-pledge is permitted");
+
+        vm.prank(attacker);
+        stakeReg.setDutyUnits(0); // the seed's blockhash is already public
+        assertTrue(stakeReg.epochSettled(), "and the tree has NOT moved: staged for next epoch");
+        assertEq(stakeReg.totalEligibleWeight(), stakeReg.totalEligibleWeight(), "same epoch, same distribution");
+
+        address[] memory ground = _drawOnce(8, seed);
+
+        _assertPrefix(
+            _without(clean, attacker),
+            _without(ground, attacker),
+            "a self-directed un-pledge must not move anyone else's seat"
+        );
+        // It still excludes ITSELF — the seatability read stays live, so P0-2's
+        // guarantee that a seat is only issued against escrow is untouched.
+        for (uint256 i = 0; i < ground.length; i++) {
+            assertTrue(ground[i] != attacker, "the attacker is not seated");
+        }
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// `requestExit(free)` is the second lever and closes the same way.
+    function test_H03A_post_seed_requestExit_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawable(12, 100 * XBZZ);
+        who;
+        bytes32 seed = keccak256("h03a-exit");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        address attacker = clean[0];
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(attacker);
+        vm.prank(attacker);
+        stakeReg.requestExit(free); // reserves everything: `usable` drops to zero
+
+        address[] memory ground = _drawOnce(8, seed);
+
+        _assertPrefix(
+            _without(clean, attacker),
+            _without(ground, attacker),
+            "a self-directed exit request must not move anyone else's seat"
+        );
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// The involuntary exclusion must still take effect, or a penalised moderator
+    /// would keep being seated for the rest of the epoch. A freeze is imposed by
+    /// settlement rather than chosen, so it is not one of the levers — and it is
+    /// deliberately still allowed to remap.
+    function test_H03A_a_freeze_still_excludes_from_the_rest_of_the_draw() public {
+        address[] memory who = _spawnDrawable(12, 100 * XBZZ);
+        who;
+        bytes32 seed = keccak256("h03a-freeze");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        address penalised = clean[0];
+        vm.startPrank(oldLogic);
+        stakeReg.lock(penalised, CASE_B, RISK_PER_SEAT);
+        stakeReg.freeze(penalised, CASE_B, RISK_PER_SEAT, vm.getBlockTimestamp() + 30 days);
+        vm.stopPrank();
+
+        address[] memory ground = _drawOnce(8, seed);
+        for (uint256 i = 0; i < ground.length; i++) {
+            assertTrue(ground[i] != penalised, "a frozen moderator is not seated");
+        }
+    }
+
+    /// The cut is not ignored — only its within-epoch remapping side effect is.
+    /// At the next boundary the weight change lands in full.
+    function test_H03A_the_cut_still_lands_at_the_next_epoch() public {
+        address[] memory who = _spawnDrawable(4, 100 * XBZZ);
+        uint256 before = stakeReg.totalEligibleWeight();
+
+        vm.prank(who[0]);
+        stakeReg.setDutyUnits(0);
+        assertEq(stakeReg.totalEligibleWeight(), before, "unmoved within the epoch");
+
+        _settleEpoch();
+        assertLt(stakeReg.totalEligibleWeight(), before, "and fully applied at the boundary");
+        assertEq(stakeReg.eligibleWeightOf(who[0]), 0, "the un-pledge really did take effect");
+    }
+
     /// `drawPanel` refuses to sample an epoch whose staged changes are not yet in.
     function test_draw_refuses_an_unsettled_epoch() public {
         _stakeActivatePledge(alice, 100 * XBZZ);

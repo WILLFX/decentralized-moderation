@@ -181,11 +181,21 @@ contract StakeRegistry {
     //
     // Replaced by something structural. Draw-eligible weight now changes only at
     // EPOCH BOUNDARIES, on a fixed block cadence nobody can influence: a change
-    // made during epoch `e` is staged and takes effect in `e + 1`. Within an
-    // epoch the eligible set is constant, so a draw armed and realized inside one
-    // epoch cannot be reshaped after its entropy becomes public — by anyone, in
-    // either direction. There is no change to detect and nothing to re-arm on,
-    // which is why the counter is gone rather than fixed.
+    // made during epoch `e` is staged and takes effect in `e + 1`. So the SAMPLING
+    // TREE is constant across a draw window, there is no change to detect, and
+    // nothing to re-arm on — which is why the counter is gone rather than fixed.
+    //
+    // **Be precise about what that does and does not give you (M2.6-P0-3c).** The
+    // tree being constant is not the same as the SEATABLE SET being constant.
+    // `drawPanel` must read the live moderator struct to decide whether a drawn
+    // address may actually be seated, because P0-2 requires a seat to be issued
+    // only when its collateral can be escrowed at that moment — and a rejected
+    // address is removed from the tree for the rest of the draw, which remaps every
+    // interval after it. So a self-directed reduction made after a seed became
+    // public still steered the panel (H-03A) even though the tree never moved.
+    // `voluntaryCutEpoch` below closes that; the honest statement of the property
+    // is "the tree cannot move, and a voluntary reduction cannot remap the draw",
+    // not "eligibility is constant so there is nothing to grind".
     uint256 public immutable epochBlocks;
     /// Epochs up to and including this one have had their staged changes applied.
     uint256 public appliedEpoch;
@@ -201,6 +211,31 @@ contract StakeRegistry {
     /// The weight each moderator's leaf carries for the CURRENT epoch. Written
     /// only at drain time, and used to restore leaves a draw excluded transiently.
     mapping(address => uint256) internal epochWeight;
+
+    /// M2.6-P0-3c (H-03A): the epoch in which this moderator last made a
+    /// SELF-DIRECTED reduction to its own seatability — `setDutyUnits` downward or
+    /// `requestExit`. Nothing else writes it: `dutyReserved` rises only by being
+    /// drawn, `free` falls only by `lock`/`freeze`/escrow, and a freeze is imposed,
+    /// not chosen.
+    ///
+    /// P0-3 made the sortition TREE constant within an epoch and concluded that
+    /// eligibility was "constant by construction, so there is nothing to grind".
+    /// The tree is constant. The SEATABLE SET is not, and that was enough:
+    /// `drawPanel` reads the live struct to decide seatability (which P0-2
+    /// requires — a seat may only be issued if its collateral can be escrowed right
+    /// now) and excludes a rejected address with `stakeTree.set(seat, 0)`. That
+    /// exclusion REMAPS every subsequent interval in the draw.
+    ///
+    /// So a moderator not currently seated (`dutyReserved == 0`, which
+    /// `setDutyUnits` therefore does not block) could wait for its seed's blockhash
+    /// to become public, zero its duty — or `requestExit(free)`, the same lever
+    /// through `usable` — and shift the whole remainder of the panel. With `k`
+    /// identities an attacker selects among subsets of a public-seed draw for gas
+    /// plus one epoch of eligibility. That is H-03A, and it was recorded as closed.
+    ///
+    /// The fix cannot be to stop reading live state — P0-2 depends on that read.
+    /// It is to stop a voluntary reduction from moving the TREE: see `drawPanel`.
+    mapping(address => uint256) public voluntaryCutEpoch;
 
     // --- obligation handles (M2.6-P0-5) --------------------------------------
     //
@@ -403,6 +438,9 @@ contract StakeRegistry {
         uint256 remaining = _total(m) - amount;
         if (remaining != 0 && remaining < minStake) revert MinStakeFloor();
 
+        // M2.6-P0-3c: the second self-directed lever. `exitAmount` enters
+        // seatability through `usable`, and it rises only here.
+        voluntaryCutEpoch[msg.sender] = currentEpoch();
         m.exitAmount = amount;
         // Terms are settled now: a later parameter change can neither extend the
         // wait nor invalidate an already-valid exit (H-11).
@@ -446,6 +484,11 @@ contract StakeRegistry {
         // assignment for free. `settleDuty` needs no such guard — it can only
         // reach escrow the draw actually posted for a named case.
         if (units < m.dutyReserved) revert DutyReserved();
+        // M2.6-P0-3c: a reduction is self-directed, so it must not be able to
+        // reshape a draw whose seed is already public. Raising capacity is not a
+        // lever — it can only make this moderator MORE seatable, which never
+        // triggers an exclusion.
+        if (units < m.dutyUnits) voluntaryCutEpoch[msg.sender] = currentEpoch();
         if (units > 0) {
             uint256 reserved = m.pending + m.exitAmount;
             uint256 usable = m.free > reserved ? m.free - reserved : 0;
@@ -626,6 +669,10 @@ contract StakeRegistry {
         // here removes it: the caller drains through `advanceEpoch`, which commits.
         if (!epochSettled()) revert EpochNotSettled();
 
+        // M2.6-P0-3c (H-03A). Read once: `currentEpoch()` is a DIV and this loop
+        // runs up to `2 * count` times.
+        uint256 epochNow = currentEpoch();
+
         seats = new address[](count);
         address[] memory excluded = new address[](count);
         uint256 nExcluded;
@@ -647,8 +694,28 @@ contract StakeRegistry {
             // (or any other exclusion) applied mid-epoch is live here even though
             // the leaf still carries last boundary's weight, so a penalised
             // moderator cannot be seated for the remainder of the epoch.
-            if (block.timestamp < m.frozenUntil || m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
-                if (nExcluded < count) {
+            //
+            // M2.6-P0-3c (H-03A): the seatability read stays LIVE — P0-2 requires
+            // it — but a moderator that reduced its own seatability THIS EPOCH is
+            // never removed from the tree here. Its seat is still denied, so no
+            // seat is ever issued without escrow; what it no longer gets is the
+            // remap. `stakeTree.set(seat, 0)` shifts every subsequent interval, so
+            // without this a post-seed `setDutyUnits(0)` or `requestExit(free)`
+            // from an unseated holder steered the rest of the panel.
+            //
+            // Epoch granularity is exactly right, and is why P0-3's arm-window rule
+            // is load-bearing here: `_armSeed` keeps a seed's whole window inside
+            // one epoch, so a cut recorded in an EARLIER epoch necessarily happened
+            // before this seed was armed and cannot be a response to it.
+            //
+            // A freeze still excludes. It is imposed by settlement rather than
+            // chosen, it is the one exclusion P0-2/P0-3 require to be live, and
+            // leaving it out would let a penalised moderator keep being seated for
+            // the rest of the epoch.
+            bool frozen = block.timestamp < m.frozenUntil;
+            bool cut = voluntaryCutEpoch[seat] == epochNow;
+            if (frozen || m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
+                if ((frozen || !cut) && nExcluded < count) {
                     excluded[nExcluded++] = seat;
                     stakeTree.set(seat, 0);
                 }
@@ -670,8 +737,17 @@ contract StakeRegistry {
             // the moderator is held out by the exclusion list instead, which is
             // restored before returning, so the tree is unchanged on exit.
             _stageSeated(seat);
-            if (m.dutyUnits <= m.dutyReserved || (m.free > m.pending + m.exitAmount ? m.free - m.pending - m.exitAmount : 0) < riskPerSeat)
-            {
+            // Exhausted BY this seating: deterministic in the seed, so removing the
+            // leaf leaks nothing. Skipped when the moderator cut its own capacity
+            // this epoch (M2.6-P0-3c) — otherwise cutting 5 units to 1 would still
+            // choose the attempt at which the remap happens.
+            if (
+                !cut
+                    && (
+                        m.dutyUnits <= m.dutyReserved
+                            || (m.free > m.pending + m.exitAmount ? m.free - m.pending - m.exitAmount : 0) < riskPerSeat
+                    )
+            ) {
                 if (nExcluded < count) {
                     excluded[nExcluded++] = seat;
                     stakeTree.set(seat, 0);

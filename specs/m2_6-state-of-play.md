@@ -4,8 +4,10 @@
 The last code change is `51af155`; everything after it is documentation.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
-> that pass found **six blocking regressions in items marked closed** plus three
-> fixes that no test discriminated. They are fixed on top of the tag. See the
+> that pass found **seven blocking regressions in items marked closed** plus three
+> fixes that no test discriminated. One of them (H-03A) was a claim as much as a
+> bug: P0-3's "eligibility is constant by construction, so there is nothing to
+> grind" was overstated, and the overstatement is what kept the hole invisible. They are fixed on top of the tag. See the
 > "Regressions found after the close" table in
 > `specs/m2_6-work-order.md`. The tag is deliberately **not moved** — it is the
 > commit the audit ran against, and moving it would invalidate that verification.
@@ -59,7 +61,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass): **203 passing, 17 suites**.
+**Suite now** (tag + the post-close regression pass): **207 passing, 17 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline. A file
 move, not new coverage.
@@ -85,7 +87,7 @@ despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
 After the post-close regression pass: `Moderation` 24,137 (439 free),
-`StakeRegistry` 12,547, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
+`StakeRegistry` 12,960, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
 
 `Moderation` is up 841 bytes across the batch and the margin is now the binding
 constraint on anything further in the game contract — see the note at the top of
@@ -106,8 +108,11 @@ A re-audit scoped to "the three-contract architecture" is scoped wrong; it is fo
 - **Dedup** lives in the registry too, so it survives a migration.
 - **Legacy entries** are adjudicable through a replacement logic.
 - **Duty reservations escrow real collateral**; all four bypasses are closed.
-- **Eligibility changes only at fixed epoch boundaries** — constant by construction
-  across any draw window, so there is nothing to grind and nothing to re-arm on.
+- **Eligibility changes only at fixed epoch boundaries**, so the sampling TREE is
+  constant across any draw window and there is nothing to re-arm on. *(This bullet
+  used to end "constant by construction, so there is nothing to grind". That was
+  the one overstated claim in this document, and it was wrong — see M2.6-P0-3c
+  below. The tree being constant is not the seatable set being constant.)*
 - **Obligations are keyed** `(authEpoch, logic, moderator, caseRef)`, closing both
   cross-logic and cross-case discharge — for `lock`, `release`, `freeze` and
   `settleDuty`. **`setTrack` is the exception and is still unscoped** (K-5); the
@@ -131,6 +136,11 @@ Added by the post-close pass:
   version was H-10 evasion.
 - **Governance cannot orphan live obligation handles.** `executeLogic` refuses to
   re-authorize a logic that is already authorized and not drained.
+- **A voluntary reduction cannot remap a draw** (H-03A). `drawPanel` still reads
+  live state to decide seatability — P0-2 requires that — but a moderator that cut
+  its own duty or requested exit this epoch is denied its seat WITHOUT its leaf
+  being removed, so it can exclude itself and nothing else. A freeze still
+  excludes: it is imposed, not chosen.
 - **The privileged registry surface is now exactly**
   `lock / release / freeze / reward / setTrack / drawPanel / settleDuty /
   advanceEpoch`, plus the index registry's `openCase / closeCase / writeEntry /
@@ -182,6 +192,16 @@ it had to be global, a dedup map that died with its contract, a collateral pool 
 could not say which case it backed, a version counter standing in for an epoch.
 Conservation held throughout all of them, which is exactly why they were invisible.
 Conservation is necessary and never sufficient.
+
+M2.6-P0-3c adds the sharpest instance yet, and it is a lesson about prose:
+**a true statement one level away from the property you need is not a proof of it.**
+"The sortition tree cannot move within an epoch" was true, verified, and tested. The
+property actually required is "the draw cannot be reshaped after its seed is public",
+and the gap between them — a live seatability read whose rejections remap the tree —
+was where H-03A lived. The design comment at that check described the architecture
+correctly; the summary sentence drew a stronger conclusion than the architecture
+supports, and that sentence was then copied into two documents and treated as
+settled. Prefer stating the mechanism over stating the conclusion.
 
 The post-close pass added two more, both of the same family:
 

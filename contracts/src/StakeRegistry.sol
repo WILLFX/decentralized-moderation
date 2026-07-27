@@ -655,11 +655,24 @@ contract StakeRegistry {
     }
 
     /// @notice Draw a panel of `count` seats, RESERVING one duty unit per seat
-    ///         (H-07). A moderator whose pledged capacity is exhausted mid-draw
-    ///         drops out of the tree for the rest of this draw (its weight is
-    ///         restored before returning), so seats land only where collateral
-    ///         exists — no rejection sampling, and attempts are bounded at 2×count.
+    ///         (H-07).
+    ///
+    ///         Sampling is stake-weighted WITH REPLACEMENT over the epoch-start
+    ///         tree, under a live rejection filter: an address that cannot escrow a
+    ///         seat right now is SKIPPED and its attempt is spent. It is not removed
+    ///         from the tree, so it may be drawn again — that is what the attempt
+    ///         budget (`ATTEMPTS_PER_SEAT × count`) pays for, and it is what makes
+    ///         the address mapping independent of anything an actor can change after
+    ///         the seed is public (M2.6-P0-3d).
+    ///
+    ///         Seats therefore land only where collateral exists, and a panel can
+    ///         come back SHORT — of the target, and of `count` — when capacity is
+    ///         scarce. Short panels are a liveness path, not an error (D-14).
     /// @return seats The drawn addresses, one entry per seat (duplicates possible).
+    /// @return attempts Draws performed, including rejected ones. The caller MUST
+    ///         advance its cursor by this and not by `seats.length`: batches are
+    ///         contiguous segments of one fixed walk, and a seat-based cursor would
+    ///         make a later batch's addresses depend on this one's acceptances.
     function drawPanel(uint256 count, bytes32 seed, uint256 offset, uint256 caseRef)
         external
         onlyLogic

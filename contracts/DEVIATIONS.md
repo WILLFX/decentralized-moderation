@@ -168,14 +168,45 @@ entropy that draws from it is known:
    snapshot block and returns the round to `DRAW`, so each widen's panel is drawn
    from entropy that did not exist when anyone chose to withhold a reveal.
 
-*Residual (accepted, documented):* the gate is deliberately one-directional — it
-triggers on eligibility **increases** only. Weight *removals* (a selected moderator
-requesting an exit) still change the live tree, but that costs the actor its own
-eligibility and cannot add a chosen identity to a panel. A determined party can also
-repeatedly bump the version to delay a draw; each bump costs gas and yields no
-control over the eventual seed (re-arming is the same unbounded mechanism as the
-stale-blockhash re-arm, D-1). Full epoch-checkpointed eligibility remains the
-stronger M4 option if this proves insufficient.
+*Residual as recorded in M2.5 (accepted, one-directional gate).* **Both the gate
+and this residual are superseded — see below.**
+
+**Superseded (M2.6-P0-3, then P0-3c, then P0-3d).** The `eligibilityAddVersion`
+gate above was deleted: it was griefable in one direction (`setDutyUnits(sameValue)`
+bumped it with no change, re-arming every pending case for gas) and blind in the
+other (`release`, `reward` and duty release all grew the drawable set without
+bumping it). It was replaced by fixed-cadence eligibility epochs — weight changes
+staged in epoch `e` take effect at the start of `e+1` — and then twice more, because
+freezing the tree between epochs turned out not to be the property:
+
+- **P0-3c (H-03A).** The tree was constant; the *seatable set* was not. `drawPanel`
+  removed a rejected address from the tree to save attempts, which remapped every
+  later interval, so a post-seed `setDutyUnits(0)` or `requestExit` steered the
+  panel. P0-3c suppressed that write for voluntary reductions.
+- **P0-3d (H-03A + H-03B).** That closed two levers, not the property: the
+  exhaustion asymmetry survived downward, and the whole upward family survived
+  across `realizeSeats` batches. **The draw now performs no writes to the sortition
+  tree at all**, so the tree is immutable for a whole epoch and the address mapping
+  is fixed before the seed is public.
+
+**Sampling, stated honestly.** §5.2 specifies stake-weighted sampling **with
+replacement**. Removing the exclusion makes the *offer* distribution exactly that —
+each attempt samples the full epoch-start tree independently — where the old
+exclusion was an undocumented drift toward sampling *without* replacement. The
+*seat* distribution is still not §5.2's rule, because a live escrow check rejects
+offers a moderator cannot back, and capacity depletion makes those rejections
+correlated with how much a holder has already been seated. **More faithful, not
+compliant.** Closing the remaining gap requires seating without a live collateral
+check, which is exactly what P0-2 forbids.
+
+*Residual (accepted, documented): cut-point mobility.* All divergence a post-seed
+action can cause is confined to the tail of the panel. An actor that makes itself
+seatable displaces the last accepted third party; one that makes itself unseatable
+extends the run and adds a tail position. It can never substitute one third party
+for another in the middle. Priced by stake share rather than by identity count — an
+actor cannot choose *where* in the walk it appears, only whether to convert an
+appearance into a seat — and every seat it takes costs escrow plus commit/reveal or
+the no-show penalty.
 
 ### D-9. `TopicCreated` emits the topic key, not the string (spec §8.4)
 
@@ -236,9 +267,17 @@ settlement (rewards, winners' seats, mean-track) reads `talliedSeats`. So the
 re-drawn seats are drawn but **uncounted**.
 
 **Why.** The voter's reward and mean-track weight must reflect what they were tallied
-for, not seats they never re-committed to. The alternative — excluding
-already-committed voters from the widen draw — is rejection sampling with unbounded
-gas.
+for, not seats they never re-committed to.
+
+*Corrected M2.6-P0-3d.* This entry used to reject the alternative — excluding
+already-committed voters from the widen draw — as "rejection sampling with unbounded
+gas". The first half is now the shipped design and the second half was the real
+objection: the draw DOES reject offers it cannot seat, and what makes that safe is
+that rejection is bounded (`ATTEMPTS_PER_SEAT × count`) and does not write the tree.
+An exclusion-based version would be bounded too; what rules it out is that removing
+an address remaps every later interval of the draw, which is H-03A. Recorded because
+the original wording would send a reader looking for a gas problem that is not the
+reason.
 
 **Threat model.** Closes a reward-siphon: without this, a high-stake early revealer in
 an under-participating (widened) round would collect extra reward-lottery weight per

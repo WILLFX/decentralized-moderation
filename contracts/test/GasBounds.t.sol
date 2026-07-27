@@ -585,6 +585,11 @@ contract GasBoundsTest is ModerationTestBase {
         // A genuine 47-seat draw over 1000 pledged moderators cost ~4.40M
         // (~4.35M before the M2.5 port, so the cross-contract call is ~1% of it).
         //
+        // M2.6-P0-3d re-measured this row: 7,201,469 before, 7,039,728 after. The
+        // no-write draw pays extra descents and saves exclusion+restore tree writes,
+        // and the writes cost more. (The ~5.41M cited below is stale — it predates
+        // P0-5's obligation handles landing in this loop.)
+        //
         // M2.6-P0-2 raised it to ~5.41M, and the increase is structural rather
         // than incidental: escrowing a seat's collateral writes `dutyBonded` for
         // that moderator, and for a moderator not yet holding duty that is a COLD

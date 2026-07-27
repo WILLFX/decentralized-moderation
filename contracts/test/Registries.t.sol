@@ -1107,7 +1107,7 @@ contract RegistriesTest is Test {
         assertEq(stakeReg.totalDutyBondedStake(), 3 * RISK_PER_SEAT, "collateral was still escrowed");
     }
 
-    // --- M2.6-P0-3c / H-03A: the seatable set, not just the tree --------------
+    // --- M2.6-P0-3d / H-03A + H-03B: the draw must not write the tree ---------
     //
     // P0-3 froze the sortition TREE for the duration of an epoch and concluded that
     // "eligibility is constant by construction, so there is nothing to grind". The
@@ -1236,11 +1236,12 @@ contract RegistriesTest is Test {
         assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
     }
 
-    /// The involuntary exclusion must still take effect, or a penalised moderator
-    /// would keep being seated for the rest of the epoch. A freeze is imposed by
-    /// settlement rather than chosen, so it is not one of the levers — and it is
-    /// deliberately still allowed to remap.
-    function test_H03A_a_freeze_still_excludes_from_the_rest_of_the_draw() public {
+    /// A freeze must still keep a penalised moderator out of the panel. Since
+    /// M2.6-P0-3d it does so by DENIAL rather than by removal from the tree — the
+    /// substance (never seated) is unchanged, and it stops being a remap lever,
+    /// which P0-3c had had to carve out as an accepted residual because `claim()`
+    /// is permissionless and its timing is actor-chosen.
+    function test_H03A_a_freeze_still_denies_for_the_rest_of_the_draw() public {
         address[] memory who = _spawnDrawable(12, 100 * XBZZ);
         who;
         bytes32 seed = keccak256("h03a-freeze");
@@ -1274,6 +1275,185 @@ contract RegistriesTest is Test {
         _settleEpoch();
         assertLt(stakeReg.totalEligibleWeight(), before, "and fully applied at the boundary");
         assertEq(stakeReg.eligibleWeightOf(who[0]), 0, "the un-pledge really did take effect");
+    }
+
+    /// M2.6-P0-3d, the DOWNWARD class P0-3c aimed at, now driven at the exhaustion
+    /// site rather than the denial site.
+    ///
+    /// `riskPerSeat == MIN_STAKE` in the default ruleset, so a minimum-stake
+    /// identity has one duty unit and exhausts on its FIRST seat. Under exclusion
+    /// that meant: seated-then-exhausted removed its leaf and remapped the rest of
+    /// the draw, while the same identity having cut beforehand was never seated and
+    /// never removed. Two trees, third parties move — and P0-3c's `!cut` guard did
+    /// not close it, because the asymmetry is between the cut and no-cut runs.
+    function test_H03D_exhaustion_asymmetry_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawableUnits(16, 1); // one duty unit each
+        bytes32 seed = keccak256("h03d-exhaust");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        // The attacker must be seated at a NON-FINAL position, or exhaustion has no
+        // subsequent intervals to remap and this passes vacuously.
+        address attacker = clean[0];
+        uint256 lastAt;
+        for (uint256 i = 0; i < clean.length; i++) {
+            if (clean[i] == attacker) lastAt = i;
+        }
+        assertLt(lastAt, clean.length - 1, "attacker is seated before the end of the run");
+        (, uint256 reserved,) = stakeReg.dutyOf(attacker);
+        assertEq(reserved, 0);
+
+        vm.prank(attacker);
+        stakeReg.setDutyUnits(0);
+        address[] memory ground = _drawOnce(8, seed);
+
+        _assertPrefix(
+            _without(clean, attacker), _without(ground, attacker), "exhaustion must not move anyone else"
+        );
+        who;
+    }
+
+    /// The multi-unit variant, so the fix cannot special-case the one-unit path:
+    /// two duty units, offered three times.
+    function test_H03D_multi_unit_holder_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawableUnits(10, 2);
+        bytes32 seed = keccak256("h03d-multi");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(12, seed);
+        vm.revertToState(snap);
+
+        address attacker = clean[0];
+        uint256 offered;
+        for (uint256 i = 0; i < clean.length; i++) {
+            if (clean[i] == attacker) offered++;
+        }
+        assertGe(offered, 2, "the multi-seat case is actually exercised");
+
+        vm.prank(attacker);
+        stakeReg.setDutyUnits(0);
+        address[] memory ground = _drawOnce(12, seed);
+
+        _assertPrefix(_without(clean, attacker), _without(ground, attacker), "multi-unit holder moves nobody");
+        who;
+    }
+
+    /// M2.6-P0-3d, the dependency the whole design rests on, pinned directly:
+    /// `addr(i)` is a pure function of (seed, attempt index, epoch-start tree).
+    ///
+    /// Precompute the walk off the PRE-DRAW tree through the public `draw` view,
+    /// then assert the seats the draw returns are an in-order subsequence of it.
+    /// Needs no model of seatability, and fails the moment any exclusion remaps,
+    /// because post-exclusion draws come from a mutated tree and stop appearing.
+    function test_H03D_seats_are_a_subsequence_of_the_predrawn_walk() public {
+        _spawnDrawableUnits(20, 2);
+        bytes32 seed = keccak256("h03d-walk");
+        uint256 n = 48;
+
+        address[] memory walk = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            walk[i] = stakeReg.draw(uint256(keccak256(abi.encode(seed, i))));
+        }
+        // Make some of the walk unseatable so exclusions WOULD fire under the old
+        // shape; the subsequence must survive it.
+        for (uint256 i = 0; i < n; i += 5) {
+            (, uint256 res,) = stakeReg.dutyOf(walk[i]);
+            if (res == 0) {
+                vm.prank(walk[i]);
+                stakeReg.setDutyUnits(0);
+            }
+        }
+
+        address[] memory seats = _drawOnce(12, seed);
+        uint256 w;
+        for (uint256 s_ = 0; s_ < seats.length; s_++) {
+            bool found;
+            while (w < n) {
+                if (walk[w++] == seats[s_]) {
+                    found = true;
+                    break;
+                }
+            }
+            assertTrue(found, "every seat comes from the pre-draw walk, in order");
+        }
+    }
+
+    /// M2.6-P0-3d: the cursor accumulates ATTEMPTS, so batches are contiguous
+    /// segments of one walk and batching is transparent. A seat-based cursor would
+    /// leak across batches exactly as in-memory exclusion does — this is the single
+    /// fact the whole design rests on, and it is one refactor away from being
+    /// silently broken.
+    ///
+    /// GUARD, not a discriminator: it passes on the pre-fix code too, because the
+    /// restore loop left the tree identical between calls there. It exists to fail
+    /// if the cursor ever becomes seat-based.
+    ///
+    /// Ordinary regime deliberately: `maxAttempts` is per call, so under heavy
+    /// absorption a batched and an unbatched run can hit their caps at different
+    /// points and diverge legitimately.
+    function test_H03D_batching_is_transparent() public {
+        _spawnDrawableUnits(40, 4);
+        bytes32 seed = keccak256("h03d-batch");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory whole = _drawOnce(12, seed);
+        vm.revertToState(snap);
+
+        vm.prank(oldLogic);
+        (address[] memory b1, uint256 a1) = stakeReg.drawPanel(5, seed, 0, CASE_A);
+        vm.prank(oldLogic);
+        (address[] memory b2,) = stakeReg.drawPanel(7, seed, a1, CASE_A);
+
+        assertEq(b1.length + b2.length, whole.length, "same total seats");
+        for (uint256 i = 0; i < b1.length; i++) {
+            assertEq(b1[i], whole[i], "batch 1 matches the unbatched prefix");
+        }
+        for (uint256 i = 0; i < b2.length; i++) {
+            assertEq(b2[i], whole[b1.length + i], "batch 2 continues the same walk");
+        }
+    }
+
+    /// Constraint 2: the attempt budget has to hold panel fill, or the leak has been
+    /// traded for a liveness regression.
+    function test_H03D_panel_fills_under_absorption() public {
+        address[] memory who = _spawnDrawableUnits(40, 1); // capacity 40
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(who[i]);
+            stakeReg.setDutyUnits(0); // 25% absorbing
+        }
+        for (uint256 t = 0; t < 20; t++) {
+            uint256 snap = vm.snapshotState();
+            address[] memory seats = _drawOnce(24, keccak256(abi.encode("fill", t)));
+            assertEq(seats.length, 24, "the panel still fills against 25% absorption");
+            vm.revertToState(snap);
+        }
+    }
+
+    /// M2.6-P0-3d: `voluntaryCutEpoch` is superseded and must stay deleted — same
+    /// reasoning as `penalizeNoShow` (K-4). A mechanism with nothing left to do but
+    /// a live write path reads as defence it no longer provides.
+    function test_H03D_voluntary_cut_epoch_selector_is_gone() public {
+        (bool ok,) = address(stakeReg).call(abi.encodeWithSignature("voluntaryCutEpoch(address)", alice));
+        assertFalse(ok, "superseded by the no-write invariant");
+    }
+
+    /// Spawn `n` moderators pledging exactly `units` each.
+    function _spawnDrawableUnits(uint256 n, uint256 units) internal returns (address[] memory who) {
+        who = new address[](n);
+        uint256 amount = units * RISK_PER_SEAT;
+        for (uint256 i = 0; i < n; i++) {
+            who[i] = address(uint160(uint256(keccak256(abi.encode("u", units, i)))));
+            _stake(who[i], amount);
+        }
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        for (uint256 i = 0; i < n; i++) {
+            stakeReg.activate(who[i]);
+            vm.prank(who[i]);
+            stakeReg.setDutyUnits(units);
+        }
+        _settleEpoch();
     }
 
     /// `drawPanel` refuses to sample an epoch whose staged changes are not yet in.

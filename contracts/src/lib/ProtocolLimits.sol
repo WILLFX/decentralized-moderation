@@ -30,7 +30,7 @@ library ProtocolLimits {
     /// unbatched loop in `Moderation` scales with panel size. The three that did
     /// are all behind bounded cursors:
     ///
-    ///     seat draw   `realizeSeats`  P1-2   24 seats/call, 3,690,617 gas (46%)
+    ///     seat draw   `realizeSeats`  P1-2   24 seats/call, 3,664,261 gas (46%)
     ///     settlement  `claim`         H-04   40 seats/call
     ///     VOID        `claim`         P0-7   opening is O(1) at 5,849 gas;
     ///                                        disposal 12/call, 1,347,418 gas (17%)
@@ -59,6 +59,14 @@ library ProtocolLimits {
     /// `MAX_TOTAL_DRAWS` and is rejected, so the two bounds compose rather than
     /// overlap. `GasBounds` reads this constant directly — raising it again
     /// without re-measuring fails the suite.
+    ///
+    /// Re-derived at M2.6-P0-3d, which changed what a draw ATTEMPT costs and does:
+    /// the draw no longer writes the sortition tree, so it pays extra descents
+    /// instead of exclusion-plus-restore writes, and `ATTEMPTS_PER_SEAT` rose from
+    /// 2 to 6. Both directions were measured and the seat-draw batch came out
+    /// slightly CHEAPER (3,746,905 -> 3,664,261), so 128 and 24 both stand. The
+    /// extra budget is only ever spent under scarcity; in every dense scenario the
+    /// panel fills long before the cap binds, so gas at 6 equals gas at 2.
     ///
     /// > If a future item adds an unbatched per-seat or per-holder loop, THAT
     /// > becomes the binding constraint again and this number must be re-derived

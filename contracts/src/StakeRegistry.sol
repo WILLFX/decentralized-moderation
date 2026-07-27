@@ -185,17 +185,14 @@ contract StakeRegistry {
     // TREE is constant across a draw window, there is no change to detect, and
     // nothing to re-arm on — which is why the counter is gone rather than fixed.
     //
-    // **Be precise about what that does and does not give you (M2.6-P0-3c).** The
-    // tree being constant is not the same as the SEATABLE SET being constant.
-    // `drawPanel` must read the live moderator struct to decide whether a drawn
-    // address may actually be seated, because P0-2 requires a seat to be issued
-    // only when its collateral can be escrowed at that moment — and a rejected
-    // address is removed from the tree for the rest of the draw, which remaps every
-    // interval after it. So a self-directed reduction made after a seed became
-    // public still steered the panel (H-03A) even though the tree never moved.
-    // `voluntaryCutEpoch` below closes that; the honest statement of the property
-    // is "the tree cannot move, and a voluntary reduction cannot remap the draw",
-    // not "eligibility is constant so there is nothing to grind".
+    // **Be precise about what that does and does not give you.** The tree being
+    // constant between epochs is not, on its own, the property. `drawPanel` must
+    // read the live moderator struct to decide whether a drawn address may actually
+    // be seated (P0-2), so the SEATABLE SET moves within an epoch — and while the
+    // draw removed rejected addresses to save attempts, that live set fed a tree
+    // write and steered the panel (H-03A/H-03B). The draw no longer writes the tree
+    // at all (M2.6-P0-3d), which is what makes the boundary cadence sufficient
+    // rather than merely necessary. State the mechanism, not the conclusion.
     uint256 public immutable epochBlocks;
     /// Epochs up to and including this one have had their staged changes applied.
     uint256 public appliedEpoch;
@@ -203,39 +200,62 @@ contract StakeRegistry {
     /// `e + 1`. Keyed by epoch so changes staged mid-drain are not swept early.
     mapping(uint256 => address[]) internal stagedByEpoch;
     mapping(uint256 => mapping(address => bool)) internal isStaged;
+    /// M2.6-P0-3d: attempts a draw may spend per seat sought. Sized by measurement,
+    /// not by intuition — it is what pays for NOT removing an unseatable address
+    /// from the tree, since one that is denied can be drawn again.
+    ///
+    /// 6 was chosen against the panel-fill bar (P99 fill >= 95%) over: ordinary
+    /// load; honest churn at 10%; an adversarial absorber at 30% and 50%; a
+    /// post-settlement frozen cohort of 47; and a scarce network whose capacity
+    /// barely exceeds the target. It is FREE in every dense case — the panel fills
+    /// long before the cap binds, so gas at 6 is identical to gas at 2 (worst
+    /// measured 4.19M, 52% of the 8M ceiling). It is only ever spent under scarcity,
+    /// which is exactly where the old budget of 2 failed.
+    ///
+    /// Documented breaking point: usable capacity ~= the seat target, where filling
+    /// becomes coupon-collector-bound rather than budget-bound and no attempt budget
+    /// helps. Re-derive with the panel-fill rows in `GasBounds.t.sol` if the loop
+    /// changes.
+    uint256 internal constant ATTEMPTS_PER_SEAT = 6;
+
     /// Position reached inside the epoch currently being drained. Public because it
     /// is the only way to see that a partial drain PERSISTED (M2.6-P0-3b) — the
     /// regression it guards against was invisible precisely because the discarded
     /// work left no trace.
     uint256 public drainCursor;
     /// The weight each moderator's leaf carries for the CURRENT epoch. Written
-    /// only at drain time, and used to restore leaves a draw excluded transiently.
+    /// only at drain time. (It no longer has a second job: since M2.6-P0-3d a draw
+    /// excludes nothing, so there is nothing to restore.)
     mapping(address => uint256) internal epochWeight;
 
-    /// M2.6-P0-3c (H-03A): the epoch in which this moderator last made a
-    /// SELF-DIRECTED reduction to its own seatability — `setDutyUnits` downward or
-    /// `requestExit`. Nothing else writes it: `dutyReserved` rises only by being
-    /// drawn, `free` falls only by `lock`/`freeze`/escrow, and a freeze is imposed,
-    /// not chosen.
+    /// M2.6-P0-3d (H-03A/H-03B): **the sortition tree is immutable for the whole
+    /// of an epoch.** It is written in exactly two places — `initialize`, and
+    /// `_drainEpochs` at a boundary. `drawPanel` reads it and never writes it.
     ///
-    /// P0-3 made the sortition TREE constant within an epoch and concluded that
-    /// eligibility was "constant by construction, so there is nothing to grind".
-    /// The tree is constant. The SEATABLE SET is not, and that was enough:
-    /// `drawPanel` reads the live struct to decide seatability (which P0-2
-    /// requires — a seat may only be issued if its collateral can be escrowed right
-    /// now) and excludes a rejected address with `stakeTree.set(seat, 0)`. That
-    /// exclusion REMAPS every subsequent interval in the draw.
+    /// That single sentence is what closes the grind, and it is checkable by
+    /// inspection rather than by argument. The draw's address mapping is
+    /// `addr(i) = draw(keccak(seed, offset + i))`, which depends on the seed, the
+    /// attempt index and the tree. All three are fixed before the seed becomes
+    /// public: `_armSeed` keeps a seed's window inside one epoch and `realizeSeats`
+    /// re-arms if the epoch turns over; the cursor accumulates ATTEMPTS, so batches
+    /// are contiguous segments of one walk; and the tree cannot move. Live
+    /// seatability inputs therefore feed only accept/deny, which changes how far the
+    /// walk runs and never what the walk is.
     ///
-    /// So a moderator not currently seated (`dutyReserved == 0`, which
-    /// `setDutyUnits` therefore does not block) could wait for its seed's blockhash
-    /// to become public, zero its duty — or `requestExit(free)`, the same lever
-    /// through `usable` — and shift the whole remainder of the panel. With `k`
-    /// identities an attacker selects among subsets of a public-seed draw for gas
-    /// plus one epoch of eligibility. That is H-03A, and it was recorded as closed.
+    /// What this replaces. P0-3 froze the tree between epochs and concluded that
+    /// eligibility was "constant by construction, so there is nothing to grind". The
+    /// tree was constant; the SEATABLE SET was not. `drawPanel` removed a rejected
+    /// address with `stakeTree.set(seat, 0)` to save attempts, and that remapped
+    /// every later interval — so a post-seed `setDutyUnits(0)` or `requestExit(free)`
+    /// from an unseated holder steered the panel (H-03A), and so did anything that
+    /// RAISED seatability between batches: `setDutyUnits` up, `activate`, `thaw`,
+    /// `claim` on another case (H-03B). P0-3c suppressed the first family by tracking
+    /// voluntary reductions; that closed two levers, not the property.
     ///
-    /// The fix cannot be to stop reading live state — P0-2 depends on that read.
-    /// It is to stop a voluntary reduction from moving the TREE: see `drawPanel`.
-    mapping(address => uint256) public voluntaryCutEpoch;
+    /// Both families close here for one reason instead of a list, and the freeze
+    /// lever — which P0-3c had to carve out as an accepted residual — closes with
+    /// them. `voluntaryCutEpoch` is deleted: with no write to suppress, it had
+    /// nothing left to do.
 
     // --- obligation handles (M2.6-P0-5) --------------------------------------
     //
@@ -438,9 +458,6 @@ contract StakeRegistry {
         uint256 remaining = _total(m) - amount;
         if (remaining != 0 && remaining < minStake) revert MinStakeFloor();
 
-        // M2.6-P0-3c: the second self-directed lever. `exitAmount` enters
-        // seatability through `usable`, and it rises only here.
-        voluntaryCutEpoch[msg.sender] = currentEpoch();
         m.exitAmount = amount;
         // Terms are settled now: a later parameter change can neither extend the
         // wait nor invalidate an already-valid exit (H-11).
@@ -484,11 +501,6 @@ contract StakeRegistry {
         // assignment for free. `settleDuty` needs no such guard — it can only
         // reach escrow the draw actually posted for a named case.
         if (units < m.dutyReserved) revert DutyReserved();
-        // M2.6-P0-3c: a reduction is self-directed, so it must not be able to
-        // reshape a draw whose seed is already public. Raising capacity is not a
-        // lever — it can only make this moderator MORE seatable, which never
-        // triggers an exclusion.
-        if (units < m.dutyUnits) voluntaryCutEpoch[msg.sender] = currentEpoch();
         if (units > 0) {
             uint256 reserved = m.pending + m.exitAmount;
             uint256 usable = m.free > reserved ? m.free - reserved : 0;
@@ -669,57 +681,31 @@ contract StakeRegistry {
         // here removes it: the caller drains through `advanceEpoch`, which commits.
         if (!epochSettled()) revert EpochNotSettled();
 
-        // M2.6-P0-3c (H-03A). Read once: `currentEpoch()` is a DIV and this loop
-        // runs up to `2 * count` times.
-        uint256 epochNow = currentEpoch();
+        // No drawable capacity anywhere. A PRECONDITION since M2.6-P0-3d rather than
+        // the per-attempt check it used to be: nothing writes the tree during a
+        // draw, so it cannot empty part-way through.
+        if (stakeTree.total() == 0) return (new address[](0), 0);
 
         seats = new address[](count);
-        address[] memory excluded = new address[](count);
-        uint256 nExcluded;
         uint256 drawn;
-        uint256 maxAttempts = 2 * count;
+        uint256 maxAttempts = ATTEMPTS_PER_SEAT * count;
         while (drawn < count && attempts < maxAttempts) {
-            if (stakeTree.total() == 0) break; // no capacity left network-wide
+            // M2.6-P0-3d: THE INVARIANT. Nothing in this loop writes `stakeTree`,
+            // so `addr(i) = draw(keccak(seed, offset + i))` is a pure function of
+            // the seed, the attempt index, and the epoch-start tree — all fixed
+            // before the seed became public. Everything below may only ACCEPT or
+            // DENY the address this hands back. A decision cannot move a mapping it
+            // does not write.
             address seat = stakeTree.draw(uint256(keccak256(abi.encode(seed, offset + attempts))));
             attempts++;
             Moderator storage m = moderators[seat];
             // M2.6-P0-2 (bypass 4): a seat is only issued if its collateral can be
-            // ESCROWED right now. Reserving capacity while the backing stayed in
-            // `free` let the same stake back several outstanding assignments, be
-            // locked by whichever case committed first, or be exit-reserved.
+            // ESCROWED right now. This read is deliberately LIVE, and that is safe
+            // precisely because it only denies — see the invariant above.
             uint256 reserved = m.pending + m.exitAmount;
             uint256 usable = m.free > reserved ? m.free - reserved : 0;
-            // M2.6-P0-3: the tree is the epoch's sampling distribution, but the
-            // STRUCT is the authority for what may actually be seated. A freeze
-            // (or any other exclusion) applied mid-epoch is live here even though
-            // the leaf still carries last boundary's weight, so a penalised
-            // moderator cannot be seated for the remainder of the epoch.
-            //
-            // M2.6-P0-3c (H-03A): the seatability read stays LIVE — P0-2 requires
-            // it — but a moderator that reduced its own seatability THIS EPOCH is
-            // never removed from the tree here. Its seat is still denied, so no
-            // seat is ever issued without escrow; what it no longer gets is the
-            // remap. `stakeTree.set(seat, 0)` shifts every subsequent interval, so
-            // without this a post-seed `setDutyUnits(0)` or `requestExit(free)`
-            // from an unseated holder steered the rest of the panel.
-            //
-            // Epoch granularity is exactly right, and is why P0-3's arm-window rule
-            // is load-bearing here: `_armSeed` keeps a seed's whole window inside
-            // one epoch, so a cut recorded in an EARLIER epoch necessarily happened
-            // before this seed was armed and cannot be a response to it.
-            //
-            // A freeze still excludes. It is imposed by settlement rather than
-            // chosen, it is the one exclusion P0-2/P0-3 require to be live, and
-            // leaving it out would let a penalised moderator keep being seated for
-            // the rest of the epoch.
-            bool frozen = block.timestamp < m.frozenUntil;
-            bool cut = voluntaryCutEpoch[seat] == epochNow;
-            if (frozen || m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
-                if ((frozen || !cut) && nExcluded < count) {
-                    excluded[nExcluded++] = seat;
-                    stakeTree.set(seat, 0);
-                }
-                continue;
+            if (block.timestamp < m.frozenUntil || m.dutyUnits <= m.dutyReserved || usable < riskPerSeat) {
+                continue; // denied; the attempt is spent, the tree is untouched
             }
             m.dutyReserved += 1;
             m.free -= riskPerSeat;
@@ -732,32 +718,9 @@ contract StakeRegistry {
             ob.dutyBonded += uint112(riskPerSeat);
             logicDutyReserved[msg.sender] += 1;
             seats[drawn++] = seat;
-            // M2.6-P0-3: the persistent weight shrink is STAGED for the next
-            // epoch — the tree must not move inside an epoch. Within this draw
-            // the moderator is held out by the exclusion list instead, which is
-            // restored before returning, so the tree is unchanged on exit.
+            // The persistent weight shrink is STAGED for the next epoch. Applying
+            // it now would be a tree write, which is the thing this must not do.
             _stageSeated(seat);
-            // Exhausted BY this seating: deterministic in the seed, so removing the
-            // leaf leaks nothing. Skipped when the moderator cut its own capacity
-            // this epoch (M2.6-P0-3c) — otherwise cutting 5 units to 1 would still
-            // choose the attempt at which the remap happens.
-            if (
-                !cut
-                    && (
-                        m.dutyUnits <= m.dutyReserved
-                            || (m.free > m.pending + m.exitAmount ? m.free - m.pending - m.exitAmount : 0) < riskPerSeat
-                    )
-            ) {
-                if (nExcluded < count) {
-                    excluded[nExcluded++] = seat;
-                    stakeTree.set(seat, 0);
-                }
-            }
-        }
-        // Restore every temporarily-excluded leaf to the weight this epoch
-        // started with, so the draw leaves the tree exactly as it found it.
-        for (uint256 j; j < nExcluded; ++j) {
-            stakeTree.set(excluded[j], epochWeight[excluded[j]]);
         }
         if (drawn < count) {
             // Shrink to what was actually seated.

@@ -4,12 +4,15 @@
 The last code change is `51af155`; everything after it is documentation.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
-> that pass found **seven blocking regressions in items marked closed** plus three
+> that pass found **eight blocking regressions in items marked closed** plus three
 > fixes that no test discriminated. One of them (H-03A) was a claim as much as a
 > bug: P0-3's "eligibility is constant by construction, so there is nothing to
-> grind" was overstated, and the overstatement is what kept the hole invisible. They are fixed on top of the tag. See the
-> "Regressions found after the close" table in
-> `specs/m2_6-work-order.md`. The tag is deliberately **not moved** — it is the
+> grind" was overstated, and the overstatement is what kept the hole invisible.
+> Its first fix then closed two levers rather than the property, and had to be
+> reopened (H-03B) and replaced with a single invariant — see P0-3d below.
+>
+> All are fixed on top of the tag; see the "Regressions found after the close"
+> table in `specs/m2_6-work-order.md`. The tag is deliberately **not moved** — it is the
 > commit the audit ran against, and moving it would invalidate that verification.
 > The pointers in this file still name it for that reason; a new tag is cut for the
 > fixed state. Everything from here down describes the state **at the tag** unless
@@ -61,10 +64,11 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass): **207 passing, 17 suites**.
+**Suite now** (tag + the post-close regression pass): **218 passing, 18 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
-`CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline. A file
-move, not new coverage.
+`CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
+move, not new coverage). The eighteenth is `SeatDraw.t.sol`, the cross-batch
+seat-draw family, which no registry-level fixture can reach.
 
 (The peak during the milestone was 199 / 19. The difference is `test/spike/`, three
 throwaway suites that existed only to produce the gas numbers behind the
@@ -87,7 +91,7 @@ despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
 After the post-close regression pass: `Moderation` 24,137 (439 free),
-`StakeRegistry` 12,960, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
+`StakeRegistry` 12,126, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
 
 `Moderation` is up 841 bytes across the batch and the margin is now the binding
 constraint on anything further in the game contract — see the note at the top of
@@ -111,8 +115,10 @@ A re-audit scoped to "the three-contract architecture" is scoped wrong; it is fo
 - **Eligibility changes only at fixed epoch boundaries**, so the sampling TREE is
   constant across any draw window and there is nothing to re-arm on. *(This bullet
   used to end "constant by construction, so there is nothing to grind". That was
-  the one overstated claim in this document, and it was wrong — see M2.6-P0-3c
-  below. The tree being constant is not the seatable set being constant.)*
+  the one overstated claim in this document, and it was wrong — see M2.6-P0-3d
+  below. The tree being constant BETWEEN epochs is not the seatable set being
+  constant WITHIN one; the draw writing the tree is what turned that gap into a
+  grind, and it no longer does.)*
 - **Obligations are keyed** `(authEpoch, logic, moderator, caseRef)`, closing both
   cross-logic and cross-case discharge — for `lock`, `release`, `freeze` and
   `settleDuty`. **`setTrack` is the exception and is still unscoped** (K-5); the
@@ -136,11 +142,13 @@ Added by the post-close pass:
   version was H-10 evasion.
 - **Governance cannot orphan live obligation handles.** `executeLogic` refuses to
   re-authorize a logic that is already authorized and not drained.
-- **A voluntary reduction cannot remap a draw** (H-03A). `drawPanel` still reads
-  live state to decide seatability — P0-2 requires that — but a moderator that cut
-  its own duty or requested exit this epoch is denied its seat WITHOUT its leaf
-  being removed, so it can exclude itself and nothing else. A freeze still
-  excludes: it is imposed, not chosen.
+- **The sortition tree is immutable for a whole epoch** (H-03A + H-03B).
+  `drawPanel` reads it and never writes it; the only writers are `initialize` and
+  `_drainEpochs` at a boundary. So the draw's address mapping is fixed before the
+  seed is public, and live seatability inputs — which P0-2 requires — feed only
+  accept/deny, changing how far the walk runs and never what the walk is. The
+  attempt budget rose from 2 to 6 per seat to pay for not removing anyone, sized
+  by measurement and free in every dense case.
 - **The privileged registry surface is now exactly**
   `lock / release / freeze / reward / setTrack / drawPanel / settleDuty /
   advanceEpoch`, plus the index registry's `openCase / closeCase / writeEntry /
@@ -193,7 +201,15 @@ could not say which case it backed, a version counter standing in for an epoch.
 Conservation held throughout all of them, which is exactly why they were invisible.
 Conservation is necessary and never sufficient.
 
-M2.6-P0-3c adds the sharpest instance yet, and it is a lesson about prose:
+M2.6-P0-3d adds the sharpest instance of all, and it is a lesson about scope:
+**closing every lever you can name is not closing the property.** P0-3c enumerated
+the two self-directed levers and suppressed them, which was correct about both and
+wrong about the whole — the exhaustion asymmetry and the entire upward family
+across batches were still open, and the second only exists because seat drawing is
+batched, which is machinery introduced in the same milestone. Fix the mechanism
+that makes levers possible, not the levers.
+
+M2.6-P0-3c is a lesson about prose:
 **a true statement one level away from the property you need is not a proof of it.**
 "The sortition tree cannot move within an epoch" was true, verified, and tested. The
 property actually required is "the draw cannot be reshaped after its seed is public",

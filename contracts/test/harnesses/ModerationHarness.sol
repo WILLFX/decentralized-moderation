@@ -51,7 +51,7 @@ contract ModerationHarness is Moderation {
         c.finalOutcome = finalOutcome;
         c.phase = Phase.FINALIZED;
         c.pot = pot;
-        openPotsTotal += pot;
+        money.openPotsTotal += pot;
     }
 
     function __injectRound(uint256 caseId) external {
@@ -146,7 +146,9 @@ contract ModerationHarness is Moderation {
     }
 
     function __deleteEntry(bytes32 topicKey, uint256 globalId) external {
-        _deleteEntry(topicKey, globalId);
+        // M2.6: was `_deleteEntry`, which moved to `Settlement` with the index
+        // effects. The registry call it wrapped is what this always exercised.
+        indexReg.deleteEntry(topicKey, globalId);
     }
 
     function __setDepth(uint256 caseId, uint256 depth) external {

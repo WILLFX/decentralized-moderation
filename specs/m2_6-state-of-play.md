@@ -18,15 +18,16 @@ The last code change is `51af155`; everything after it is documentation.
 > fixed state. Everything from here down describes the state **at the tag** unless
 > it says otherwise.
 >
-> **The one thing to carry forward:** `Moderation` is at 24,137 bytes, 439 free,
-> up 841 across this batch — and that margin is a consequence of the fixes in this
-> batch, not an independent constraint. It is cited as the reason K-5 and others
-> are deferred, so the reasoning is circular unless said out loud; the work order's
-> "Size position" section says it out loud. Three of the known-open items (K-1
-> keeper economics, K-3 one settlement reference time, K-5 `setTrack` scoping) land
-> in that contract and do not fit. **A second structural split is a precondition
-> for that work**, not an optimisation to reach for afterwards; the seam candidates
-> are in the same section.
+> **The size position is resolved.** `Moderation` is at **19,964 bytes, 4,612
+> free**, after the second structural split moved settlement into a delegatecalled
+> library (`src/lib/Settlement.sol`). K-1, K-3 and K-5 now fit. What follows was
+> written before that and is kept because the reasoning still stands:
+>
+> `Moderation` was at 24,137 bytes, 439 free, up 841 across the regression batch —
+> and that margin was a consequence of those fixes, not an independent constraint.
+> It was cited as the reason K-1, K-3 and K-5 were deferred, which made the
+> reasoning circular unless said out loud. Saying it out loud is what made the split
+> the next item rather than a permanent excuse.
 >
 > **K-5 is the highest-severity thing still open** and it is new to the record:
 > `StakeRegistry.setTrack` takes no `caseRef` and writes absolutely, so during a
@@ -90,21 +91,32 @@ becomes something a reader mistakes for a test of the product.)
 despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
-After the post-close regression pass: `Moderation` 24,137 (439 free),
-`StakeRegistry` 12,126, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
+After the post-close regression pass and the second structural split:
+`Moderation` **19,964 (4,612 free)**, `Settlement` 5,596, `StakeRegistry` 12,126,
+`IndexRegistry` 6,256, `RulesetGovernor` 4,459.
 
-`Moderation` is up 841 bytes across the batch and the margin is now the binding
-constraint on anything further in the game contract — see the note at the top of
-this file, and the work order's "Size position" section for the seam candidates.
+`Moderation` rose 841 bytes across the regression batch and then fell 4,173 in the
+split, so it ends well below where the milestone started. The margin is no longer
+the binding constraint on work in the game contract; the seam analysis is in the
+work order's "Size position" section.
 
-## The architecture is now four contracts, not three
+## The architecture is four contracts and two linked libraries
+
+`Settlement` (M2.6) is a DELEGATECALLed library, not a fifth contract: it runs
+against `Moderation`'s own storage, so the bytes are outside the EIP-170 budget
+while every `Case`/`Round` field it touches stays exactly where it was. A
+re-auditor should read it as part of `Moderation`'s behaviour and as a separate
+deployment artifact.
+
+## The four contracts
 
 `RulesetGovernor` was split out of `Moderation` when it hit EIP-170 mid-milestone.
 The seam is **authoring vs enforcement**: proposing/validating/timelocking a ruleset
 is cold and validation-heavy, enforcing one is on every hot path. Ruleset *storage*
 deliberately stayed in `Moderation` — `_cp()` reads it per phase transition.
 
-A re-audit scoped to "the three-contract architecture" is scoped wrong; it is four.
+A re-audit scoped to "the three-contract architecture" is scoped wrong; it is four
+contracts plus `Settlement` and the pure helper libraries.
 
 ## What changed, in one line each
 

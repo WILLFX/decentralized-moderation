@@ -877,7 +877,37 @@ work, not an optimisation to consider afterwards.
   still a selector. Deleted rather than scoped, because a `caseRef` version would
   be dead code with a live selector.
 
-## Size position — read this before planning the P1 work
+## Size position — RESOLVED by the second structural split
+
+> **Superseded 2026-07.** Everything below was written when `Moderation` had 439
+> bytes free and described the split as a precondition. **The split has landed.**
+> Settlement — initialisation, the per-seat disposal loop, the finish and its index
+> effects — moved into `src/lib/Settlement.sol`, a DELEGATECALLed library.
+>
+> `Moderation` **24,137 -> 19,964 B, free 439 -> 4,612**. `Settlement` is 5,596 B
+> deployed separately. Suite unchanged at 218 tests / 18 suites; the only test-side
+> edits are one identifier in `ModerationHarness` (`openPotsTotal` is now a getter
+> over a grouped `Money` struct, layout-identical) and one harness call repointed at
+> the registry after `_deleteEntry` moved.
+>
+> The seam was chosen by measurement, not by size alone: settlement is both the
+> largest candidate (5,688 B stubbed) and the furthest from the round state machine,
+> which is where the widen restructure has to fit. Appeals (2,369 B) and VOID
+> disposal (913 B) were rejected because `_failAppealRound` and `_voidStep` are
+> reached from `_closeReveal` — moving them would put a cross-boundary call *inside*
+> the machine the split exists to make room in. Submission (3,012 B) was rejected
+> because `submit` writes case storage and calls `_openRound`.
+>
+> One measured lesson worth keeping: an intermediate shape that moved only the
+> disposal loop and left `_settleInit`/`_settleFinish` behind saved **298 bytes net**
+> — three call sites' worth of storage-pointer marshalling cost back almost
+> everything the move freed. Collapsing to a single entry point is what turned that
+> into 4,173.
+>
+> K-1, K-3 and K-5 now fit. The reasoning below is kept as the record of why the
+> split was taken and what was weighed.
+
+## Size position — the original analysis (kept for the record)
 
 `Moderation` is at **24,137 bytes, 439 free** against the EIP-170 limit of 24,576.
 It gained **841 bytes across this batch** (23,296 at the `m2.6-close` tag).

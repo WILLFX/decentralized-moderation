@@ -31,6 +31,7 @@ Foundry. Work order: `specs/m2-work-order.md`.
 |---|---|
 | `src/Moderation.sol` | The **replaceable game**: cases, appeals, settlement. Holds pot money only (fees + appeal bonds). |
 | `src/RulesetGovernor.sol` | Governance **authoring**: proposing, validating and timelocking rulesets and guidelines versions. Split out of `Moderation` in M2.6 when it hit EIP-170 — authoring is cold and validation-heavy, enforcement is on every hot path. Ruleset *storage* stays in `Moderation` (`_cp()` reads it per transition); the governor pushes validated results in via `applyRuleset`. |
+| `src/lib/Settlement.sol` | The settlement block — init, per-seat disposal, finish, index effects — as a **DELEGATECALLed library**. Split out of `Moderation` in M2.6 when the widen restructure needed EIP-170 room in the round state machine. A library rather than a contract because settlement touches almost all of `Case`/`Round`: the bytes move, the storage does not. |
 | `src/lib/ProtocolLimits.sol` | The immutable H-11 caps, shared by the contract that validates a ruleset and the one that enforces it so the two cannot drift. |
 | `src/StakeRegistry.sol` | **Permanent** custody + bookkeeping for moderator stake, the sortition tree and the H-07 duty pool. Moderators stake, exit and withdraw here directly — never through the game, so exit is never gated by logic. |
 | `src/IndexRegistry.sol` | **Permanent** topic → approved-entries index. The protocol's actual product; it outlives every logic redeployment. |
@@ -52,10 +53,10 @@ Conservation therefore spans two balances:
                                 + totalPendingPayout + totalSettling
     balanceOf(StakeRegistry) == free + committed + frozen + dutyBonded
 
-`Moderation` is at **24,107 bytes, 469 free** against EIP-170. That margin — not
-gas — is the binding constraint on further work in the game contract; the two
-open P1 items that land in it do not fit, and a second structural split is the
-planned precondition. See `specs/m2_6-work-order.md`, "Size position".
+`Moderation` is at **19,964 bytes, 4,612 free** against EIP-170, after the second
+structural split moved settlement into a delegatecalled library. That margin was
+439 before the split, which is why it had to happen before the widen restructure
+rather than after. See `specs/m2_6-work-order.md`, "Size position".
 
 ## Tests
 

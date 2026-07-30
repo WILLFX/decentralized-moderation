@@ -145,73 +145,64 @@ library Settlement {
         Ext memory x,
         uint256 maxSteps
     ) public {
-        Moderation.Round storage r = c.rounds[c.rounds.length - 1];
+        // M2.6-item-2b: walk EVERY round, on the same two-cursor shape
+        // `_disposeBatch` uses.
+        //
+        // This read `c.rounds[c.rounds.length - 1]` and disposed that round alone.
+        // Pre-2b a depth-0 VOID followed exactly one round, so "the last round" and
+        // "every round" were the same set. 3b makes a depth hold up to four, each
+        // able to carry committers who never revealed — the commit-and-vanish case
+        // the budget exists to price — and every one of those but the last was
+        // STRANDED: stake left in `committed`, so not withdrawable, not thawable and
+        // not draw-eligible; `_settle` accepts only VOID_SETTLING/FINALIZED/SETTLING
+        // so `Phase.VOID` has no way back; and `logicCommitted` never reaching zero
+        // means `canRevoke` stays false forever, reopening the permanent strand
+        // P0-5b closed. Conservation still balanced throughout, which is why the
+        // invariant campaign did not see it.
+        //
+        // The property, stated so it cannot be satisfied by one round again: **on a
+        // terminal transition, every round the case opened has its committed stake
+        // and its duty escrow discharged.**
+        uint256 nRounds = c.rounds.length;
+        uint256 round = s.round;
         uint256 idx = s.idx;
-        uint256 len = r.seatHolders.length;
         uint256 steps;
-        // M2.6-item-8: a VOID freezes for `freezeBase`, UNAMPLIFIED, and it is the
-        // only path that does.
-        //
-        // Everywhere else the duration is `s.freezeDur` — `freezeBase × power`, where
-        // power is read from the seat-weighted mean track of the WINNING SIDE
-        // (`FreezeMath`, §6.4). A VOID has `finalOutcome == Void` and never runs
-        // `_settleInit`, so there is no winning side, no mean track, and no
-        // `s.freezeDur`: it is zero, and using it would mean no freeze at all —
-        // exactly the free griefing this function's disposal rule exists to prevent.
-        //
-        // `freezeBase` is not a third number invented for this path. It is the SAME
-        // formula evaluated where there is nothing to amplify from:
-        // `freezeDuration(0, ...)` returns `baseSeconds` exactly, because power at a
-        // zero mean track is 1. So a VOID prices non-participation at the power-1 end
-        // of the range the adjudicated path can produce, which is the honest reading
-        // of what a VOID means — the protocol learned nothing about who was right, so
-        // it applies the base rather than guessing an amplification.
         uint256 freezeUntil = block.timestamp + p.freezeBase;
-        // M2.6-P0-6c: amnesty for an abandoned draw, gated on the round NEVER
-        // having widened.
-        //
-        // P0-6 gave a blanket amnesty on `c.drawAbandoned`, reasoning that a seated
-        // moderator cannot fail to do something it was never asked to do. True of a
-        // round that stalled before COMMIT ever opened; false once the round has
-        // widened, because a widen only happens AFTER a commit window opened and
-        // closed. `widenCount > 0` is therefore proof that at least one window
-        // existed, and the holders who sat through it are no-shows whatever becomes
-        // of the later draw.
-        //
-        // The blanket version was H-10 EVASION, and cheap: moderators pledging
-        // exactly the depth-0 target get seated, refuse to commit, the round widens,
-        // the re-draw stalls on the very capacity they are still holding, and
-        // `resolveStalledDraw` releases everyone.
-        //
-        // Known imprecision, taken deliberately: this OVER-penalises the widen
-        // tranche — moderators drawn by the widen itself, who were never given a
-        // window either. In the attack it has no false positives at all, because the
-        // attackers hold the capacity that makes the re-draw stall, so the widen
-        // tranche is empty by construction. Where it does bite, the cost is one
-        // seat's escrow frozen for one `failedRevealFreeze`. Separating the tranches
-        // needs per-seat window provenance, filed with P1-1(b) to be built once.
-        // M2.6-item-2b, finding (iv): the DEPTH's attempt count, not this round's
-        // own widen count — a stall round resets the latter. See `_disposeBatch`.
-        bool amnesty = c.drawAbandoned && c.attemptsUsed == 0;
-        while (idx < len && steps < maxSteps) {
-            address a = r.seatHolders[idx];
-            uint256 amt = r.committedAmt[a];
-            if (amt > 0) {
-                r.committedAmt[a] = 0;
-                x.stakeReg.freeze(a, r.caseRef, amt, freezeUntil); // committed -> frozen; never a transfer
+        while (round < nRounds) {
+            Moderation.Round storage r = c.rounds[round];
+            // M2.6-item-2b, finding (iv): gated on the DEPTH's attempt count, not the
+            // round's own widen count — a stall round is a fresh round whose
+            // `widenCount` starts at zero, so the old gate would hand P0-6c's amnesty
+            // straight back to the actor it was written to catch. Scoped to the LAST
+            // round for the same reason `_disposeBatch` scopes it there: an abandoned
+            // draw abandons the round that was drawing.
+            bool amnesty = c.drawAbandoned && round + 1 == nRounds && c.attemptsUsed == 0;
+            uint256 len = r.seatHolders.length;
+            while (idx < len) {
+                if (steps >= maxSteps) {
+                    s.round = round;
+                    s.idx = idx;
+                    emit Moderation.SettleProgressed(c.id, round, idx);
+                    return;
+                }
+                address a = r.seatHolders[idx];
+                uint256 amt = r.committedAmt[a];
+                if (amt > 0) {
+                    r.committedAmt[a] = 0;
+                    x.stakeReg.freeze(a, r.caseRef, amt, freezeUntil); // committed -> frozen
+                }
+                // H-07: capacity and escrow both return when the case ends (P0-2).
+                _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a], p.freezeBase);
+                unchecked {
+                    ++idx;
+                    ++steps;
+                }
             }
-            // H-07: capacity and escrow both return when the case ends (P0-2).
-            _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a], p.freezeBase);
-            unchecked {
-                ++idx;
-                ++steps;
-            }
+            unchecked { ++round; }
+            idx = 0;
         }
-        s.idx = idx;
-        if (idx < len) {
-            emit Moderation.SettleProgressed(c.id, c.depth, idx);
-            return;
-        }
+        s.round = round;
+        s.idx = 0;
         _voidFinish(c, money, p, x);
     }
 

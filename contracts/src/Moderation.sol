@@ -370,6 +370,11 @@ contract Moderation is ReentrancyGuard {
         // Index of the round whose tally produced the outcome. A depth now holds
         // several rounds and only one adjudicates, so `_cur(c)` is not that round.
         uint256 adjRound;
+        // depth -> that depth's adjudicating round index. The money paths are
+        // addressed by DEPTH in the ABI and by ROUND in storage, and those stopped
+        // being the same number; this is what reconciles them, and what
+        // `adjudicatingRoundAt` exposes so a client can address a round directly.
+        mapping(uint256 => uint256) adjRoundAt;
         // The adjudicating round of the PREVIOUS depth — what `_failAppealRound`
         // restores. `c.depth - 1` was a valid index only while depth == round index.
         uint256 prevDepthAdjRound;
@@ -1142,7 +1147,11 @@ contract Moderation is ReentrancyGuard {
         ) {
             revert CaseNotTerminal();
         }
-        Round storage r = c.rounds[depth];
+        // M2.6-item-2b: `depth` is a DEPTH, and a depth now holds several rounds. A
+        // bond only ever attaches to the round that adjudicated — `contributeAppealBond`
+        // writes `c.rounds[c.adjRound]` — so resolve rather than index directly. A
+        // banked round can never hold a bond, so nothing is unreachable.
+        Round storage r = c.rounds[_adjRoundOf(c, depth)];
         if (r.bondInPot) revert BondLocked();
         uint256 amt = r.bondContribs[msg.sender];
         if (amt == 0) revert NothingToReclaim();
@@ -1151,6 +1160,13 @@ contract Moderation is ReentrancyGuard {
         money.totalPendingBond -= amt;
         address(token).safeTransfer(msg.sender, amt);
         emit BondReclaimed(caseId, depth, msg.sender, amt);
+    }
+
+    /// @dev The round that adjudicated `depth`. Depth 0's entry is 0 both because
+    ///      that is the first round and because an un-adjudicated case has nothing
+    ///      to address, so the zero default is never a wrong answer here.
+    function _adjRoundOf(Case storage c, uint256 depth) internal view returns (uint256) {
+        return c.adjRoundAt[depth];
     }
 
     function _opposite(Outcome o) internal pure returns (Outcome) {
@@ -1233,8 +1249,11 @@ contract Moderation is ReentrancyGuard {
     function claimAppealPayout(uint256 caseId, uint256 depth) external nonReentrant {
         Case storage c = cases[caseId];
         if (c.phase != Phase.SETTLED) revert CaseNotFinalized();
-        if (depth >= c.rounds.length) revert NothingToReclaim();
-        Round storage r = c.rounds[depth];
+        if (depth > c.depth) revert NothingToReclaim();
+        // M2.6-item-2b: as in `reclaimBond` — resolve the DEPTH to the round that
+        // adjudicated it. Bounds-checked against `c.depth`, because `rounds.length`
+        // now overcounts: a depth that stalled contributed several rounds.
+        Round storage r = c.rounds[_adjRoundOf(c, depth)];
         bool winning = r.bondInPot && r.appealFor == c.finalOutcome;
         bool refundOnly = r.bondInPot && r.bondRefundOnly && !winning; // H-10: capital back, no bonus
         // A bond that lost on the merits was forfeited into the rewards — nothing to pull.
@@ -1483,6 +1502,7 @@ contract Moderation is ReentrancyGuard {
         Round storage r = c.rounds[idx];
         c.phase = Phase.TALLY;
         c.adjRound = idx;
+        c.adjRoundAt[c.depth] = idx;
         r.adjudicated = true; // M2.6-item-2b(3a): the tally the outcome is drawn from
         r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
@@ -1509,8 +1529,16 @@ contract Moderation is ReentrancyGuard {
     function _void(Case storage c) internal {
         c.phase = Phase.VOID_SETTLING;
         c.finalOutcome = Outcome.Void;
-        settleState[c.id].idx = 0;
-        emit VoidOpened(c.id, _cur(c).seatHolders.length);
+        // M2.6-item-2b: BOTH cursors. VOID disposal now walks every round, so the
+        // round cursor has to start at zero alongside the seat cursor.
+        SettleState storage st = settleState[c.id];
+        st.round = 0;
+        st.idx = 0;
+        uint256 participants;
+        for (uint256 i; i < c.rounds.length; ++i) {
+            participants += c.rounds[i].seatHolders.length;
+        }
+        emit VoidOpened(c.id, participants);
     }
 
     // M2.6: the DISPOSAL half of a VOID (`_voidStep` / `_voidFinish`) moved to
@@ -1652,25 +1680,43 @@ contract Moderation is ReentrancyGuard {
         );
     }
 
-    function seatsOf(uint256 caseId, uint256 depth, address moderator) external view returns (uint256) {
-        return cases[caseId].rounds[depth].seats[moderator];
+    /// @notice The round index that adjudicated `depth` — how a client turns the
+    ///         depth it knows about into the index the per-round views below take.
+    /// @dev M2.6-item-2b. Depth and round index were the same number until a depth
+    ///      could hold several rounds; the five views below still SAID `depth` while
+    ///      meaning round index, and under 2b those diverge. They are renamed rather
+    ///      than re-semanticked (a parameter name is not part of the selector, so no
+    ///      caller breaks), and this is the discovery path for callers that were
+    ///      genuinely passing a depth.
+    function adjudicatingRoundAt(uint256 caseId, uint256 depth) external view returns (uint256) {
+        return cases[caseId].adjRoundAt[depth];
     }
 
-    function seatHolderAt(uint256 caseId, uint256 depth, uint256 i) external view returns (address) {
-        return cases[caseId].rounds[depth].seatHolders[i];
+    /// @notice Total rounds this case opened, across every depth. The upper bound
+    ///         for the `roundIndex` parameters below.
+    function roundCount(uint256 caseId) external view returns (uint256) {
+        return cases[caseId].rounds.length;
     }
 
-    function bondInfo(uint256 caseId, uint256 depth)
+    function seatsOf(uint256 caseId, uint256 roundIndex, address moderator) external view returns (uint256) {
+        return cases[caseId].rounds[roundIndex].seats[moderator];
+    }
+
+    function seatHolderAt(uint256 caseId, uint256 roundIndex, uint256 i) external view returns (address) {
+        return cases[caseId].rounds[roundIndex].seatHolders[i];
+    }
+
+    function bondInfo(uint256 caseId, uint256 roundIndex)
         external
         view
         returns (uint256 bond, Outcome appealFor, bool bondInPot)
     {
-        Round storage r = cases[caseId].rounds[depth];
+        Round storage r = cases[caseId].rounds[roundIndex];
         return (r.bond, r.appealFor, r.bondInPot);
     }
 
-    function bondContribOf(uint256 caseId, uint256 depth, address contributor) external view returns (uint256) {
-        return cases[caseId].rounds[depth].bondContribs[contributor];
+    function bondContribOf(uint256 caseId, uint256 roundIndex, address contributor) external view returns (uint256) {
+        return cases[caseId].rounds[roundIndex].bondContribs[contributor];
     }
 
     function appealFloor(uint256 caseId) external view returns (uint256) {

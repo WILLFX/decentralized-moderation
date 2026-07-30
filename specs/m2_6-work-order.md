@@ -950,10 +950,49 @@ rule exists to prevent. Split:
 boundary guard for hazard 1. Landing the reward scoping while it is provably inert is
 safer than landing it beside the mechanism that first arms it.
 
+**3b — landed, then fixed.** A blocker found in review: `settleVoid` disposed only
+the last round, so a multi-round VOID stranded every earlier round's committed stake.
+See "The VOID strand" below.
+
 **3b — landed.** Commit-time widen with the REVEAL -> DRAW edge deleted, stall rounds
 on the shared per-depth counter, findings (ii)/(iii)/(iv), the tests, the re-derived
 figures. Part 1 and the stall round stay together: separating them is the H-10
 regression.
+
+#### The VOID strand — a blocker 3b introduced, and the class around it
+
+`settleVoid` read `c.rounds[c.rounds.length - 1]` and iterated that round alone,
+where the FINALIZED path has always run `while (round < nRounds)`. Pre-2b a depth-0
+VOID followed exactly one round, so "the last round" and "every round" were the same
+set. 3b makes a depth hold up to four, each able to carry committers who never
+revealed — the commit-and-vanish case the budget exists to price.
+
+Every round but the last was **stranded**: stake left in `committed`, so not
+withdrawable, not thawable, not draw-eligible; `_settle` accepts only
+VOID_SETTLING/FINALIZED/SETTLING, so `Phase.VOID` has no transition left that could
+reach it; and `logicCommitted` never reaching zero means `canRevoke` is false
+forever — reopening the permanent strand P0-5b closed. **Conservation balanced
+throughout**, which is why the invariant campaign did not see it.
+
+The property, stated so one round cannot satisfy it again: *on a terminal
+transition, every round the case opened has its committed stake and its duty escrow
+discharged.* `settleVoid` now walks rounds on the same two-cursor shape
+`_disposeBatch` uses, and `_void` resets both cursors.
+
+**And it was a class of six, not one.** Every `rounds[depth]` site was swept:
+
+| site | fix |
+|---|---|
+| `reclaimBond`, `claimAppealPayout` | resolve DEPTH -> adjudicating round via `c.adjRoundAt` |
+| `seatsOf`, `seatHolderAt`, `bondInfo`, `bondContribOf` | parameter renamed `roundIndex` |
+
+The money paths keep taking a **depth** in the ABI and resolve it internally, because
+a bond only ever attaches to the round that adjudicated (`contributeAppealBond`
+writes `c.rounds[c.adjRound]`) — a banked round can never hold one, so nothing
+becomes unreachable and no caller has to discover anything. The four views genuinely
+address a **round**, so they say so; a parameter name is not part of the selector, so
+no caller breaks. **Discovery for callers that were passing a depth:
+`adjudicatingRoundAt(caseId, depth)`, plus `roundCount(caseId)` as the bound.**
 
 #### The figures, re-derived against the shipped ruleset
 
@@ -990,11 +1029,49 @@ to reveal:
 | **0.19** | 5.05% | **5.05%** |
 | 0.30 | 16.3% | 16.25% |
 
-**The pre-committed 5% bar is crossed at `phi` ~ 0.19** — roughly one seat in five
-failing to reveal, which is a badly degraded network rather than normal operation. At
-the dense fixture the bar holds with a wide margin, so the participation credit stays
-item 10's business and is not pulled forward. The figure to watch in production is
-`phi`, and it is now the parameter that decides this.
+**The pre-committed 5% bar is crossed at `phi` ~ 0.19 under the independence
+assumption.** Two corrections to how that was first reported, both of which make the
+residual more serious than "holds with a wide margin" suggested.
+
+**1. Independence is load-bearing, and it is the optimistic case.** The table above
+is a binomial: each seat fails to reveal independently. Real reveal failures are
+CORRELATED — a client release, an RPC outage, a gas spike, a shared hosting provider
+take a whole panel together, and panels are drawn from a moderator set with no
+reason to be independent in any of those. At the same marginal `phi`, correlation
+banks far more often:
+
+| `phi` | independent | perfectly correlated |
+|---|---|---|
+| 0.05 | 0.12% | **5.00%** |
+| 0.10 | 0.86% | 9.99% |
+| 0.19 | 5.05% | 18.89% |
+
+Perfect correlation reaches the bar at `phi = 0.05`, not 0.19 — a **forty-fold**
+difference at ordinary failure rates. The truth lies between and nothing in the
+protocol pushes it toward the left column. **The table is an upper bound on how well
+this behaves, not an estimate of it.**
+
+**2. 5% is not an edge case; it is the price.** It is the ex-ante probability that
+any given seat lands downside-only, which is exactly what a moderator prices when
+deciding how much duty to pledge. That makes it a **disincentive to pledge**, not a
+tail risk — and pledged capacity is what the whole seat-draw depends on.
+
+**Re-priced against item 8's final numbers.** A banked seat pays nothing if its
+holder reveals coherently and costs `s.freezeDur` if it reveals incoherently or
+withholds. Item 8 raised the withhold branch from `failedRevealFreeze` (1 day) to
+`s.freezeDur` (**7 to 28 days** at the shipped ruleset), so the term this residual is
+multiplied by grew 7x to 28x in the same milestone that created the residual. At
+`beta = 5%` and `P(not coherent) ~ 0.5`, a pledged seat carries `0.05 x 0.5 x 7-28
+days` of expected dead-weight illiquidity — with no reachable upside on those seats
+at all, since the reward denominator excludes them.
+
+Stated as the asymmetry: **reward income scales by `(1 - beta)`; freeze exposure does
+not scale at all.** The two items are coupled in the direction that compounds.
+
+The participation credit still stays item 10's business — it needs the per-round
+allocation item 10 must build — but it is filed as a live economic cost rather than a
+contingency, and the trigger to revisit is `phi` under CORRELATED failure, not the
+independent figure.
 
 
 

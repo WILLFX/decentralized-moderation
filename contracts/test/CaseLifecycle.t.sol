@@ -333,6 +333,33 @@ contract CaseLifecycleTest is ModerationTestBase {
             }
         }
 
+        // M2.6-item-2b: assert EVERY ROUND is discharged, not just the last.
+        //
+        // This test previously walked `committers` — the round-0 seat-holders it had
+        // captured — and asserted `frozen > 0` for each. Under stall rounds a depth
+        // holds up to four rounds, and that assertion was satisfied by whichever
+        // round the disposal happened to reach while the others sat untouched, their
+        // stake stranded in `committed`: not withdrawable, not thawable, not
+        // draw-eligible, with no phase transition left that could reach it and
+        // `canRevoke` false forever. Conservation still balanced, which is why
+        // nothing caught it.
+        //
+        // The property is per ROUND, so the fixture asserts it per round.
+        uint256 nRounds = mod.__roundCount(caseId);
+        assertGt(nRounds, 1, "fixture must have stalled, or it cannot see the defect");
+        uint256 checked;
+        for (uint256 rIdx = 0; rIdx < nRounds; rIdx++) {
+            (, uint256 shc,,,,,,,,) = mod.roundInfo(caseId, rIdx);
+            for (uint256 i = 0; i < shc; i++) {
+                address a = mod.seatHolderAt(caseId, rIdx, i);
+                // Nothing may be left in `committed` for ANY round of the case.
+                (,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(a);
+                assertEq(committed, 0, "every round's committed stake is discharged");
+                checked++;
+            }
+        }
+        assertGt(checked, 0, "the sweep actually visited seat-holders");
+
         // M2.6-item-8: every vanisher is frozen for `freezeBase`, UNAMPLIFIED — the
         // one path that uses it, and the only path where the amplified duration does
         // not exist. A VOID never runs `_settleInit`, so there is no winning side to
@@ -342,8 +369,7 @@ contract CaseLifecycleTest is ModerationTestBase {
         // `freezeBase` is not a third number invented for the VOID path: it is the
         // same `FreezeMath` curve evaluated where there is nothing to amplify from,
         // since power at a zero mean track is exactly 1. Asserted against the live
-        // ruleset rather than a literal, so a governance change cannot leave this
-        // passing against a stale copy.
+        // ruleset rather than a literal.
         uint256 expected = mod.getParams().freezeBase;
         assertGt(expected, 1 days, "fixture must discriminate against the deleted brief freeze");
         for (uint256 i = 0; i < committers.length; i++) {

@@ -513,6 +513,34 @@ expected registry code hashes. `submit`/`submitRemoval` require `active`. A
 token-mismatch deployment silently makes the registry insolvent in one asset while
 accumulating another.
 
+**Landed as item 4 (post-close), and NOT as an `activate()` gate.** This item was
+flagged by both original audits and then lost to a duplicate P1-2 numbering — the
+number was reused for batched seat drawing — so it survived the whole milestone
+unbuilt. Closed piecewise instead:
+
+- `token == stakeReg.token()` is a **constructor** check. Both `token` and
+  `stakeReg` are immutable, so the relation is fixed at construction and a revert
+  there makes the bad deployment unrepresentable; an activation flag would add
+  state and a live selector to guard a state that can no longer arise. It subsumes
+  `token != 0`, because the registry rejects a zero token at its own construction.
+- `stakeReg.isLogic(this)` and `indexReg.isLogic(this)` are enforced continuously by
+  P0-5's `_requireOpen`, which is strictly stronger than a one-shot activation
+  check: authorization can be revoked *after* activation, and a gate that only ran
+  once would not see it.
+- **Deliberately not taken:** `guidelinesVersion > 0` and expected registry code
+  hashes. The first is an operational precondition, not a safety one — a case
+  submitted under version 0 pins version 0 and adjudicates consistently. The second
+  pins registry bytecode into the game contract, which forecloses exactly the
+  registry upgrade the M2.5 split exists to permit.
+
+The audit's statement of the harm understates it. It is not an accounting
+mismatch: settlement's `reward()` pulls `StakeRegistry.token()` from the logic
+contract, which under a mismatch it does not hold, so the transfer reverts and takes
+`claim` with it. Every adjudicated case bricks in SETTLING with its seat-holders'
+committed stake **locked permanently**, while `submit` keeps taking fees. VOIDs
+still drain, because they pay the submitter in the logic's own token and never call
+`reward()` — so the fault presents as intermittent rather than total.
+
 Also: **`MAX_PANEL = 512` is not evidence-based.** The largest measured draw is 47
 seats over 1,000 moderators at ~4.39M gas, and `realizeSeats` attempts a whole target
 in one call. Either derive the cap from a real worst-case benchmark or make seat
@@ -675,8 +703,12 @@ are not optional extras — several findings exist *because* the fixture stopped
 11. A case opened when the network has zero pledged capacity (P0-6).
 12. A committed moderator receiving widen seats, then settling — assert the extra
     seats are either collateralized or penalized, never silently released (P1-1).
-13. Deployment with a token that differs from `stakeReg.token()` (P1-2).
-14. Deployment authorized in one registry but not the other (P1-2).
+13. ~~Deployment with a token that differs from `stakeReg.token()` (P1-2).~~
+    **Covered** by item 4: `test_deployment_against_a_foreign_token_is_refused`
+    plus its matching-token counterpart.
+14. ~~Deployment authorized in one registry but not the other (P1-2).~~ **Covered**
+    by P0-5's `_requireOpen`, which checks BOTH registries at submit —
+    `test_desynchronized_registry_authorization_rejects_submissions`.
 15. ~~A ruleset that passes validation but exceeds `MAX_TOTAL_DRAWS` at runtime
     through target clamping (P1-3).~~ **Covered** by the validator commit:
     `test_short_target_array_cannot_smuggle_draws_past_the_aggregate_bound` and

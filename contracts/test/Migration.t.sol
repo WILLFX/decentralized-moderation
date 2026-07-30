@@ -8,6 +8,7 @@ import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
 import {RulesetGovernor} from "../src/RulesetGovernor.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
+import {MockBZZ} from "./mocks/MockBZZ.sol";
 
 /// The whole point of the M2.5 split, exercised end to end against live state
 /// rather than asserted about empty registries: run a real case to settlement
@@ -27,6 +28,45 @@ contract MigrationTest is ModerationTestBase {
         RulesetGovernor g = new RulesetGovernor(address(this), GOV_TIMELOCK);
         m = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg, address(g));
         g.bindModeration(m);
+    }
+
+    // --- M2.6-item-4: the deployment must hold the registry's asset -----------
+
+    /// Flagged by both original audits, then lost to a duplicate P1-2 numbering,
+    /// so it survived the whole milestone unbuilt.
+    ///
+    /// The harm is not an accounting mismatch. `submit` pulls fees in the logic
+    /// contract's token; settlement approves that token to the registry and calls
+    /// `reward()`, which pulls `StakeRegistry.token()` from the logic contract
+    /// (P0-4 — the registry funds itself and verifies the balance delta). Under a
+    /// mismatch it pulls an asset the logic contract does not hold, the transfer
+    /// reverts, and `claim` reverts with it: every adjudicated case bricks in
+    /// SETTLING with its seat-holders' committed stake locked forever, while
+    /// `submit` goes on accepting fees. VOIDs still drain — they pay the submitter
+    /// in the logic's own token and never call `reward()` — so the fault presents
+    /// as intermittent rather than total.
+    ///
+    /// That harm is argued from the call path rather than exercised, deliberately:
+    /// a test for it would have to construct the mismatched deployment this check
+    /// now makes unconstructible. The refusal is the assertion available, and it
+    /// is the one that has to hold.
+    function test_deployment_against_a_foreign_token_is_refused() public {
+        MockBZZ other = new MockBZZ();
+        assertTrue(address(other) != address(bzz), "fixture needs two distinct tokens");
+        assertEq(address(stakeReg.token()), address(bzz), "registry holds the suite's token");
+
+        RulesetGovernor g = new RulesetGovernor(address(this), GOV_TIMELOCK);
+        vm.expectRevert(Moderation.TokenMismatch.selector);
+        new ModerationHarness(IERC20(address(other)), stakeReg, indexReg, address(g));
+    }
+
+    /// The matching deployment still constructs, so the check is an identity test
+    /// and not an accidental ban on redeploying the game contract — which is the
+    /// entire point of the M2.5 split.
+    function test_deployment_against_the_registry_token_is_accepted() public {
+        RulesetGovernor g = new RulesetGovernor(address(this), GOV_TIMELOCK);
+        ModerationHarness m = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg, address(g));
+        assertEq(address(m.token()), address(stakeReg.token()), "logic and registry hold one asset");
     }
 
     function test_live_migration_preserves_stake_and_index() public {

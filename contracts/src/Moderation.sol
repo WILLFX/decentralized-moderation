@@ -149,6 +149,33 @@ contract Moderation is ReentrancyGuard {
 
     constructor(IERC20 _token, StakeRegistry _stakeReg, IndexRegistry _indexReg, address _governor) {
         if (_governor == address(0)) revert ZeroGovernor();
+        // M2.6-item-4: this contract and the registry must hold the SAME asset.
+        //
+        // Flagged by both original audits and then lost to a duplicate P1-2
+        // numbering, so it survived the milestone unbuilt. The failure is not an
+        // accounting mismatch — it is permanently locked stake:
+        //
+        //   `submit` pulls the fee in THIS contract's token. Settlement approves
+        //   that token to the registry and calls `reward()`, which pulls
+        //   `StakeRegistry.token()` from this address (P0-4: the registry funds
+        //   itself and verifies the balance delta). Under a mismatch it pulls an
+        //   asset this contract does not hold, so the transfer reverts — and with
+        //   it the whole `claim`. Every adjudicated case then bricks in SETTLING
+        //   with its seat-holders' committed stake locked forever, while `submit`
+        //   keeps accepting fees. VOIDs still drain, because they pay the submitter
+        //   in this contract's own token and never call `reward()`, which is what
+        //   would make the fault look intermittent rather than total.
+        //
+        // Checked in the CONSTRUCTOR rather than behind the `activate()` gate P1-2
+        // sketched: `token` and `stakeReg` are both immutable, so the relation is
+        // fixed at construction and a revert here makes the bad deployment
+        // unrepresentable. An activation flag would add state and a selector to
+        // guard a state that cannot arise once this line exists.
+        //
+        // This subsumes a zero-token check: the registry rejects a zero token at
+        // its own construction, so equality with a live registry's token implies
+        // non-zero. A separate `_token != 0` check would be unreachable.
+        if (address(_token) != address(_stakeReg.token())) revert TokenMismatch();
         governor = _governor;
         token = _token;
         stakeReg = _stakeReg;
@@ -1540,6 +1567,8 @@ contract Moderation is ReentrancyGuard {
     /// A ruleset would lock more per seat than a pledged duty unit is worth, so
     /// panels could be seated on collateral that cannot cover them.
     error RiskPerSeatExceedsDutyUnit();
+    /// M2.6-item-4: deployed against a token the stake registry does not hold.
+    error TokenMismatch();
 
     modifier onlyGovernor() {
         if (msg.sender != governor) revert NotGovernor();

@@ -238,9 +238,10 @@ contract RulesetGovernor {
         if (p.seedLag == 0 || p.seedLag > L.MAX_SEED_LAG) revert BadParams();
         if (p.commitTimeout == 0 || p.commitTimeout > L.MAX_WINDOW) revert BadParams();
         if (p.revealWindow == 0 || p.revealWindow > L.MAX_WINDOW) revert BadParams();
-        if (p.failedRevealFreeze > L.MAX_FREEZE || p.freezeBase == 0 || p.freezeBase > L.MAX_FREEZE) {
-            revert BadParams();
-        }
+        // M2.6-item-8: `failedRevealFreeze` was bounded here too and is deleted with
+        // the parameter. `freezeBase` is now the ONLY freeze duration a ruleset sets,
+        // which is the point — there is no second one to keep in step with it.
+        if (p.freezeBase == 0 || p.freezeBase > L.MAX_FREEZE) revert BadParams();
         // M2.6-P0-8: and the AMPLIFIED result, which is what settlement actually
         // computes. `MAX_FREEZE` bounded the base and the failed-reveal freeze but
         // never `freezeBase * freezeCap`.

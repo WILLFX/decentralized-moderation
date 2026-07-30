@@ -83,7 +83,19 @@ contract Moderation is ReentrancyGuard {
         uint256 freezeCap; // FREEZE_CAP multiplier (WAD, >= 1e18)
         uint256 trackSat; // TRACK_SAT (WAD)
         uint256 trackDecay; // TRACK_DECAY per-case decay (WAD fraction, < 1e18)
-        uint256 failedRevealFreeze; // brief freeze for commit-and-vanish (seconds)
+        // M2.6-item-8: `failedRevealFreeze` was HERE, and is deleted.
+        //
+        // It priced commit-and-vanish at its own short duration (1 day shipped) while
+        // every other non-participation took `freezeBase × power` (7 to 28 days), so
+        // withholding was the cheapest way to be wrong. Shape 4 removes the
+        // difference by removing the parameter rather than by constraining it: a
+        // withheld reveal now reaches the same line as an incoherent one, the no-show
+        // rung takes the same duration, and a VOID takes `freezeBase` unamplified.
+        //
+        // A governance parameter that nothing reads is still a governance parameter —
+        // proposable, validated, and implying it does something. Same standard that
+        // deleted `penalizeNoShow` (P0-5c), `voluntaryCutEpoch` (P0-3d) and
+        // `unbackedSeats`: delete rather than leave live surface with no effect.
         uint256 supersafeAge; // SUPERSAFE_AGE (seconds)
     }
 
@@ -159,7 +171,6 @@ contract Moderation is ReentrancyGuard {
             freezeCap: 4 * WAD, // FREEZE_CAP = 4 (WO-6 recalibration)
             trackSat: 60 * WAD, // TRACK_SAT = 60
             trackDecay: (WAD * 95) / 100, // TRACK_DECAY = 0.95
-            failedRevealFreeze: 1 days,
             supersafeAge: 96 hours
         });
         commitTargetByDepth = [uint256(5), 11, 23, 47];

@@ -149,7 +149,24 @@ library Settlement {
         uint256 idx = s.idx;
         uint256 len = r.seatHolders.length;
         uint256 steps;
-        uint256 freezeUntil = block.timestamp + p.failedRevealFreeze;
+        // M2.6-item-8: a VOID freezes for `freezeBase`, UNAMPLIFIED, and it is the
+        // only path that does.
+        //
+        // Everywhere else the duration is `s.freezeDur` — `freezeBase × power`, where
+        // power is read from the seat-weighted mean track of the WINNING SIDE
+        // (`FreezeMath`, §6.4). A VOID has `finalOutcome == Void` and never runs
+        // `_settleInit`, so there is no winning side, no mean track, and no
+        // `s.freezeDur`: it is zero, and using it would mean no freeze at all —
+        // exactly the free griefing this function's disposal rule exists to prevent.
+        //
+        // `freezeBase` is not a third number invented for this path. It is the SAME
+        // formula evaluated where there is nothing to amplify from:
+        // `freezeDuration(0, ...)` returns `baseSeconds` exactly, because power at a
+        // zero mean track is 1. So a VOID prices non-participation at the power-1 end
+        // of the range the adjudicated path can produce, which is the honest reading
+        // of what a VOID means — the protocol learned nothing about who was right, so
+        // it applies the base rather than guessing an amplification.
+        uint256 freezeUntil = block.timestamp + p.freezeBase;
         // M2.6-P0-6c: amnesty for an abandoned draw, gated on the round NEVER
         // having widened.
         //
@@ -182,7 +199,7 @@ library Settlement {
                 x.stakeReg.freeze(a, r.caseRef, amt, freezeUntil); // committed -> frozen; never a transfer
             }
             // H-07: capacity and escrow both return when the case ends (P0-2).
-            _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a]);
+            _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a], p.freezeBase);
             unchecked {
                 ++idx;
                 ++steps;
@@ -280,7 +297,7 @@ library Settlement {
                 // worth of stake. This is the penalty that makes "dominate the
                 // appeal panel and simply refuse to commit" (H-10) cost something.
                 // Capacity and escrow settle in the same call either way (P0-2).
-                _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a]);
+                _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a], s.freezeDur);
             }
             round++;
             idx = 0;
@@ -305,9 +322,20 @@ library Settlement {
     ) private {
         uint256 amt = r.committedAmt[a];
         Moderation.Vote vote = r.reveals[a];
-        if (vote == Moderation.Vote.None) {
-            x.stakeReg.freeze(a, r.caseRef, amt, block.timestamp + p.failedRevealFreeze);
-        } else if (_coherent(vote, fo)) {
+        // M2.6-item-8: ONE non-participation path, not two that happen to agree.
+        //
+        // Withholding a reveal used to take `failedRevealFreeze` (1 day) while
+        // revealing incoherently took `s.freezeDur` (7 to 28 days at the shipped
+        // ruleset). The reward term cancels — both forfeit it — so the whole price
+        // difference was the duration, and a moderator who suspected it was about to
+        // be on the losing side could pay a twenty-eighth of the penalty by simply
+        // going quiet. Withholding was the cheapest way to be wrong.
+        //
+        // The parity is now STRUCTURAL: a non-revealer and an incoherent revealer
+        // reach the same line, so there is no inequality to validate, no second
+        // duration to keep in step, and no multiplier to calibrate. `k = 1` — any
+        // factor here would reintroduce exactly what collapsing the branch avoids.
+        if (vote != Moderation.Vote.None && _coherent(vote, fo)) {
             // Principal: pure bookkeeping inside the registry, no transfer — the
             // committed slice never left it.
             x.stakeReg.release(a, r.caseRef, amt);
@@ -327,6 +355,7 @@ library Settlement {
                 x.stakeReg.reward(a, reward);
             }
         } else {
+            // Withheld or incoherent — the same price, by construction.
             x.stakeReg.freeze(a, r.caseRef, amt, block.timestamp + s.freezeDur);
         }
         _touchTrack(c, r, a, fo, p, decayed, x);
@@ -353,22 +382,40 @@ library Settlement {
         x.stakeReg.setTrack(a, t);
     }
 
-    /// @dev H-07/H-10: settle a seat-holder's duty reservations, penalising one
-    ///      seat's escrow if it was drawn and did not serve. Bounded registry-side
-    ///      by the escrow those seats actually posted, so it can never fail
-    ///      settlement and can never reach another case's collateral.
+    /// @dev H-07/H-10: settle a seat-holder's duty reservations, penalising the
+    ///      escrow of every seat it was drawn on and did not serve.
+    ///
+    ///      M2.6-item-8 prices this rung in the same commit as the withhold rung,
+    ///      because pricing one alone only moves the rational actor to the other.
+    ///      Two changes, and both are needed for the same reason:
+    ///
+    ///      **Seats-scaled.** It was ONE `riskPerSeat` regardless of seats held, so
+    ///      a moderator drawn onto eight seats paid an eighth per seat for ignoring
+    ///      all eight, and the more of a panel it dominated the cheaper each seat
+    ///      got — the wrong gradient for the attack this rung exists to price.
+    ///      P0-2 makes the fix need no cap: escrow is exactly `seats × riskPerSeat`,
+    ///      so `seats × riskPerSeat` is "forfeit this case's escrow for these seats"
+    ///      and the registry's own bound (`penalty > seatBond ? seatBond : penalty`)
+    ///      is already at that value. It cannot overshoot and cannot reach another
+    ///      case's collateral.
+    ///
+    ///      **Duration passed in, not read from a parameter of its own.** On the
+    ///      adjudicated path this is `s.freezeDur`, the same duration the two
+    ///      revealing-or-withholding rungs take, so never committing is not cheaper
+    ///      than committing and going quiet. On the VOID path there is no
+    ///      `s.freezeDur` to use — see `settleVoid`.
     function _settleDuty(
         Moderation.Params storage p,
         Ext memory x,
         uint256 caseRef,
         address a,
         uint256 seats,
-        bool failed
+        bool failed,
+        uint256 freezeDur
     ) private {
         if (seats == 0) return;
-        // One seat's worth, regardless of seats held.
-        uint256 penalty = failed ? p.riskPerSeat : 0;
-        x.stakeReg.settleDuty(a, caseRef, seats, penalty, block.timestamp + p.failedRevealFreeze);
+        uint256 penalty = failed ? seats * p.riskPerSeat : 0;
+        x.stakeReg.settleDuty(a, caseRef, seats, penalty, block.timestamp + freezeDur);
     }
 
     function _coherent(Moderation.Vote vote, Moderation.Outcome finalOutcome) private pure returns (bool) {

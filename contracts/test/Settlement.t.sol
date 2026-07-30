@@ -122,35 +122,192 @@ contract SettlementTest is ModerationTestBase {
         assertGt(stakeReg.eligibleWeightOf(victim), 0, "thawed -> eligible again");
     }
 
-    // --- failed reveal: brief freeze -----------------------------------------
+    /// Stake a dominant moderator, so a single holder reliably lands several of the
+    /// depth-0 seats. Weight buys REPEATS under a with-replacement draw, and a
+    /// multi-seat holder is the only fixture in which a per-seat penalty differs
+    /// from a per-holder one.
+    function _spawnWhale(uint256 amount) internal returns (address whale) {
+        whale = makeAddr("whale");
+        bzz.mint(whale, amount);
+        vm.prank(whale);
+        bzz.approve(address(stakeReg), type(uint256).max);
+        vm.prank(whale);
+        stakeReg.stake(amount);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
+        stakeReg.activate(whale);
+        // Computed before pranking: an external call in the arg list eats the prank.
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(whale);
+        uint256 units = free / riskPerSeat;
+        vm.prank(whale);
+        stakeReg.setDutyUnits(units);
+        // M2.6-P0-3: new weight is drawable only at the next eligibility epoch.
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
+    }
 
-    function test_failed_reveal_brief_freeze() public {
+    // --- item 8: withholding is priced exactly like being wrong ---------------
+
+    /// M2.6-item-8. This test previously asserted `<= 1 days` — it froze the defect
+    /// as intended behaviour, in the same way `test_draw_refuses_an_unsettled_epoch`
+    /// asserted the epoch-discard as correct. Withholding a reveal took
+    /// `failedRevealFreeze` while revealing incoherently took `freezeBase × power`,
+    /// so at the shipped ruleset a moderator who suspected it was on the losing side
+    /// could pay 1 day instead of 7 to 28 by going quiet. The reward term cancels —
+    /// both rungs forfeit it — so that duration gap WAS the entire price difference.
+    ///
+    /// Asserted as PARITY rather than as a number: the two rungs now reach the same
+    /// line in `_disposeSeat`, and a number would go stale the moment the ruleset
+    /// changes while the parity is the property.
+    function test_withholding_is_priced_like_revealing_incoherently() public {
         uint256 caseId = _submit(mods[0]);
         _realizeSeats(caseId);
-        // Everyone commits; one seat-holder never reveals.
-        _commitAll(caseId, 0, Moderation.Vote.Approve);
+        (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
+        assertGe(shCount, 3, "fixture needs a withholder and both vote sides");
+
+        // Everyone commits. Seat 1 commits Reject, the rest Approve, so that
+        // whichever way the seat-weighted outcome draw falls there is a revealer on
+        // the losing side to compare the withholder against.
+        for (uint256 i = 0; i < shCount; i++) {
+            address sh = mod.seatHolderAt(caseId, 0, i);
+            Moderation.Vote v = i == 1 ? Moderation.Vote.Reject : Moderation.Vote.Approve;
+            // Computed into a local FIRST: an external call in the argument list
+            // consumes the prank (the trap this suite has hit three times).
+            bytes32 h = mod.computeCommit(caseId, 0, sh, v, SALT);
+            vm.prank(sh);
+            mod.commitVote(caseId, h);
+        }
         if (_phase(caseId) == Moderation.Phase.COMMIT) {
             vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
             mod.closeCommit(caseId);
         }
-        (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
+
+        // Seat 0 committed and then vanishes. Everyone else reveals what they bound.
         address vanisher = mod.seatHolderAt(caseId, 0, 0);
-        // reveal everyone except the vanisher.
         for (uint256 i = 1; i < shCount; i++) {
             address sh = mod.seatHolderAt(caseId, 0, i);
             vm.prank(sh);
-            mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+            mod.revealVote(caseId, i == 1 ? Moderation.Vote.Reject : Moderation.Vote.Approve, SALT);
         }
-        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
-        mod.closeReveal(caseId);
+        if (_phase(caseId) == Moderation.Phase.REVEAL) {
+            vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
+            mod.closeReveal(caseId);
+        }
         _realizeOutcome(caseId);
         _finalize(caseId);
         mod.claim(caseId);
 
-        // Vanisher took a brief (1 day) freeze, not the full incoherent freeze.
-        uint256 fu = _frozenUntil(vanisher);
-        assertGt(fu, vm.getBlockTimestamp(), "vanisher frozen");
-        assertLe(fu - vm.getBlockTimestamp(), 1 days, "brief freeze only");
+        // Pick the incoherent revealer AFTER reading the drawn outcome, so the
+        // comparison does not depend on which way the seat-weighted draw fell.
+        (,,,,,, Moderation.Outcome fo) = mod.caseInfo(caseId);
+        address wrong = fo == Moderation.Outcome.Approve
+            ? mod.seatHolderAt(caseId, 0, 1) // revealed Reject
+            : mod.seatHolderAt(caseId, 0, 2); // revealed Approve
+        assertTrue(wrong != vanisher, "comparison must be a different moderator");
+
+        uint256 fuVanisher = _frozenUntil(vanisher);
+        uint256 fuWrong = _frozenUntil(wrong);
+        assertGt(fuVanisher, vm.getBlockTimestamp(), "vanisher frozen");
+        assertEq(fuVanisher, fuWrong, "withholding costs exactly what being wrong costs");
+        // And it is emphatically no longer the old brief rung. This is the assertion
+        // that fails against pre-item-8 code (86,400 vs 604,800 seconds).
+        assertGt(fuVanisher - vm.getBlockTimestamp(), 1 days, "not the deleted brief freeze");
+        _assertConservation();
+    }
+
+    /// The rung that also avoids committing must not be the cheapest of all.
+    ///
+    /// `_settleDuty` charged ONE `riskPerSeat` regardless of seats held, frozen for
+    /// the same brief duration, so a moderator drawn onto k seats paid 1/k per seat
+    /// for ignoring all k — the gradient ran the wrong way for exactly the actor
+    /// this rung exists to price. Both halves are fixed here, and both are needed:
+    /// pricing the withhold rung alone would only move a rational actor onto this one.
+    function test_no_show_is_not_the_cheapest_rung() public {
+        // Draws are stake-weighted WITH REPLACEMENT, and the base fixture's eight
+        // equal moderators land one seat each — under which the old rule and the new
+        // one agree exactly. A dominant staker is what makes the seat-count
+        // dimension observable at all.
+        //
+        // The depth-0 panel is widened first, because a dominant staker on a
+        // five-seat panel can hold enough of it that the remaining seats cannot
+        // reach `minReveals`, and the round widens instead of reaching an outcome.
+        // Twelve seats leaves slack in both directions. Defaults are READ FROM THE
+        // LIVE RULESET and one field changed — never a re-declared copy, which would
+        // silently drift from ruleset 0.
+        Moderation.Params memory gp = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+        cts[0] = 12;
+        governor.proposeParameters(gp, cts, aws);
+        vm.warp(vm.getBlockTimestamp() + GOV_TIMELOCK);
+        governor.executeParameters();
+
+        address whale = _spawnWhale(24_000 * XBZZ);
+
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+
+        (, uint256 shCount,,,,,,,,) = mod.roundInfo(caseId, 0);
+        assertGe(shCount, 2, "fixture needs a no-show and a participant");
+
+        // The no-show must hold MORE THAN ONE seat or this fixture cannot see the
+        // half of the fix that matters: the old rule charged one `riskPerSeat`
+        // whatever the seat count, so at one seat old and new agree exactly. Draws
+        // are stake-weighted WITH REPLACEMENT, so pick the holder that landed the
+        // most seats rather than assuming seat 0 did.
+        uint256 noShowIdx;
+        uint256 noShowSeats;
+        for (uint256 i = 0; i < shCount; i++) {
+            uint256 n = mod.__seats(caseId, 0, mod.seatHolderAt(caseId, 0, i));
+            if (n > noShowSeats) {
+                noShowSeats = n;
+                noShowIdx = i;
+            }
+        }
+        address noShow = mod.seatHolderAt(caseId, 0, noShowIdx);
+        assertEq(noShow, whale, "the dominant staker should be the multi-seat holder");
+        assertGt(noShowSeats, 1, "fixture must give the no-show multiple seats to discriminate");
+
+        for (uint256 i = 0; i < shCount; i++) {
+            if (i == noShowIdx) continue;
+            address sh = mod.seatHolderAt(caseId, 0, i);
+            bytes32 h = mod.computeCommit(caseId, 0, sh, Moderation.Vote.Approve, SALT);
+            vm.prank(sh);
+            mod.commitVote(caseId, h);
+        }
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+        }
+        for (uint256 i = 0; i < shCount; i++) {
+            if (i == noShowIdx) continue;
+            address sh = mod.seatHolderAt(caseId, 0, i);
+            vm.prank(sh);
+            mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
+        }
+        // Every committer revealed, so `revealVote` already closed the round.
+        if (_phase(caseId) == Moderation.Phase.REVEAL) {
+            vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
+            mod.closeReveal(caseId);
+        }
+        _realizeOutcome(caseId);
+        _finalize(caseId);
+
+        (,,, uint256 frozenBefore,,,,,) = stakeReg.moderatorInfo(noShow);
+        mod.claim(caseId);
+        (,,, uint256 frozenAfter,,,,,) = stakeReg.moderatorInfo(noShow);
+
+        // Seats-scaled: the whole escrow these seats posted, not one seat's worth.
+        // P0-2 makes the bound structural — escrow IS seats x riskPerSeat — so the
+        // registry's own clamp sits exactly at this value and cannot overshoot.
+        assertEq(
+            frozenAfter - frozenBefore,
+            noShowSeats * mod.getParams().riskPerSeat,
+            "no-show forfeits every seat's escrow, not one seat's"
+        );
+        // And for the same duration the participating rungs take, so never
+        // committing is not cheaper than committing and going quiet.
+        assertGt(_frozenUntil(noShow) - vm.getBlockTimestamp(), 1 days, "not the deleted brief freeze");
         _assertConservation();
     }
 

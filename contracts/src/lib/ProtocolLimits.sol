@@ -82,8 +82,8 @@ library ProtocolLimits {
     /// upper one — so an accepted ruleset could overflow `FreezeMath` inside
     /// `_settleInit`, which runs before a case reaches any recoverable state.
     /// Every settlement attempt would then revert, permanently. `MAX_FREEZE`
-    /// bounded `freezeBase` and `failedRevealFreeze` but never the AMPLIFIED
-    /// result, which is the product of the two.
+    /// bounded `freezeBase` (and, until item 8 deleted it, `failedRevealFreeze`) but
+    /// never the AMPLIFIED result, which is the product of the two.
     uint256 internal constant MAX_FREEZE_MULTIPLIER = 100 * WAD;
     uint256 internal constant MAX_BOND_MULT = 100;
     uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window

@@ -320,13 +320,23 @@ contract CaseLifecycleTest is ModerationTestBase {
             }
         }
 
-        // Every committer that vanished is frozen for the brief duration and
-        // excluded from the tree — the deterrent is present in the VOID path.
+        // M2.6-item-8: every vanisher is frozen for `freezeBase`, UNAMPLIFIED — the
+        // one path that uses it, and the only path where the amplified duration does
+        // not exist. A VOID never runs `_settleInit`, so there is no winning side to
+        // read a mean track from and `s.freezeDur` is zero; using it would mean no
+        // freeze at all, which is the free griefing this disposal rule prevents.
+        //
+        // `freezeBase` is not a third number invented for the VOID path: it is the
+        // same `FreezeMath` curve evaluated where there is nothing to amplify from,
+        // since power at a zero mean track is exactly 1. Asserted against the live
+        // ruleset rather than a literal, so a governance change cannot leave this
+        // passing against a stale copy.
+        uint256 expected = mod.getParams().freezeBase;
+        assertGt(expected, 1 days, "fixture must discriminate against the deleted brief freeze");
         for (uint256 i = 0; i < committers.length; i++) {
             (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(committers[i]);
             assertGt(frozen, 0, "vanisher's stake frozen, not released");
-            assertGt(frozenUntil, vm.getBlockTimestamp(), "vanisher frozen");
-            assertLe(frozenUntil - vm.getBlockTimestamp(), 1 days, "brief freeze only");
+            assertEq(frozenUntil - vm.getBlockTimestamp(), expected, "VOID freezes for the unamplified base");
             assertEq(stakeReg.eligibleWeightOf(committers[i]), 0, "frozen -> excluded");
         }
         _assertConservation();

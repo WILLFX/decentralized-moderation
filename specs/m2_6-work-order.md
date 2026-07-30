@@ -899,6 +899,98 @@ work, not an optimisation to consider afterwards.
   still a selector. Deleted rather than scoped, because a `caseRef` version would
   be dead code with a live selector.
 
+## Item 8 — freeze economics, priced (post-close)
+
+**The defect.** Withholding a reveal took `failedRevealFreeze`; revealing
+incoherently took `s.freezeDur = freezeBase × power`. At the shipped ruleset that is
+1 day against 7–28. The reward term **cancels** — both rungs forfeit it — so the
+duration gap was the entire price difference, and a moderator who suspected it was
+about to be on the losing side could pay a seventh to a twenty-eighth of the penalty
+by going quiet. Withholding was the cheapest way to be wrong.
+
+**Shape taken: delete the withhold-specific duration.** A non-revealer and an
+incoherent revealer now reach the same line in `_disposeSeat`. The parity is
+**structural** — there is no inequality to validate, no second duration to keep in
+step with the first, and no cross-parameter invariant. `k = 1`: any multiplier would
+reintroduce exactly what collapsing the branch avoids. `failedRevealFreeze` is
+deleted from `Params`, from the constructor and from `_validateParams`, so a ruleset
+now sets **one** freeze duration. Same family as `penalizeNoShow` (P0-5c),
+`voluntaryCutEpoch` (P0-3d) and `unbackedSeats` — a governance parameter that
+nothing reads is still proposable, validated, and implies it does something.
+
+**The VOID rung.** A VOID never runs `_settleInit`, so there is no winning side, no
+mean track and no `s.freezeDur` — it is zero, and using it would mean no freeze at
+all. It takes **`freezeBase`, unamplified**, and that is not a third number invented
+for the path: `FreezeMath.freezeDuration(0, …)` returns `baseSeconds` exactly,
+because power at a zero mean track is 1. A VOID therefore prices non-participation at
+the power-1 end of the range the adjudicated path can produce, which is the honest
+reading — the protocol learned nothing about who was right, so it applies the base
+rather than guessing an amplification.
+
+**The no-show rung, priced in the same commit.** Pricing withhold alone would only
+move a rational actor to the cheaper rung and change nothing. `_settleDuty` charged
+ONE `riskPerSeat` regardless of seats held, so a moderator drawn onto *k* seats paid
+1/*k* per seat for ignoring all *k* — the gradient ran backwards for exactly the
+actor the rung exists to price. It is now `seats × riskPerSeat` for `s.freezeDur`.
+P0-2 makes the bound structural rather than a cap: escrow **is** `seats ×
+riskPerSeat`, so the registry's own clamp already sits at that value and the penalty
+cannot overshoot or reach another case's collateral.
+
+The property is monotonicity — non-participation is not cheaper than participation,
+and the rung that also avoids committing is not the cheapest of all. It is asserted
+as parity rather than as a number, because a number goes stale the moment governance
+moves and the parity is the property.
+
+### Honest downtime, as a number
+
+This is a real cost to honest operators and it is not small. An operator whose node
+is down across one reveal window previously lost eligibility for **1 day**. It now
+loses eligibility for **7 days at minimum, and up to 28** at the top of the freezing
+curve (`freezeBase` 7 days, `freezeCap` 4). That is a 7× to 28× increase in the
+penalty for a power cut, and it is the same penalty a deliberate withholder pays,
+because the chain cannot tell them apart. Anyone calibrating `freezeBase` is
+calibrating that, not just the attack.
+
+### The feedback loop with item 2b, which runs both ways
+
+Harsher non-reveal penalties thin the operator pool. A thinner pool produces more
+participation shortfalls. More shortfalls produce more stall rounds. More stall
+rounds enlarge item 2b's banked-tally residual — the option that is decisive on the
+final round of the budget at the quorum margin. And in the other direction, 2b's
+residual is acceptable **only because it is priceable**, and this item is the price.
+
+The two items are therefore coupled in both directions and the calibration is chosen
+against both, not against item 8 alone. Raising `freezeBase` to deter withholding
+makes 2b's residual worse; lowering it to protect honest operators makes withholding
+cheap again. There is no setting that optimises one without moving the other.
+
+### Known and excluded: recoverable reveals
+
+Same category as hiding reveals — named so a re-auditor does not read them as
+misses, not because they were overlooked:
+
+- **Escrowed salts** — a voter deposits its salt with a third party or a contract
+  that can reveal on its behalf if it goes dark.
+- **Threshold decryption** — commitments encrypted to a committee that opens them at
+  the reveal deadline, so a vanished voter's vote is still counted.
+- **Third-party reveal** — anyone holding a valid `(vote, salt)` pair being able to
+  submit it for the committer.
+
+Each would make withholding structurally impossible rather than merely expensive,
+which is a strictly stronger property than the one this item buys. All three replace
+the commit-reveal scheme with a different cryptographic construction and a different
+liveness assumption (a committee, or a counterparty), and that is a protocol
+redesign, not a calibration. Excluded on scope, deliberately, and recorded here so
+the choice is visible.
+
+### Not folded in
+
+The reward-tally scoping question that item 2b raises — `Settlement`'s reward is
+`distributable × talliedSeats[a] / winnersSeats`, and `winnersSeats` accumulates
+across **every** round in `_settleInit` — is a 2b question, not an item-8 one. It is
+recorded against 2b's revision. Item 8 changes what non-participation costs; it does
+not change how the reward is divided.
+
 ## Size position — RESOLVED by the second structural split
 
 > **Superseded 2026-07.** Everything below was written when `Moderation` had 439

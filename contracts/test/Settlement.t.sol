@@ -146,6 +146,82 @@ contract SettlementTest is ModerationTestBase {
         stakeReg.advanceEpoch(type(uint256).max);
     }
 
+    // --- item 2b(3a): only an adjudicating round feeds a payoff ---------------
+
+    /// **Guard.** This passes on today's code and is expected to: a round that did
+    /// not adjudicate has zero reveals, so it contributes zero to `winnersSeats`
+    /// whether or not the gate exists, and no seat in it can reach the reward
+    /// branch. It is here to catch a FUTURE change, and specifically one shape of
+    /// change — item 2b's stall rounds, where a depth holds several rounds and only
+    /// one adjudicates.
+    ///
+    /// What it guards is not an overpayment. If the `adjudicated` gate is applied to
+    /// `_settleInit`'s `winnersSeats` but not to `_disposeSeat`'s numerator, a seat
+    /// in an excluded round pays against a denominator that no longer counts it,
+    /// `s.distributed` passes `s.distributable`, and `_settleFinish`'s
+    /// `s.bounty + (s.distributable - s.distributed)` UNDERFLOWS. `claim` reverts,
+    /// permanently, with every seat-holder's stake locked — item 4's failure class.
+    ///
+    /// So the assertions are shaped for a revert, not for a bad number. Settlement
+    /// is driven in single-seat batches and the boundary is checked BETWEEN them,
+    /// because `_settleFinish` runs in the same call as the last `_disposeBatch` and
+    /// an overshoot is not observable after a settlement that completed. Completion
+    /// itself is asserted, and deliberately not wrapped in `expectRevert`: a
+    /// conservation check placed after a successful settle cannot reach this at all,
+    /// because under the defect there is no successful settle.
+    function test_only_adjudicating_rounds_feed_a_payoff_and_settlement_never_overshoots() public {
+        // A case whose appeal round never adjudicates: depth 0 decides, depth 1
+        // draws no participation at all and falls back through `_failAppealRound`.
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+        _appeal(caseId, makeAddr("challenger"));
+        _realizeSeats(caseId);
+
+        uint256 guard;
+        while (_phase(caseId) != Moderation.Phase.FINALIZED) {
+            require(guard++ < 12, "did not finalize");
+            Moderation.Phase ph = _phase(caseId);
+            if (ph == Moderation.Phase.DRAW) {
+                vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+                mod.realizeSeats(caseId);
+            } else if (ph == Moderation.Phase.COMMIT) {
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+                mod.closeCommit(caseId);
+            } else if (ph == Moderation.Phase.REVEAL) {
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
+                mod.closeReveal(caseId);
+            } else {
+                revert("unexpected phase");
+            }
+        }
+
+        assertEq(mod.__roundCount(caseId), 2, "fixture must carry two rounds");
+        assertTrue(mod.__adjudicated(caseId, 0), "depth 0 drew the outcome");
+        assertFalse(mod.__adjudicated(caseId, 1), "the failed appeal round never did");
+
+        // Settle one seat at a time, checking the boundary between batches.
+        uint256 steps;
+        while (_phase(caseId) != Moderation.Phase.SETTLED) {
+            require(steps++ < 200, "settlement did not complete");
+            mod.claim(caseId, 1);
+            (, uint256 distributable, uint256 distributed) = mod.__settleMoney(caseId);
+            assertLe(distributed, distributable, "settlement overshot its own pool");
+        }
+
+        // Completion is the assertion the underflow would break, so it is asserted
+        // rather than assumed by whatever runs after it.
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.SETTLED), "settlement completed");
+
+        // And the gate selected: `winnersSeats` is depth 0's winning side alone.
+        (uint256 winnersSeats,,) = mod.__settleMoney(caseId);
+        (,,,, uint256 approveSeats,,,,,) = mod.roundInfo(caseId, 0);
+        assertEq(winnersSeats, approveSeats, "only the adjudicating round's seats count");
+        assertGt(winnersSeats, 0, "and the fixture actually had winners");
+
+        _assertConservation();
+    }
+
     // --- item 8: withholding is priced exactly like being wrong ---------------
 
     /// M2.6-item-8. This test previously asserted `<= 1 days` — it froze the defect

@@ -284,9 +284,18 @@ contract Moderation is ReentrancyGuard {
         uint256 pendingDraw; // H-05: seats still to be drawn for this round (fresh entropy per draw, incl. each widen)
         uint256 epochAtArm; // H-05/P0-3: the eligibility epoch this seed belongs to
         // M2.6-P0-5: this round's obligation reference in the stake registry,
-        // `(caseId << 8) | depth`. Stored once at open rather than threaded
+        // `(caseId << 8) | roundIndex`. Stored once at open rather than threaded
         // through every settlement helper — the settle loop is already at the IR
         // stack limit, and a round always knows which round it is.
+        //
+        // M2.6-item-2b(3a): keyed on the ROUND INDEX, not the depth. Identical
+        // today — one round per depth means `rounds.length - 1 == depth` — but
+        // item 2b opens several rounds at one depth, and two rounds sharing a
+        // handle would make the second round's escrow land on the first's
+        // obligation, so settlement would double-debit or under-debit. Changed
+        // here, while it is provably a no-op, rather than alongside the mechanism
+        // that first makes it bite. 8 bits holds the worst case at the governance
+        // caps: (1 + MAX_RULE_DEPTH) x (1 + MAX_RULE_WIDEN) = 81 rounds.
         uint256 caseRef;
         uint256 seatSnapshotBlock; // block whose blockhash seeds the seat draw
         uint256 outcomeSnapshotBlock; // block whose blockhash seeds the outcome draw
@@ -310,6 +319,15 @@ contract Moderation is ReentrancyGuard {
         uint256 approveTrackNum;
         uint256 rejectTrackNum;
         bool underQuorum; // H-09: outcome armed below MIN_REVEALS after max widen
+        // M2.6-item-2b(3a): this round's tally produced the outcome — set by
+        // `_armOutcome`, which is the only place a tally is ever drawn from.
+        //
+        // Today every round that revealed anything reaches `_armOutcome`, and the
+        // rounds that do not (`_failAppealRound`, whose precondition is ZERO
+        // reveals) contribute zero to every aggregate — so gating on this changes
+        // nothing. Under item 2b a depth holds several rounds and only one of them
+        // adjudicates, which is when the flag starts selecting.
+        bool adjudicated;
         uint256 revealedSeats; // approveSeats + rejectSeats
         Outcome outcome; // drawn ∝ seat counts
         Outcome appealFor; // the outcome an appeal against THIS round argues for
@@ -881,12 +899,20 @@ contract Moderation is ReentrancyGuard {
     /// @notice The commit hash a voter must submit: bound to chain, contract,
     ///         case, depth, voter, vote, and salt (M-01). Binding prevents copying
     ///         another voter's commitment or replaying one across cases/depths.
-    function computeCommit(uint256 caseId, uint256 depth, address voter, Vote vote, bytes32 salt)
+    /// @dev M2.6-item-2b(3a): the third field is the ROUND INDEX, not the depth.
+    ///      Identical today, since a depth holds exactly one round. Under item 2b a
+    ///      depth holds several, and binding to the depth would put two rounds in
+    ///      one commitment domain — a stalled round's revealed `(vote, salt)` is a
+    ///      valid preimage for the same voter in the round that follows it. `voter`
+    ///      is bound (M-01), so the exploitable content is narrow, but a disclosed
+    ///      value verifying a later commitment is the shape item 2b exists to
+    ///      remove, and it is free to close here.
+    function computeCommit(uint256 caseId, uint256 roundIndex, address voter, Vote vote, bytes32 salt)
         public
         view
         returns (bytes32)
     {
-        return keccak256(abi.encode(block.chainid, address(this), caseId, depth, voter, uint8(vote), salt));
+        return keccak256(abi.encode(block.chainid, address(this), caseId, roundIndex, voter, uint8(vote), salt));
     }
 
     /// @notice COMMIT -> REVEAL once the commit window elapses (also triggered
@@ -908,7 +934,7 @@ contract Moderation is ReentrancyGuard {
         Round storage r = _cur(c);
         if (!r.committed[msg.sender]) revert NotCommitted();
         if (r.reveals[msg.sender] != Vote.None) revert AlreadyRevealed();
-        if (computeCommit(caseId, c.depth, msg.sender, vote, salt) != r.commits[msg.sender]) revert BadReveal();
+        if (computeCommit(caseId, c.rounds.length - 1, msg.sender, vote, salt) != r.commits[msg.sender]) revert BadReveal();
 
         r.reveals[msg.sender] = vote;
         // Tally is capped to the seats collateralized at commit (H-08): a widen can
@@ -1251,7 +1277,7 @@ contract Moderation is ReentrancyGuard {
         uint256 target = _commitTarget(c, depth);
         r.nSeats = 0; // filled in by the draw: seats seated, not seats sought
         r.pendingDraw = target; // H-05
-        r.caseRef = (c.id << 8) | depth; // M2.6-P0-5
+        r.caseRef = (c.id << 8) | (c.rounds.length - 1); // M2.6-P0-5, item-2b(3a)
         _armSeed(c, r);
         // M2.6-P0-6: a draw that can never complete must still end. Deliberately
         // set here and on widen, NOT in `_armSeed` — a case whose seed keeps
@@ -1336,6 +1362,7 @@ contract Moderation is ReentrancyGuard {
 
     function _armOutcome(Case storage c, Round storage r) internal {
         c.phase = Phase.TALLY;
+        r.adjudicated = true; // M2.6-item-2b(3a): the tally the outcome is drawn from
         r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
     }

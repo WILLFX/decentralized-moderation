@@ -146,7 +146,11 @@ contract GovernanceTest is ModerationTestBase {
     }
 
     function test_cancel_clears_pending() public {
-        _proposeMinReveals(9);
+        // M2.6-item-2b(3a): was 9, an arbitrary placeholder. `minReveals` is now
+        // bounded by the smallest un-widened panel a case can reach (5 at the
+        // shipped ruleset), so 9 no longer validates. The value is incidental — this
+        // test asserts that cancelling clears a pending proposal.
+        _proposeMinReveals(5);
         (, bool exists) = governor.pendingParamsEta();
         assertTrue(exists);
         governor.cancelParameters();

@@ -60,6 +60,13 @@ contract ModerationHarness is Moderation {
         // injected round must too, or settlement debits the wrong handle.
         uint256 depth = cases[caseId].rounds.length - 1;
         cases[caseId].rounds[depth].caseRef = (caseId << 8) | depth;
+        // M2.6-item-2b(3a): a real round reaches settlement through `_armOutcome`,
+        // which is where `adjudicated` is set — and settlement now reads it to
+        // decide which tally feeds a payoff. An injected FINALIZED case is
+        // simulating a round that adjudicated, so the injector must stamp it or it
+        // stops mirroring the real path and the differential vectors settle with
+        // `winnersSeats == 0`.
+        cases[caseId].rounds[depth].adjudicated = true;
     }
 
     /// revealCode: 0 = None (committed but failed to reveal), 1 = Approve, 2 = Reject.
@@ -149,6 +156,29 @@ contract ModerationHarness is Moderation {
         // M2.6: was `_deleteEntry`, which moved to `Settlement` with the index
         // effects. The registry call it wrapped is what this always exercised.
         indexReg.deleteEntry(topicKey, globalId);
+    }
+
+    /// The settlement cursor's money fields, so a test can assert the boundary
+    /// `distributed <= distributable` BETWEEN batches. `_settleFinish` runs in the
+    /// same call as the final `_disposeBatch`, so the overshoot that underflows it
+    /// is not observable after a completed settlement — only before one, or as the
+    /// revert itself (M2.6-item-2b(3a), hazard 1).
+    function __settleMoney(uint256 caseId)
+        external
+        view
+        returns (uint256 winnersSeats, uint256 distributable, uint256 distributed)
+    {
+        SettleState storage st = settleState[caseId];
+        return (st.winnersSeats, st.distributable, st.distributed);
+    }
+
+    /// Did this round's tally produce the outcome (M2.6-item-2b(3a))?
+    function __adjudicated(uint256 caseId, uint256 roundIndex) external view returns (bool) {
+        return cases[caseId].rounds[roundIndex].adjudicated;
+    }
+
+    function __roundCount(uint256 caseId) external view returns (uint256) {
+        return cases[caseId].rounds.length;
     }
 
     function __setDepth(uint256 caseId, uint256 depth) external {

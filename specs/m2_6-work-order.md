@@ -941,6 +941,58 @@ work, not an optimisation to consider afterwards.
 Full design in review correspondence; this records what is **ruled** so the next
 reader is not dependent on it.
 
+### Build split: 3a (prerequisites) and 3b (mechanism)
+
+Commit 3 as first specified was ten mechanisms at once — the shape the one-per-commit
+rule exists to prevent. Split:
+
+**3a — landed.** Four changes that are behaviour-identical on today's code, plus the
+boundary guard for hazard 1. Landing the reward scoping while it is provably inert is
+safer than landing it beside the mechanism that first arms it.
+
+**3b — the mechanism.** Commit-time widen with the REVEAL -> DRAW edge deleted, stall
+rounds on the shared per-depth counter, findings (ii)/(iii)/(iv), the new tests, the
+re-derived figures. Part 1 and the stall round stay together: separating them is the
+H-10 regression.
+
+#### 3a, and the exact sense in which each part is a no-op
+
+| change | why identical today |
+|---|---|
+| `caseRef` keyed on round index | Every `_openRound` call site gives `rounds.length - 1 == depth`: three at depth 0 with the array empty, one at `fromDepth + 1` after `fromDepth + 1` pushes. |
+| `computeCommit` keyed on round index | Same identity; `revealVote` passes `rounds.length - 1` where it passed `c.depth`. |
+| reward scoping to the adjudicating round | Every round that revealed anything reaches `_armOutcome`. The only rounds excluded are `_failAppealRound`'s, whose precondition is ZERO reveals — so they contribute zero to `winnersSeats` and `meanTrackNum`, and no seat in them can reach the reward branch. |
+| `minReveals` bound | Ruleset 0 is `minReveals = 3` against `min(5, 11, 23, 47) = 5`. |
+
+**`meanTrackNum` is gated alongside `winnersSeats`, and had to be.** It is the
+numerator of a mean whose denominator is `winnersSeats`; scoping one without the
+other leaves a ratio that is not a mean of anything and can exceed every individual
+track. The cross-set property excepted at item 10 is that both sum across DEPTHS
+while the outcome is drawn from one round — a different statement, untouched here.
+
+#### Where "no-op" needs a qualifier, stated rather than glossed
+
+The `minReveals` bound is a no-op on **behaviour** — ruleset 0 satisfies it and no
+shipped path changes — but it is deliberately **not** a no-op on **what governance
+may propose**, since narrowing that is the entire point. One existing test proposed
+`minReveals = 9` as an arbitrary placeholder for a cancellation test; it now
+validates at 5. The value was incidental to what that test asserts.
+
+#### The two test-side changes, and why neither is an assertion change
+
+The split's standard was an unmoved suite. This is not quite that, and the exceptions
+are named rather than absorbed:
+
+1. `ModerationHarness.__injectRound` now stamps `adjudicated = true`. The injector's
+   contract is that it "mirrors exactly what those items' real code paths do", and a
+   real round in a FINALIZED case has been through `_armOutcome`. Without the stamp
+   the differential vectors settle with `winnersSeats == 0` — the harness diverging
+   from production, not production changing.
+2. The `minReveals = 9` placeholder above.
+
+No assertion, fixture shape or expected value changed. Suite 223 -> **224**; the one
+addition is the hazard-1 guard.
+
 ### P′, in three clauses — and P′-c is OPEN
 
 - **P′-a (disclosure).** Every commitment counted in a tally is fixed before any
@@ -1022,6 +1074,17 @@ The test must assert at the boundary: drive a multi-round case with a banked rou
 containing coherent revealers, assert `claim` **completes** (phase reaches SETTLED,
 not wrapped in `expectRevert`), and assert `distributed <= distributable` at the
 final disposal step.
+
+**Landed in 3a** as
+`test_only_adjudicating_rounds_feed_a_payoff_and_settlement_never_overshoots`,
+labelled a guard in its own body. Its fixture is a case whose appeal round never
+adjudicates (`_failAppealRound`), settled one seat at a time with the boundary
+checked between batches — `_settleFinish` runs in the same call as the last
+`_disposeBatch`, so an overshoot is invisible after a settlement that completed. It
+also pins that the gate SELECTS: `winnersSeats` equals depth 0's winning seats alone,
+with `__adjudicated` asserted true for round 0 and false for round 1. A banked round
+carrying coherent revealers is not constructible until 3b, so that stronger fixture
+lands with the mechanism.
 
 **Hazard 2 — the banked seat is pure downside, and it needs a number.**
 `_disposeBatch` walks every round and `_disposeSeat` judges against

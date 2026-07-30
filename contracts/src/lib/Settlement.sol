@@ -339,7 +339,20 @@ library Settlement {
             // Principal: pure bookkeeping inside the registry, no transfer — the
             // committed slice never left it.
             x.stakeReg.release(a, r.caseRef, amt);
-            uint256 reward = s.winnersSeats == 0 ? 0 : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
+            // M2.6-item-2b(3a): the SAME gate `_settleInit` applies, and applying
+            // it at only ONE site is an underflow rather than an overpayment. A
+            // numerator from a round the denominator excludes drives `s.distributed`
+            // past `s.distributable`, and `_settleFinish` computes
+            // `s.bounty + (s.distributable - s.distributed)` — which reverts,
+            // permanently, leaving the case stuck in SETTLING with every
+            // seat-holder's stake locked. Item 4's failure class.
+            //
+            // No-op today: a non-adjudicating round has zero reveals, so this branch
+            // is unreachable there. Which is precisely why it lands now, rather than
+            // beside the mechanism that first arms it.
+            uint256 reward = (!r.adjudicated || s.winnersSeats == 0)
+                ? 0
+                : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
             if (reward > 0) {
                 // `totalSettling` is decremented by the caller from the delta in
                 // `s.distributed` — see `disposeBatch`.
@@ -435,12 +448,28 @@ library Settlement {
         uint256 winningContribTot;
         for (uint256 d; d < nRounds; ++d) {
             Moderation.Round storage r = c.rounds[d];
-            if (fo == Moderation.Outcome.Approve) {
-                winnersSeats += r.approveSeats;
-                meanTrackNum += r.approveTrackNum;
-            } else {
-                winnersSeats += r.rejectSeats;
-                meanTrackNum += r.rejectTrackNum;
+            // M2.6-item-2b(3a): only the round whose tally produced the outcome
+            // feeds a payoff. Today that is every round that revealed anything, and
+            // the rounds it excludes contribute zero to both sums — the
+            // `_failAppealRound` path's precondition is ZERO reveals — so this is an
+            // exact no-op. Under item 2b a depth holds several rounds and only one
+            // adjudicates; counting a banked round here is the disclosure channel on
+            // the money axis (P′-c).
+            //
+            // `meanTrackNum` is gated TOO, and must be. It is the numerator of a
+            // MEAN whose denominator is `winnersSeats`; scoping one without the
+            // other leaves a ratio that is not a mean of anything and can exceed
+            // every individual track. The cross-set property excepted at item 10 is
+            // that both sum across DEPTHS while the outcome is drawn from one round.
+            // That is untouched here and is not the same thing.
+            if (r.adjudicated) {
+                if (fo == Moderation.Outcome.Approve) {
+                    winnersSeats += r.approveSeats;
+                    meanTrackNum += r.approveTrackNum;
+                } else {
+                    winnersSeats += r.rejectSeats;
+                    meanTrackNum += r.rejectTrackNum;
+                }
             }
             if (r.bondInPot) {
                 if (r.appealFor == fo) {

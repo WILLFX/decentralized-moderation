@@ -252,8 +252,27 @@ contract RulesetGovernor {
         // quantity a new retry axis has to enter. `maxWiden` is its only term today.
         uint256 attempts = 1 + p.maxWiden;
 
-        // minReveals must be reachable within the fully-widened depth-0 panel.
-        if (p.minReveals > attempts * commitTargets[0]) revert BadParams();
+        // M2.6-item-2b(3a): full quorum must be achievable WITHOUT the failure
+        // path. This was `minReveals <= attempts * commitTargets[0]` —
+        // reachability once the widen budget is spent — which admits 20 against a
+        // five-seat depth-0 target. Above the un-widened target, perfect
+        // participation on a full panel still leaves `revealedSeats < minReveals`,
+        // so every round at that depth must widen to reach quorum, every decision
+        // there is marked `underQuorum`, and by H-09 no such decision can ever
+        // reach the supersafe view AT ANY PARTICIPATION RATE. The parameter would
+        // silently disable a product guarantee rather than tighten a quorum.
+        //
+        // Strictly tighter than the check it replaces, so it is a replacement and
+        // not a second knob. Reads the runtime-clamped target, so it composes with
+        // P1-3 instead of reintroducing the array-versus-runtime gap one field
+        // over. Collaterally it keeps a banked tally smaller than the panel that
+        // follows it, which item 2b's residual argument had been ASSUMING.
+        uint256 minTarget = type(uint256).max;
+        for (uint256 d; d <= p.maxDepth; ++d) {
+            uint256 t = _runtimeTarget(commitTargets, d);
+            if (t < minTarget) minTarget = t;
+        }
+        if (p.minReveals > minTarget) revert BadParams();
 
         // Every supplied entry must be individually sane, whatever depth it serves.
         for (uint256 i; i < commitTargets.length; ++i) {

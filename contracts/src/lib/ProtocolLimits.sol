@@ -87,5 +87,20 @@ library ProtocolLimits {
     uint256 internal constant MAX_FREEZE_MULTIPLIER = 100 * WAD;
     uint256 internal constant MAX_BOND_MULT = 100;
     uint256 internal constant MAX_SEED_LAG = 250; // < 256-block blockhash window
-    uint256 internal constant MAX_TOTAL_DRAWS = 4000; // reachable settlement bound
+    /// Reachable settlement bound: the most seat draws any accepted ruleset can
+    /// produce across one case, and therefore the most seats settlement can have to
+    /// dispose.
+    ///
+    /// M2.6-P1-3: what this bounds is only as good as how it is computed. The check
+    /// iterated the `commitTargets` ARRAY while `Moderation._commitTarget` clamps to
+    /// the last entry at deeper depths, so a short array was validated over the
+    /// entries it gave and run over more depths than that. It now iterates
+    /// `d = 0..maxDepth` over the runtime-clamped target, as
+    /// `Σ_{d} attempts × runtimeTarget(d)` with `attempts` one named per-depth
+    /// budget — so a new retry axis enters the product instead of needing a term of
+    /// its own.
+    ///
+    /// The default ruleset reaches `4 × (5+11+23+47) = 344`. This number is the
+    /// ceiling for anything governance can accept, not that figure.
+    uint256 internal constant MAX_TOTAL_DRAWS = 4000;
 }

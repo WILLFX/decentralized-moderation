@@ -526,6 +526,25 @@ validates as 3,600 draws and executes up to 32,400. Iterate `depth = 0..maxDepth
 using the runtime clamp. Add caps for `freezeCap`, track, `freezeBase * power`, fee
 and pot arithmetic; require `trackDecay < WAD`.
 
+**Clamping fix landed** (validator commit, post-close). The aggregate loop now runs
+`d = 0..maxDepth` over `_runtimeTarget(commitTargets, d)`, which mirrors
+`Moderation._commitTarget`'s clamp and nothing else. At the current caps the
+reachable figure is `[MAX_PANEL]` with both retry budgets at 8: validated 1,152
+before, reachable 10,368. Two tests, both failing pre-fix — an explicit fixture and
+a fuzz property asserting acceptance tracks the runtime-clamped sum, with ascending
+targets so a uniform array cannot pass it vacuously.
+
+The shape matters as much as the number. `totalDraws` is now
+`Σ_{d=0..maxDepth} attempts × runtimeTarget(d)` with `attempts` a single named
+per-depth budget (`1 + maxWiden` today), so a retry axis added later multiplies into
+`attempts` and needs no new term and no second loop. This was a precondition for the
+item-2b stall round, which adds exactly such an axis.
+
+The `freezeCap` / `freezeBase * power` caps landed with P0-8. **Remaining:
+`trackDecay < WAD`** — the check is `> L.WAD`, so `trackDecay == WAD` is still
+accepted. Deliberately not folded in here; it is a calibration question, not a
+bound-shape one.
+
 ### P1-4. Retry economics
 Rejection clears the dedup reservation, so identical content is resubmittable at the
 base fee — cheaper than the ≥2× pot appeal, with a fresh panel and fresh probabilistic
@@ -658,8 +677,11 @@ are not optional extras — several findings exist *because* the fixture stopped
     seats are either collateralized or penalized, never silently released (P1-1).
 13. Deployment with a token that differs from `stakeReg.token()` (P1-2).
 14. Deployment authorized in one registry but not the other (P1-2).
-15. A ruleset that passes validation but exceeds `MAX_TOTAL_DRAWS` at runtime through
-    target clamping (P1-3).
+15. ~~A ruleset that passes validation but exceeds `MAX_TOTAL_DRAWS` at runtime
+    through target clamping (P1-3).~~ **Covered** by the validator commit:
+    `test_short_target_array_cannot_smuggle_draws_past_the_aggregate_bound` and
+    `testFuzz_aggregate_bound_tracks_the_runtime_clamped_sum`, both demonstrated
+    failing against the array-indexed loop.
 16. Rejected content resubmitted at base fee (P1-4).
 17. A direct token transfer to either contract not breaking the invariant (P1-6).
 

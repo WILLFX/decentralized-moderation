@@ -361,6 +361,82 @@ contract GovernanceTest is ModerationTestBase {
         governor.proposeParameters(big, many, aws8);
     }
 
+    /// M2.6-P1-3: validation READ the target array; the runtime CLAMPS it.
+    ///
+    /// `_validateParams` looped `i < commitTargets.length` and counted only entries
+    /// at or below `maxDepth`, while `Moderation._commitTarget` returns the LAST
+    /// entry for every depth past the array's end. A ruleset supplying fewer targets
+    /// than `maxDepth + 1` was therefore bounded over the entries it gave and then
+    /// run over more depths than that, each of the uncounted ones silently drawing
+    /// the last entry's worth. `MAX_TOTAL_DRAWS` bounded something the runtime does
+    /// not do.
+    ///
+    /// No attacker and no exotic choice: one target at the cap, both retry budgets at
+    /// theirs. H-11 pins a ruleset per case, so every case opened under this one was
+    /// bounded by a number that did not apply to it.
+    function test_short_target_array_cannot_smuggle_draws_past_the_aggregate_bound() public {
+        uint256[] memory one = new uint256[](1);
+        one[0] = L.MAX_PANEL;
+        uint256[] memory aws = new uint256[](1);
+        aws[0] = 3 days;
+
+        Moderation.Params memory p = mod.getParams();
+        p.maxDepth = L.MAX_RULE_DEPTH; // nine depths reachable
+        p.maxWiden = L.MAX_RULE_WIDEN; // nine attempts at each
+        p.minReveals = 1;
+
+        // Both numbers spelled out, because the defect is the gap between them.
+        uint256 asValidated = (1 + p.maxWiden) * one[0];
+        uint256 asRun = (1 + p.maxWiden) * (1 + p.maxDepth) * one[0];
+        assertEq(asValidated, 1152, "what the array-indexed loop computed");
+        assertEq(asRun, 10368, "what nine clamped depths actually draw");
+        assertLe(asValidated, L.MAX_TOTAL_DRAWS, "so the old validator accepted it");
+        assertGt(asRun, L.MAX_TOTAL_DRAWS, "and the runtime blew the bound");
+
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, one, aws);
+    }
+
+    /// The composability guarantee behind the P1-3 rewrite: acceptance is a function
+    /// of the RUNTIME-clamped aggregate and of one per-depth attempt budget — not of
+    /// how many entries the array happens to hold.
+    ///
+    /// Targets ascend, so the clamped tail is the array's LARGEST entry and an
+    /// under-count is maximally wrong. A uniform array could not discriminate: every
+    /// depth would read the same number whether the loop clamped or not.
+    function testFuzz_aggregate_bound_tracks_the_runtime_clamped_sum(
+        uint8 nTargets,
+        uint8 target,
+        uint8 maxDepth,
+        uint8 maxWiden
+    ) public {
+        uint256 n = 1 + (uint256(nTargets) % L.MAX_ARRAY_LEN);
+        uint256 d = uint256(maxDepth) % (L.MAX_RULE_DEPTH + 1);
+        uint256 w = uint256(maxWiden) % (L.MAX_RULE_WIDEN + 1);
+
+        uint256[] memory cts = new uint256[](n);
+        uint256[] memory aws = new uint256[](n);
+        for (uint256 i; i < n; ++i) {
+            cts[i] = 1 + ((uint256(target) + i) % L.MAX_PANEL);
+            aws[i] = 3 days;
+        }
+
+        Moderation.Params memory p = mod.getParams();
+        p.maxDepth = d;
+        p.maxWiden = w;
+        p.minReveals = 1;
+
+        // Recomputed the way the RUNTIME reaches it: every depth 0..maxDepth, each
+        // using the target `_commitTarget` will really clamp to.
+        uint256 reachable;
+        for (uint256 i; i <= d; ++i) {
+            reachable += (1 + w) * cts[i < n ? i : n - 1];
+        }
+
+        if (reachable > L.MAX_TOTAL_DRAWS) vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+    }
+
     // --- M2.6-P0-8: the freeze arithmetic is bounded at both ends -------------
 
     /// `freezeCap` had only a LOWER bound (`>= WAD`). `FreezeMath` computes

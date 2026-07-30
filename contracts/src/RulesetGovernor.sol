@@ -245,19 +245,57 @@ contract RulesetGovernor {
         // computes. `MAX_FREEZE` bounded the base and the failed-reveal freeze but
         // never `freezeBase * freezeCap`.
         if (FixedPointMathLib.fullMulDiv(p.freezeBase, p.freezeCap, L.WAD) > L.MAX_FREEZE) revert BadParams();
-        // minReveals must be reachable within the fully-widened depth-0 panel.
-        if (p.minReveals > commitTargets[0] * (1 + p.maxWiden)) revert BadParams();
+        // The per-depth SEAT-DRAWING ATTEMPT BUDGET: how many times one depth can
+        // seek a target's worth of seats. Named once and used everywhere below,
+        // because it is the quantity the aggregate bound is a function of — and the
+        // quantity a new retry axis has to enter. `maxWiden` is its only term today.
+        uint256 attempts = 1 + p.maxWiden;
 
-        uint256 totalDraws;
+        // minReveals must be reachable within the fully-widened depth-0 panel.
+        if (p.minReveals > attempts * commitTargets[0]) revert BadParams();
+
+        // Every supplied entry must be individually sane, whatever depth it serves.
         for (uint256 i; i < commitTargets.length; ++i) {
             if (commitTargets[i] == 0 || commitTargets[i] > L.MAX_PANEL) revert BadParams();
-            // every depth up to maxDepth can widen maxWiden times
-            if (i <= p.maxDepth) totalDraws += (1 + p.maxWiden) * commitTargets[i];
         }
         for (uint256 i; i < appealWindows.length; ++i) {
             if (appealWindows[i] == 0 || appealWindows[i] > L.MAX_WINDOW) revert BadParams();
         }
+
+        // M2.6-P1-3: aggregate reachability, iterating DEPTHS rather than the array.
+        //
+        // This loop used to run `i < commitTargets.length` and add only when
+        // `i <= maxDepth`. `Moderation._commitTarget` CLAMPS to the last entry at
+        // deeper depths, so a ruleset supplying fewer targets than `maxDepth + 1`
+        // was validated over the entries given and then run over more depths than
+        // that — every uncounted depth silently drawing the last entry's worth.
+        // `MAX_TOTAL_DRAWS` bounded something the runtime does not do.
+        //
+        // It is reachable with no attacker and no exotic choice: `commitTargets =
+        // [128]`, `maxDepth = 8`, `maxWiden = 8` validated at 9 x 128 = 1,152 draws
+        // and runs at 9 x 9 x 128 = 10,368. H-11 pins a ruleset per case, so every
+        // case opened under one was bounded by a number that did not apply to it.
+        //
+        // The shape is what keeps it fixed. `totalDraws` is now
+        // `Σ_{d=0..maxDepth} attempts × runtimeTarget(d)`, so it is a function of
+        // the two things that actually determine the work — the depths a case can
+        // reach and the target each of those depths will really use — and of one
+        // attempt budget. A retry axis added later multiplies into `attempts` and
+        // needs no new term, no second loop, and no second place to forget.
+        uint256 totalDraws;
+        for (uint256 d; d <= p.maxDepth; ++d) {
+            totalDraws += attempts * _runtimeTarget(commitTargets, d);
+        }
         if (totalDraws > L.MAX_TOTAL_DRAWS) revert BadParams();
+    }
+
+    /// @dev The value `Moderation._commitTarget` will ACTUALLY return at `depth`,
+    ///      clamping to the last entry exactly as it does. Validation and runtime
+    ///      reading a target differently is the whole of M2.6-P1-3, so this mirrors
+    ///      that one line and nothing else.
+    function _runtimeTarget(uint256[] calldata commitTargets, uint256 depth) private pure returns (uint256) {
+        uint256 len = commitTargets.length;
+        return commitTargets[depth < len ? depth : len - 1];
     }
 
     // --- views ---------------------------------------------------------------

@@ -31,7 +31,9 @@ The last code change is `51af155`; everything after it is documentation.
 > reasoning circular unless said out loud. Saying it out loud is what made the split
 > the next item rather than a permanent excuse.
 >
-> **K-5 is the highest-severity thing still open** and it is new to the record:
+> **K-5 was the highest-severity thing still open when this was written; item 10
+> now is** — see "Where things stand" below, and the work order's "Item 10" section.
+> K-5 remains open and is new to the record:
 > `StakeRegistry.setTrack` takes no `caseRef` and writes absolutely, so during a
 > handover — when both logics are authorized by design — either can overwrite any
 > moderator's track. It is the one residual of P0-5's scoping. Not a fund drain;
@@ -67,7 +69,8 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass): **218 passing, 18 suites**.
+**Suite now** (tag + the post-close regression pass + the post-close items): **223
+passing, 18 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
 move, not new coverage). The eighteenth is `SeatDraw.t.sol`, the cross-batch
@@ -92,6 +95,14 @@ becomes something a reader mistakes for a test of the product.)
 `Moderation` ends the milestone **smaller than it started** (23,795 -> 23,296)
 despite eleven items landing in it, because the structural split gave back more
 than they cost.
+
+**The highest-severity open finding is item 10**, recorded in the work order: the
+reward denominator (`_settleInit`, every round) reads a different seat set than the
+outcome draw (`realizeOutcome`, `_cur(c)`). The mismatch makes expected reward depend
+on how you vote — appeal panels earn ~83% more for overturning than upholding,
+regardless of merit, on every appealed case with no attacker. Live on shipped code,
+not introduced by any post-close item, and deferred only because its fix must be
+calibrated against post-2b code.
 
 After the post-close regression pass, the second structural split, and the split's
 follow-up: `Moderation` **19,203 (5,373 free)**, `Settlement` 6,645,

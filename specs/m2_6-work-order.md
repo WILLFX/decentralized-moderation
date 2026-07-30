@@ -903,14 +903,19 @@ missed. None is a P0.
 
 ## Knowingly open, carried forward with severity
 
-Named here so a re-auditor does not read them as misses. None is a P0; none is
-being fixed in this pass.
+Named here so a re-auditor does not read them as misses. None is being fixed in
+this pass.
+
+**Read item 10 first.** It is the only entry here that is a live defect on shipped
+code rather than a gap, an inefficiency or a design question, and it is the one a
+re-auditor should check before anything else in this table.
 
 | # | Item | Severity | Why not P0 |
 |---|---|---|---|
 | K-1 | **Keeper economics: unpaid work, and work decoupled from progress.** *(Two findings, merged — one gap.)* **(a)** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. **(b)** M2.6-P0-3b added a second unpaid path, and it is worse in kind: a `realizeSeats` poke that finds the epoch unsettled spends itself draining and **advances no case at all** — it seats nobody, moves no phase, and cannot become the terminal batch that earns the bounty. A full 128-item batch measures 1.83M gas over a 1000-leaf tree (~840k at the suite's fixture scale). The fix that removed the keeper REQUIREMENT therefore left keeper-shaped work with no reward attached to it. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. An efficiency and latency problem, not a stuck-funds one. (b) is additionally self-healing: the drain is permissionless, anyone can call `advanceEpoch` directly, and the epoch completes the moment somebody does. A pro-rata bounty split across batches addresses (a); (b) needs the drain to be attributable in the first place, since it is tied to no case today. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
+| **10** | **Reward structure reads a different seat set than the outcome draw.** `realizeOutcome:926` draws from `_cur(c)`; `_settleInit:389` sums every round. The mismatch makes `E[reward]` depend on the vote, and the dependence is a *dominant strategy*, not a bias. **(a)** Appeal panels are paid to overturn: a depth-1 committer earns ~83% more for flipping than for upholding, regardless of merit, reachable on every appealed case with no attacker. **(b)** Suppressing turnout enriches the survivors: per-seat payout is `D / revealedSeats`, and an `underQuorum` adjudication pays the whole distributable to as little as one seat. Full analysis, derivation and the neutraliser are in "Item 10" above. | **High** | The only entry in this table that is a live defect on shipped code rather than a gap or an inefficiency, and it sits on the protocol's core claim. Not fixed in this pass only because its neutraliser must be calibrated against post-2b code — 2b's scoping shrinks `winnersSeats`, which makes (b) larger. **Ordering: 2b, then item 10.** |
 | K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and it does not fit the 469 bytes left in `Moderation`. It belongs with the split. |
 
 K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which is the
@@ -1015,6 +1020,33 @@ liveness assumption (a committee, or a counterparty), and that is a protocol
 redesign, not a calibration. Excluded on scope, deliberately, and recorded here so
 the choice is visible.
 
+### Residual, merged here from item 2b: the unrewarded revealer
+
+**P1.** A moderator that reveals coherently and on time in a round that does not
+adjudicate is **paid nothing**, while a moderator that fails to reveal in that same
+round **is** frozen. Punished if wrong, unpaid if right.
+
+Originally carried as a probabilistic residual — under a case-wide `winnersSeats` a
+banked round's revealers were still in the denominator, so they might be paid. Item
+2b's §4 scoping ends that: `winnersSeats` counts only the round that adjudicated at
+each depth, so within a depth the non-payment is **definite**, not possible. Restated
+here in those terms rather than left reading as a maybe.
+
+**The freeze deliberately still applies to banked rounds.** The symmetry argument —
+if a round does not count for reward it should not count for penalty — loses to a
+concrete security consequence: a banked round with no freeze is a *free* round. An
+attacker seated in round 1 could withhold at zero cost, force the stall, and be
+re-drawn into round 2 with its stake untouched. That is P0-6c's amnesty hole one
+door over, and item 8's unified freeze only makes revealing weakly dominant if the
+freeze applies wherever the seat existed.
+
+So the bargain, stated accurately: **a banked round's seat is a duty obligation, not
+a claim on the pot.** Serving it avoids a freeze; it does not earn a share, because
+the share belongs to the round that adjudicated. The asymmetry is real and is not
+dressed up. Pricing it needs a participation credit carved from the distributable,
+which requires the per-round allocation **item 10** already has to build — so the
+instrument belongs there, not here.
+
 ### Not folded in
 
 The reward-tally scoping question that item 2b raises — `Settlement`'s reward is
@@ -1022,6 +1054,123 @@ The reward-tally scoping question that item 2b raises — `Settlement`'s reward 
 across **every** round in `_settleInit` — is a 2b question, not an item-8 one. It is
 recorded against 2b's revision. Item 8 changes what non-participation costs; it does
 not change how the reward is divided.
+
+## Item 10 — reward structure reads a different seat set than the outcome draw
+
+**Severity: High. Live on shipped code. Two instances, one defect.** Found while
+revising item 2b's reward scoping; neither instance is introduced by 2b and neither
+is fixed by it.
+
+### The condition, stated once
+
+A voter's expected reward is
+
+```
+E[reward | vote v]  =  P(v wins) x D x s / winnersSeats(v)
+                    =  (f_v / T) x D x s / (b_v + f_v)
+                    =  (D.s / T) x f_v / (b_v + f_v)
+```
+
+where `T` is the deciding round's revealed seats, `f_v` that round's seats on side
+*v* including the voter's own `s`, and `b_v` any OTHER seats the denominator counts.
+
+`P(v wins)` reads the seat set `realizeOutcome:926` draws from — `_cur(c)`, one
+round. The denominator reads the seat set `_settleInit:389` sums — every round. When
+those are the same set, `f_v` cancels and `E = D.s / T`, **invariant in the vote**:
+the reward is a participation payment and the freeze is the Schelling incentive.
+When they differ, the residue `f_v / (b_v + f_v)` is the distortion, and it is
+strictly decreasing in `b_v`.
+
+> **The invariant: the reward denominator must read the same seat set the outcome
+> draw reads.** Everything below is that condition failing in two places.
+
+### Instance (a) — appeal panels are paid to overturn
+
+Depth 0 tallies 5A/0R, outcome Approve, appeal filed. Depth 1 seats eleven; the
+other ten split 5A/5R; a one-seat committer:
+
+| vote | E[reward] |
+|---|---|
+| Approve (upholding) | `(D/11) x 6/11` = **0.0496 D** |
+| Reject (overturning) | `(D/11) x 6/6` = **0.0909 D** |
+
+**Flipping pays 83% more, regardless of the merits.** With a one-sided prior tally
+the contrarian branch is `D.s/T` exactly and the upholding branch is strictly below
+it, so this is a dominant strategy with no exception — not a perturbation, and not
+conditional on the parameters. The disclosed quantity is a full depth-0 panel, and
+depth-0 tallies are public through `roundInfo` and the depth-0 outcome itself.
+
+Reachable on **every appealed case, with no attacker**, on the code as shipped.
+
+### Instance (b) — suppressing turnout enriches the survivors
+
+Per-seat payout is `D / T`, so it rises as turnout falls. `_closeReveal:1280` marks
+`underQuorum` and arms the outcome whenever reveals are nonzero after the retry cap,
+so a one-seat under-quorum adjudication takes `D x 1/1` — **the entire
+distributable**. Two revealed of a five-seat panel pays `0.5 D` per seat against
+`0.2 D` at full turnout.
+
+Same root cause: the denominator shrinks with turnout while the pot does not.
+
+### Why one item
+
+Fixing either alone leaves the other reading the mismatched seat set, and the
+neutraliser for (b) requires the per-round allocation that fixing (a) forces. They
+are the same defect at two scales.
+
+### The neutraliser, derived
+
+```
+distributable  x  revealedSeats / commitTarget(depth)      per adjudicating round
+```
+
+giving per-seat payout `D / commitTarget(depth)` — **constant, independent of
+turnout**. This is the unique scaling with that property; `revealedSeats /
+minReveals`, the first form considered, still leaves a 2.5x advantage at the shipped
+depth-0 ruleset.
+
+Remainder destination: **refund to the submitter.** They paid for a full panel's
+adjudication and received a partial one, so the unpaid share returns. That is a
+principled answer rather than an arbitrary one, which matters because every other
+destination (bounty, burn, carry-forward) invents a policy to dispose of money the
+protocol did not earn.
+
+### Sizing constraint: item 10 must be built against POST-2b code
+
+Item 2b's §4 scoping shrinks `winnersSeats` to adjudicating rounds only. That
+**raises** per-seat payout, so 2b makes instance (b) larger, not smaller. The
+neutraliser still composes — `D / commitTarget(depth)`, constant, applied per
+adjudicating round — but its calibration must be measured against a denominator that
+exists after 2b lands. Sizing it against today's case-wide `winnersSeats` would
+calibrate against a quantity 2b removes.
+
+Ordering follows: **2b first, then item 10.**
+
+### A pattern worth naming
+
+Item 10 is not the first place this milestone where the audit named a real defect
+and the wrong failure mode. Substantiated from this record:
+
+- **K-4 / `penalizeNoShow`** — filed P1 as an unused function ("no production
+  caller"). The actual mode was an unscoped write to *pooled* `dutyBonded`, able to
+  freeze collateral posted for a different case's live seat.
+- **MAX_PANEL** — filed as a calibration note ("not evidence-based"). The actual
+  mode was permanent unfinalizability of every case opened under a ruleset H-11 pins
+  per case.
+- **Item 4 / token identity** — named as "silently makes the registry insolvent in
+  one asset while accumulating another", an accounting mismatch. The actual mode is
+  a **finalizability break**: `reward()` pulls the registry's token from a contract
+  that does not hold it, `claim` reverts, and seat-holders' committed stake is
+  locked permanently — presenting intermittently, because VOIDs still drain.
+- **Item 10 itself** — named as follow-the-crowd, "a later committer computes its
+  exact share by joining the winning side". The actual direction is **contrarian**,
+  it is a dominant strategy rather than an estimate, and it is live in appeals with
+  no 2b involved.
+
+The recurrence is the point: in each case the named mode was plausible enough to set
+the severity, and the real mode was worse. Severity assigned from a finding's
+*description* rather than from tracing its call path has been wrong every time it
+has been checked here.
 
 ## Size position — RESOLVED by the second structural split
 
@@ -1135,6 +1284,12 @@ economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadline
 — shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference
 time, = K-3), plus K-1 (keeper per-batch payment) and K-5 (`setTrack` is not
 obligation-scoped — the residual of P0-5, severity High), and the P2 list.
+
+**Item 10 is not in that category and this heading does not cover it.** It is a
+live defect on shipped code at severity High — appeal panels paid to overturn
+regardless of merit, plus turnout suppression enriching the survivors — and it is
+deferred only because its fix must be calibrated against post-2b code. See "Item 10"
+above.
 
 These go to the external reviewer as known-open rather than being worked in
 another internal round. K-4 was the exception and is closed, because it was a P0

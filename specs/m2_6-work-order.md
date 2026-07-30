@@ -915,7 +915,7 @@ re-auditor should check before anything else in this table.
 | K-1 | **Keeper economics: unpaid work, and work decoupled from progress.** *(Two findings, merged — one gap.)* **(a)** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. **(b)** M2.6-P0-3b added a second unpaid path, and it is worse in kind: a `realizeSeats` poke that finds the epoch unsettled spends itself draining and **advances no case at all** — it seats nobody, moves no phase, and cannot become the terminal batch that earns the bounty. A full 128-item batch measures 1.83M gas over a 1000-leaf tree (~840k at the suite's fixture scale). The fix that removed the keeper REQUIREMENT therefore left keeper-shaped work with no reward attached to it. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. An efficiency and latency problem, not a stuck-funds one. (b) is additionally self-healing: the drain is permissionless, anyone can call `advanceEpoch` directly, and the epoch completes the moment somebody does. A pro-rata bounty split across batches addresses (a); (b) needs the drain to be attributable in the first place, since it is tied to no case today. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
-| **10** | **Reward structure reads a different seat set than the outcome draw.** `realizeOutcome:926` draws from `_cur(c)`; `_settleInit:389` sums every round. The mismatch makes `E[reward]` depend on the vote, and the dependence is a *dominant strategy*, not a bias. **(a)** Appeal panels are paid to overturn: a depth-1 committer earns ~83% more for flipping than for upholding, regardless of merit, reachable on every appealed case with no attacker. **(b)** Suppressing turnout enriches the survivors: per-seat payout is `D / revealedSeats`, and an `underQuorum` adjudication pays the whole distributable to as little as one seat. Full analysis, derivation and the neutraliser are in "Item 10" above. | **High** | The only entry in this table that is a live defect on shipped code rather than a gap or an inefficiency, and it sits on the protocol's core claim. Not fixed in this pass only because its neutraliser must be calibrated against post-2b code — 2b's scoping shrinks `winnersSeats`, which makes (b) larger. **Ordering: 2b, then item 10.** |
+| **10** | **Reward structure reads a different seat set than the outcome draw.** `realizeOutcome:926` draws from `_cur(c)`; `_settleInit:389` sums every round. The mismatch makes `E[reward]` depend on the vote. **(a)** Appeal panels are paid to overturn: where the deciding round splits evenly — the pivotal case, and the one where freeze risk is symmetric so the reward gap is the whole payoff gap — a depth-1 committer earns `1 + b/f` times as much for flipping as for upholding, ~83% at the worked fixture, reachable on every appealed case with no attacker. Lopsided rounds recover honesty via the freeze term. **(b)** Suppressing turnout enriches the survivors: per-seat payout is `D / revealedSeats`, and an `underQuorum` adjudication pays the whole distributable to as little as one seat. Full analysis, derivation and the neutraliser are in "Item 10" above. | **High** | The only entry in this table that is a live defect on shipped code rather than a gap or an inefficiency, and it sits on the protocol's core claim. Not fixed in this pass only because its neutraliser must be calibrated against post-2b code — 2b's scoping shrinks `winnersSeats`, which makes (b) larger. **Ordering: 2b, then item 10.** |
 | K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and it does not fit the 469 bytes left in `Moderation`. It belongs with the split. |
 
 K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which is the
@@ -935,6 +935,133 @@ work, not an optimisation to consider afterwards.
   class P0-5a exists to make unrepresentable, and a selector nothing calls today is
   still a selector. Deleted rather than scoped, because a `caseRef` version would
   be dead code with a live selector.
+
+## Item 2b — commit-time widen and the stall round (post-close, in build)
+
+Full design in review correspondence; this records what is **ruled** so the next
+reader is not dependent on it.
+
+### P′, in three clauses — and P′-c is OPEN
+
+- **P′-a (disclosure).** Every commitment counted in a tally is fixed before any
+  vote counted in that tally is disclosed. **Closed** by the commit-time widen: the
+  REVEAL -> DRAW edge at `Moderation.sol:1270` is deleted, and it was the only
+  backward edge (`:748`, `:1241`, `:1270` enumerated and verified).
+- **P′-b (coherence).** No commitment is made knowing a disclosed quantity that
+  affects whether it will be judged coherent. **Holds**, because the final outcome
+  is drawn from the committer's own round (`realizeOutcome:926`, `_cur(c)`).
+- **P′-c (payout neutrality).** No disclosed quantity makes one vote more profitable
+  than another. **OPEN.**
+
+> **P′-c is not closed, and the record must not say it is.** 2b's scoping closes the
+> **same-depth** instance — banked rounds leave `winnersSeats`, so a post-stall
+> committer sees `b_v = 0`. The **cross-depth** instance survives untouched: a
+> depth-1 committer still reads depth 0's tally in its denominator. That is item 10
+> instance (a), and it is the larger of the two.
+>
+> Declaring P′-c closed on the strength of its same-depth instance would be the
+> third knowing repeat of this milestone's own lesson — *a true statement one level
+> away from the property you need is not a proof of it.* It is recorded open.
+
+### Reward scoping
+
+`winnersSeats` counts, per depth, only the round that **adjudicated** at that depth.
+Non-adjudicating (banked) rounds are excluded; earlier depths stay in.
+
+### `minReveals` bound
+
+```
+minReveals  <=  min over d in 0..maxDepth of runtimeTarget(d)
+```
+
+**Justification (replaces an earlier, weaker one).** The first derivation offered
+was "quorum must be reachable on a single un-widened panel." That is true but does
+not *imply* the bound — reachability-with-widening is also true and is weaker, so
+the argument does not discriminate between them.
+
+The reason is that **full quorum must be achievable without the failure path.**
+Above the un-widened target, even perfect participation on a full panel leaves
+`revealedSeats < minReveals`, so every round at that depth must widen to reach
+quorum, every decision there is marked `underQuorum`, and by H-09 no such decision
+can ever reach the supersafe view — at *any* participation rate. The parameter would
+silently disable a product guarantee rather than merely tighten a quorum.
+
+Reuses commit 2's `_runtimeTarget`, so it composes with the P1-3 clamping fix, and
+it **replaces** the reachability check rather than adding a knob (it is strictly
+tighter). Collaterally it guarantees a banked tally is smaller than the panel that
+follows it.
+
+### The freeze applies to banked rounds
+
+**Reason (replaces an earlier, wrong one).** The first argument given was that a
+penalty-free banked round lets a withholder stall at zero cost. That does not hold:
+excluding banked revealers from the *incoherence* freeze leaves a withholder's cost
+untouched, since a withholder takes the `Vote.None` branch.
+
+The reason that does hold: **a penalty-free banked round makes revealing free, and
+revealing is what selects which round adjudicates.** An attacker reveals in every
+round at zero risk, and pays only in the one where its vote happens to land — a free
+option over which round decides. The conclusion is unchanged; the argument for it is.
+
+### Two hazards the implementation must clear
+
+**Hazard 1 — apply the scoping at BOTH sites, or settlement reverts permanently.**
+Excluding banked rounds from `_settleInit`'s `winnersSeats` while `_disposeSeat`
+still pays `talliedSeats[a] / winnersSeats` on every round it walks leaves banked
+revealers paying against a shrunken denominator, so `s.distributed` exceeds
+`s.distributable`. `_settleFinish` (`Settlement.sol:489`) then computes
+`s.bounty + (s.distributable - s.distributed)` and **underflows**.
+
+That is a revert, not an overpayment: `claim` reverts, the case is stuck in SETTLING
+forever, and every seat-holder's committed stake is locked permanently. Same failure
+class as item 4.
+
+**Test consequence, which is the part that is easy to get wrong.** A conservation
+assertion *after* a successful settle cannot reach this — settlement never succeeds.
+The test must assert at the boundary: drive a multi-round case with a banked round
+containing coherent revealers, assert `claim` **completes** (phase reaches SETTLED,
+not wrapped in `expectRevert`), and assert `distributed <= distributable` at the
+final disposal step.
+
+**Hazard 2 — the banked seat is pure downside, and it needs a number.**
+`_disposeBatch` walks every round and `_disposeSeat` judges against
+`c.finalOutcome`, so a banked round's seat earns nothing (post-scoping) and is still
+frozen if incoherent.
+
+The auditor's "sit out the early rounds" response is not available: P0-2 blocks
+un-pledging while reserved, and item 8 made non-revealing cost the same freeze, so
+revealing weakly dominates once seated. The real effect is on the **expected return
+to pledging**, which is item 8's existing coupling. The arithmetic:
+
+```
+E[rounds at a depth]  =  (1 - s^4) / (1 - s)          s = P(a round stalls)
+fraction of seats in banked rounds  =  1 - (1 - s) / (1 - s^4)   ~=  s   (small s)
+```
+
+| stall rate `s` | seats landing in banked rounds |
+|---|---|
+| 0.05 | 5.0% |
+| 0.10 | 10.0% |
+| 0.20 | 19.9% |
+
+A banked seat's expected value is `-P(incoherent) x C` — freeze risk with no upside
+— so a pledged unit's **reward income scales by `(1 - s)` while its freeze exposure
+is unchanged**. The net effect is a reduction of `s x (reward per seat)`.
+
+`s` is **not yet measured**. Bar pre-committed before measuring: **if `s > 5%` at
+the dense fixture, a participation credit becomes item 10's business** (it needs the
+per-round allocation item 10 must build anyway); at or below 5% it stays a recorded
+residual against item 8's calibration.
+
+### Deferral conditions for item 10, accepted
+
+1. Its severity is recorded in the resolution record **now**, not at scheduling time.
+2. It reaches the standing recommendation as a live reason that recommendation
+   still holds.
+3. **2b leaves the incentive purely cross-depth, so item 10's fix cannot borrow
+   2b's shape.** 2b excludes non-adjudicating rounds *within* a depth; item 10 must
+   reconcile aggregates *across* depths, where every round adjudicated. Different
+   problem, different mechanism.
 
 ## Item 8 — freeze economics, priced (post-close)
 
@@ -1063,7 +1190,7 @@ is fixed by it.
 
 ### The condition, stated once
 
-A voter's expected reward is
+A voter's expected **reward** is
 
 ```
 E[reward | vote v]  =  P(v wins) x D x s / winnersSeats(v)
@@ -1081,8 +1208,74 @@ the reward is a participation payment and the freeze is the Schelling incentive.
 When they differ, the residue `f_v / (b_v + f_v)` is the distortion, and it is
 strictly decreasing in `b_v`.
 
-> **The invariant: the reward denominator must read the same seat set the outcome
-> draw reads.** Everything below is that condition failing in two places.
+> **The invariant: every aggregate that feeds a payoff must read the same seat set
+> the outcome draw reads.** Everything below is that condition failing.
+
+### But reward is not the payoff. The freeze term is the other half
+
+**Correction to an earlier draft of this entry, which claimed the distortion is a
+"dominant strategy with no exception".** That is false, and falsifiable in two
+lines. The full payoff is
+
+```
+E[payoff | v]  =  (D.s / T) x f_v / (b_v + f_v)   -   (1 - f_v / T) x C
+                  \________ reward ________/          \____ freeze ____/
+```
+
+with `C` the cost of one `s.freezeDur` freeze on `s` seats. **Both** terms increase
+in `f_v` — the reward through `P(v wins)`, the freeze through the same probability.
+Only the reward term sees `b_v`. So the contrarian branch buys reward at the price
+of freeze risk, and when that price is high the honest vote wins:
+
+> `b_A = 1`, `b_R = 0`, deciding round 10A/0R plus the committer's one seat.
+> Vote A: `f_A = 11`, reward `D/12`, freeze exposure **0**.
+> Vote R: `f_R = 1`, reward `D/11`, freeze exposure **10/11**.
+> The flip buys `D/132` and costs `(10/11) x C`. Honest wins for any `C > D/120`.
+
+**Where the finding actually holds, stated exactly.** The freeze terms cancel when
+`f_A = f_R` — an evenly split deciding round. There, flipping to the side carrying
+fewer prior seats pays
+
+```
+E_contrarian / E_crowd  =  (b_A + f) / (b_R + f)  =  1 + b_A / f      (one-sided prior)
+```
+
+at **identical** freeze risk. As the round becomes lopsided the freeze differential
+grows linearly in `|f_A - f_R|` while the reward gap stays bounded, and honesty
+recovers.
+
+That is not a weakening in the cases that matter. A round splits evenly exactly
+when a single vote moves the outcome draw most, so **the distortion is strongest
+precisely where votes are pivotal and washes out where they are not.** A defect
+that bites only on the decisive cases is worse than one that biases everything a
+little, not better.
+
+### The second cross-set aggregate, and why it is excepted
+
+`meanTrackNum` (`:440`, `:443`) accumulates the winning side's track across **all**
+rounds and is divided by case-wide `winnersSeats` at `:479` to set `s.freezeDur`.
+Same structural shape as `winnersSeats`, on the freeze axis rather than the reward
+axis: a non-adjudicating round's revealers move the penalty applied to the deciding
+round's losers.
+
+**Excepted deliberately, on magnitude and on the absence of a beneficiary:**
+
+- **No one is paid.** A longer freeze transfers nothing (invariant 2). The reward
+  distortion can be monetised; this one can only be used to grief, and the griefer
+  must itself be coherent to enter the mean at all.
+- **It is a mean, not a sum.** Extra seats pull the mean toward their own track
+  rather than scaling it, so the lever is bounded by how far one track sits from
+  the average.
+- **The curve saturates.** `power = 1 + (cap-1)(1 - e^(-mean/sat))`, so
+  `dpower/dmean = (cap-1).e^(-mean/sat)/sat`. At the shipped ruleset (`cap = 4`,
+  `sat = 60`, `base = 7 days`) that is at most `0.05` per unit of mean track, i.e.
+  **~0.35 days per unit** — and shifting the mean by one unit against ten winning
+  seats needs a seat sitting ten track above it. One high-track seat in a banked
+  round is worth roughly **5% of a 7-day freeze**.
+
+Recorded as an exception rather than omitted, because the invariant above quantifies
+over *every* aggregate feeding a payoff and an unstated exception is how the next
+instance hides.
 
 ### Instance (a) — appeal panels are paid to overturn
 
@@ -1094,11 +1287,19 @@ other ten split 5A/5R; a one-seat committer:
 | Approve (upholding) | `(D/11) x 6/11` = **0.0496 D** |
 | Reject (overturning) | `(D/11) x 6/6` = **0.0909 D** |
 
-**Flipping pays 83% more, regardless of the merits.** With a one-sided prior tally
-the contrarian branch is `D.s/T` exactly and the upholding branch is strictly below
-it, so this is a dominant strategy with no exception — not a perturbation, and not
-conditional on the parameters. The disclosed quantity is a full depth-0 panel, and
-depth-0 tallies are public through `roundInfo` and the depth-0 outcome itself.
+**Flipping pays 83% more at identical freeze risk.** This fixture is the symmetric
+case — `f_A = f_R = 6`, so both branches carry the same `5/11` chance of being
+frozen and the freeze term cancels exactly. What is left is the reward ratio
+`(b_A + f) / (b_R + f) = 1 + 5/6 = 1.83`, which is where the 83% comes from: it is
+derived, not measured off one fixture.
+
+The advantage is **net**, not gross, only because the round splits evenly. Lopsided
+rounds recover honesty — see "But reward is not the payoff" above, and the
+counterexample there. An evenly split round is also the one where a single vote
+moves the outcome draw most, so this is the pivotal case rather than a corner of it.
+
+The disclosed quantity is a full depth-0 panel, and depth-0 tallies are public
+through `roundInfo` and the depth-0 outcome itself.
 
 Reachable on **every appealed case, with no attacker**, on the code as shipped.
 
@@ -1164,8 +1365,12 @@ and the wrong failure mode. Substantiated from this record:
   locked permanently — presenting intermittently, because VOIDs still drain.
 - **Item 10 itself** — named as follow-the-crowd, "a later committer computes its
   exact share by joining the winning side". The actual direction is **contrarian**,
-  it is a dominant strategy rather than an estimate, and it is live in appeals with
-  no 2b involved.
+  the direction is contrarian rather than crowd-following, it is decisive rather
+  than an estimate wherever the deciding round splits evenly, and it is live in
+  appeals with no 2b involved. (The first correction of this entry then *over*-shot
+  in the other direction, claiming a dominant strategy with no exception — see the
+  freeze-term counterexample above. Recorded because over-correcting a finding is
+  the same failure as under-stating it.)
 
 The recurrence is the point: in each case the named mode was plausible enough to set
 the severity, and the real mode was worse. Severity assigned from a finding's
@@ -1287,13 +1492,21 @@ obligation-scoped — the residual of P0-5, severity High), and the P2 list.
 
 **Item 10 is not in that category and this heading does not cover it.** It is a
 live defect on shipped code at severity High — appeal panels paid to overturn
-regardless of merit, plus turnout suppression enriching the survivors — and it is
+wherever the deciding round splits evenly, plus turnout suppression enriching the
+survivors — and it is
 deferred only because its fix must be calibrated against post-2b code. See "Item 10"
 above.
 
 These go to the external reviewer as known-open rather than being worked in
 another internal round. K-4 was the exception and is closed, because it was a P0
 misfiled as a P1.
+
+**Item 10 is a live reason this recommendation still holds.** It was found by an
+internal review pass, on shipped code, on the protocol's core claim — and it had
+been read past by two prior audits, each of which named a real defect under a
+failure mode that set the severity too low (see the pattern list in "Item 10").
+A finding of that shape and severity surviving this long is the argument for the
+external review, not against it.
 
 **P1-5 (quorum counts seats) is CLOSED.** It was already implemented — H-09's
 `_fullQuorum` counts independent revealers, not seats — but the only test used one

@@ -99,8 +99,11 @@ than they cost.
 **The highest-severity open finding is item 10**, recorded in the work order: the
 reward denominator (`_settleInit`, every round) reads a different seat set than the
 outcome draw (`realizeOutcome`, `_cur(c)`). The mismatch makes expected reward depend
-on how you vote — appeal panels earn ~83% more for overturning than upholding,
-regardless of merit, on every appealed case with no attacker. Live on shipped code,
+on how you vote — where the deciding round splits evenly, which is where a single
+vote moves the outcome most, appeal panels earn ~83% more for overturning than
+upholding at identical freeze risk, on every appealed case with no attacker.
+(Lopsided rounds recover honesty; the freeze term is the reason, and the work
+order carries the counterexample.) Live on shipped code,
 not introduced by any post-close item, and deferred only because its fix must be
 calibrated against post-2b code.
 

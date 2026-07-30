@@ -1068,10 +1068,22 @@ at all, since the reward denominator excludes them.
 Stated as the asymmetry: **reward income scales by `(1 - beta)`; freeze exposure does
 not scale at all.** The two items are coupled in the direction that compounds.
 
-The participation credit still stays item 10's business — it needs the per-round
-allocation item 10 must build — but it is filed as a live economic cost rather than a
-contingency, and the trigger to revisit is `phi` under CORRELATED failure, not the
-independent figure.
+**Ruling: filed, not built.** The measurement's real finding is that **the model is
+the question** — forty-fold between the two columns, and the correlation structure is
+not measurable before deployment. Three reasons the credit does not get built now:
+
+- Calibrating an economic mechanism against an unknown parameter is how `MAX_PANEL`
+  reached 512.
+- Item 10 already owns the per-round allocation machinery a credit needs, so a credit
+  built now gets built twice.
+- Nothing is deployed, so there is no live harm accruing while it waits.
+
+**Revisit trigger: the banked-round rate**, not `phi` under correlated failure. That
+formulation was two unknowns, neither directly observable — a marginal failure rate
+and a correlation structure. The banked-round rate is the single quantity both feed
+into, it is **countable on chain** (rounds opened at a depth versus rounds that
+adjudicated, per case), and it collapses the pair into something an operator can
+actually watch. Revisit when it approaches 5%.
 
 
 
@@ -1690,6 +1702,23 @@ been read past by two prior audits, each of which named a real defect under a
 failure mode that set the severity too low (see the pattern list in "Item 10").
 A finding of that shape and severity surviving this long is the argument for the
 external review, not against it.
+
+**Two items landed in this milestone that move the same cost in the same direction,
+and a re-auditor should find that stated rather than reconstruct it.** Item 8 priced
+non-participation by raising the withheld-reveal freeze from `failedRevealFreeze`
+(1 day) to `s.freezeDur` (7 to 28 days). Item 2b's stall round then created a class
+of seat — the banked seat — that carries that freeze with **no reachable reward**,
+because the reward denominator excludes non-adjudicating rounds.
+
+So: *the term item 7's residual is multiplied by grew 7x to 28x in the same milestone
+that created the residual.* Neither item is wrong on its own and neither review
+would have caught it alone, because the compounding lives between them. Reward income
+scales by `(1 - beta)` where `beta` is the banked-round rate; freeze exposure does
+not scale at all. Whoever calibrates `freezeBase` is setting both, and the two pull
+in the same direction on a moderator's willingness to pledge duty — which is the
+capacity the seat draw depends on.
+
+Filed at item 7, with the banked-round rate as the trigger to revisit.
 
 **P1-5 (quorum counts seats) is CLOSED.** It was already implemented — H-09's
 `_fullQuorum` counts independent revealers, not seats — but the only test used one

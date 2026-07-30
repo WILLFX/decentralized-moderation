@@ -120,8 +120,14 @@ contract CaseLifecycleTest is ModerationTestBase {
         bytes32 h = keccak256(abi.encode(uint8(Moderation.Vote.Approve), SALT));
         vm.prank(sh);
         mod.commitVote(caseId, h);
-        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
-        mod.closeCommit(caseId);
+        // M2.6-item-2b: one committer is below `minReveals`, which now widens
+        // rather than opening a reveal window. The rest of the panel commits so the
+        // round reaches REVEAL, which is what this test is about.
+        _topUpCommitQuorum(caseId, Moderation.Vote.Approve);
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+        }
         vm.prank(sh);
         vm.expectRevert(Moderation.BadReveal.selector);
         mod.revealVote(caseId, Moderation.Vote.Approve, keccak256("wrong"));
@@ -146,8 +152,11 @@ contract CaseLifecycleTest is ModerationTestBase {
         mod.__injectWidenSeats(caseId, 0, sh, 7);
         assertEq(mod.__seats(caseId, 0, sh), collateralized + 7, "post-widen seat count is inflated");
 
-        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
-        mod.closeCommit(caseId);
+        _topUpCommitQuorum(caseId, Moderation.Vote.Approve); // item 2b: reach commit quorum
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+        }
         vm.prank(sh);
         mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
 
@@ -171,8 +180,11 @@ contract CaseLifecycleTest is ModerationTestBase {
         vm.prank(b);
         mod.commitVote(caseId, hA); // b copies a's commitment
 
-        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
-        mod.closeCommit(caseId);
+        _topUpCommitQuorum(caseId, Moderation.Vote.Approve); // item 2b: reach commit quorum
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+        }
 
         // a reveals its own vote fine; b cannot reveal the copied commitment.
         vm.prank(a);
@@ -264,10 +276,11 @@ contract CaseLifecycleTest is ModerationTestBase {
         _realizeSeats(caseId);
         (uint256 nSeats0,,,,,,,,,) = mod.roundInfo(caseId, 0);
 
+        // M2.6-item-2b: the widen now fires at close-of-COMMIT, on insufficient
+        // COMMITMENT, so no reveal window opens first. That relocation is the P′
+        // fix: the tranche this draws commits against an empty tally.
         vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
-        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
-        mod.closeReveal(caseId);
         // H-05: a widen re-arms fresh entropy, so the round goes back to DRAW;
         // realizing the new seed draws the added seats and reopens COMMIT.
         assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "widened, back to draw");
@@ -434,8 +447,11 @@ contract CaseLifecycleTest is ModerationTestBase {
 
         // It committed exactly what it could back, and the tally follows (H-08).
         assertEq(mod.__committedSeats(caseId, 0, sh), affordable, "committed only affordable seats");
-        vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
-        mod.closeCommit(caseId);
+        _topUpCommitQuorum(caseId, Moderation.Vote.Approve); // item 2b: reach commit quorum
+        if (_phase(caseId) == Moderation.Phase.COMMIT) {
+            vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+            mod.closeCommit(caseId);
+        }
         vm.prank(sh);
         mod.revealVote(caseId, Moderation.Vote.Approve, SALT);
         assertEq(mod.__talliedSeats(caseId, 0, sh), affordable, "tally <= collateralized seats");
@@ -529,11 +545,10 @@ contract CaseLifecycleTest is ModerationTestBase {
             epochLen - (vm.getBlockNumber() % epochLen), seedLag + slack, "positioned where the window cannot fit"
         );
 
-        // Nobody commits: the round widens and re-arms.
+        // Nobody commits: the round widens and re-arms at close-of-COMMIT
+        // (M2.6-item-2b), with no reveal window in between.
         vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
         mod.closeCommit(caseId);
-        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
-        mod.closeReveal(caseId);
         assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.DRAW), "widened back to DRAW");
         (,,,,, , uint256 widenCount,, uint256 snap,) = mod.roundInfo(caseId, 0);
         assertEq(widenCount, 1, "and it is a widen, not a fresh round");

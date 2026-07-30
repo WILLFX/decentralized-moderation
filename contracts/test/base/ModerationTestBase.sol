@@ -158,7 +158,10 @@ abstract contract ModerationTestBase is StackDeployer {
     /// DEFERRED to the next epoch, so the snapshot block can be well beyond
     /// `seedLag` — rolling a fixed `SEED_LAG + 1` is no longer enough.
     function _rollToSeed(uint256 caseId) internal {
-        (,,,,,,,, uint256 snapshotBlock,) = mod.roundInfo(caseId, _depth(caseId));
+        // M2.6-item-2b: `roundInfo` is indexed by ROUND, and a depth now holds
+        // several. Reading by depth would poll a stale round's snapshot block and
+        // `realizeSeats` would revert `SeedNotReady` forever.
+        (,,,,,,,, uint256 snapshotBlock,) = mod.roundInfo(caseId, mod.__roundCount(caseId) - 1);
         uint256 target = snapshotBlock + 1;
         if (vm.getBlockNumber() < target) vm.roll(target);
         else vm.roll(vm.getBlockNumber() + 1);
@@ -172,6 +175,23 @@ abstract contract ModerationTestBase is StackDeployer {
             bytes32 commitHash = mod.computeCommit(caseId, depth, sh, vote, SALT); // M-01: bound per voter
             vm.prank(sh);
             mod.commitVote(caseId, commitHash);
+        }
+    }
+
+    /// M2.6-item-2b: COMMIT no longer always closes to REVEAL. Commitment below
+    /// `minReveals` WIDENS instead — a round that cannot reach quorum should draw
+    /// more seats, not open a reveal window it can never fill. Fixtures that
+    /// exercise the reveal path with a handful of committers therefore need the rest
+    /// of the panel to commit too. Commits every seat-holder that has not already.
+    function _topUpCommitQuorum(uint256 caseId, Moderation.Vote vote) internal {
+        uint256 ri = mod.__roundCount(caseId) - 1;
+        (, uint256 n,,,,,,,,) = mod.roundInfo(caseId, ri);
+        for (uint256 i = 0; i < n; i++) {
+            address sh = mod.seatHolderAt(caseId, ri, i);
+            if (mod.__committedSeats(caseId, ri, sh) > 0) continue;
+            bytes32 h = mod.computeCommit(caseId, ri, sh, vote, SALT);
+            vm.prank(sh);
+            mod.commitVote(caseId, h);
         }
     }
 

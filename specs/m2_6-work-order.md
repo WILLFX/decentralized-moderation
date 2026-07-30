@@ -950,10 +950,53 @@ rule exists to prevent. Split:
 boundary guard for hazard 1. Landing the reward scoping while it is provably inert is
 safer than landing it beside the mechanism that first arms it.
 
-**3b — the mechanism.** Commit-time widen with the REVEAL -> DRAW edge deleted, stall
-rounds on the shared per-depth counter, findings (ii)/(iii)/(iv), the new tests, the
-re-derived figures. Part 1 and the stall round stay together: separating them is the
-H-10 regression.
+**3b — landed.** Commit-time widen with the REVEAL -> DRAW edge deleted, stall rounds
+on the shared per-depth counter, findings (ii)/(iii)/(iv), the tests, the re-derived
+figures. Part 1 and the stall round stay together: separating them is the H-10
+regression.
+
+#### The figures, re-derived against the shipped ruleset
+
+| | pre-2b | post-2b |
+|---|---|---|
+| worst-case case duration | 61 days | **61 days** |
+| reachable seat draws (default ruleset) | 344 | **344** |
+| `MAX_TOTAL_DRAWS` term | `(1 + maxWiden) x target` | **unchanged** |
+| rounds per case | <= 4 | <= 16 |
+
+All three hold because the counter is **shared**. A depth affords `1 + maxWiden`
+attempts however they are mixed, and each costs one target's worth of seats and at
+most one DRAW+COMMIT+REVEAL of wall clock. A separate stall budget would have
+multiplied the two and taken 61 days to 157 and 344 seats to 1,376.
+
+The duration bar is asserted from the live ruleset
+(`test_worst_case_duration_is_not_raised_by_stall_rounds`), not from constants copied
+into a test. Rounds per case rising 4 -> 16 is the one real new cost: settlement's
+per-round overhead and `_noRejectEver` both scale with it, while total SEATS do not.
+
+#### Item 7, measured and derived
+
+The seat half is measured: a case that stalls once puts a whole round beyond reward
+(5 of 10 seats at the shipped depth-0 panel). The rate half is not a protocol
+quantity — it is driven by the per-seat reveal-failure rate `phi`, which nothing here
+fixes. With panel 5 and `minReveals` 3, a round stalls when 3 or more of 5 seats fail
+to reveal:
+
+| `phi` | stall rate | seats in banked rounds |
+|---|---|---|
+| 0.05 | 0.12% | 0.12% |
+| 0.10 | 0.86% | 0.86% |
+| 0.15 | 2.7% | 2.66% |
+| **0.19** | 5.05% | **5.05%** |
+| 0.30 | 16.3% | 16.25% |
+
+**The pre-committed 5% bar is crossed at `phi` ~ 0.19** — roughly one seat in five
+failing to reveal, which is a badly degraded network rather than normal operation. At
+the dense fixture the bar holds with a wide margin, so the participation credit stays
+item 10's business and is not pulled forward. The figure to watch in production is
+`phi`, and it is now the parameter that decides this.
+
+
 
 #### 3a, and the exact sense in which each part is a no-op
 

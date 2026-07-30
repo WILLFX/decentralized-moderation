@@ -310,6 +310,11 @@ contract Moderation is ReentrancyGuard {
         mapping(address => bool) committed; // has committed
         mapping(address => uint256) committedAmt; // stake locked by this seat-holder for this round
         uint256 committedCount; // # seat-holders committed
+        // M2.6-item-2b: Σ committedSeats, the ceiling on what this round can ever
+        // reveal (H-08 caps the tally at the seats collateralized at commit). The
+        // commit-time widen trigger reads it, because it is the largest quantity
+        // known at close-of-commit that bounds the reveal quorum.
+        uint256 committedSeatsTotal;
         uint256 revealedCount; // # committers revealed
         uint256 approveSeats; // Σ seats revealing Approve
         uint256 rejectSeats; // Σ seats revealing Reject
@@ -349,6 +354,28 @@ contract Moderation is ReentrancyGuard {
         uint256 rulesVersion; // H-11: consensus ruleset pinned at submit
         Phase phase;
         uint256 depth;
+        // M2.6-item-2b: the SHARED per-depth attempt budget. A commit-time widen
+        // tranche and a stall round each consume exactly one, and each adds one
+        // target's worth of fresh seats an attacker must dominate — so a mixed path
+        // costs the same `4n` as a pure one ARITHMETICALLY, by construction, rather
+        // than because the attacker declines to mix. That is what preserves the
+        // q^{4n} floor under any future change to which behaviour triggers which
+        // lever. Note `:1259`'s `add = _commitTarget(c, c.depth)`: a widen already
+        // draws a full target's worth, which is the fact the parity rests on. A
+        // change making the widen a genuine top-up would silently break it.
+        //
+        // "Seats sought", not "seats drawn" — a short panel under scarce capacity
+        // adds fewer, and the budget is spent either way.
+        uint256 attemptsUsed;
+        // Index of the round whose tally produced the outcome. A depth now holds
+        // several rounds and only one adjudicates, so `_cur(c)` is not that round.
+        uint256 adjRound;
+        // The adjudicating round of the PREVIOUS depth — what `_failAppealRound`
+        // restores. `c.depth - 1` was a valid index only while depth == round index.
+        uint256 prevDepthAdjRound;
+        // First round index at the current depth, so the terminal predicate can span
+        // exactly this depth's rounds (finding (ii)).
+        uint256 depthFirstRound;
         uint256 pot; // fee + appeal bonds moved in (§6.2)
         uint256 appealBondTotal; // Σ appeal bonds that met their floor and joined the pot
         uint256 phaseDeadline;
@@ -859,9 +886,14 @@ contract Moderation is ReentrancyGuard {
         r.commits[msg.sender] = commitHash;
         r.committed[msg.sender] = true;
         r.committedCount++;
+        r.committedSeatsTotal += s;
 
         emit Committed(caseId, msg.sender, s);
-        if (r.committedCount == r.seatHolders.length) _toReveal(c);
+        // Every seat-holder has committed, so nothing more can arrive in this
+        // window. Route through `_endCommit` rather than straight to REVEAL: full
+        // participation on a SHORT panel can still leave commitment below quorum,
+        // and that is a widen, not a reveal window.
+        if (r.committedCount == r.seatHolders.length) _endCommit(c);
     }
 
     /// @notice End a case whose draw can never complete (M2.6-P0-6).
@@ -921,7 +953,46 @@ contract Moderation is ReentrancyGuard {
         Case storage c = cases[caseId];
         if (c.phase != Phase.COMMIT) revert WrongPhase();
         if (block.timestamp < c.phaseDeadline) revert DeadlineNotReached();
-        _toReveal(c);
+        _endCommit(c);
+    }
+
+    /// @dev COMMIT closes. **This is where under-participation is now detected, and
+    ///      that relocation is the whole of the P′ fix.**
+    ///
+    ///      The widen used to fire at close-of-REVEAL, which meant every widen
+    ///      tranche committed against a tally that was already public — and the
+    ///      REVEAL -> DRAW edge it needed was the only backward edge in a round's
+    ///      phase graph. Deleting that edge makes the property structural: for any
+    ///      round, every `commitVote` strictly precedes every `revealVote` in block
+    ///      order, because `commitVote` is COMMIT-only, `revealVote` is REVEAL-only,
+    ///      and no path returns from REVEAL to either.
+    ///
+    ///      The trigger is committed SEATS against `minReveals`. H-08 caps a round's
+    ///      tally at the seats collateralized at commit, so `committedSeatsTotal` is
+    ///      exactly the ceiling on what this round could ever reveal: below it,
+    ///      quorum is already unreachable and drawing more seats is the right
+    ///      remedy. Above it, a shortfall is a DUTY failure by identified parties,
+    ///      and the remedy for that is the stall round in `_closeReveal`, not more
+    ///      seats.
+    function _endCommit(Case storage c) internal {
+        Round storage r = _cur(c);
+        Params storage p = _cp(c);
+        if (r.committedSeatsTotal >= p.minReveals || c.attemptsUsed >= p.maxWiden) {
+            _toReveal(c);
+            return;
+        }
+        // Widen: one attempt from the shared per-depth budget, one target's worth of
+        // seats added to THIS round, fresh entropy (H-05). No reveal window has
+        // opened, so the tranche commits against an empty tally by construction.
+        c.attemptsUsed++;
+        r.widenCount++;
+        uint256 add = _commitTarget(c, c.depth);
+        r.pendingDraw = add;
+        _armSeed(c, r);
+        c.phase = Phase.DRAW;
+        c.phaseDeadline = block.timestamp + p.commitTimeout; // P0-6
+        emit Widened(c.id, c.depth, r.widenCount, r.nSeats);
+        emit RoundOpened(c.id, c.depth, add, r.seatSnapshotBlock);
     }
 
     /// @notice Reveal a previously committed vote (Approve or Reject) with its
@@ -976,7 +1047,9 @@ contract Moderation is ReentrancyGuard {
     function realizeOutcome(uint256 caseId) external {
         Case storage c = cases[caseId];
         if (c.phase != Phase.TALLY) revert WrongPhase();
-        Round storage r = _cur(c);
+        // M2.6-item-2b: the ADJUDICATING round, which under finding (ii) may be an
+        // earlier round at this depth rather than the current one.
+        Round storage r = c.rounds[c.adjRound];
         if (block.number <= r.outcomeSnapshotBlock) revert SeedNotReady();
 
         bytes32 bh = blockhash(r.outcomeSnapshotBlock);
@@ -1002,7 +1075,7 @@ contract Moderation is ReentrancyGuard {
         Case storage c = cases[caseId];
         if (c.phase != Phase.APPEAL_WINDOW) revert WrongPhase();
         if (block.timestamp < c.phaseDeadline) revert DeadlineNotReached();
-        c.finalOutcome = _cur(c).outcome;
+        c.finalOutcome = c.rounds[c.adjRound].outcome; // M2.6-item-2b
         c.phase = Phase.FINALIZED;
         emit Finalized(caseId, c.finalOutcome);
     }
@@ -1024,7 +1097,9 @@ contract Moderation is ReentrancyGuard {
         if (c.depth >= _cp(c).maxDepth) revert AppealsClosed();
         if (block.timestamp >= c.phaseDeadline) revert AppealWindowClosed();
 
-        Round storage r = _cur(c);
+        // M2.6-item-2b: an appeal bonds against the round that ADJUDICATED, which
+        // is where the outcome and the bond bookkeeping live.
+        Round storage r = c.rounds[c.adjRound];
         if (r.appealFor == Outcome.Unset) r.appealFor = _opposite(r.outcome);
 
         uint256 floor = _cp(c).bondMultiplier * c.pot;
@@ -1271,7 +1346,30 @@ contract Moderation is ReentrancyGuard {
         }
     }
 
+    /// @dev Open the FIRST round at a new depth: a fresh attempt budget, and a new
+    ///      span for the terminal predicate to scan.
     function _openRound(Case storage c, uint256 depth) internal {
+        // The budget is PER DEPTH, not per case. At depth > 0 `_failAppealRound`
+        // makes vanishing a win, so an attacker attacks the depth it cares about; a
+        // per-case budget partly spent by honest liveness trouble at depth 0 would
+        // leave a smaller floor at depth 2, i.e. earlier bad luck degrading later
+        // security.
+        c.attemptsUsed = 0;
+        if (depth > 0) c.prevDepthAdjRound = c.adjRound;
+        c.depthFirstRound = c.rounds.length;
+        _pushRound(c, depth);
+    }
+
+    /// @dev A STALL round: a fresh panel at the SAME depth, on the same budget.
+    ///      Opened when a round drew commitment but not reveals — a duty failure by
+    ///      identified parties, for which drawing more seats into the same tally is
+    ///      the wrong remedy and the only path by which disclosure precedes
+    ///      commitment.
+    function _openStallRound(Case storage c) internal {
+        _pushRound(c, c.depth);
+    }
+
+    function _pushRound(Case storage c, uint256 depth) internal {
         c.rounds.push();
         Round storage r = c.rounds[c.rounds.length - 1];
         uint256 target = _commitTarget(c, depth);
@@ -1302,38 +1400,43 @@ contract Moderation is ReentrancyGuard {
         uint256 reveals = r.revealedSeats;
 
         if (reveals >= _cp(c).minReveals) {
-            _armOutcome(c, r);
+            _armOutcome(c, c.rounds.length - 1);
             return;
         }
-        // Under-participation: widen while retries remain.
-        if (r.widenCount < _cp(c).maxWiden) {
-            r.widenCount++;
-            uint256 add = _commitTarget(c, c.depth);
-            // H-05: a widen re-draw gets FRESH entropy (a newly armed snapshot
-            // block), not keccak(oldSeed, widenCount) — which contained no new
-            // randomness and was fully known before a voter decided whether to
-            // withhold a reveal and trigger the widen. Back to DRAW; the poke
-            // draws only the added seats.
-            r.pendingDraw = add;
-            _armSeed(c, r);
-            c.phase = Phase.DRAW;
-            c.phaseDeadline = block.timestamp + _cp(c).commitTimeout; // P0-6
-            emit Widened(c.id, c.depth, r.widenCount, r.nSeats); // seated so far
-            emit RoundOpened(c.id, c.depth, add, r.seatSnapshotBlock); // seats SOUGHT
+        // M2.6-item-2b: commitment cleared quorum and reveals did not. There is NO
+        // widen here any more — that edge (REVEAL -> DRAW, the only backward one in
+        // a round's phase graph) is what let a widen tranche commit against a
+        // disclosed tally, and it is deleted. Instead the round is set aside and a
+        // FRESH round opens at the same depth, on the same shared budget.
+        //
+        // Set aside, not discarded: the round stays in `c.rounds`, its reveals stay
+        // readable, and its `rejectSeats` still counts for `_noRejectEver` — reject
+        // evidence survives any reset (§8.1). What it loses is the reward
+        // denominator, which is 3a's `adjudicated` gate.
+        if (c.attemptsUsed < _cp(c).maxWiden) {
+            c.attemptsUsed++;
+            _openStallRound(c);
             return;
         }
-        // Widen exhausted with participation: proceed with the reveals we have
-        // (a case that got participation should still yield an outcome), but mark
-        // the round under-quorum so its approval can never reach the supersafe
-        // view (H-09).
-        if (reveals != 0) {
-            r.underQuorum = true;
-            _armOutcome(c, r);
+
+        // Budget exhausted. **Finding (ii): the terminal predicate spans the DEPTH,
+        // not the current round.** With a per-round tally, "did anyone reveal?"
+        // asked of `_cur(c)` would let an attacker leave the early rounds alone and
+        // dominate only the LAST one, reaching a terminal state at `q^n` instead of
+        // `q^{4n}` — the floor collapsing by the whole budget, which is what ruling
+        // 3 forbids. So: adjudicate on the most recent round at this depth that
+        // revealed anything, marked under-quorum so its approval can never reach the
+        // supersafe view (H-09). This is the pre-2b `reveals != 0` branch transposed
+        // from one growing round to a sequence of them.
+        uint256 idx = _lastRevealingRoundAtDepth(c);
+        if (idx != type(uint256).max) {
+            c.rounds[idx].underQuorum = true;
+            _armOutcome(c, idx);
             return;
         }
-        // Zero reveals after the cap. At depth 0 there is no prior outcome, so
-        // VOID. For an appeal round (depth > 0) the flip-bond was already funded
-        // to reach this round, so instead of voiding the whole case the appeal
+        // No round at this depth revealed anything. At depth 0 there is no prior
+        // outcome, so VOID. For an appeal round (depth > 0) the flip-bond was already
+        // funded to reach this round, so instead of voiding the whole case the appeal
         // simply fails and the prior round's outcome stands (the forfeited bond
         // is settled in claim(), M2-5).
         if (c.depth == 0) {
@@ -1352,7 +1455,9 @@ contract Moderation is ReentrancyGuard {
     ///      liveness, and refund the funding bond's capital (no bonus) rather than
     ///      forfeiting it to the prior winners (H-10).
     function _failAppealRound(Case storage c, Round storage r) internal {
-        Round storage prev = c.rounds[c.depth - 1];
+        // M2.6-item-2b, finding (iii): the previous depth's ADJUDICATING round.
+        // `c.depth - 1` was a valid index only while a depth held exactly one round.
+        Round storage prev = c.rounds[c.prevDepthAdjRound];
         prev.bondRefundOnly = true;
         r.outcome = prev.outcome;
         c.finalOutcome = prev.outcome;
@@ -1360,8 +1465,24 @@ contract Moderation is ReentrancyGuard {
         emit Finalized(c.id, c.finalOutcome);
     }
 
-    function _armOutcome(Case storage c, Round storage r) internal {
+    /// @dev The most recent round at the CURRENT depth that revealed anything, or
+    ///      `type(uint256).max` if the depth was silent throughout. Bounded by the
+    ///      per-depth attempt budget, so the scan is at most `1 + maxWiden` rounds.
+    function _lastRevealingRoundAtDepth(Case storage c) internal view returns (uint256) {
+        uint256 i = c.rounds.length;
+        while (i > c.depthFirstRound) {
+            unchecked { --i; }
+            if (c.rounds[i].revealedSeats != 0) return i;
+        }
+        return type(uint256).max;
+    }
+
+    /// @dev Arm the outcome on round `idx`, which is NOT necessarily `_cur(c)`:
+    ///      under finding (ii) an exhausted depth adjudicates on an earlier round.
+    function _armOutcome(Case storage c, uint256 idx) internal {
+        Round storage r = c.rounds[idx];
         c.phase = Phase.TALLY;
+        c.adjRound = idx;
         r.adjudicated = true; // M2.6-item-2b(3a): the tally the outcome is drawn from
         r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
@@ -1497,7 +1618,10 @@ contract Moderation is ReentrancyGuard {
         return (c.kind, c.submitter, c.phase, c.depth, c.pot, c.phaseDeadline, c.finalOutcome);
     }
 
-    function roundInfo(uint256 caseId, uint256 depth)
+    /// @dev Indexed by ROUND, not by depth. Those were the same number until item
+    ///      2b let a depth hold several rounds; the parameter was always
+    ///      `c.rounds[...]`, so only the name was ever misleading.
+    function roundInfo(uint256 caseId, uint256 roundIndex)
         external
         view
         returns (
@@ -1513,7 +1637,7 @@ contract Moderation is ReentrancyGuard {
             uint256 outcomeSnapshotBlock
         )
     {
-        Round storage r = cases[caseId].rounds[depth];
+        Round storage r = cases[caseId].rounds[roundIndex];
         return (
             r.nSeats,
             r.seatHolders.length,

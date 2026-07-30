@@ -144,10 +144,10 @@ contract StalledDrawTest is ModerationTestBase {
         // the widen re-draw will find nothing and the case stalls in DRAW.
         _drainUnseatedCapacity();
 
+        // M2.6-item-2b: zero COMMITMENT widens at close-of-commit; there is no
+        // reveal window to pass through first.
         vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
-        mod.closeCommit(caseId);
-        vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
-        mod.closeReveal(caseId); // zero reveals -> widen -> back to DRAW
+        mod.closeCommit(caseId); // zero commitment -> widen -> back to DRAW
         if (_phase(caseId) != Moderation.Phase.DRAW) return; // widen exhausted: not this path
         (,,,,,, uint256 widenCount,,,) = mod.roundInfo(caseId, 0);
         assertGt(widenCount, 0, "a window opened and closed before the stall");

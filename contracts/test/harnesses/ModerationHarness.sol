@@ -181,6 +181,23 @@ contract ModerationHarness is Moderation {
         return cases[caseId].rounds.length;
     }
 
+    /// M2.6-item-2b: the shared per-depth attempt budget consumed so far.
+    function __attemptsUsed(uint256 caseId) external view returns (uint256) {
+        return cases[caseId].attemptsUsed;
+    }
+
+    function __adjRound(uint256 caseId) external view returns (uint256) {
+        return cases[caseId].adjRound;
+    }
+
+    function __underQuorum(uint256 caseId, uint256 roundIndex) external view returns (bool) {
+        return cases[caseId].rounds[roundIndex].underQuorum;
+    }
+
+    function __roundWidenCount(uint256 caseId, uint256 roundIndex) external view returns (uint256) {
+        return cases[caseId].rounds[roundIndex].widenCount;
+    }
+
     function __setDepth(uint256 caseId, uint256 depth) external {
         cases[caseId].depth = depth;
     }

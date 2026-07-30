@@ -190,7 +190,9 @@ library Settlement {
         // tranche is empty by construction. Where it does bite, the cost is one
         // seat's escrow frozen for one `failedRevealFreeze`. Separating the tranches
         // needs per-seat window provenance, filed with P1-1(b) to be built once.
-        bool amnesty = c.drawAbandoned && r.widenCount == 0;
+        // M2.6-item-2b, finding (iv): the DEPTH's attempt count, not this round's
+        // own widen count — a stall round resets the latter. See `_disposeBatch`.
+        bool amnesty = c.drawAbandoned && c.attemptsUsed == 0;
         while (idx < len && steps < maxSteps) {
             address a = r.seatHolders[idx];
             uint256 amt = r.committedAmt[a];
@@ -276,7 +278,14 @@ library Settlement {
             // but only if it NEVER WIDENED. See `_voidStep` for the argument; this
             // is the same rule on the appeal path, which reaches settlement through
             // `_failAppealRound` -> FINALIZED instead of VOID.
-            bool amnesty = c.drawAbandoned && round + 1 == nRounds && r.widenCount == 0;
+            // M2.6-item-2b, finding (iv): gated on the DEPTH's attempt count, not the
+            // round's own widen count. A stall round is a fresh round whose
+            // `widenCount` starts at zero, so the old gate would hand P0-6c's amnesty
+            // straight back to the actor it was written to catch — burn the depth's
+            // budget, then abandon the draw, and be released without penalty.
+            // `attemptsUsed == 0` means no commit window ever opened at this depth,
+            // which is the condition the amnesty was always reaching for.
+            bool amnesty = c.drawAbandoned && round + 1 == nRounds && c.attemptsUsed == 0;
             uint256 nsh = r.seatHolders.length;
             while (idx < nsh) {
                 if (steps >= maxSteps) {
@@ -389,7 +398,10 @@ library Settlement {
         if (decayed[a]) return;
         decayed[a] = true;
         uint256 t = (x.stakeReg.trackOf(a) * p.trackDecay) / WAD;
-        if (c.rounds.length == 1 && r.reveals[a] != Moderation.Vote.None && _coherent(r.reveals[a], fo)) {
+        // M2.6-item-2b: "undisputed" means never APPEALED. `rounds.length == 1` was
+        // that test only while a depth held one round; a case that stalled once and
+        // then adjudicated was never disputed either. Equivalent before 2b.
+        if (c.depth == 0 && r.reveals[a] != Moderation.Vote.None && _coherent(r.reveals[a], fo)) {
             t += WAD; // +1 for a coherent, undisputed participation
         }
         x.stakeReg.setTrack(a, t);
@@ -609,7 +621,7 @@ library Settlement {
         for (uint256 d; d < n; ++d) {
             if (c.rounds[d].underQuorum) return false;
         }
-        return c.rounds[c.depth].revealedCount >= p.minReveals;
+        return c.rounds[c.adjRound].revealedCount >= p.minReveals; // M2.6-item-2b
     }
 
     /// @dev Release this case's content reservations so the content is submittable

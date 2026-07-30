@@ -1057,7 +1057,7 @@ contract Moderation is ReentrancyGuard {
         // M2.6-P0-7: a voided case drains through the same permissionless keeper
         // entry point, so clients and keepers have one poke to call.
         if (c.phase == Phase.VOID_SETTLING) {
-            _voidStep(c, maxSteps);
+            Settlement.settleVoid(c, settleState[c.id], money, _cp(c), Settlement.Ext(token, stakeReg, indexReg), maxSteps);
             return;
         }
         if (c.phase != Phase.FINALIZED && c.phase != Phase.SETTLING) revert CaseNotFinalized();
@@ -1149,26 +1149,11 @@ contract Moderation is ReentrancyGuard {
 
 
 
-    function _freezeSlice(address a, uint256 caseRef, uint256 amt, uint256 until) internal {
-        stakeReg.freeze(a, caseRef, amt, until); // committed -> frozen; never a transfer
-    }
-
-    /// @dev H-07/H-10: penalize a seat-holder that pledged duty capacity, was
-    ///      drawn on it, and never committed. Freezes one seat's worth of its FREE
-    ///      stake for the brief failed-reveal duration — a liquidity and
-    ///      eligibility cost, never a transfer to anyone (principle 2 holds: no
-    ///      internal attack profit). Bounded to what the moderator actually has, so
-    ///      the penalty can never fail settlement.
-    function _settleDuty(Case storage c, uint256 caseRef, address a, uint256 seats, bool failed) internal {
-        if (seats == 0) return;
-        Params storage p = _cp(c);
-        // One seat's worth, regardless of seats held. The registry bounds the
-        // penalty by the escrow these seats actually posted, so this can never
-        // fail settlement and can never reach another case's collateral.
-        uint256 penalty = failed ? p.riskPerSeat : 0;
-        stakeReg.settleDuty(a, caseRef, seats, penalty, block.timestamp + p.failedRevealFreeze);
-    }
-
+    // M2.6: `_freezeSlice` and `_settleDuty` were here, as SECOND COPIES of the
+    // versions in `Settlement` — kept only because VOID disposal had not moved
+    // across the seam. It has (`Settlement.settleVoid`), so the duplicates are gone.
+    // A penalty rule stated in two places is the divergence this milestone keeps
+    // finding; there is now exactly one `_settleDuty` in the codebase.
 
     // --- internal transitions ------------------------------------------------
 
@@ -1342,88 +1327,10 @@ contract Moderation is ReentrancyGuard {
         emit VoidOpened(c.id, _cur(c).seatHolders.length);
     }
 
-    /// @dev One bounded batch of VOID disposal. A VOID happens only on zero
-    ///      reveals after MAX_WIDEN, so every committer in the round is a
-    ///      commit-and-vanish actor: each takes the §6.3 brief freeze
-    ///      (committed -> frozen), never a free release. Otherwise a coordinated
-    ///      panel could grief submissions to VOID at no cost.
-    function _voidStep(Case storage c, uint256 maxSteps) internal {
-        Round storage r = _cur(c);
-        SettleState storage s = settleState[c.id];
-        uint256 idx = s.idx;
-        uint256 len = r.seatHolders.length;
-        uint256 steps;
-        uint256 freezeUntil = block.timestamp + _cp(c).failedRevealFreeze;
-        // M2.6-P0-6c: amnesty for an abandoned draw, gated on the round NEVER
-        // having widened.
-        //
-        // P0-6 gave a blanket amnesty on `c.drawAbandoned`, reasoning that a
-        // seated moderator cannot fail to do something it was never asked to do.
-        // True of a round that stalled before COMMIT ever opened; false once the
-        // round has widened, because a widen only happens AFTER a commit window
-        // opened and closed. `widenCount > 0` is therefore proof that at least one
-        // window existed, and the holders who sat through it are no-shows whatever
-        // becomes of the later draw.
-        //
-        // The blanket version was H-10 EVASION, and cheap: moderators pledging
-        // exactly the depth-0 target get seated, refuse to commit, the round
-        // widens, the re-draw stalls on the very capacity they are still holding,
-        // and `resolveStalledDraw` releases everyone. `test_void_with_no_commits_
-        // penalizes_no_shows` freezes that identical refusal when the draw happens
-        // to complete — so the penalty depended on whether the attacker left any
-        // capacity for the widen, which the attacker chooses.
-        //
-        // Known imprecision, taken deliberately: this OVER-penalises the widen
-        // tranche — moderators drawn by the widen itself, who were never given a
-        // window either. In the attack it has no false positives at all, because
-        // the attackers hold the capacity that makes the re-draw stall, so the
-        // widen tranche is empty by construction. Where it does bite, the cost is
-        // one seat's escrow frozen for one `failedRevealFreeze`.
-        //
-        // Separating the tranches needs per-seat window provenance — which round
-        // AND which tranche a seat was drawn in. That is the same mechanism P1-1(b)
-        // needs for the reopened commit window, and it is filed there to be built
-        // once. Choosing to over-penalise rather than under-penalise here is the
-        // opposite of the call made at the blanket-amnesty site, and deliberately
-        // so: there the harm was freezing someone who was never asked, here the
-        // harm is a free pass on a stated defence.
-        bool amnesty = c.drawAbandoned && r.widenCount == 0;
-        while (idx < len && steps < maxSteps) {
-            address a = r.seatHolders[idx];
-            uint256 amt = r.committedAmt[a];
-            if (amt > 0) {
-                r.committedAmt[a] = 0;
-                _freezeSlice(a, r.caseRef, amt, freezeUntil);
-            }
-            // H-07: capacity and escrow both return when the case ends (P0-2).
-            _settleDuty(c, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a]);
-            unchecked {
-                ++idx;
-                ++steps;
-            }
-        }
-        s.idx = idx;
-        if (idx < len) {
-            emit SettleProgressed(c.id, c.depth, idx);
-            return;
-        }
-        _voidFinish(c);
-    }
-
-    /// @dev The pot side of a VOID, once every participant is disposed.
-    function _voidFinish(Case storage c) internal {
-        uint256 pot = c.pot;
-        uint256 bounty = (pot * _cp(c).claimBountyFrac) / WAD;
-        c.pot = 0;
-        money.openPotsTotal -= pot;
-        _clearDedup(c);
-        indexReg.closeCase(c.id); // M2.6-P0-5b: index effects complete
-        c.phase = Phase.VOID;
-
-        if (bounty > 0) address(token).safeTransfer(msg.sender, bounty);
-        address(token).safeTransfer(c.submitter, pot - bounty);
-        emit Voided(c.id);
-    }
+    // M2.6: the DISPOSAL half of a VOID (`_voidStep` / `_voidFinish`) moved to
+    // `Settlement.settleVoid`. Only the O(1) opener above stays, because only the
+    // opener is called from the round state machine. See that file's header for the
+    // correction to the split's original — and wrong — reason for leaving it here.
 
     // --- internal helpers ----------------------------------------------------
 
@@ -1476,17 +1383,9 @@ contract Moderation is ReentrancyGuard {
         return free > reserved ? free - reserved : 0;
     }
 
-    function _clearDedup(Case storage c) internal {
-        if (c.kind != Kind.SUBMISSION) return;
-        uint256 len = c.topicKeys.length;
-        for (uint256 i; i < len; ++i) {
-            // H-02 is enforced registry-side: the release no-ops unless THIS
-            // logic and THIS case own the key, so a stale case cannot wipe a
-            // reservation a newer resubmission now holds.
-            indexReg.releaseContent(_dedupKey(c.contentHash, c.metaHash, c.topicKeys[i]), c.id);
-        }
-    }
-
+    // M2.6: `_clearDedup` went with `_voidFinish` — a third duplicate that only
+    // existed because VOID disposal had not crossed the seam. `_dedupKey` stays:
+    // `submit` reserves with it, and that is on this side of the boundary.
     function _dedupKey(bytes32 contentHash, bytes32 metaHash, bytes32 topicKey) internal pure returns (bytes32) {
         return keccak256(abi.encode(contentHash, metaHash, topicKey));
     }

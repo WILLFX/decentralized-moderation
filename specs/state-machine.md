@@ -508,6 +508,21 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested,
    + totalSettling` and
    `balanceOf(StakeRegistry) == totalFreeStake + totalCommittedStake +
    totalFrozenStake + totalDutyBondedStake`. No idle treasury (README §4).
+
+   **The first equality holds at TRANSACTION boundaries, not at every intermediate
+   state.** Since M2.6's second structural split, `Settlement._disposeBatch`
+   decrements `totalSettling` once per batch from the delta in `s.distributed`,
+   where the pre-split code decremented it per reward inside the loop. From the
+   first reward credit of a batch the registry has already pulled that reward out
+   of `Moderation`, so its balance has fallen while `totalSettling` has not; the
+   equality is untrue until the batch returns. It is acceptable because **no
+   execution can observe the window**: `claim` is `nonReentrant`, the only external
+   calls in the loop are into `StakeRegistry` (which never calls back into a logic
+   contract), and the token is a fixed ERC-20 with no transfer hook. All three are
+   load-bearing — a callback-bearing token would make the intermediate state
+   reachable and force the per-reward form back.
+
+   The second equality is **not** weakened and holds at every block.
 2. **No internal transfer:** no execution path moves stake principal from one
    moderator to another. Rewards credited to voters come only from `pot` (fees +
    forfeited bonds). *(Test: property test that Σ principal per address is

@@ -18,10 +18,12 @@ The last code change is `51af155`; everything after it is documentation.
 > fixed state. Everything from here down describes the state **at the tag** unless
 > it says otherwise.
 >
-> **The size position is resolved.** `Moderation` is at **19,964 bytes, 4,612
+> **The size position is resolved.** `Moderation` is at **19,203 bytes, 5,373
 > free**, after the second structural split moved settlement into a delegatecalled
-> library (`src/lib/Settlement.sol`). K-1, K-3 and K-5 now fit. What follows was
-> written before that and is kept because the reasoning still stands:
+> library (`src/lib/Settlement.sol`) and its follow-up moved VOID disposal after
+> it. K-1, K-3 and K-5 now fit — and K-3 no longer costs `Moderation` anything at
+> all, since every site it touches is now in `Settlement`. What follows was written
+> before that and is kept because the reasoning still stands:
 >
 > `Moderation` was at 24,137 bytes, 439 free, up 841 across the regression batch —
 > and that margin was a consequence of those fixes, not an independent constraint.
@@ -91,12 +93,13 @@ becomes something a reader mistakes for a test of the product.)
 despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
-After the post-close regression pass and the second structural split:
-`Moderation` **19,964 (4,612 free)**, `Settlement` 5,596, `StakeRegistry` 12,126,
-`IndexRegistry` 6,256, `RulesetGovernor` 4,459.
+After the post-close regression pass, the second structural split, and the split's
+follow-up: `Moderation` **19,203 (5,373 free)**, `Settlement` 6,645,
+`StakeRegistry` 12,126, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
 
-`Moderation` rose 841 bytes across the regression batch and then fell 4,173 in the
-split, so it ends well below where the milestone started. The margin is no longer
+`Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
+and a further 761 when VOID disposal followed settlement across the seam, so it
+ends well below where the milestone started. The margin is no longer
 the binding constraint on work in the game contract; the seam analysis is in the
 work order's "Size position" section.
 

@@ -38,8 +38,15 @@ import {FreezeMath} from "./FreezeMath.sol";
 /// `resolveStalledDraw`, so it would put a cross-boundary call *inside* the machine
 /// this split exists to give room to — the wrong direction, for half the bytes.
 /// *Submission*: `submit` writes case storage and calls `_openRound`, so it
-/// straddles that machine's entry. *VOID disposal*: only 913 B, and `_voidStep` is
-/// reached from `closeReveal`, again inside the machine.
+/// straddles that machine's entry.
+///
+/// *VOID disposal* was rejected on the same structural ground and that reasoning was
+/// **wrong**: it said `_voidStep` is reached from `closeReveal`. It is not. What
+/// `closeReveal` and `resolveStalledDraw` call is `_void`, the O(1) phase flip, and
+/// that stays in `Moderation`. `_voidStep` is reached only through `claim` ->
+/// `_settle`, already across this boundary. It moved here in the split's follow-up
+/// (`settleVoid`), which also removed the duplicate `_settleDuty`, `_freezeSlice`
+/// and `_clearDedup` that keeping it behind cost.
 ///
 /// ## Why a LIBRARY and not a fourth contract
 ///
@@ -114,6 +121,101 @@ library Settlement {
         else emit Moderation.SettleProgressed(c.id, s.round, s.idx);
     }
 
+    /// @notice One bounded batch of VOID disposal (M2.6-P0-7), behind the same seam.
+    /// @dev Moved here in the split's follow-up. The original rejection reasoning —
+    ///      "`_voidStep` is reached from `closeReveal`, inside the round state
+    ///      machine" — was simply wrong, and is corrected in this file's header: it
+    ///      is `_void`, the O(1) phase flip, that `closeReveal` and
+    ///      `resolveStalledDraw` call. `_voidStep` is reached only through `claim` ->
+    ///      `_settle`, which was already across this boundary. So the move adds no
+    ///      call into the machine the split exists to give room to, and it deletes
+    ///      the reason `_settleDuty`, `_freezeSlice` and `_clearDedup` existed in two
+    ///      copies — a duplicated penalty rule being exactly the kind of divergence
+    ///      this milestone keeps finding.
+    ///
+    ///      A VOID happens only on zero reveals after the widen cap, so every
+    ///      committer in the round is a commit-and-vanish actor: each takes the §6.3
+    ///      brief freeze (committed -> frozen), never a free release. Otherwise a
+    ///      coordinated panel could grief submissions to VOID at no cost.
+    function settleVoid(
+        Moderation.Case storage c,
+        Moderation.SettleState storage s,
+        Moderation.Money storage money,
+        Moderation.Params storage p,
+        Ext memory x,
+        uint256 maxSteps
+    ) public {
+        Moderation.Round storage r = c.rounds[c.rounds.length - 1];
+        uint256 idx = s.idx;
+        uint256 len = r.seatHolders.length;
+        uint256 steps;
+        uint256 freezeUntil = block.timestamp + p.failedRevealFreeze;
+        // M2.6-P0-6c: amnesty for an abandoned draw, gated on the round NEVER
+        // having widened.
+        //
+        // P0-6 gave a blanket amnesty on `c.drawAbandoned`, reasoning that a seated
+        // moderator cannot fail to do something it was never asked to do. True of a
+        // round that stalled before COMMIT ever opened; false once the round has
+        // widened, because a widen only happens AFTER a commit window opened and
+        // closed. `widenCount > 0` is therefore proof that at least one window
+        // existed, and the holders who sat through it are no-shows whatever becomes
+        // of the later draw.
+        //
+        // The blanket version was H-10 EVASION, and cheap: moderators pledging
+        // exactly the depth-0 target get seated, refuse to commit, the round widens,
+        // the re-draw stalls on the very capacity they are still holding, and
+        // `resolveStalledDraw` releases everyone.
+        //
+        // Known imprecision, taken deliberately: this OVER-penalises the widen
+        // tranche — moderators drawn by the widen itself, who were never given a
+        // window either. In the attack it has no false positives at all, because the
+        // attackers hold the capacity that makes the re-draw stall, so the widen
+        // tranche is empty by construction. Where it does bite, the cost is one
+        // seat's escrow frozen for one `failedRevealFreeze`. Separating the tranches
+        // needs per-seat window provenance, filed with P1-1(b) to be built once.
+        bool amnesty = c.drawAbandoned && r.widenCount == 0;
+        while (idx < len && steps < maxSteps) {
+            address a = r.seatHolders[idx];
+            uint256 amt = r.committedAmt[a];
+            if (amt > 0) {
+                r.committedAmt[a] = 0;
+                x.stakeReg.freeze(a, r.caseRef, amt, freezeUntil); // committed -> frozen; never a transfer
+            }
+            // H-07: capacity and escrow both return when the case ends (P0-2).
+            _settleDuty(p, x, r.caseRef, a, r.seats[a], !amnesty && !r.committed[a]);
+            unchecked {
+                ++idx;
+                ++steps;
+            }
+        }
+        s.idx = idx;
+        if (idx < len) {
+            emit Moderation.SettleProgressed(c.id, c.depth, idx);
+            return;
+        }
+        _voidFinish(c, money, p, x);
+    }
+
+    /// @dev The pot side of a VOID, once every participant is disposed.
+    function _voidFinish(
+        Moderation.Case storage c,
+        Moderation.Money storage money,
+        Moderation.Params storage p,
+        Ext memory x
+    ) private {
+        uint256 pot = c.pot;
+        uint256 bounty = (pot * p.claimBountyFrac) / WAD;
+        c.pot = 0;
+        money.openPotsTotal -= pot;
+        _clearDedup(c, x);
+        x.indexReg.closeCase(c.id); // M2.6-P0-5b: index effects complete
+        c.phase = Moderation.Phase.VOID;
+
+        if (bounty > 0) address(x.token).safeTransfer(msg.sender, bounty);
+        address(x.token).safeTransfer(c.submitter, pot - bounty);
+        emit Moderation.Voided(c.id);
+    }
+
     /// @notice Dispose up to `maxSteps` seat-holders from the cursor.
     /// @return done True when the last seat-holder of the last round was disposed,
     ///         so `settle` knows to run the finish in the same transaction.
@@ -126,6 +228,25 @@ library Settlement {
         Ext memory x,
         uint256 maxSteps
     ) private returns (bool done) {
+        // `money.totalSettling` is decremented ONCE PER BATCH, from the delta in
+        // `s.distributed`, rather than per reward inside the loop as it was before
+        // the split. Both forms leave the same value at the batch's end; they differ
+        // in how long invariant 1's token-balance equality is untrue.
+        //
+        // From the first reward credit the registry has already PULLED that reward
+        // out of this contract, so `balanceOf(Moderation)` has fallen while
+        // `totalSettling` has not: the equality is broken from that credit until this
+        // function returns. What makes the window acceptable is not that it is short
+        // — it is a whole batch — but that **no execution can observe it**. `claim`
+        // is `nonReentrant`; the only external calls in the loop are into
+        // `StakeRegistry`, which never calls back into a logic contract; and the
+        // token is a fixed ERC-20 with no transfer hook. Every one of those three is
+        // load-bearing. A token with a callback would make this reachable, and the
+        // per-reward form would have to come back.
+        //
+        // Invariant 1 is stated at transaction boundaries for exactly this reason.
+        // The registry's stake-bucket equality is NOT weakened and still holds at
+        // every block.
         uint256 distributedBefore = s.distributed;
         Moderation.Outcome fo = c.finalOutcome;
         uint256 nRounds = c.rounds.length;
@@ -294,9 +415,11 @@ library Settlement {
         uint256 bonusPool = winningContribTot == 0 ? 0 : (residual * p.bonusFrac) / WAD;
         uint256 distributable = residual - bounty - bonusPool;
 
-        // Winning-appeal refunds + bonuses become pull-based (C-01); the reward
-        // pool + bounty are held in `money.totalSettling` while the batched disposition
-        // credits them out, so conservation is exact at every intermediate state.
+        // Winning-appeal refunds + bonuses become pull-based (C-01); the reward pool
+        // + bounty are held in `money.totalSettling` while the batched disposition
+        // credits them out. Conservation is exact at TRANSACTION boundaries, not at
+        // every intermediate state — see `_disposeBatch` for the window and why
+        // nothing can execute inside it (invariant 1).
         money.openPotsTotal -= pot;
         c.apBonusPoolLeft = bonusPool;
         c.apContribTotLeft = winningContribTot;

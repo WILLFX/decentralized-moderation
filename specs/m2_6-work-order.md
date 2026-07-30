@@ -892,11 +892,23 @@ work, not an optimisation to consider afterwards.
 >
 > The seam was chosen by measurement, not by size alone: settlement is both the
 > largest candidate (5,688 B stubbed) and the furthest from the round state machine,
-> which is where the widen restructure has to fit. Appeals (2,369 B) and VOID
-> disposal (913 B) were rejected because `_failAppealRound` and `_voidStep` are
-> reached from `_closeReveal` — moving them would put a cross-boundary call *inside*
-> the machine the split exists to make room in. Submission (3,012 B) was rejected
+> which is where the widen restructure has to fit. Appeals (2,369 B) was rejected
+> because `_failAppealRound` is reached from `_closeReveal` and
+> `resolveStalledDraw` — moving it would put a cross-boundary call *inside* the
+> machine the split exists to make room in. Submission (3,012 B) was rejected
 > because `submit` writes case storage and calls `_openRound`.
+>
+> **Correction (split follow-up).** VOID disposal (913 B) was rejected on that same
+> structural ground and the reason was **wrong**: it said `_voidStep` is reached
+> from `_closeReveal`. It is not. `_closeReveal` and `resolveStalledDraw` call
+> `_void`, the O(1) phase flip; `_voidStep` is reached only through `claim` ->
+> `_settle`, already across the boundary. It has since moved
+> (`Settlement.settleVoid`), which also deleted the three duplicates leaving it
+> behind had cost — `_settleDuty`, `_freezeSlice` and `_clearDedup` each existed in
+> two copies, a penalty rule stated twice being the divergence this milestone keeps
+> finding. `Moderation` 19,964 -> **19,203 B** (free 4,612 -> **5,373**);
+> `Settlement` 5,596 -> 6,645 B. Suite unchanged at 218 tests / 18 suites, with no
+> test-side edits at all.
 >
 > One measured lesson worth keeping: an intermediate shape that moved only the
 > disposal loop and left `_settleInit`/`_settleFinish` behind saved **298 bytes net**
@@ -925,12 +937,14 @@ it rather than infer it.
 
 That margin is the binding constraint on everything above, and it is not enough:
 
-- **K-1 (keeper per-batch payment)** touches `_settleStep`, `_settleFinish`,
-  `_voidStep`/`_voidFinish` and `realizeSeats` — every batched path — and needs
-  per-batch accrual state plus a payout split. It lands in `Moderation`.
+- **K-1 (keeper per-batch payment)** touches every batched path — the disposal
+  loop, `_settleFinish`, VOID disposal and `realizeSeats` — and needs per-batch
+  accrual state plus a payout split. Since the split follow-up, only `realizeSeats`
+  is still in `Moderation`; the rest is in `Settlement`.
 - **K-3 (one settlement reference time)** needs a `settleStartedAt` in
-  `SettleState` and every `until` derived from it, across `_disposeSeat`,
-  `_freezeSlice` and `_voidStep`. Also `Moderation`.
+  `SettleState` and every `until` derived from it, across `_disposeSeat` and the
+  VOID batch. Since the split follow-up moved VOID disposal, all of those sites are
+  in `Settlement` — this one no longer costs `Moderation` anything.
 - **K-5 (`setTrack` scoping)** changes a registry signature, so every call site
   moves too — and `_touchTrack` is the sole caller, in `Moderation`. It also has a
   design question in front of it (per-logic or global track), which is a reason to

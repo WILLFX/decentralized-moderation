@@ -526,7 +526,49 @@ contract GasBoundsTest is ModerationTestBase {
     }
 
     /// A panel at the validator's cap completes in a bounded number of batches.
+    ///
+    /// **M2.6-item-5: this drove the DEFAULT five-seat panel and never read
+    /// `L.MAX_PANEL`.** Five seats fit in one `DRAW_SEATS_PER_BATCH` batch, so the
+    /// loop ran once, "bounded batches" was one batch, and raising `MAX_PANEL` could
+    /// not have moved it. The name claimed a property the fixture never reached.
+    ///
+    /// It now proposes a ruleset AT the cap, reading the constant directly so that
+    /// raising `MAX_PANEL` re-exercises this rather than silently passing, and
+    /// pledges enough capacity to fill it.
     function test_max_panel_completes_in_bounded_batches() public {
+        // Capacity for a cap-sized panel, on top of the base fixture's eight.
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        for (uint256 i = 0; i < L.MAX_PANEL; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("panelmod", i)))));
+            bzz.mint(a, 100 * XBZZ);
+            vm.prank(a);
+            bzz.approve(address(stakeReg), type(uint256).max);
+            vm.prank(a);
+            stakeReg.stake(20 * XBZZ);
+        }
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
+        for (uint256 i = 0; i < L.MAX_PANEL; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("panelmod", i)))));
+            stakeReg.activate(a);
+            vm.prank(a);
+            stakeReg.setDutyUnits((20 * XBZZ) / riskPerSeat);
+        }
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
+
+        // A depth-0 target AT the cap. Defaults are read from the live ruleset and
+        // one field changed — never a re-declared copy.
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = new uint256[](1);
+        cts[0] = L.MAX_PANEL;
+        uint256[] memory aws = new uint256[](1);
+        aws[0] = 4 days;
+        p.maxDepth = 0;
+        p.maxWiden = 0;
+        governor.proposeParameters(p, cts, aws);
+        vm.warp(vm.getBlockTimestamp() + GOV_TIMELOCK);
+        governor.executeParameters();
+
         uint256 caseId = _submit(mods[0]);
         uint256 batches;
         while (_phase(caseId) == Moderation.Phase.DRAW) {
@@ -536,10 +578,17 @@ contract GasBoundsTest is ModerationTestBase {
             uint256 used = g - gasleft();
             batches++;
             assertLt(used, HARD_CEILING, "every seat-draw batch fits");
+            assertLt(used, (HARD_CEILING * 80) / 100, "with margin");
             assertLt(batches, 64, "the draw terminates");
         }
         assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "panel complete");
-        emit log_named_uint("batches_for_default_panel", batches);
+
+        // The fixture must actually have reached the cap, or it is measuring a
+        // short panel again and the name lies a second time.
+        (uint256 nSeats,,,,,,,,,) = mod.roundInfo(caseId, 0);
+        assertEq(nSeats, L.MAX_PANEL, "the panel really is cap-sized");
+        assertGt(batches, 1, "and it really did take more than one batch");
+        emit log_named_uint("batches_for_max_panel", batches);
     }
 
     /// The seat-draw poke over a large tree (D9's 2M budget row): a full 47-seat
@@ -642,25 +691,47 @@ contract GasBoundsTest is ModerationTestBase {
         mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, six, 0, fee);
     }
 
+    /// **M2.6-item-5: this was vacuous, and it was vacuous in the worst way — it
+    /// exited before the thing it names could happen.** The loop had no DRAW branch,
+    /// so the `else break` fired the moment the first widen sent the round back to
+    /// DRAW. One iteration, `widenCount == 1`, and `assertLe(1, MAX_WIDEN)` passes
+    /// whatever the contract does. A widen that looped forever would have passed it
+    /// too, because the fixture stopped at the first widen.
+    ///
+    /// Rewritten against item 2b's commit-time trigger rather than repaired: the
+    /// widen fires at close-of-COMMIT now, and the budget it spends is the SHARED
+    /// per-depth counter that stall rounds draw on too. So the bound to assert is
+    /// that counter, not one round's `widenCount`.
     function test_widen_cannot_loop_unboundedly() public {
         uint256 caseId = _submit(mods[0]);
-        _realizeSeats(caseId);
-        // Never participate; drive until terminal — must stop within MAX_WIDEN+2 cycles.
+        uint256 maxAttempts = mod.getParams().maxWiden;
+
+        // Never participate, and drive EVERY phase — including DRAW, which is where
+        // the old fixture gave up.
         uint256 guard;
-        while (_phase(caseId) != Moderation.Phase.VOID && _phase(caseId) != Moderation.Phase.FINALIZED) {
-            require(guard++ < 2 * (MAX_WIDEN + 2), "widen looped unboundedly");
-            Moderation.Phase p = _phase(caseId);
-            if (p == Moderation.Phase.COMMIT) {
+        while (_phase(caseId) != Moderation.Phase.VOID && _phase(caseId) != Moderation.Phase.VOID_SETTLING) {
+            require(guard++ < 4 * (maxAttempts + 2), "the round machine looped unboundedly");
+            Moderation.Phase ph = _phase(caseId);
+            if (ph == Moderation.Phase.DRAW) {
+                _rollToSeed(caseId);
+                mod.realizeSeats(caseId);
+            } else if (ph == Moderation.Phase.COMMIT) {
                 vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
-            } else if (p == Moderation.Phase.REVEAL) {
+            } else if (ph == Moderation.Phase.REVEAL) {
                 vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
-                break;
+                revert("unexpected phase");
             }
+            // The bound holds at EVERY step, not only at the end — an overrun that
+            // corrected itself before the loop exited would otherwise be invisible.
+            assertLe(mod.__attemptsUsed(caseId), maxAttempts, "the shared budget is never exceeded");
         }
-        (,,,,,, uint256 widenCount,,,) = mod.roundInfo(caseId, 0);
-        assertLe(widenCount, MAX_WIDEN, "widen bounded by MAX_WIDEN");
+
+        // And the fixture must have actually spent the budget, or it proves nothing
+        // about a bound it never approached.
+        assertEq(mod.__attemptsUsed(caseId), maxAttempts, "the budget was fully spent");
+        assertGt(guard, maxAttempts, "and the machine really did run past one widen");
     }
 }

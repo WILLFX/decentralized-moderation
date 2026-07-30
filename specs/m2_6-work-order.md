@@ -1258,6 +1258,80 @@ residual against item 8's calibration.
    reconcile aggregates *across* depths, where every round adjudicated. Different
    problem, different mechanism.
 
+## Item 5 — five fixtures that read as coverage and were not (post-close)
+
+A fixture that cannot discriminate is worse than no fixture: it occupies the slot a
+real test would take and reports green while the property it names goes unchecked.
+Five, from the cold audit's sweep. Each was fixed to discriminate, or deleted with
+the reason; **every repair below was mutation-tested** — the guarded code was broken
+and the fixture confirmed to fail.
+
+| fixture | defect | disposition |
+|---|---|---|
+| `test_widen_cannot_loop_unboundedly` | no DRAW branch, so `else break` fired on the FIRST widen | **rewritten** against 2b's commit-time trigger |
+| `test_settling_one_case_cannot_drain_another_cases_escrow` | passed `CASE_A` to all four calls | **fixed**, and the assertions strengthened |
+| `test_reauthorization_does_not_inherit_old_handles` | drained before revoking, so the revert was over-determined | **renamed**, one assertion deleted |
+| `test_max_panel_completes_in_bounded_batches` | drove the default 5-seat panel, never read `L.MAX_PANEL` | **fixed** to drive the cap |
+| P0-3c's `frozen` disjunct in `drawPanel` | untested | **new test** |
+
+### The two that needed more than a repair
+
+**`test_widen_cannot_loop_unboundedly` was vacuous in the worst way — it exited
+before the thing it names could happen.** The loop had no DRAW branch, so the `else
+break` fired the moment the first widen sent the round back to DRAW: one iteration,
+`widenCount == 1`, and `assertLe(1, MAX_WIDEN)` passes whatever the contract does. A
+widen that looped forever would have passed it too.
+
+Rewritten rather than repaired, because 2b moved the trigger: the widen now fires at
+close-of-COMMIT and spends the SHARED per-depth counter that stall rounds also draw
+on, so the bound to assert is that counter rather than one round's `widenCount`. It
+now drives every phase including DRAW, asserts the bound at **every step** (an
+overrun that corrected itself before the loop exited would otherwise be invisible),
+and asserts the budget was **fully spent** — so it cannot pass by never approaching
+the bound.
+
+**`test_settling_one_case_cannot_drain_another_cases_escrow` needed two fixes, and
+the second was only visible under mutation.** Passing `CASE_A` to both draws made
+"two cases" one obligation seated twice. But repairing that alone still did not
+discriminate: with symmetric one-unit settlements, a per-case obligation and one
+merged pool produce identical numbers, and the fixture passed against a registry
+bounding by the pooled totals. Over-asking is the only shape where the property is
+observable — case A now settles **two** units against an obligation holding one, and
+B's unit and escrow must both survive. Under the pooled-bound mutation that
+underflows, which is the defect this test is named for.
+
+### The one that is unreachable by construction
+
+**`test_reauthorization_does_not_inherit_old_handles`** closed by expecting
+`NotYourObligation` on an old `caseRef`, presented as proof that old handles are
+unreachable. It proved nothing: the fixture must RELEASE before revoking, because
+`revokeLogic` requires `canRevoke` and `canRevoke` requires a full drain — so the
+obligation was already empty, and `NotYourObligation` is what an empty obligation
+returns whether or not the namespace rotated.
+
+**The stronger property cannot be tested, and that is the finding rather than a gap
+to fill.** A surviving old handle cannot exist across a revocation: P0-5b's drain
+gate guarantees every obligation is closed before `revokeLogic` succeeds. No fixture
+can discriminate on it, and one that appeared to would be reading an empty slot.
+Renamed to `test_reauthorization_rotates_the_handle_namespace`, which is the
+observable part, plus an assertion that the NEW namespace is live — so the rotation
+is shown to have preserved function, not merely broken the old one. The case where
+orphaning IS reachable is P0-5d's live-logic test.
+
+### The disjunct that looked dead and is not
+
+`drawPanel` denies a seat on `block.timestamp < m.frozenUntil`, and that clause had
+no test. It is easy to read as dead — `_eligibleWeight` returns 0 for a frozen
+moderator, so a frozen address should not be in the tree to draw.
+
+It is live, and P0-3 is the reason: `freeze` calls `_syncTree`, which **stages** the
+weight change to the next epoch boundary. A moderator frozen mid-epoch keeps its tree
+weight for the rest of that epoch and can still be drawn — the disjunct is the only
+thing stopping it taking a seat it can no longer back. The new fixture asserts the
+tree still carries the weight while the live weight is already zero, or the denial
+would be equally explained by an empty tree, and it fails when the disjunct is
+removed.
+
 ## Item 8 — freeze economics, priced (post-close)
 
 **The defect.** Withholding a reveal took `failedRevealFreeze`; revealing

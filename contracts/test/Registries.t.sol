@@ -613,27 +613,39 @@ contract RegistriesTest is Test {
     function test_settling_one_case_cannot_drain_another_cases_escrow() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
 
-        // Two separate cases each seat this moderator once.
+        // M2.6-item-5: BOTH draws named `CASE_A`, so "two cases" was one obligation
+        // seated twice and the cross-case property the test is named for was never
+        // exercised. A version of `settleDuty` that read the pooled `dutyBonded`
+        // instead of the per-case obligation — the exact defect this exists to
+        // catch — would have passed it.
         vm.startPrank(oldLogic);
         stakeReg.drawPanel(1, keccak256("caseA"), 0, CASE_A);
-        stakeReg.drawPanel(1, keccak256("caseB"), 0, CASE_A);
+        stakeReg.drawPanel(1, keccak256("caseB"), 0, CASE_B);
         vm.stopPrank();
         (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 2, "two outstanding assignments");
         assertEq(bonded, 2 * RISK_PER_SEAT, "each with its own escrow");
 
-        // Case A settles; the moderator no-showed there.
+        // Case A settles — and asks for MORE than it holds. This is what makes the
+        // fixture discriminate: with symmetric one-unit settlements, a per-case
+        // obligation and one merged pool produce identical numbers, so the test
+        // would pass either way. Over-asking is the only shape where "cannot reach
+        // another case's escrow" is observable — the clamp must bound it to A's own
+        // unit and leave B's untouched.
         vm.prank(oldLogic);
-        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 2, 2 * RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
 
-        (,, bonded) = stakeReg.dutyOf(alice);
+        uint256 reservedAfter;
+        (, reservedAfter, bonded) = stakeReg.dutyOf(alice);
         assertEq(bonded, RISK_PER_SEAT, "case B's escrow is untouched");
+        assertEq(reservedAfter, 1, "and B's assignment is still outstanding");
         (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
-        assertEq(frozen, RISK_PER_SEAT, "A's penalty applied");
+        assertEq(frozen, RISK_PER_SEAT, "A's penalty is bounded by A's own escrow");
 
-        // Case B settles; its penalty is still payable, which is the point.
+        // Case B settles against its OWN obligation; its penalty is still payable,
+        // which is the point — A's settlement must not have consumed B's escrow.
         vm.prank(oldLogic);
-        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_B, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (,,, frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, 2 * RISK_PER_SEAT, "B's penalty applied too");
         (,, bonded) = stakeReg.dutyOf(alice);
@@ -780,25 +792,87 @@ contract RegistriesTest is Test {
         assertEq(committed, 0, "the rightful owner settles normally");
     }
 
-    /// Re-authorizing a revoked logic gives it a fresh handle namespace, so it
-    /// cannot reach obligations from its previous life.
-    function test_reauthorization_does_not_inherit_old_handles() public {
+    /// Re-authorizing a revoked logic rotates its handle namespace.
+    ///
+    /// **M2.6-item-5: renamed, and one assertion deleted as over-determined.** The
+    /// test closed by expecting `NotYourObligation` on an old `caseRef`, presented as
+    /// proof that old handles are unreachable. It proved nothing: the fixture
+    /// RELEASES before revoking, because `revokeLogic` requires `canRevoke` and
+    /// `canRevoke` requires a full drain. So the obligation was already empty, and
+    /// `NotYourObligation` is exactly what an empty obligation returns whether or
+    /// not the namespace rotated.
+    ///
+    /// **The stronger property is unreachable by construction, and that is the
+    /// finding rather than a gap to fill.** A surviving old handle cannot exist
+    /// across a revocation: the drain gate (P0-5b) guarantees every obligation is
+    /// closed before `revokeLogic` succeeds, so there is never an old handle for a
+    /// re-authorized logic to reach. No fixture can discriminate on it, and one that
+    /// appeared to would be reading an empty slot.
+    ///
+    /// What IS observable, and what this now asserts, is the rotation itself —
+    /// `authEpoch` strictly increases, so handles minted after re-authorization are
+    /// in a different namespace from anything the previous life could have minted.
+    /// The live-logic case, where orphaning WOULD be reachable, is P0-5d's
+    /// `test_reauthorizing_a_live_logic_cannot_orphan_its_obligations` below.
+    function test_reauthorization_rotates_the_handle_namespace() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.startPrank(oldLogic);
         stakeReg.lock(alice, CASE_A, 10 * XBZZ);
-        stakeReg.release(alice, CASE_A, 10 * XBZZ); // drain: revocation now requires it
+        stakeReg.release(alice, CASE_A, 10 * XBZZ); // drain: revocation requires it
         vm.stopPrank();
         uint256 epochBefore = stakeReg.authEpoch(oldLogic);
+        assertTrue(stakeReg.canRevoke(oldLogic), "the drain gate is what empties the old namespace");
 
         stakeReg.revokeLogic(oldLogic);
         _authorize(oldLogic); // same address, authorized again
         assertGt(stakeReg.authEpoch(oldLogic), epochBefore, "a new namespace");
 
-        // The re-authorized contract starts empty: a case reference it used in its
-        // previous life resolves to a different handle entirely.
-        vm.prank(oldLogic);
-        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        // And the new namespace is live: a handle minted now works, so the rotation
+        // did not merely break the old one.
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
         stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        vm.stopPrank();
+        (,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(committed, 0, "the re-authorized logic settles under its own epoch");
+    }
+
+    /// M2.6-item-5 / P0-3c: the `frozen` disjunct in `drawPanel`'s rejection filter.
+    ///
+    /// `drawPanel` denies a seat when `block.timestamp < m.frozenUntil`, and that
+    /// clause had no test. It is easy to assume it is dead — `_eligibleWeight`
+    /// returns 0 for a frozen moderator, so a frozen address should not be in the
+    /// tree to draw. It is NOT dead, and the reason is P0-3: `freeze` calls
+    /// `_syncTree`, which STAGES the weight change to the next epoch boundary. A
+    /// moderator frozen mid-epoch keeps its tree weight for the rest of that epoch
+    /// and can still be drawn — the disjunct is the only thing that stops it taking
+    /// a seat it can no longer back.
+    ///
+    /// The fixture asserts the tree still carries the weight, or the denial would be
+    /// equally explained by an empty tree.
+    function test_a_moderator_frozen_mid_epoch_is_denied_a_seat_while_still_in_the_tree() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 weightBefore = stakeReg.totalEligibleWeight();
+        assertGt(weightBefore, 0, "alice is drawable to begin with");
+
+        // Freeze her, in the middle of the epoch, through the real path.
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 7 days);
+        vm.stopPrank();
+
+        // P0-3: the weight change is STAGED, so the tree is unchanged this epoch.
+        // This is what makes the disjunct reachable rather than dead code.
+        assertEq(stakeReg.totalEligibleWeight(), weightBefore, "the tree still carries her weight");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "while her LIVE weight is already zero");
+
+        // A draw in this epoch must still refuse her.
+        vm.prank(oldLogic);
+        (address[] memory seats, uint256 attempts) = stakeReg.drawPanel(1, keccak256("frozen"), 0, CASE_B);
+        assertGt(attempts, 0, "the draw actually ran");
+        for (uint256 i = 0; i < seats.length; i++) {
+            assertTrue(seats[i] != alice, "a frozen moderator is denied even while drawable");
+        }
     }
 
     /// M2.6-P0-5d: governance must not be able to orphan live obligation handles.

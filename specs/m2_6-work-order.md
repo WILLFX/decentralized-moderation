@@ -1318,6 +1318,19 @@ observable part, plus an assertion that the NEW namespace is live — so the rot
 is shown to have preserved function, not merely broken the old one. The case where
 orphaning IS reachable is P0-5d's live-logic test.
 
+### Conclusion: mutate every repair
+
+The escrow fixture is the case for it. The reported defect — `CASE_A` passed to all
+four calls — was real, and fixing it was not enough: with symmetric one-unit
+settlements a per-case obligation and one merged pool produce identical numbers, so
+the repaired fixture still passed against a registry bounding by the pooled totals.
+**Only mutating the code it guards revealed that the repair had not repaired it.**
+
+A fix is a hypothesis about why a test was blind. Mutation is the only way to test
+that hypothesis, and "I fixed the thing the audit named" is not evidence the fixture
+now discriminates. Every repair in this item was mutation-tested; the standard is
+cheap and it caught one failure out of five.
+
 ### The disjunct that looked dead and is not
 
 `drawPanel` denies a seat on `block.timestamp < m.frozenUntil`, and that clause had
@@ -1331,6 +1344,30 @@ thing stopping it taking a seat it can no longer back. The new fixture asserts t
 tree still carries the weight while the live weight is already zero, or the denial
 would be equally explained by an empty tree, and it fails when the disjunct is
 removed.
+
+### Close-out: two residuals that were safe by accident
+
+Both money paths resolved a depth through `adjRoundAt`'s **zero default**, so a depth
+the case never reached — or reached and never adjudicated — silently addressed ROUND
+0. Neither was exploitable on today's call sites: `reclaimBond` survived because a
+caller naming a bogus depth usually has nothing at round 0 either, and
+`claimAppealPayout` survived because the second call finds `contrib == 0`.
+
+**Safe on today's call sites, unsafe as a property** — the fifth instance of that
+shape this milestone, after `settleDuty`'s clamp, `unbackedSeats`, `penalizeNoShow`
+and the amnesty gate. Fixed rather than argued:
+
+- `adjRoundAt` stores `index + 1`, so zero is an unambiguous "never adjudicated"
+  rather than a valid round index wearing the same value. That ambiguity was the
+  defect; the missing bound was its symptom.
+- `reclaimBond` is bounded on `depth > c.depth`, matching its sibling.
+- `_adjRoundOf` reverts `DepthNotAdjudicated` instead of resolving to round 0.
+- `adjudicatingRoundAt` returns `(roundIndex, adjudicated)` so a client can probe
+  before calling a path that now reverts.
+
+Both tests are pre-fix-failing on a SUCCESSFUL call rather than a different revert:
+pre-fix a contributor could reclaim its depth-0 bond by naming a depth the case never
+reached, and could claim depth 0's payout under an un-adjudicated depth 1.
 
 ## Item 8 — freeze economics, priced (post-close)
 
@@ -1645,6 +1682,22 @@ The recurrence is the point: in each case the named mode was plausible enough to
 the severity, and the real mode was worse. Severity assigned from a finding's
 *description* rather than from tracing its call path has been wrong every time it
 has been checked here.
+
+**A second pattern, about unreachability arguments specifically.** Three deletions
+this milestone rested on one — `unbackedSeats`, `penalizeNoShow`, `voluntaryCutEpoch`
+— and all three were right. P0-3c's `frozen` disjunct in `drawPanel` looked
+*identical* to those: `_eligibleWeight` returns 0 for a frozen moderator, so a frozen
+address cannot be in the tree, so the check is dead. It is not dead. `freeze` calls
+`_syncTree`, which **stages** the weight change to the next epoch boundary, so a
+moderator frozen mid-epoch keeps its tree weight for the rest of that epoch and can
+still be drawn.
+
+> **An unreachability argument has to trace the staging, not just the live read.**
+> P0-3 put an epoch between every weight change and its effect on the tree, so "this
+> state implies that weight" is true of the LIVE struct and false of the tree for up
+> to one epoch. Every deletion argued from a live read needs re-checking against that
+> gap; the three that stand, stand because they argue from structure (escrow at draw
+> time, a superseded selector, a superseded field) rather than from a derived weight.
 
 ## Size position — RESOLVED by the second structural split
 

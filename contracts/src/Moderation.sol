@@ -538,6 +538,12 @@ contract Moderation is ReentrancyGuard {
     error CaseNotTerminal();
     error BondLocked();
     error NothingToReclaim();
+    /// M2.6-item-2b close-out: a depth this case never reached, or never adjudicated.
+    /// Both money paths used to resolve such a depth to round 0 and survive on the
+    /// fact that round 0's contributions happen to be zero or already spent — safe on
+    /// today's call sites, unsafe as a property. The same shape as `settleDuty`'s
+    /// clamp, `unbackedSeats`, `penalizeNoShow` and the amnesty gate.
+    error DepthNotAdjudicated();
     error PhaseDeadlinePassed(); // M-02: commit/reveal after the window has elapsed
     error BadKind(); // submit() is submissions-only; removals go through submitRemoval
     error TargetNotRemovable(); // removal target must be a settled, approved, indexed submission
@@ -1147,7 +1153,11 @@ contract Moderation is ReentrancyGuard {
         ) {
             revert CaseNotTerminal();
         }
-        // M2.6-item-2b: `depth` is a DEPTH, and a depth now holds several rounds. A
+        // M2.6-item-2b close-out: bounded the way `claimAppealPayout` is. Without it
+        // an unbounded depth resolved to round 0 and a contributor could reclaim a
+        // depth-0 bond by naming a depth the case never reached.
+        if (depth > c.depth) revert DepthNotAdjudicated();
+        // `depth` is a DEPTH, and a depth now holds several rounds. A
         // bond only ever attaches to the round that adjudicated — `contributeAppealBond`
         // writes `c.rounds[c.adjRound]` — so resolve rather than index directly. A
         // banked round can never hold a bond, so nothing is unreachable.
@@ -1162,11 +1172,20 @@ contract Moderation is ReentrancyGuard {
         emit BondReclaimed(caseId, depth, msg.sender, amt);
     }
 
-    /// @dev The round that adjudicated `depth`. Depth 0's entry is 0 both because
-    ///      that is the first round and because an un-adjudicated case has nothing
-    ///      to address, so the zero default is never a wrong answer here.
+    /// @dev The round that adjudicated `depth`, reverting if the depth was never
+    ///      reached or never adjudicated.
+    ///
+    ///      Stored offset by one so that zero is an unambiguous "never" — round 0 is
+    ///      a real index, so the bare default could not be distinguished from it.
+    ///      Without that, an out-of-range depth resolved to round 0 and the call
+    ///      SUCCEEDED against a different depth's bookkeeping; it survived only
+    ///      because round 0's contributions are usually zero or already spent. That
+    ///      is the "safe on today's call sites, unsafe as a property" shape this
+    ///      milestone has now met five times.
     function _adjRoundOf(Case storage c, uint256 depth) internal view returns (uint256) {
-        return c.adjRoundAt[depth];
+        uint256 stored = c.adjRoundAt[depth];
+        if (stored == 0) revert DepthNotAdjudicated();
+        return stored - 1;
     }
 
     function _opposite(Outcome o) internal pure returns (Outcome) {
@@ -1502,7 +1521,7 @@ contract Moderation is ReentrancyGuard {
         Round storage r = c.rounds[idx];
         c.phase = Phase.TALLY;
         c.adjRound = idx;
-        c.adjRoundAt[c.depth] = idx;
+        c.adjRoundAt[c.depth] = idx + 1; // +1: 0 means NEVER adjudicated
         r.adjudicated = true; // M2.6-item-2b(3a): the tally the outcome is drawn from
         r.outcomeSnapshotBlock = block.number + _cp(c).seedLag;
         emit OutcomeArmed(c.id, c.depth, r.outcomeSnapshotBlock);
@@ -1688,8 +1707,15 @@ contract Moderation is ReentrancyGuard {
     ///      than re-semanticked (a parameter name is not part of the selector, so no
     ///      caller breaks), and this is the discovery path for callers that were
     ///      genuinely passing a depth.
-    function adjudicatingRoundAt(uint256 caseId, uint256 depth) external view returns (uint256) {
-        return cases[caseId].adjRoundAt[depth];
+    function adjudicatingRoundAt(uint256 caseId, uint256 depth)
+        external
+        view
+        returns (uint256 roundIndex, bool adjudicated)
+    {
+        uint256 stored = cases[caseId].adjRoundAt[depth];
+        // Probeable rather than reverting: the money paths revert on a depth that
+        // never adjudicated, so a client needs a way to ask first.
+        return stored == 0 ? (0, false) : (stored - 1, true);
     }
 
     /// @notice Total rounds this case opened, across every depth. The upper bound

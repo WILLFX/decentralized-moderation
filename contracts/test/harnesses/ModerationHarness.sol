@@ -67,6 +67,11 @@ contract ModerationHarness is Moderation {
         // stops mirroring the real path and the differential vectors settle with
         // `winnersSeats == 0`.
         cases[caseId].rounds[depth].adjudicated = true;
+        // ...and the depth -> round map `_armOutcome` writes alongside it, which the
+        // money paths resolve through. Injected vectors are one round per depth, so
+        // round `d` is depth `d`'s adjudicating round. Offset by one: zero means
+        // "never adjudicated".
+        cases[caseId].adjRoundAt[depth] = depth + 1;
     }
 
     /// revealCode: 0 = None (committed but failed to reveal), 1 = Approve, 2 = Reject.

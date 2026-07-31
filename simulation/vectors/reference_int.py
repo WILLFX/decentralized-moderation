@@ -34,12 +34,28 @@ def settle(case: dict) -> dict:
     fo = case["finalOutcome"]
     rounds = case["rounds"]
 
-    # winners' seats (coherent revealers, all rounds)
+    # M2.6-item-10. `winners_seats` survives ONLY as the denominator of the
+    # mean-track that drives the freeze curve; it is no longer the reward divisor.
+    # Scoping one half of a mean without the other leaves a ratio that is not a mean
+    # of anything, so the pair stays paired.
     winners_seats = 0
     for r in rounds:
         for (_vi, seats, _camt, rc) in r["seats"]:
             if rc != 0 and coherent(rc, fo):
                 winners_seats += seats
+
+    # Per-round revealed seats (side-agnostic: a vote moves between the two side
+    # counters and never the sum) and capacity sought. The injector records one
+    # unit of capacity per injected seat, mirroring `_openRound`'s `r.target`.
+    revealed = [sum(seats for (_v, seats, _c, rc) in r["seats"] if rc != 0) for r in rounds]
+    capacity = [sum(seats for (_v, seats, _c, _rc) in r["seats"]) for r in rounds]
+    win_d = [
+        sum(seats for (_v, seats, _c, rc) in r["seats"] if rc != 0 and coherent(rc, fo))
+        for r in rounds
+    ]
+    sum_capacity = sum(capacity)
+    # The last round is the one whose tally drew the outcome.
+    adj_round = len(rounds) - 1
 
     # winning-appeal refunds
     refunds = 0
@@ -55,16 +71,32 @@ def settle(case: dict) -> dict:
     bonus_pool = 0 if winning_contrib_tot == 0 else residual * BONUS_FRAC // WAD
     distributable = residual - bounty - bonus_pool
 
+    # M2.6-item-10: allocate per round, then divide by a DEPTH-DEPENDENT divisor.
+    #
+    # Winning seats where the outcome is drawn (the cancellation is the neutrality),
+    # revealed seats at a superseded depth (side-agnostic, so no factor lands on top
+    # of the belief ratio). No single divisor is neutral at both.
+    pool = [0] * len(rounds)
+    divisor = [0] * len(rounds)
+    payable = 0
+    for d in range(len(rounds)):
+        pool[d] = 0 if sum_capacity == 0 else distributable * revealed[d] // sum_capacity
+        divisor[d] = win_d[d] if d == adj_round else revealed[d]
+        if divisor[d] != 0:
+            payable += pool[d] * win_d[d] // divisor[d]
+    # What no adjudicating depth earned returns to the case's fee payer.
+    submitter_refund = distributable - payable
+
     # rewards + committed disposition
     distributed = 0
     free: dict[int, int] = {}
     frozen: dict[int, int] = {}
-    for r in rounds:
+    for d, r in enumerate(rounds):
         for (vi, seats, camt, rc) in r["seats"]:
             if rc == 0:
                 frozen[vi] = frozen.get(vi, 0) + camt          # failed reveal -> frozen
             elif coherent(rc, fo):
-                reward = 0 if winners_seats == 0 else distributable * seats // winners_seats
+                reward = 0 if divisor[d] == 0 else pool[d] * seats // divisor[d]
                 distributed += reward
                 free[vi] = free.get(vi, 0) + camt + reward     # stake back + reward
             else:
@@ -87,5 +119,16 @@ def settle(case: dict) -> dict:
     # bounty no longer includes ``bonus_pool - bonus_paid``. ``payout`` here is the
     # pristine (pre-pull) per-contributor amount the on-chain view reports.
     _ = bonus_paid  # retained for clarity; not swept to the bounty
-    claim_bounty = bounty + (distributable - distributed)
-    return {"free": free, "frozen": frozen, "payout": payout, "claimBounty": claim_bounty}
+    # M2.6-item-10: the keeper's residue is bounded by ROUNDING — at most one wei
+    # per paid seat-holder, independent of the size of the pot. It reads `payable`,
+    # not `distributable`: the unclaimed allocation never enters the reward channel,
+    # so it cannot be swept here. Left in `distributable`, the empty-winning-side
+    # case hands the WHOLE allocation to whoever sends the last batch.
+    claim_bounty = bounty + (payable - distributed)
+    return {
+        "free": free,
+        "frozen": frozen,
+        "payout": payout,
+        "claimBounty": claim_bounty,
+        "submitterRefund": submitter_refund,
+    }

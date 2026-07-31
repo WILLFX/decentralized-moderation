@@ -111,6 +111,7 @@ def _flatten(case):
         "exp_payout_idx": [k for k, _ in payout],
         "exp_payout_amt": [x for _, x in payout],
         "exp_claimBounty": exp["claimBounty"],
+        "exp_submitterRefund": exp["submitterRefund"],
     }
 
 

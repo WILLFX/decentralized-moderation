@@ -72,6 +72,11 @@ contract ModerationHarness is Moderation {
         // round `d` is depth `d`'s adjudicating round. Offset by one: zero means
         // "never adjudicated".
         cases[caseId].adjRoundAt[depth] = depth + 1;
+        // M2.6-item-10: the LAST injected round is the one whose tally drew the
+        // outcome, matching a real case where the deepest adjudicating round decides.
+        // The divisor is depth-dependent, so which round is the deciding one is now
+        // load-bearing rather than cosmetic.
+        cases[caseId].adjRound = depth;
     }
 
     /// revealCode: 0 = None (committed but failed to reveal), 1 = Approve, 2 = Reject.
@@ -81,6 +86,11 @@ contract ModerationHarness is Moderation {
         Round storage r = cases[caseId].rounds[depth];
         if (r.seats[voter] == 0) r.seatHolders.push(voter);
         r.seats[voter] += seats;
+        // M2.6-item-10: a real round records the capacity it SOUGHT at `_openRound`,
+        // and item 10's allocation divides by the sum of those. An injected seat
+        // models a seat that was sought and seated, so the injector must record it or
+        // the vectors settle against a zero capacity and pay nothing.
+        r.target += seats;
         if (committedAmt > 0) {
             r.committed[voter] = true;
             r.committedAmt[voter] = committedAmt;
@@ -201,6 +211,27 @@ contract ModerationHarness is Moderation {
 
     function __roundWidenCount(uint256 caseId, uint256 roundIndex) external view returns (uint256) {
         return cases[caseId].rounds[roundIndex].widenCount;
+    }
+
+    /// M2.6-item-10: the depth's allocation and the divisor its coherent seats
+    /// share it by. Both are written once at `_settleInit`.
+    function __rewardTerms(uint256 caseId, uint256 roundIndex)
+        external
+        view
+        returns (uint256 pool, uint256 divisor, uint256 revealedSeats, uint256 target)
+    {
+        Round storage r = cases[caseId].rounds[roundIndex];
+        return (r.rewardPool, r.rewardDivisor, r.revealedSeats, r.target);
+    }
+
+    function __distributable(uint256 caseId) external view returns (uint256) {
+        return settleState[caseId].distributable;
+    }
+
+    /// M2.6-item-10: the case's FEE PAYER, who the unclaimed allocation is owed to.
+    /// An injected case has none, and "who is owed" is the ambiguity item 10 names.
+    function __setSubmitter(uint256 caseId, address who) external {
+        cases[caseId].submitter = who;
     }
 
     function __setDepth(uint256 caseId, uint256 depth) external {

@@ -111,6 +111,13 @@ contract DifferentialTest is StackDeployer {
     function _assertVector(uint256 i, uint256 gotBounty, uint256 caseId) internal {
         assertEq(gotBounty, _u(i, "exp_claimBounty"), _msg(i, "claimBounty"));
 
+        // M2.6-item-10: the unclaimed allocation is owed to the case's FEE PAYER and
+        // must not have been swept into the bounty above. 47 of these 52 vectors
+        // carry a nonzero refund, so before item 10 the keeper was taking money that
+        // no adjudicating depth earned in ninety per cent of the generated cases —
+        // the whole pot, in the empty-winning-side vector.
+        assertEq(mod.submitterRefundOwed(caseId), _u(i, "exp_submitterRefund"), _msg(i, "refund"));
+
         uint256[] memory fIdx = _ua(i, "exp_free_idx");
         uint256[] memory fAmt = _ua(i, "exp_free_amt");
         for (uint256 k = 0; k < fIdx.length; k++) {

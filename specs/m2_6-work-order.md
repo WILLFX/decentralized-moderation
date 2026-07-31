@@ -1689,6 +1689,28 @@ principled answer rather than an arbitrary one, which matters because every othe
 destination (bounty, burn, carry-forward) invents a policy to dispose of money the
 protocol did not earn.
 
+### BUILT (post-close). What the build found that the design did not
+
+**The `Σct` normalizer had to become capacity SOUGHT, not `commitTarget(depth)`.**
+Under 2b a widen adds another target's worth of seats to the same round, so
+`revealedSeats` at a depth can reach `4 x commitTarget(d)`. With `Σ commitTarget` as
+the denominator, `Σ_d allocation_d = D x Σr / Σct` **exceeds `D`** — the allocation
+oversubscribes the pot and settlement reverts. The fix is that a round records the
+seats it SOUGHT (`r.target`, one target at open plus one per widen), and the
+normalizer sums those. That bounds `r_d <= target_d` by construction — a reveal needs
+a committed seat, a committed seat needs a drawn seat, a drawn seat needs a sought
+one — so `Σ allocation <= D` always. Found at build time; the design as ruled would
+have bricked settlement on any widened case.
+
+**47 of the 52 differential vectors carried a nonzero submitter refund.** The Python
+reference (`simulation/vectors/reference_int.py`) was updated to the new arithmetic
+independently of the Solidity and regenerated: vector 1 is the empty-winning-side
+case, and its expected claim bounty fell from `37000000000002520` — the ENTIRE POT —
+to `370000000000025`, the bounty alone. The generator had independently produced the
+exact case the design predicted would differ most, and the delta is exactly the
+predicted 100%-to-the-keeper. Before item 10 the keeper was taking money no
+adjudicating depth had earned in ninety per cent of the generated cases.
+
 ### Sizing constraint: item 10 must be built against POST-2b code
 
 Item 2b's §4 scoping shrinks `winnersSeats` to adjudicating rounds only. That

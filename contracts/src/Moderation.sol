@@ -333,6 +333,19 @@ contract Moderation is ReentrancyGuard {
         // nothing. Under item 2b a depth holds several rounds and only one of them
         // adjudicates, which is when the flag starts selecting.
         bool adjudicated;
+        // M2.6-item-10: the seats this round SOUGHT — `commitTarget(depth)` at open,
+        // plus one target per widen. Stored rather than re-derived because it is the
+        // capacity the case actually bought at this depth, and because it BOUNDS
+        // `revealedSeats` by construction: a reveal needs a committed seat, a
+        // committed seat needs a drawn seat, and a drawn seat needs a sought one. The
+        // allocation divides by a sum of these, so that bound is what keeps
+        // `Σ allocation <= distributable`.
+        uint256 target;
+        // M2.6-item-10: this depth's slice of `distributable`, and the divisor its
+        // coherent seats share it by. Both written once at `_settleInit`; see
+        // `Settlement._settleInit` for why the divisor is depth-dependent.
+        uint256 rewardPool;
+        uint256 rewardDivisor;
         uint256 revealedSeats; // approveSeats + rejectSeats
         Outcome outcome; // drawn ∝ seat counts
         Outcome appealFor; // the outcome an appeal against THIS round argues for
@@ -381,6 +394,12 @@ contract Moderation is ReentrancyGuard {
         // First round index at the current depth, so the terminal predicate can span
         // exactly this depth's rounds (finding (ii)).
         uint256 depthFirstRound;
+        // M2.6-item-10: the unclaimed part of `distributable`, owed to the case's FEE
+        // PAYER — `submitter`, which for a REMOVAL is the remover and not the author
+        // of the targeted content. Pull-based (C-01): `_settleFinish` already carries
+        // one token transfer and its conservation window is safe only because nothing
+        // can execute inside it.
+        uint256 refundOwed;
         uint256 pot; // fee + appeal bonds moved in (§6.2)
         uint256 appealBondTotal; // Σ appeal bonds that met their floor and joined the pot
         uint256 phaseDeadline;
@@ -504,6 +523,8 @@ contract Moderation is ReentrancyGuard {
     event AppealWindowOpened(uint256 indexed caseId, uint256 indexed depth, uint256 deadline);
     event Finalized(uint256 indexed caseId, Outcome finalOutcome);
     event Voided(uint256 indexed caseId);
+    /// M2.6-item-10: the unclaimed allocation returned to the case's fee payer.
+    event SubmitterRefunded(uint256 indexed caseId, address indexed to, uint256 amount);
     /// M2.6-P0-7: VOID disposal opened; `participants` batches remain to drain.
     event VoidOpened(uint256 indexed caseId, uint256 participants);
     /// M2.6-P0-6: a draw was abandoned for want of network capacity.
@@ -999,6 +1020,7 @@ contract Moderation is ReentrancyGuard {
         r.widenCount++;
         uint256 add = _commitTarget(c, c.depth);
         r.pendingDraw = add;
+        r.target += add; // M2.6-item-10: a widen buys another target's worth
         _armSeed(c, r);
         c.phase = Phase.DRAW;
         c.phaseDeadline = block.timestamp + p.commitTimeout; // P0-6
@@ -1186,6 +1208,29 @@ contract Moderation is ReentrancyGuard {
         uint256 stored = c.adjRoundAt[depth];
         if (stored == 0) revert DepthNotAdjudicated();
         return stored - 1;
+    }
+
+    /// @notice Claim the part of a settled case's pot that no adjudicating depth
+    ///         earned — the capacity the case bought and did not use.
+    ///
+    ///         Owed to the case's FEE PAYER. For a REMOVAL that is the remover, not
+    ///         the author of the targeted content: they paid the fee, they bought the
+    ///         adjudication, the unbought portion returns to them. "Refund the
+    ///         submitter" reads across the two case kinds as though it meant the
+    ///         content's author, which is why this says which one it means.
+    /// @dev Pull-based (C-01). `_settleFinish` already carries one token transfer and
+    ///      its conservation window is safe only because nothing can execute inside
+    ///      it; a second transfer on that path would widen the surface for no gain.
+    function claimSubmitterRefund(uint256 caseId) external nonReentrant returns (uint256 amount) {
+        Case storage c = cases[caseId];
+        if (c.phase != Phase.SETTLED) revert CaseNotFinalized();
+        if (msg.sender != c.submitter) revert NothingToReclaim();
+        amount = c.refundOwed;
+        if (amount == 0) revert NothingToReclaim();
+        c.refundOwed = 0;
+        money.totalPendingPayout -= amount;
+        address(token).safeTransfer(msg.sender, amount);
+        emit SubmitterRefunded(caseId, msg.sender, amount);
     }
 
     function _opposite(Outcome o) internal pure returns (Outcome) {
@@ -1413,6 +1458,7 @@ contract Moderation is ReentrancyGuard {
         uint256 target = _commitTarget(c, depth);
         r.nSeats = 0; // filled in by the draw: seats seated, not seats sought
         r.pendingDraw = target; // H-05
+        r.target = target; // M2.6-item-10: capacity sought at this depth
         r.caseRef = (c.id << 8) | (c.rounds.length - 1); // M2.6-P0-5, item-2b(3a)
         _armSeed(c, r);
         // M2.6-P0-6: a draw that can never complete must still end. Deliberately
@@ -1743,6 +1789,11 @@ contract Moderation is ReentrancyGuard {
 
     function bondContribOf(uint256 caseId, uint256 roundIndex, address contributor) external view returns (uint256) {
         return cases[caseId].rounds[roundIndex].bondContribs[contributor];
+    }
+
+    /// M2.6-item-10: what `claimSubmitterRefund` would pay.
+    function submitterRefundOwed(uint256 caseId) external view returns (uint256) {
+        return cases[caseId].refundOwed;
     }
 
     function appealFloor(uint256 caseId) external view returns (uint256) {

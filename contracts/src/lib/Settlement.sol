@@ -350,9 +350,11 @@ library Settlement {
             // No-op today: a non-adjudicating round has zero reveals, so this branch
             // is unreachable there. Which is precisely why it lands now, rather than
             // beside the mechanism that first arms it.
-            uint256 reward = (!r.adjudicated || s.winnersSeats == 0)
-                ? 0
-                : (s.distributable * r.talliedSeats[a]) / s.winnersSeats;
+            // M2.6-item-10: this depth's own pool over this depth's own divisor.
+            // Both are written once at `_settleInit`; see there for why the divisor
+            // differs between the deciding depth and a superseded one.
+            uint256 reward =
+                r.rewardDivisor == 0 ? 0 : (r.rewardPool * r.talliedSeats[a]) / r.rewardDivisor;
             if (reward > 0) {
                 // `totalSettling` is decremented by the caller from the delta in
                 // `s.distributed` — see `disposeBatch`.
@@ -447,6 +449,8 @@ library Settlement {
         uint256 nRounds = c.rounds.length;
         uint256 winnersSeats;
         uint256 meanTrackNum;
+        uint256 sumRevealed;
+        uint256 sumCapacity;
         uint256 refunds;
         uint256 winningContribTot;
         for (uint256 d; d < nRounds; ++d) {
@@ -473,6 +477,15 @@ library Settlement {
                     winnersSeats += r.rejectSeats;
                     meanTrackNum += r.rejectTrackNum;
                 }
+                // M2.6-item-10: the two sums the allocation needs. `revealedSeats`
+                // is side-agnostic — it takes the same `s` that went to one of the
+                // two side counters (`Moderation.sol:1033/:1039/:1040`), so a
+                // voter's choice moves the vote between summands and never the sum.
+                // That is the correctness condition: an allocation weight that reads
+                // WINNING seats cancels the per-depth divisor exactly and reproduces
+                // the case-wide formula it replaces.
+                sumRevealed += r.revealedSeats;
+                sumCapacity += r.target;
             }
             if (r.bondInPot) {
                 if (r.appealFor == fo) {
@@ -499,14 +512,91 @@ library Settlement {
         // credits them out. Conservation is exact at TRANSACTION boundaries, not at
         // every intermediate state — see `_disposeBatch` for the window and why
         // nothing can execute inside it (invariant 1).
+        // M2.6-item-10: PASS 2 — allocate `distributable` across the adjudicating
+        // depths, and decide each one's divisor.
+        //
+        // ## The obstruction that forces a depth-DEPENDENT divisor
+        //
+        // No single divisor, applied uniformly across depths, paying only coherent
+        // seats, is neutral everywhere:
+        //
+        //   - At the depth whose tally DRAWS the outcome, `P(final = v) = f_v / T`,
+        //     so `E ∝ f_v / divisor`. Neutral iff the divisor is proportional to
+        //     `f_v` — the cancellation IS the neutrality.
+        //   - At a SUPERSEDED depth, `P(final = v)` is set by a later panel and the
+        //     voter cannot move it, so `E ∝ π_v / divisor`. Neutral iff the divisor
+        //     is INDEPENDENT of `f_v`, or a factor `f_v'/f_v` lands on top of the
+        //     belief ratio — paying more for the minority position, 5x on a
+        //     five-seat panel against 1.83x for the same shape before this change.
+        //
+        // Proportional-to and independent-of are incompatible. Hence:
+        //
+        //     deciding depth   -> winning seats     (cancels)
+        //     superseded depth -> revealed seats    (side-agnostic, turnout-neutral)
+        //
+        // Two forms escape the obstruction and are REJECTED rather than absent:
+        // paying every revealer regardless of coherence (uniform and neutral, but it
+        // severs reward from correctness and leaves the freeze as the only pull
+        // toward being right), and computing a superseded depth's payout probability
+        // from its OWN tally (cancels everywhere, and reinstates the cross-depth
+        // coupling this change exists to delete — self-defeating, not unavailable).
+        //
+        // ## Why the divisor must be a SUPERSET of the winning side
+        //
+        // A depth pays out `pool_d * w_d / divisor_d`. The divisor must therefore be
+        // at least `w_d`, or the depth overspends its own allocation and
+        // `s.distributed` passes `s.distributable` — the 2b hazard, which is a
+        // permanent revert rather than an overpayment. `revealedSeats` satisfies it
+        // by construction (`approveSeats + rejectSeats == revealedSeats`), and so
+        // does the winning side itself. A future divisor that does not is the shape
+        // to refuse.
+        uint256 payable_;
+        for (uint256 d; d < nRounds; ++d) {
+            Moderation.Round storage r = c.rounds[d];
+            if (!r.adjudicated) continue;
+            uint256 pool = sumCapacity == 0 ? 0 : (distributable * r.revealedSeats) / sumCapacity;
+            uint256 w = fo == Moderation.Outcome.Approve ? r.approveSeats : r.rejectSeats;
+            // The deciding round is the one the outcome was drawn from.
+            uint256 divisor = d == c.adjRound ? w : r.revealedSeats;
+            r.rewardPool = pool;
+            r.rewardDivisor = divisor;
+            // What this depth will actually pay. A depth whose winning side is empty
+            // pays nothing and its whole allocation refunds — the ruling that an
+            // overturned panel's capacity returns to the buyer, falling out of the
+            // formula rather than sitting beside it.
+            if (divisor != 0) payable_ += (pool * w) / divisor;
+        }
+        uint256 submitterCredit = distributable - payable_;
+
         money.openPotsTotal -= pot;
         c.apBonusPoolLeft = bonusPool;
         c.apContribTotLeft = winningContribTot;
-        money.totalPendingPayout += refunds + bonusPool;
-        money.totalSettling += residual - bonusPool; // = bounty + distributable, in flight
+        // M2.6-item-10, build condition (a): the two buckets move TOGETHER.
+        //
+        // This was `totalPendingPayout += refunds + bonusPool` and
+        // `totalSettling += residual - bonusPool`. With a credit carved out of
+        // `distributable`, crediting only the first over-credits `totalSettling` by
+        // the credit, and it never drains — the break surfacing when the submitter
+        // PULLS, not at settlement, so a fixture that settles and stops cannot see
+        // it. The sum is unchanged, so conservation holds either way, which is
+        // exactly why the invariant campaign would not catch it.
+        money.totalPendingPayout += refunds + bonusPool + submitterCredit;
+        money.totalSettling += bounty + payable_;
+        c.refundOwed = submitterCredit;
 
+        // M2.6-item-10, build condition (b): `winnersSeats` is NOT dropped even
+        // though the reward no longer reads it. It is the denominator of
+        // `meanTrackNum / winnersSeats`, which is a MEAN — scoping one without the
+        // other leaves a ratio that is not a mean of anything and can exceed every
+        // individual track. The pair stays paired.
         s.winnersSeats = winnersSeats;
-        s.distributable = distributable;
+        // `distributable` keeps its existing meaning: what remains PAYABLE TO VOTERS.
+        // The unclaimed part never enters it, so `_settleFinish`'s
+        // `s.distributable - s.distributed` stays rounding dust and is untouched. Had
+        // the credit been left to fall out of that subtraction it would have been
+        // transferred to whoever sent the last batch — 31% of `distributable` at the
+        // empty-winning-side case, to a keeper a voter is free to be.
+        s.distributable = payable_;
         s.freezeDur = FreezeMath.freezeDuration(
             winnersSeats == 0 ? 0 : meanTrackNum / winnersSeats, p.trackSat, p.freezeCap, p.freezeBase
         );

@@ -1369,6 +1369,53 @@ Both tests are pre-fix-failing on a SUCCESSFUL call rather than a different reve
 pre-fix a contributor could reclaim its depth-0 bond by naming a depth the case never
 reached, and could claim depth 0's payout under an un-adjudicated depth 1.
 
+## Item 9 — the deployment and linking step (post-close)
+
+The repository had **no `script/` at all**. `Settlement` is a linked library that must
+be deployed and linked into `Moderation` before `Moderation` can be deployed, Foundry
+does that automatically for tests, and so nothing in the suite could catch it being
+missed. The requirement lived only in `contracts/README.md`'s module map — the shape
+of gap this milestone keeps finding, one file over.
+
+**The deliverable is `verify`, not the deployment.** A script that deploys and stops
+is the same gap in a different place. It reverts on: one token across `Moderation` and
+the registry; `OPEN_AND_SETTLE` on **both** registries; the governor bind checked from
+both sides; `riskPerSeat` covering a seat; and the linked library. Anything that would
+make the stack unusable fails the script, not the first case.
+
+**`logicState == OPEN_AND_SETTLE`, not `isLogic`.** There is no `isLogic`; the state is
+a three-valued enum and `SETTLE_ONLY` is a real value that would pass a boolean check
+while refusing every new case. The stronger assertion is the correct one.
+
+**Step 6 is irreversible and it is what the script exists for.**
+`governor.bindModeration` is one-way and `Moderation.governor` is immutable, so a
+wrong bind leaves a governor governing nothing and a game contract permanently
+ungovernable, with no repair from either side. `verify` checks the bind from both
+directions, and a test asserts it rejects a stack where it was never done.
+
+**The one check that cannot be made in-script, stated rather than faked.** The library
+address is baked into `Moderation`'s bytecode at link time and Solidity cannot read
+its own link table, so nothing inside a contract can prove `Moderation` points at a
+live `Settlement`. It splits: `verify` asserts an explicitly linked address holds the
+*right* code (codehash against the compiled artefact, not merely non-empty), and
+`test_a_script_deployed_stack_settles_a_real_case` proves reachability behaviourally
+by settling a case, which delegatecalls the library. A deployment doing neither is
+told it is unverified rather than returning green.
+
+**Two properties made explicit rather than left to the reader.** The registry timelock
+means this is not one transaction: there is a window where every contract exists and
+none is authorized, and `submit` correctly refuses (`_requireOpen`) — asserted, not
+waited out. And both registries plus the governor are owned by the deploy key until
+the two-step transfer completes; `verify` warns loudly when it has not been started.
+
+**The test is the artefact.** Eleven cases: the forced ordering (a zero governor and a
+foreign token both fail at construction), the authorization window, `verify` accepting
+a good stack, and — the part that matters — `verify` **rejecting** each broken one,
+because a checker that passes everything is the same gap one file further on. It runs
+against production contracts, not harnesses: the rest of the suite deploys through
+`StackDeployer`, which cannot catch a mistake in deployment ordering because it makes
+the same choices every time.
+
 ## Item 8 — freeze economics, priced (post-close)
 
 **The defect.** Withholding a reveal took `failedRevealFreeze`; revealing

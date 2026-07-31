@@ -58,6 +58,65 @@ structural split moved settlement into a delegatecalled library. That margin was
 439 before the split, which is why it had to happen before the widen restructure
 rather than after. See `specs/m2_6-work-order.md`, "Size position".
 
+## Deployment
+
+`script/Deploy.s.sol`, exercised by `test/Deploy.t.sol`. **The test is the artefact;
+the script is what it tests** — a deploy script nothing drives is documentation that
+compiles, which is what this repository had until M2.6-item-9.
+
+`Settlement` is a **linked library**: it must be deployed and its address linked into
+`Moderation` before `Moderation` can be deployed at all. Foundry does that
+automatically for tests, so no suite could catch it being missed and the requirement
+lived only in the module map above.
+
+**The order is forced, not conventional.**
+
+| # | step | why here |
+|---|---|---|
+| 1 | `StakeRegistry(token, timelock, minStake, activationDelay, exitCooldown, riskPerSeat, epochBlocks)` | governance is `msg.sender` |
+| 2 | `IndexRegistry(timelock)` | governance is `msg.sender` |
+| 3 | `RulesetGovernor(governance, timelock)` | **before** `Moderation` — `Moderation.governor` is immutable |
+| 4 | deploy + link `Settlement` | Foundry's job; see the link note below |
+| 5 | `Moderation(token, stakeReg, indexReg, governor)` | reverts on a zero governor, and on `token != stakeReg.token()` |
+| 6 | `governor.bindModeration(moderation)` | **one-way and unrecoverable** |
+| 7 | `proposeLogic` on BOTH registries → wait `timelockDelay` → `executeLogic()` on both | authorization |
+
+The circularity — the governor needs the game, the game needs the governor — resolves
+only because `RulesetGovernor` is constructed without a `Moderation` reference and
+binds afterward. **Step 6 is the one that cannot be undone:** a wrong bind leaves a
+governor that governs nothing and a `Moderation` whose immutable `governor` points at
+it, with no repair from either side.
+
+**`verify` is the deliverable.** It reverts on anything that would make the stack
+unusable, so a broken deployment fails the script rather than the first case: one
+token across `Moderation` and the registry; `OPEN_AND_SETTLE` on **both** registries
+(desynchronised authorization is its own failure, not half of one); the bind checked
+from both sides; `stakeReg.riskPerSeat() >= moderation.getParams().riskPerSeat`; and
+the linked library.
+
+**The link is the one thing no in-script check can prove.** The library address is
+baked into `Moderation`'s bytecode at link time and Solidity cannot read its own link
+table. So it splits: if you linked explicitly (`--libraries
+src/lib/Settlement.sol:Settlement:0x...`) pass that address to `verify` and it asserts
+the address holds the *right* code, not merely some code; and
+`test_a_script_deployed_stack_settles_a_real_case` proves `Moderation` actually
+reaches it the only way it can be proven — by settling a case, which delegatecalls
+the library. A deployment that does neither is unverified on this point and `verify`
+says so instead of returning green.
+
+**Two properties of the process, stated because a single `run()` would hide them.**
+
+- **It is not one transaction.** The registry timelock sits inside step 7, so there is
+  a window where every contract exists and none is authorized. `submit` refuses during
+  it (`_requireOpen`) — a case opened then would take a fee it could never settle.
+  That refusal is asserted, not waited out.
+- **Governance is the deploy key until transferred.** Both registries set
+  `governance = msg.sender`; the governor takes it as an argument.
+  `handOverGovernance` proposes to all three, and the recipient must call
+  `acceptGovernance()` on each. If `GOVERNANCE_OWNER` is unset, `verify` warns loudly
+  rather than passing quietly — a stack still owned by a deploy key is a finding, not
+  a default.
+
 ## Tests
 
 | Suite | Covers |

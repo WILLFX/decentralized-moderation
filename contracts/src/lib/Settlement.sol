@@ -78,11 +78,17 @@ import {FreezeMath} from "./FreezeMath.sol";
 ///
 /// ## Behaviour
 ///
-/// Nothing here changes what settlement does. The only restructuring is mechanical:
-/// `_settle`'s `FINALIZED -> init` step moved inside `settle()`, and the
-/// `SettleProgressed` emit moved with it. Same order, same transaction, same state
-/// writes. The evidence is the suite: 218 tests over 18 suites, unchanged except one
-/// identifier in a harness and one harness call repointed at the registry.
+/// **The split itself changed nothing about what settlement does.** The only
+/// restructuring was mechanical: `_settle`'s `FINALIZED -> init` step moved inside
+/// `settle()`, and the `SettleProgressed` emit moved with it. Same order, same
+/// transaction, same state writes. The evidence was the suite: 218 tests over 18
+/// suites at that commit, unchanged except one identifier in a harness and one
+/// harness call repointed at the registry.
+///
+/// Post-close items have since changed settlement's behaviour here rather than in
+/// `Moderation` — item 2b (stall rounds and the banked-round scoping) and item 10
+/// (per-depth reward allocation with a depth-dependent divisor). Read the arithmetic
+/// below as current; read the paragraph above as the record of the move.
 library Settlement {
     using SafeTransferLib for address;
 

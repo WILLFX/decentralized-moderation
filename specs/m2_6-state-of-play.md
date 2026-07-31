@@ -1,7 +1,10 @@
 # M2.6 — state of play (milestone closed, plus a post-close regression pass)
 
 **All P0 items are closed.** The re-audit should target the **`m2.6-close` tag**.
-The last code change is `51af155`; everything after it is documentation.
+The last code change *before that tag* is `51af155`; everything between it and the
+tag is documentation. Code has landed since — the post-close regression pass and
+post-close items 2b, 4, 5, 8, 9 and 10 — and the tag is deliberately not moved to
+cover it; see the note below.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
 > that pass found **eight blocking regressions in items marked closed** plus three
@@ -18,7 +21,7 @@ The last code change is `51af155`; everything after it is documentation.
 > fixed state. Everything from here down describes the state **at the tag** unless
 > it says otherwise.
 >
-> **The size position is resolved.** `Moderation` is at **19,203 bytes, 5,373
+> **The size position is resolved.** `Moderation` is at **19,980 bytes, 4,596
 > free**, after the second structural split moved settlement into a delegatecalled
 > library (`src/lib/Settlement.sol`) and its follow-up moved VOID disposal after
 > it. K-1, K-3 and K-5 now fit — and K-3 no longer costs `Moderation` anything at
@@ -31,9 +34,9 @@ The last code change is `51af155`; everything after it is documentation.
 > reasoning circular unless said out loud. Saying it out loud is what made the split
 > the next item rather than a permanent excuse.
 >
-> **K-5 was the highest-severity thing still open when this was written; item 10
-> now is** — see "Where things stand" below, and the work order's "Item 10" section.
-> K-5 remains open and is new to the record:
+> **K-5 is the highest-severity thing still open.** It held that position when this
+> was written, lost it to item 10, and holds it again now that item 10 has landed —
+> see "Where things stand" below. K-5 is new to the record:
 > `StakeRegistry.setTrack` takes no `caseRef` and writes absolutely, so during a
 > handover — when both logics are authorized by design — either can overwrite any
 > moderator's track. It is the one residual of P0-5's scoping. Not a fund drain;
@@ -69,12 +72,15 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass + the post-close items): **223
-passing, 18 suites**.
+**Suite now** (tag + the post-close regression pass + the post-close items): **254
+passing, 21 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
 move, not new coverage). The eighteenth is `SeatDraw.t.sol`, the cross-batch
-seat-draw family, which no registry-level fixture can reach.
+seat-draw family, which no registry-level fixture can reach. The last three are
+`StallRound.t.sol` (item 2b's next-depth stall round), `Deploy.t.sol` (item 9's
+post-deploy assertions) and `RewardScoping.t.sol` (item 10's per-depth reward
+allocation).
 
 (The peak during the milestone was 199 / 19. The difference is `test/spike/`, three
 throwaway suites that existed only to produce the gas numbers behind the
@@ -83,7 +89,8 @@ are recorded in `contracts/GAS_BUDGETS.md` and `ProtocolLimits`; the code that
 produced them is deleted, because a measurement harness that outlives its decision
 becomes something a reader mistakes for a test of the product.)
 
-**Sizes** (EIP-170 limit 24,576):
+**Sizes at the tag** (EIP-170 limit 24,576; for current sizes see the end of this
+section):
 
 | contract | bytes | margin |
 |---|---|---|
@@ -96,20 +103,27 @@ becomes something a reader mistakes for a test of the product.)
 despite eleven items landing in it, because the structural split gave back more
 than they cost.
 
-**The highest-severity open finding is item 10**, recorded in the work order: the
-reward denominator (`_settleInit`, every round) reads a different seat set than the
-outcome draw (`realizeOutcome`, `_cur(c)`). The mismatch makes expected reward depend
-on how you vote — where the deciding round splits evenly, which is where a single
-vote moves the outcome most, appeal panels earn ~83% more for overturning than
-upholding at identical freeze risk, on every appealed case with no attacker.
-(Lopsided rounds recover honesty; the freeze term is the reason, and the work
-order carries the counterexample.) Live on shipped code,
-not introduced by any post-close item, and deferred only because its fix must be
-calibrated against post-2b code.
+**Item 10 has landed** (`e072945`). It was the highest-severity open finding: the
+reward denominator (`_settleInit`, every round) read a different seat set than the
+outcome draw (`realizeOutcome`, `_cur(c)`), which made expected reward depend on how
+you vote — where the deciding round splits evenly, which is where a single vote moves
+the outcome most, appeal panels earned ~83% more for overturning than upholding at
+identical freeze risk, on every appealed case with no attacker. The fix allocates the
+distributable per adjudicating round in proportion to seats revealed over seats
+sought, and divides each round's pool by the winning side at the deciding depth and by
+all revealers at earlier depths. The work order's "Item 10" section carries the
+derivation, the counterexample that bounds the claim, and what the build found that
+the design did not.
 
-After the post-close regression pass, the second structural split, and the split's
-follow-up: `Moderation` **19,203 (5,373 free)**, `Settlement` 6,645,
-`StakeRegistry` 12,126, `IndexRegistry` 6,256, `RulesetGovernor` 4,459.
+**The highest-severity thing still open is K-5** — `StakeRegistry.setTrack` is not
+obligation-scoped — with the `trackDecay < WAD` clause the other named residual, the
+one part of P1-3 that did not land with the clamping fix. Both are in the work
+order's "Knowingly open" table.
+
+After the post-close regression pass, the second structural split, the split's
+follow-up, and post-close items 2b, 4, 5, 8, 9 and 10: `Moderation` **19,980 (4,596
+free)**, `Settlement` 6,796, `StakeRegistry` 12,126, `IndexRegistry` 6,256,
+`RulesetGovernor` 4,245.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
 and a further 761 when VOID disposal followed settlement across the seam, so it
@@ -184,6 +198,24 @@ Added by the post-close pass:
   deleteEntry / tryReserveContent / releaseContent`. `releaseDuty` and
   `penalizeNoShow` are gone; every write to duty escrow now names its case. That
   claim is about ESCROW — `setTrack` is on the list and is still unscoped (K-5).
+
+Added by the post-close items, each with its own section in the work order:
+
+- **A widen happens at commit close, not at reveal close** (item 2b), and a depth
+  that cannot reach `minReveals` opens a **stall round** rather than deciding under
+  quorum. Reward scoping follows: only the round that adjudicated at a depth counts.
+- **A foreign token is unrepresentable** (item 4): `token == stakeReg.token()` is a
+  constructor check over two immutables, not an activation gate, so the bad
+  deployment cannot be constructed rather than being caught after the fact.
+- **Five fixtures that could not discriminate were replaced** (item 5), and the
+  standing conclusion from it is *mutate every repair* — a fix is a hypothesis about
+  why a test was blind, and an unmutated repair never tests that hypothesis.
+- **Non-participation is priced** (item 8): a withheld reveal now carries
+  `s.freezeDur` rather than `failedRevealFreeze`, at all three sites.
+- **There is a deploy script, and a test that drives it** (item 9), including the
+  assertion that `verify` REJECTS each broken stack.
+- **Reward is allocated per adjudicating round with a depth-dependent divisor**
+  (item 10), so no depth's per-seat payout is a function of another depth's vote.
 
 ## Judgment calls — don't silently reverse them
 

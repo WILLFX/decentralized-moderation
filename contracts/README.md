@@ -4,13 +4,14 @@ Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
 > Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
-> independently verified and three blocking regressions were found in items marked
-> closed. They are fixed on top of it; the tag is not moved, because it is the
+> independently verified and eight blocking regressions were found in items marked
+> closed, plus three fixes that no test discriminated. They are fixed on top of it,
+> as are the post-close items 2b, 4, 5, 8, 9 and 10; the tag is not moved, because it is the
 > commit the audit ran against. See the "Regressions found after the close" table
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **200 passing tests** (188 at the tag) including a
+> registries — with **254 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a differential test against an independent
 > Python reference, and a live logic-migration test.
 >
@@ -53,7 +54,7 @@ Conservation therefore spans two balances:
                                 + totalPendingPayout + totalSettling
     balanceOf(StakeRegistry) == free + committed + frozen + dutyBonded
 
-`Moderation` is at **19,964 bytes, 4,612 free** against EIP-170, after the second
+`Moderation` is at **19,980 bytes, 4,596 free** against EIP-170, after the second
 structural split moved settlement into a delegatecalled library. That margin was
 439 before the split, which is why it had to happen before the widen restructure
 rather than after. See `specs/m2_6-work-order.md`, "Size position".
@@ -134,6 +135,13 @@ says so instead of returning green.
 | `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |
 | `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact |
 | `GasBounds.t.sol` | worst-case `claim()` under the 8M ceiling; the seat-draw and epoch-drain batch bounds; §10 failure modes |
+| `StalledDraw.t.sol` | M2.6-P0-6/6b/6c: a draw that cannot complete must still end, and disposal depends on whether a commit window ever opened. Split out of `CaseLifecycle.t.sol` when that outgrew the `via_ir` pipeline |
+| `SeatDraw.t.sol` | M2.6-P0-3d / H-03B: the cross-batch upward family, which no registry-level fixture can reach (`DRAW_SEATS_PER_BATCH` returns to the caller mid-panel) |
+| `StallRound.t.sol` | M2.6-item-2b: the commit-time widen and the next-depth stall round |
+| `RewardScoping.t.sol` | M2.6-item-10: per-depth reward allocation and the depth-dependent divisor, by injection over a specified round shape |
+| `Deploy.t.sol` | M2.6-item-9: every deploy phase through the timelock, each invariant `verify` claims, and that `verify` rejects each broken stack |
+| `WidenSeats.t.sol` | F2: a widen re-draw adds seats to a voter that already revealed; settlement pays only the seats tallied at reveal |
+| `Scaffold.t.sol` | M2-0 smoke: the toolchain runs, and the two load-bearing environment facts (xBZZ has 16 decimals; WAD is not a token base unit) |
 
 Spec departures are catalogued in `DEVIATIONS.md`; gas budgets/actuals in
 `GAS_BUDGETS.md`. Regenerate differential vectors with

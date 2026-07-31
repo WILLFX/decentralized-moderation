@@ -758,10 +758,13 @@ re-reading (P0-5d, P0-6c, P0-3c and then P0-3d, which reopened P0-3c) and three
 fixes with no discriminating test coverage. They are recorded in their own section below and are
 fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
 deliberately NOT moved, because it is the commit the audit ran against and moving
-it would invalidate that verification. Current state: **218 tests, 18 suites**,
-green at every commit, `Moderation` 24,137 B (439 free — see "Size position"). The
+it would invalidate that verification. Current state, after the regression pass and
+post-close items 2b, 4, 5, 8, 9 and 10: **254 tests, 21 suites**, green at every
+commit, `Moderation` 19,980 B (4,596 free — see "Size position"). The
 seventeenth suite is `StalledDraw.t.sol`, split out of `CaseLifecycle.t.sol` when
-that contract outgrew the `via_ir` pipeline; a file move, not new coverage.
+that contract outgrew the `via_ir` pipeline; a file move, not new coverage. The
+eighteenth is `SeatDraw.t.sol`; the last three are `StallRound.t.sol` (item 2b),
+`Deploy.t.sol` (item 9) and `RewardScoping.t.sol` (item 10).
 
 ## P0 — all closed
 
@@ -906,22 +909,32 @@ missed. None is a P0.
 Named here so a re-auditor does not read them as misses. None is being fixed in
 this pass.
 
-**Read item 10 first.** It is the only entry here that is a live defect on shipped
-code rather than a gap, an inefficiency or a design question, and it is the one a
-re-auditor should check before anything else in this table.
+**Read K-5 first.** With item 10 built (`e072945`) and struck from this table, K-5 is
+the highest-severity entry left, and it is the one a re-auditor should check before
+anything else here. Nothing remaining in this table is a live defect on shipped code
+of item 10's kind; K-5 is a scoping hole reachable only during a handover, and the
+rest are gaps, inefficiencies or design questions.
 
 | # | Item | Severity | Why not P0 |
 |---|---|---|---|
 | K-1 | **Keeper economics: unpaid work, and work decoupled from progress.** *(Two findings, merged — one gap.)* **(a)** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. **(b)** M2.6-P0-3b added a second unpaid path, and it is worse in kind: a `realizeSeats` poke that finds the epoch unsettled spends itself draining and **advances no case at all** — it seats nobody, moves no phase, and cannot become the terminal batch that earns the bounty. A full 128-item batch measures 1.83M gas over a 1000-leaf tree (~840k at the suite's fixture scale). The fix that removed the keeper REQUIREMENT therefore left keeper-shaped work with no reward attached to it. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. An efficiency and latency problem, not a stuck-funds one. (b) is additionally self-healing: the drain is permissionless, anyone can call `advanceEpoch` directly, and the epoch completes the moment somebody does. A pro-rata bounty split across batches addresses (a); (b) needs the drain to be attributable in the first place, since it is tied to no case today. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
-| **10** | **Reward structure reads a different seat set than the outcome draw.** `realizeOutcome:926` draws from `_cur(c)`; `_settleInit:389` sums every round. The mismatch makes `E[reward]` depend on the vote. **(a)** Appeal panels are paid to overturn: where the deciding round splits evenly — the pivotal case, and the one where freeze risk is symmetric so the reward gap is the whole payoff gap — a depth-1 committer earns `1 + b/f` times as much for flipping as for upholding, ~83% at the worked fixture, reachable on every appealed case with no attacker. Lopsided rounds recover honesty via the freeze term. **(b)** Suppressing turnout enriches the survivors: per-seat payout is `D / revealedSeats`, and an `underQuorum` adjudication pays the whole distributable to as little as one seat. Full analysis, derivation and the neutraliser are in "Item 10" above. | **High** | The only entry in this table that is a live defect on shipped code rather than a gap or an inefficiency, and it sits on the protocol's core claim. Not fixed in this pass only because its neutraliser must be calibrated against post-2b code — 2b's scoping shrinks `winnersSeats`, which makes (b) larger. **Ordering: 2b, then item 10.** |
-| K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and it does not fit the 469 bytes left in `Moderation`. It belongs with the split. |
+| K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and when this was written it did not fit the 469 bytes left in `Moderation`. The size objection is now spent — the second structural split left 4,596 bytes free — so what remains is the design question alone. |
+| P1-3 residual | **`trackDecay == WAD` is still accepted.** The validator's check is `> L.WAD`, so a ruleset can set decay to exactly 1.0 and track never decays. The clamping half of P1-3 landed post-close, and the `freezeCap` / `freezeBase * power` caps landed with P0-8; this clause did not. | **Residual of P1-3 (filed P1)**; no separate severity is assigned to the clause here | A calibration question, not a bound-shape one: `trackDecay == WAD` produces a monotonically non-decreasing track, which is a governance choice a validator arguably should not be the thing to forbid. Deliberately not folded into the clamping fix, so that the fix stayed one property. See "P1-3" above. |
 
 K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which is the
-only caller of `setTrack`), and it does not have room for them — see "Size
-position" below. A second structural split is a precondition for that
-work, not an optimisation to consider afterwards.
+only caller of `setTrack`), and when this table was written it had no room for
+them — which is why the second structural split was a precondition for that work
+rather than an optimisation to consider afterwards. The split has since happened;
+`Moderation` has 4,596 bytes free, and size no longer defers any of the three.
+
+**Closed after this table was written:**
+
+- **Item 10, the reward/outcome seat-set mismatch, is BUILT** (`e072945`) and struck
+  from the table above. It was the only entry that was a live defect on shipped code.
+  See the "Item 10" section for the derivation, the neutraliser and what the build
+  found that the design did not.
 
 **Closed in this pass rather than carried:**
 
@@ -1137,15 +1150,23 @@ addition is the hazard-1 guard.
 - **P′-c (payout neutrality).** No disclosed quantity makes one vote more profitable
   than another. **OPEN.**
 
-> **P′-c is not closed, and the record must not say it is.** 2b's scoping closes the
-> **same-depth** instance — banked rounds leave `winnersSeats`, so a post-stall
-> committer sees `b_v = 0`. The **cross-depth** instance survives untouched: a
-> depth-1 committer still reads depth 0's tally in its denominator. That is item 10
-> instance (a), and it is the larger of the two.
+> **P′-c is not declared closed here, and the record must not say it is.** 2b's
+> scoping closed the **same-depth** instance — banked rounds leave `winnersSeats`, so
+> a post-stall committer sees `b_v = 0`. The **cross-depth** instance survived 2b
+> untouched: a depth-1 committer still read depth 0's tally in its denominator. That
+> was item 10 instance (a), and it was the larger of the two.
 >
-> Declaring P′-c closed on the strength of its same-depth instance would be the
-> third knowing repeat of this milestone's own lesson — *a true statement one level
-> away from the property you need is not a proof of it.* It is recorded open.
+> **Item 10 has since landed** (`e072945`): each adjudicating round now takes a pool
+> fixed by its own revealed-over-sought seats and divides it by the winning side at
+> the deciding depth and by all revealers at earlier depths, so no depth's per-seat
+> reward is a function of another depth's vote. Both instances are therefore
+> addressed by mechanism. **The clause is still recorded open**, because closing a
+> property is a verification result and this is the party that built the fix.
+> Declaring P′-c closed on the strength of its same-depth instance would have been
+> the third knowing repeat of this milestone's own lesson — *a true statement one
+> level away from the property you need is not a proof of it* — and declaring it
+> closed on the strength of having written the cross-depth fix is the same move one
+> step later. It closes when a re-audit says it does.
 
 ### Reward scoping
 
@@ -1537,9 +1558,11 @@ not change how the reward is divided.
 
 ## Item 10 — reward structure reads a different seat set than the outcome draw
 
-**Severity: High. Live on shipped code. Two instances, one defect.** Found while
-revising item 2b's reward scoping; neither instance is introduced by 2b and neither
-is fixed by it.
+**Severity: High. Was live on shipped code. Two instances, one defect. BUILT in
+`e072945`** — everything below is written as the finding stood before the fix, and
+the "BUILT" subsection near the end records what landed and what the build found
+that the design did not. Found while revising item 2b's reward scoping; neither
+instance was introduced by 2b and neither was fixed by it.
 
 ### The condition, stated once
 
@@ -1711,7 +1734,7 @@ exact case the design predicted would differ most, and the delta is exactly the
 predicted 100%-to-the-keeper. Before item 10 the keeper was taking money no
 adjudicating depth had earned in ninety per cent of the generated cases.
 
-### Sizing constraint: item 10 must be built against POST-2b code
+### Sizing constraint: item 10 had to be built against POST-2b code (it was)
 
 Item 2b's §4 scoping shrinks `winnersSeats` to adjudicating rounds only. That
 **raises** per-seat payout, so 2b makes instance (b) larger, not smaller. The
@@ -1812,8 +1835,10 @@ still be drawn.
 
 ## Size position — the original analysis (kept for the record)
 
-`Moderation` is at **24,137 bytes, 439 free** against the EIP-170 limit of 24,576.
-It gained **841 bytes across this batch** (23,296 at the `m2.6-close` tag).
+`Moderation` **was at** 24,137 bytes, 439 free against the EIP-170 limit of 24,576,
+when this analysis was written. It had gained **841 bytes across that batch** (23,296
+at the `m2.6-close` tag). The split described above is what changed it; everything in
+this section is the position as it stood before that.
 
 **State the self-reference plainly, because it is one.** The margin is cited above
 as a reason K-5 and others are deferred — and the margin is what it is *because of
@@ -1881,23 +1906,27 @@ economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadline
 time, = K-3), plus K-1 (keeper per-batch payment) and K-5 (`setTrack` is not
 obligation-scoped — the residual of P0-5, severity High), and the P2 list.
 
-**Item 10 is not in that category and this heading does not cover it.** It is a
+**Item 10 was never in that category, and it is now closed** (`e072945`). It was a
 live defect on shipped code at severity High — appeal panels paid to overturn
 wherever the deciding round splits evenly, plus turnout suppression enriching the
-survivors — and it is
-deferred only because its fix must be calibrated against post-2b code. See "Item 10"
-above.
+survivors — deferred past the close only because its fix had to be calibrated
+against post-2b code. It was. See "Item 10" above.
+
+**Of the list above, K-5 is the one to read first**; it is the only remaining entry
+at severity High. The `trackDecay < WAD` clause is the other named residual — the
+one part of P1-3 that did not land with the clamping fix.
 
 These go to the external reviewer as known-open rather than being worked in
 another internal round. K-4 was the exception and is closed, because it was a P0
 misfiled as a P1.
 
-**Item 10 is a live reason this recommendation still holds.** It was found by an
-internal review pass, on shipped code, on the protocol's core claim — and it had
-been read past by two prior audits, each of which named a real defect under a
-failure mode that set the severity too low (see the pattern list in "Item 10").
-A finding of that shape and severity surviving this long is the argument for the
-external review, not against it.
+**Item 10 is a reason this recommendation still holds, and being fixed does not
+retire it.** It was found by an internal review pass, on shipped code, on the
+protocol's core claim — and it had been read past by two prior audits, each of which
+named a real defect under a failure mode that set the severity too low (see the
+pattern list in "Item 10"). What the recommendation rests on is that a finding of
+that shape and severity survived that long, which no fix undoes. The argument is for
+the external review, not against it.
 
 **Two items landed in this milestone that move the same cost in the same direction,
 and a re-auditor should find that stated rather than reconstruct it.** Item 8 priced

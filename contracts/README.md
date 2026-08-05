@@ -12,8 +12,10 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
 > registries — with **254 passing tests** (188 at the tag) including a
-> handler-driven invariant campaign, a differential test against an independent
-> Python reference, and a live logic-migration test.
+> handler-driven invariant campaign, a 52-vector differential regression test
+> against a Python integer reference (a port of the Solidity, not an independent
+> derivation — see `Differential.t.sol`'s header for what that does and does not
+> prove), and a live logic-migration test.
 >
 > See `specs/m2_6-work-order.md` (Resolution record) and
 > `specs/m2_6-state-of-play.md` for what landed, the four documented deviations
@@ -133,7 +135,7 @@ says so instead of returning green.
 | `Governance.t.sol` | timelocked params via `RulesetGovernor`, append-only guidelines, no pause (§9.9), the apply boundary, the drawable-panel cap, the M2.6-P0-8 freeze bounds, and the two-step governance transfer (M2.6-L-2) |
 | `Invariant.t.sol` | handler campaign: conservation, partition, no-principal-lost (§9.1/2/3/11) |
 | `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |
-| `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact |
+| `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact. A **regression net, not an oracle** — the reference is a port of the Solidity, and two of its assumptions (last round adjudicates; capacity sought == seats seated) are mirrored by the injector, so no vector varies them. See the file header |
 | `GasBounds.t.sol` | worst-case `claim()` under the 8M ceiling; the seat-draw and epoch-drain batch bounds; §10 failure modes |
 | `StalledDraw.t.sol` | M2.6-P0-6/6b/6c: a draw that cannot complete must still end, and disposal depends on whether a commit window ever opened. Split out of `CaseLifecycle.t.sol` when that outgrew the `via_ir` pipeline |
 | `SeatDraw.t.sol` | M2.6-P0-3d / H-03B: the cross-batch upward family, which no registry-level fixture can reach (`DRAW_SEATS_PER_BATCH` returns to the caller mid-panel) |

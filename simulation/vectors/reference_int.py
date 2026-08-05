@@ -2,8 +2,44 @@
 
 This mirrors ``claim()`` in ``contracts/src/Moderation.sol`` exactly — same order,
 same floor divisions, same dust-to-bounty sweep — so the Foundry differential test
-(``test/Differential.t.sol``) can assert bit-exact agreement between the Solidity
-implementation and this independent reimplementation (work order D10).
+(``test/Differential.t.sol``) can assert bit-exact agreement (work order D10).
+
+WHAT THIS PROVES, AND WHAT IT DOES NOT
+--------------------------------------
+This file is a **port** of the Solidity, not an independent derivation of the
+arithmetic. Same variable roles, same loop structure, and the reasoning comments
+were carried across verbatim — including the ones below. So the campaign is a
+**regression net**: it catches transcription drift and regression (a changed
+constant, a dropped floor division, a reordered step, a term that moved between
+buckets), and it catches them at wei resolution across 52 shapes, which is worth
+having. It **cannot catch a wrong formula**, because a wrong formula is wrong in
+both files. Agreement here is not evidence that the payout rule is right; it is
+evidence that two expressions of the same rule have not drifted apart.
+
+Two of its assumptions are FALSE in the contract, and the injector
+(``ModerationHarness.__injectRound`` / ``__injectSeat``) mirrors both, so no vector
+in the corpus can express the difference:
+
+1. ``adj_round = len(rounds) - 1`` assumes the last round pushed is the one whose
+   tally drew the outcome. Under M2.6-item-2b a round that stalls short of
+   ``minReveals`` is BANKED and a later stall round adjudicates the depth, so a
+   real case carries rounds with ``adjudicated == false``. ``__injectRound``
+   stamps ``adjudicated = true`` on every injected round and points ``adjRound``
+   at the last, so a banked round is not constructible in a vector.
+2. ``capacity = sum(injected seats)`` assumes seats sought equals seats seated.
+   In the contract ``r.target`` is capacity SOUGHT (one target at ``_pushRound``,
+   one more per widen) while ``r.nSeats`` is what the draw actually seated, and
+   the two diverge whenever a draw comes up short. ``__injectSeat`` does
+   ``r.target += seats``, so ``target > seats seated`` is not constructible
+   either.
+
+Those are exactly item 10's two new degrees of freedom — which round decides, and
+what the allocation normalizes by. Both shapes DO have unit coverage
+(``StallRound.t.sol`` for the banked round, the P0-6 short-draw family for an
+unfilled target), so this is a gap in the shape of the corpus rather than an
+unchecked property. Extending the injector to express both, regenerating the
+corpus, and re-deriving this file from the algebra without the Solidity open is
+filed as its own item in ``specs/m2_6-work-order.md``.
 
 It covers the *payout* arithmetic (rewards, refunds, bonuses, claim bounty, and the
 committed→free/frozen disposition). Freeze *durations* depend on solady's expWad and

@@ -1727,12 +1727,23 @@ have bricked settlement on any widened case.
 
 **47 of the 52 differential vectors carried a nonzero submitter refund.** The Python
 reference (`simulation/vectors/reference_int.py`) was updated to the new arithmetic
-independently of the Solidity and regenerated: vector 1 is the empty-winning-side
-case, and its expected claim bounty fell from `37000000000002520` — the ENTIRE POT —
-to `370000000000025`, the bounty alone. The generator had independently produced the
-exact case the design predicted would differ most, and the delta is exactly the
-predicted 100%-to-the-keeper. Before item 10 the keeper was taking money no
-adjudicating depth had earned in ninety per cent of the generated cases.
+and the corpus regenerated: vector 1 is the empty-winning-side case, and its expected
+claim bounty fell from `37000000000002520` — the ENTIRE POT — to `370000000000025`,
+the bounty alone. Before item 10 the keeper was taking money no adjudicating depth
+had earned in ninety per cent of the generated cases.
+
+**Corrected — what that 47/52 is and is not.** It was first written here as the
+reference having been updated *independently of the Solidity*, and as the generator
+having *independently produced* the case the design predicted would differ most. That
+overstated it in the direction that flatters the work, and the record should not carry
+it. `reference_int.py` is a port of the Solidity, so the two sides of the comparison
+are not independent, and the corpus predates the fix rather than being drawn to test
+it: 47/52 is a fact about the SHAPE of the existing corpus — how many generated cases
+have a winning side that does not absorb the whole allocation — which is a good
+measure of how often the defect bit and no measure at all of whether the new formula
+is right. What the regeneration does establish is that the delta between the two
+versions is the one the design predicted, at wei resolution, in every vector. See
+"Item 11" for the campaign's limits, stated in full.
 
 ### Sizing constraint: item 10 had to be built against POST-2b code (it was)
 
@@ -1790,6 +1801,104 @@ still be drawn.
 > to one epoch. Every deletion argued from a live read needs re-checking against that
 > gap; the three that stand, stand because they argue from structure (escrow at draw
 > time, a superseded selector, a superseded field) rather than from a derived weight.
+
+## Item 11 — the differential campaign is a regression net, not an oracle (FILED, not built)
+
+**Filed post-close. Not built; no code in this commit.** This item exists because the
+record described the campaign in terms a re-auditor would reasonably read as an
+oracle, and it is not one. The description is corrected wherever it appeared
+(`README.md`, `contracts/README.md`, `specs/state-machine.md`, `m2-work-order.md`'s
+D10 heading, `reference_int.py`'s header, `Differential.t.sol`'s header, and item
+10's own build note above); this section is the standing statement of the limit and
+the spec for closing it.
+
+### What the campaign proves
+
+`simulation/vectors/reference_int.py` is a **port** of `claim()`, not an independent
+derivation of the settlement arithmetic: same variable roles, same loop structure, the
+reasoning comments carried across verbatim. So 52 vectors agreeing at wei resolution
+proves that **two expressions of the same rule have not drifted apart** — it catches a
+changed constant, a dropped floor division, a reordered step, a term that moved
+between buckets, and it catches them across 52 shapes including the flip-flop
+insolvency reproducer and the dust-heavy primes. That is worth having and it is why
+the campaign stays.
+
+It **cannot catch a wrong formula.** A wrong formula is wrong in both files, in the
+same direction, and the test is green. Nothing about wei-exact agreement between a
+thing and its own port is evidence that the thing is correct.
+
+### Two assumptions that are false in the contract and mirrored in the harness
+
+Neither is a bug in either file. Each is a shape the corpus cannot express, because
+the reference assumes it away and the injector assumes it away in the same direction:
+
+1. **`adj_round = len(rounds) - 1`** — the reference assumes the last round pushed is
+   the one whose tally drew the outcome. In the contract, item 2b's under-quorum
+   fallback BANKS a round that stalls short of `minReveals` and adjudicates the depth
+   from a later stall round, so real cases carry rounds with `adjudicated == false`
+   and an `adjRound` that is not the last index. `ModerationHarness.__injectRound`
+   stamps `adjudicated = true` on every injected round, writes
+   `adjRoundAt[depth] = depth + 1`, and points `c.adjRound` at the last one — so a
+   **banked round is not constructible in a vector**.
+2. **`capacity = Σ injected seats`** — the reference assumes seats sought equals seats
+   seated. In the contract `r.target` is capacity SOUGHT (one target at `_pushRound`,
+   `Moderation.sol:1461`; one more per widen, `:1023`) while `r.nSeats` is what the
+   draw actually seated — `:1459` says so in as many words — and the two diverge on an
+   ordinary path, not an exotic one: `realizeSeats:852-859` treats a batch that seats
+   nobody as pledged capacity exhausted for the epoch, sets `pendingDraw = 0`, and
+   **opens COMMIT on the short panel**. That round can then commit, reveal and
+   adjudicate with `target > nSeats`, which under item 10 scales its allocation down
+   and sends the remainder to the submitter refund. `__injectSeat` does
+   `r.target += seats`, so **`target > seats seated` is not constructible in a
+   vector**, and the one quantity item 10 introduced to normalize by is pinned at its
+   degenerate value in all 52.
+
+**These are exactly item 10's two new degrees of freedom** — which round decides, and
+what the allocation normalizes by — which is what makes the coincidence worth writing
+down rather than shrugging at. The corpus was regenerated against item 10's arithmetic
+and every vector holds the divisor and the normalizer at their degenerate values.
+
+### Severity: coverage shape, not a hole
+
+Both shapes have unit coverage built with them, and the property is checked there:
+`StallRound.t.sol:217` drives a banked round carrying coherent revealers through
+settlement (the exact case where a wrong divisor overpays), `RewardScoping.t.sol` pins
+the depth-dependent divisor and the short-turnout allocation by injection, and
+`CaseLifecycle.t.sol:839` drives the short panel itself — 2 seats seated against a
+target of 5, COMMIT opening anyway. So this is filed as **a gap in the shape of the
+corpus, not an unchecked property**. One thing to pin when the item is built: whether
+any driven fixture carries a short-panel round all the way through *settlement* with
+`target > nSeats` in an ADJUDICATING round, or whether that combination is currently
+only reachable by injection. It is reachable in production either way — the mechanism
+is above — but "which fixture proves it" should not be an open question in a record
+that is about exactly this failure mode. What it costs is the campaign's *value as
+evidence*: a re-auditor told "52 vectors, bit-exact, against a Python reference" will
+price it as an oracle unless the record says otherwise, and the two things it most
+needs to cross-check are the two it cannot see.
+
+### The build, when it is taken
+
+1. Make `__injectRound` able to express a **banked** round: take `adjudicated` as an
+   argument rather than stamping it, and take the adjudicating index per depth rather
+   than deriving it from `rounds.length`. The injector's contract is that it mirrors
+   what the real path does, so `adjRoundAt`/`adjRound` must be settable to any
+   consistent assignment the real path can produce — and to nothing it cannot.
+2. Make `__injectSeat` able to express a **short draw**: separate capacity sought from
+   seats seated, so `r.target` is set per round rather than accumulated per seat.
+3. Teach `reference_int.py` both: `adj_round` becomes a per-depth input, `capacity`
+   becomes the round's declared target.
+4. Regenerate the corpus with generator cases that vary both, including a banked round
+   whose revealers are coherent with the final outcome (the case where a wrong divisor
+   overpays) and a depth whose draw came up short (the case where a wrong normalizer
+   oversubscribes the pot — the failure the build hit at `Σct`).
+5. **Derive the reference from the algebra, with the Solidity closed.** This is the
+   half that makes it an oracle rather than a wider net, and it is the half that is
+   easy to skip. If the derivation reproduces the port line for line, that is a
+   result; if it does not, the disagreement is the point.
+
+Ordering note: (5) is worth nothing if (1)-(4) are skipped, and (1)-(4) are worth
+having even if (5) is deferred — they widen the net without claiming more than it
+proves. Do not let (5) become the reason the item does not start.
 
 ## Size position — RESOLVED by the second structural split
 
@@ -1915,6 +2024,12 @@ against post-2b code. It was. See "Item 10" above.
 **Of the list above, K-5 is the one to read first**; it is the only remaining entry
 at severity High. The `trackDecay < WAD` clause is the other named residual — the
 one part of P1-3 that did not land with the clamping fix.
+
+**Item 11 is filed and not built**: the differential campaign is a regression net, not
+an oracle, and two of the reference's assumptions are mirrored in the injector so no
+vector can vary them — both of them item 10's degrees of freedom. It belongs in this
+list rather than in the severity table above, because it is a coverage-shape gap with
+the underlying property covered elsewhere, not a defect. See "Item 11".
 
 These go to the external reviewer as known-open rather than being worked in
 another internal round. K-4 was the exception and is closed, because it was a P0

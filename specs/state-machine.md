@@ -675,6 +675,12 @@ on-chain constraints. Each is documented with rationale and threat-model impact 
 
 Every structural guarantee this spec asserts is test-guarded in M2: funds conservation
 and no-internal-transfer as Foundry invariants over a 16k-call campaign, the settlement
-arithmetic as a 52-vector differential test against an independent Python integer
+arithmetic as a 52-vector differential test against a Python integer
 reference, and the single-stake-benefit property (§5.2, invariant 10) as a statistical
 test.
+
+The differential campaign is a **regression net, not an oracle**, and should not be
+read as one: `reference_int.py` is a port of the Solidity rather than an independent
+derivation, so wei-exact agreement proves the two have not drifted apart, not that
+the arithmetic is right. Its header states the limit and names the two assumptions
+the corpus cannot currently vary.

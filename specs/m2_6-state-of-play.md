@@ -120,6 +120,19 @@ obligation-scoped — with the `trackDecay < WAD` clause the other named residua
 one part of P1-3 that did not land with the clamping fix. Both are in the work
 order's "Knowingly open" table.
 
+**Do not read the differential campaign as an oracle** (item 11, filed not built).
+`simulation/vectors/reference_int.py` is a **port** of the Solidity, not an
+independent derivation, so 52 vectors agreeing at wei resolution proves the two have
+not drifted apart — not that the arithmetic is right; a wrong formula would be wrong
+in both. Two of the reference's assumptions are false in the contract and mirrored by
+the injector, so no vector can express the difference: the last round pushed is
+assumed to adjudicate (2b banks rounds, and `__injectRound` stamps `adjudicated` on
+every one), and capacity sought is assumed to equal seats seated (`r.target` is
+sought; `__injectSeat` does `r.target += seats`). Those are item 10's two degrees of
+freedom exactly. Both shapes are covered by unit fixtures, so it is a coverage-shape
+gap rather than an unchecked property — but the campaign is a regression net, and the
+record previously described it in terms that invited an auditor to price it higher.
+
 After the post-close regression pass, the second structural split, the split's
 follow-up, and post-close items 2b, 4, 5, 8, 9 and 10: `Moderation` **19,980 (4,596
 free)**, `Settlement` 6,796, `StakeRegistry` 12,126, `IndexRegistry` 6,256,
@@ -302,6 +315,18 @@ a P0 — it wrote pooled `dutyBonded` with no `caseRef`, which is the class P0-5
 exists to make unrepresentable, and "no caller" is exactly the reasoning that
 failed for `settleDuty`'s double-release. Reachability by any authorized logic is
 the property; today's call graph is not.
+
+And one about oracles: **a port is not a second opinion** (item 11). The differential
+campaign was described in this record as an independent reference, and by me in
+review as two implementations of the same arithmetic agreeing — "the strongest
+confirmation available". It is neither. `reference_int.py` was written from the
+Solidity, so what 52 wei-exact vectors establish is that a thing and its own port
+have not drifted, which is a regression result and not a correctness one. The tell
+was available without reading either file: the two assumptions the corpus cannot vary
+are the two degrees of freedom the most recent change introduced, and a genuinely
+independent derivation has no reason to land on exactly those. When a check and the
+thing it checks share an author and a source, say what it catches (drift) rather than
+what it feels like (confirmation).
 
 Two bugs in this milestone were found by reading rather than by a failing test — the
 cross-case escrow drain (written in P0-2, caught in P0-5) and the commit path

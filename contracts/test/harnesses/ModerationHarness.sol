@@ -100,7 +100,7 @@ contract ModerationHarness is Moderation {
             // M2.6-P0-5: settlement debits THIS round's obligation, so the
             // injected state must include one or the replay would revert.
             StakeRegistryHarness(address(stakeReg)).__injectObligation(
-                address(this), voter, (caseId << 8) | depth, committedAmt
+                address(this), voter, (caseId << 8) | depth, committedAmt, seats
             );
             r.committedCount++;
         }
@@ -135,7 +135,7 @@ contract ModerationHarness is Moderation {
     }
 
     function __setTrack(address voter, uint256 track) external {
-        stakeReg.setTrack(voter, track);
+        StakeRegistryHarness(address(stakeReg)).__forceTrack(voter, track);
     }
 
     function __injectTopic(uint256 caseId, bytes32 topicKey) external {

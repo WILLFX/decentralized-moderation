@@ -525,6 +525,33 @@ contract GovernanceTest is ModerationTestBase {
         governor.proposeParameters(p, cts, aws); // must not revert
     }
 
+    /// M2.6-K-5: the registry's immutable envelope binds rulesets too. H-11 pins a
+    /// ruleset per case, so a `trackDecay` the registry will reject is not a bad
+    /// parameter that gets noticed later — it is a case that opens and can never
+    /// settle, because `claim()` reverts inside `recordParticipation` forever.
+    /// Same class as the `riskPerSeat` check, and refused at the same place.
+    function test_a_ruleset_below_the_registry_decay_floor_is_rejected() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        uint256 floor = stakeReg.minTrackDecay();
+        p.trackDecay = floor - 1;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+
+        // The floor itself is legal, and a case under it settles rather than
+        // reverting forever — the bound has to be usable, not merely safe.
+        p.trackDecay = floor;
+        governor.proposeParameters(p, cts, aws);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        governor.executeParameters();
+        uint256 caseId = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.SETTLED), "settles at the decay floor");
+        _assertConservation();
+    }
+
     /// The shipped decay must survive the tightened bound — asserted, not assumed.
     /// A parameter fix that rejects the protocol's own default is a brick.
     ///

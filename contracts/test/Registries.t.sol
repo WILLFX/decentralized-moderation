@@ -34,11 +34,20 @@ contract RegistriesTest is Test {
     /// distinct cases in the registry-level fixtures.
     uint256 internal constant CASE_A = (1 << 8) | 0;
     uint256 internal constant CASE_B = (2 << 8) | 0;
+    uint256 internal constant MIN_TRACK_DECAY = (1e18 * 9) / 10;
+    uint256 internal constant WAD = 1e18;
 
     function setUp() public {
         bzz = new MockBZZ();
         stakeReg = new StakeRegistry(
-            IERC20(address(bzz)), TIMELOCK, MIN_STAKE, ACTIVATION, COOLDOWN, RISK_PER_SEAT, EPOCH_BLOCKS
+            IERC20(address(bzz)),
+            TIMELOCK,
+            MIN_STAKE,
+            ACTIVATION,
+            COOLDOWN,
+            RISK_PER_SEAT,
+            EPOCH_BLOCKS,
+            MIN_TRACK_DECAY
         );
         indexReg = new IndexRegistry(TIMELOCK);
         _authorize(oldLogic);
@@ -1121,7 +1130,10 @@ contract RegistriesTest is Test {
         bzz.approve(address(stakeReg), type(uint256).max);
         vm.startPrank(oldLogic);
         stakeReg.reward(alice, 5 * XBZZ); // credit path: grew weight, never bumped the counter
-        stakeReg.setTrack(alice, 1);
+        // M2.6-K-5: an incidental `setTrack(alice, 1)` stood here. It was never part
+        // of this property — track is not a tree input — and the write it stood for
+        // now requires an obligation this fixture has no reason to create. The
+        // scoped replacement has its own section below.
         vm.stopPrank();
 
         // DECREASES: never tracked at all, and they remap the whole tree.
@@ -1349,6 +1361,196 @@ contract RegistriesTest is Test {
         _settleEpoch();
         assertLt(stakeReg.totalEligibleWeight(), before, "and fully applied at the boundary");
         assertEq(stakeReg.eligibleWeightOf(who[0]), 0, "the un-pledge really did take effect");
+    }
+
+    // --- M2.6-K-5: track writes are obligation-scoped -----------------------
+
+    /// Draw `who` a seat under `caseRef` so the caller holds a real obligation.
+    /// The draw is stake-weighted WITH REPLACEMENT over everyone eligible, so a
+    /// single draw lands on an arbitrary staker — re-seed until it lands on the
+    /// one this fixture needs, rather than assuming a one-staker set.
+    function _drawSeatFor(address logic, address who, uint256 caseRef) internal {
+        for (uint256 i = 0; i < 32; i++) {
+            (, uint256 have,) = stakeReg.obligationOf(logic, who, caseRef);
+            if (have > 0) return;
+            vm.prank(logic);
+            stakeReg.drawPanel(1, keccak256(abi.encode("k5", who, caseRef, i)), 0, caseRef);
+        }
+        (, uint256 units,) = stakeReg.obligationOf(logic, who, caseRef);
+        require(units > 0, "fixture: no seat drawn");
+    }
+
+    /// THE K-5 PROPERTY. `setTrack` took no `caseRef` and wrote an absolute value,
+    /// so `onlyLogic` was its only gate — and trust model #3 keeps BOTH logics
+    /// authorized through a handover by design. A concurrently authorized logic
+    /// could therefore overwrite the standing of a moderator it had never drawn.
+    ///
+    /// Track is not stake, so this was never a solvency bug. It is a reputation
+    /// one: track drives the §6.4 freeze curve, so a corrupted value changes the
+    /// penalties an honest moderator can impose and must suffer.
+    function test_a_concurrent_logic_cannot_touch_a_moderator_it_never_drew() public {
+        _authorize(newLogic); // the handover window: both logics live, by design
+        _stakeActivatePledge(alice, 100 * XBZZ);
+
+        // `oldLogic` draws alice and legitimately records her participation.
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        uint256 earned = stakeReg.trackOf(alice);
+        assertEq(earned, WAD, "a coherent participation is worth one unit");
+
+        // `newLogic` never drew her. Under `setTrack` this was an unguarded write.
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+
+        // Nor by naming a case of its own: the obligation key includes the CALLER,
+        // so inventing a caseRef does not conjure an obligation.
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_B, 1, MIN_TRACK_DECAY);
+
+        assertEq(stakeReg.trackOf(alice), earned, "standing untouched by the logic that never drew her");
+    }
+
+    /// The attack that claims NOTHING, in its own test because the assertions above
+    /// would mask it. `coherentUnits = 0` is a PURE DECAY write: it asks for no
+    /// credit, so the credit bound cannot see it, and any legal factor satisfies the
+    /// envelope. Corrupting standing DOWNWARD is the harm K-5 names — track drives
+    /// the §6.4 curve, so shaving an honest moderator's standing weakens the
+    /// penalties it can impose — and the obligation check is the ONLY check that
+    /// stops this one. Verified by mutation: neutralising that check makes this test
+    /// fail on this line, while the broader test above still fails on the credit
+    /// bound and would have hidden which check was doing the work.
+    function test_a_concurrent_logic_cannot_decay_standing_it_never_earned() public {
+        _authorize(newLogic);
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        uint256 earned = stakeReg.trackOf(alice);
+
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 0, MIN_TRACK_DECAY);
+
+        assertEq(stakeReg.trackOf(alice), earned, "standing cannot be shaved by a logic that drew nothing");
+    }
+
+    /// THE MUTATION THAT MATTERS. Every other check passes here: the caller owns
+    /// both obligations, both were created by draws, neither has been used, and
+    /// both credits are within the seats drawn. What is being caught is the factor
+    /// varying BETWEEN moderators inside one case-round.
+    ///
+    /// Without the binding, the factor is chosen per call, at settlement, with the
+    /// outcome already known — so a logic could hand the ruleset's decay to the
+    /// moderators it likes and the floor to the ones it does not. No legitimate
+    /// ruleset can express that: `trackDecay` is per case and H-11 pins it.
+    function test_the_decay_factor_is_bound_to_the_case_not_chosen_per_moderator() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        _drawSeatFor(oldLogic, bob, CASE_A);
+
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, WAD - 1); // binds the factor
+
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.TrackDecayNotUniform.selector);
+        stakeReg.recordParticipation(bob, CASE_A, 1, MIN_TRACK_DECAY);
+
+        // The bound factor itself is fine, and a DIFFERENT case-round is free to
+        // pick its own — the binding is per case-round, not global.
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(bob, CASE_A, 1, WAD - 1);
+        _drawSeatFor(oldLogic, alice, CASE_B);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_B, 1, MIN_TRACK_DECAY);
+    }
+
+    /// No ordering dependency exists between the track write and duty settlement.
+    /// `recordParticipation` reads `drawnUnits`, which the draw sets and nothing
+    /// decrements; `settleDuty` consumes `dutyUnits`, a different field. Written as
+    /// a test rather than a comment at both call sites, because a safety property
+    /// living in a comment is this milestone's standing lesson and it has cost four
+    /// findings already.
+    function test_track_write_survives_duty_settlement_running_first() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+
+        // Settle the duty FIRST — the reverse of what `Settlement` does today.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, 0);
+        (, uint256 unitsLeft,) = stakeReg.obligationOf(oldLogic, alice, CASE_A);
+        assertEq(unitsLeft, 0, "duty units are consumed");
+
+        // The track write still works, and still bounds the credit by seats drawn.
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        assertEq(stakeReg.trackOf(alice), WAD, "credited after the units were consumed");
+    }
+
+    /// One write per obligation, ever. The registry cannot enforce once-per-CASE —
+    /// obligations are per case-ROUND and collapsing them would mean parsing
+    /// `caseRef`, which re-couples the permanent registry to a replaceable logic's
+    /// encoding. Once per obligation is the bound it can enforce, and the logic
+    /// enforces the per-case rule on its side.
+    function test_one_track_write_per_obligation() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.TrackAlreadyRecorded.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 0, MIN_TRACK_DECAY);
+    }
+
+    /// The credit is bounded by work actually done under this obligation, and the
+    /// factor by the registry's immutable envelope.
+    function test_credit_and_factor_are_both_bounded() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+
+        vm.startPrank(oldLogic);
+        vm.expectRevert(StakeRegistry.TrackCreditExceedsSeats.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 2, MIN_TRACK_DECAY); // one seat drawn
+
+        vm.expectRevert(StakeRegistry.BadTrackDecay.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY - 1); // below the floor
+
+        vm.expectRevert(StakeRegistry.BadTrackDecay.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, WAD); // parity is no decay (P1-3)
+        vm.stopPrank();
+
+        assertEq(stakeReg.trackOf(alice), 0, "nothing was written by any of them");
+    }
+
+    /// C2, the constraint that ruled out the obvious per-case-handle shape: the
+    /// VALUE is global and survives migration. Only the AUTHORITY is scoped.
+    function test_standing_accumulates_across_a_logic_migration() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        uint256 underOldLogic = stakeReg.trackOf(alice);
+        assertEq(underOldLogic, WAD, "earned under the outgoing logic");
+
+        // Migrate. The successor inherits nothing of the old logic's obligations...
+        _authorize(newLogic);
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+
+        // ...but it continues the same accumulated standing from its own draws.
+        _drawSeatFor(newLogic, alice, CASE_A);
+        vm.prank(newLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        assertEq(
+            stakeReg.trackOf(alice),
+            (underOldLogic * MIN_TRACK_DECAY) / WAD + WAD,
+            "the successor decays and extends the EXISTING track, it does not restart one"
+        );
     }
 
     /// M2.6-P0-3d, the DOWNWARD class P0-3c aimed at, now driven at the exhaustion

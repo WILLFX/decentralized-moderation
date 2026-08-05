@@ -21,14 +21,51 @@ contract StakeRegistryHarness is StakeRegistry {
         uint256 _activationDelay,
         uint256 _exitCooldown,
         uint256 _riskPerSeat,
-        uint256 _epochBlocks
-    ) StakeRegistry(_token, _timelockDelay, _minStake, _activationDelay, _exitCooldown, _riskPerSeat, _epochBlocks) {}
+        uint256 _epochBlocks,
+        uint256 _minTrackDecay
+    )
+        StakeRegistry(
+            _token,
+            _timelockDelay,
+            _minStake,
+            _activationDelay,
+            _exitCooldown,
+            _riskPerSeat,
+            _epochBlocks,
+            _minTrackDecay
+        )
+    {}
 
     /// Fabricate the obligation record a real `lock` would have created, so
     /// injected settlement fixtures exercise the same debit path (M2.6-P0-5).
-    function __injectObligation(address logic, address moderator, uint256 caseRef, uint256 committed) external {
-        obligations[obligationKey(logic, moderator, caseRef)].committed += uint112(committed);
+    /// @param seats Seats the obligation was drawn for. M2.6-K-5: `drawPanel`
+    ///        stamps `drawnUnits` per seat and `recordParticipation` refuses an
+    ///        obligation that shows no draw, so an injector that skipped it would
+    ///        make every injected settlement revert at the track write. The
+    ///        injector's contract is that it mirrors what the real path does —
+    ///        this milestone has broken that contract three times, each time
+    ///        surfacing as a differential-vector failure rather than as a clear
+    ///        signal, so the parameter is explicit rather than defaulted.
+    function __injectObligation(
+        address logic,
+        address moderator,
+        uint256 caseRef,
+        uint256 committed,
+        uint256 seats
+    ) external {
+        StakeRegistry.Obligation storage o = obligations[obligationKey(logic, moderator, caseRef)];
+        o.committed += uint104(committed);
+        o.drawnUnits += uint16(seats);
         logicCommitted[logic] += committed;
+    }
+
+    /// M2.6-K-5: set a moderator's track directly. `setTrack` is deleted from the
+    /// production surface, and the fixtures that used it were setting up a
+    /// pre-existing standing to measure the freeze curve against — a state a real
+    /// moderator reaches by participating, which no fixture wants to replay.
+    /// Test-only, on the harness, reachable by no logic contract.
+    function __forceTrack(address moderator, uint256 track) external {
+        moderators[moderator].track = track;
     }
 
     function __injectCommitted(address moderator, uint256 amount) external {

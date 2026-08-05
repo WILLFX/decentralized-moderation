@@ -238,6 +238,12 @@ contract RulesetGovernor {
         // `Params` comment already said `< 1e18` — the check was the thing that
         // disagreed with it.
         if (p.trackDecay >= L.WAD) revert BadParams(); // decay is a fraction, strictly
+        // M2.6-K-5: and inside the REGISTRY's immutable envelope. Same shape as the
+        // `riskPerSeat` check above and for the same reason — H-11 pins a ruleset
+        // per case, so a decay the registry will reject is not a bad parameter that
+        // gets noticed later, it is a case that can never settle. Checked against
+        // the live registry through the game contract, as `riskPerSeat` is.
+        if (p.trackDecay < moderation.stakeReg().minTrackDecay()) revert BadParams();
         if (p.claimBountyFrac + p.bonusFrac > L.WAD) revert BadParams(); // distributable stays >= 0
 
         // H-11: hard protocol caps + cross-field sanity so governance cannot brick

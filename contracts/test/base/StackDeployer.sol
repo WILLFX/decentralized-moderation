@@ -45,6 +45,11 @@ abstract contract StackDeployer is Test {
     /// could not keep a window valid. Must exceed `seedLag + REALIZE_SLACK` (2 + 64)
     /// or no window would ever fit.
     uint256 internal constant REG_EPOCH_BLOCKS = 256;
+    /// M2.6-K-5: the registry's immutable floor on a single track-decay write.
+    /// 0.9 WAD admits the shipped 0.95 and any ordinary recalibration below it,
+    /// and bounds one write to a 10% shave. See `StakeRegistry.minTrackDecay` for
+    /// why no admissible floor bounds the COMPOUNDED case.
+    uint256 internal constant REG_MIN_TRACK_DECAY = (1e18 * 9) / 10;
 
     /// The governor deployed alongside the most recent `_deployStack` call, for
     /// suites that drive governance. M2.6 moved ruleset authoring out of
@@ -81,7 +86,8 @@ abstract contract StackDeployer is Test {
             REG_ACTIVATION,
             REG_COOLDOWN,
             REG_RISK_PER_SEAT,
-            REG_EPOCH_BLOCKS
+            REG_EPOCH_BLOCKS,
+            REG_MIN_TRACK_DECAY
         );
         ir = new IndexRegistry(REG_TIMELOCK);
     }

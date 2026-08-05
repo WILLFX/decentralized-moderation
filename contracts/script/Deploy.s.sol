@@ -67,6 +67,11 @@ contract Deploy is Script {
         uint256 exitCooldown;
         uint256 riskPerSeat; // the registry's DUTY UNIT
         uint256 epochBlocks;
+        /// M2.6-K-5: floor on the per-write track decay factor the registry will
+        /// accept. Immutable once deployed, and every ruleset must sit inside it —
+        /// so this is chosen ONCE, for the life of the registry, against the
+        /// compounding analysis in `StakeRegistry.minTrackDecay`.
+        uint256 minTrackDecay;
         uint256 governorTimelock;
         /// Where registry + governor ownership goes. `address(0)` keeps the deployer,
         /// and `verify` will say so.
@@ -86,6 +91,7 @@ contract Deploy is Script {
     error GovernorNotBound();
     error ModerationNotBound();
     error SeatCollateralExceedsDutyUnit();
+    error TrackDecayBelowRegistryFloor();
     error SettlementNotDeployed();
     error SettlementWrongCode();
 
@@ -100,7 +106,8 @@ contract Deploy is Script {
             cfg.activationDelay,
             cfg.exitCooldown,
             cfg.riskPerSeat,
-            cfg.epochBlocks
+            cfg.epochBlocks,
+            cfg.minTrackDecay
         );
         s.indexReg = new IndexRegistry(cfg.registryTimelock);
 
@@ -171,6 +178,15 @@ contract Deploy is Script {
         //    or panels are seated on collateral that cannot cover them (D-13).
         if (s.stakeReg.riskPerSeat() < s.moderation.getParams().riskPerSeat) {
             revert SeatCollateralExceedsDutyUnit();
+        }
+
+        // 4b. M2.6-K-5: and the shipped ruleset's track decay must sit inside the
+        //     registry's immutable envelope. Same class as 4 — the registry bound is
+        //     immutable and the ruleset is pinned per case by H-11, so a stack that
+        //     fails this deploys cleanly and then reverts in `claim()` on every case
+        //     it ever opens. A deployment-time check is the only cheap one.
+        if (s.moderation.getParams().trackDecay < s.stakeReg.minTrackDecay()) {
+            revert TrackDecayBelowRegistryFloor();
         }
 
         // 5. The linked library.

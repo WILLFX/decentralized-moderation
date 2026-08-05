@@ -3,9 +3,8 @@
 **All P0 items are closed.** The re-audit should target the **`m2.6-close` tag**.
 The last code change *before that tag* is `51af155`; everything between it and the
 tag is documentation. Code has landed since — the post-close regression pass and
-post-close items 2b, 4, 5, 8, 9, 10, 11 and P1-3's residual — and the tag is
-deliberately not moved to
-cover it; see the note below.
+post-close items 2b, 4, 5, 8, 9, 10, 11, P1-3's residual and K-5 — and the tag is
+deliberately not moved to cover it; see the note below.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
 > that pass found **eight blocking regressions in items marked closed** plus three
@@ -35,15 +34,15 @@ cover it; see the note below.
 > reasoning circular unless said out loud. Saying it out loud is what made the split
 > the next item rather than a permanent excuse.
 >
-> **K-5 is the highest-severity thing still open.** It held that position when this
-> was written, lost it to item 10, and holds it again now that item 10 has landed —
-> see "Where things stand" below. K-5 is new to the record:
-> `StakeRegistry.setTrack` takes no `caseRef` and writes absolutely, so during a
-> handover — when both logics are authorized by design — either can overwrite any
-> moderator's track. It is the one residual of P0-5's scoping. Not a fund drain;
-> track is not stake. But track drives the §6.4 freeze curve and is the protocol's
-> only accumulated-standing signal, so the harm is reputation corruption and
-> freezing-power manipulation.
+> **K-5 was the last High and it is now BUILT.** It held that position when this was
+> written, lost it to item 10, took it back when item 10 landed, and is closed.
+> `StakeRegistry.setTrack` took no `caseRef` and wrote absolutely, so during a
+> handover — when both logics are authorized by design — either could overwrite any
+> moderator's track. `recordParticipation` replaces it, scoped to an obligation the
+> caller drew. **Nothing at severity High is open.** What carries forward is not an
+> item but an ACCEPTED SURFACE: three writes the registry permits and the honest
+> logic never makes, all three because tightening them needs game state the registry
+> deliberately does not hold. See the work order's "K-5" section.
 
 Two notes on that pointer. First, why not the last code commit: the deployed
 bytecode is byte-identical between `51af155` and the close, which touches only
@@ -73,7 +72,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass + the post-close items): **256
+**Suite now** (tag + the post-close regression pass + the post-close items): **264
 passing, 21 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
@@ -116,12 +115,24 @@ all revealers at earlier depths. The work order's "Item 10" section carries the
 derivation, the counterexample that bounds the claim, and what the build found that
 the design did not.
 
-**The highest-severity thing still open is K-5** — `StakeRegistry.setTrack` is not
-obligation-scoped — and it is now the only named residual carried by severity: the
-`trackDecay < WAD` clause closed with P1-3 (`RulesetGovernor.sol:240` accepted decay
-at parity, which is no decay at all, so track grew without bound on repeated coherent
-participation — the WO-6 farming vector, feeding the §6.4 freeze curve). K-5 and the
-rest of the P1/P2 list are in the work order.
+**Nothing at severity High is open.** K-5 was the last one: `setTrack` is deleted and
+`recordParticipation(moderator, caseRef, coherentUnits, decayFactor)` replaces it,
+scoped to an obligation the caller drew, with the decay factor bound per case-round so
+it cannot be varied between moderators once the outcome is known. The value stays
+global — `m.track` is untouched, so standing still accumulates across logic versions,
+which is the constraint that ruled out the obvious per-case-handle shape. The
+`trackDecay < WAD` clause closed earlier with P1-3. K-1/K-2/K-3 and the P1/P2 list
+remain, none of them a live defect.
+
+Two things a re-auditor should carry from K-5 rather than treat as closed. The
+**accepted surface**: the registry permits a track write for a drawn-but-uncommitted
+holder, on a VOIDed case, and at any lifecycle point — all three because tightening
+them needs game state the registry deliberately does not hold, which is the same fact
+that rejected moving the update rule wholesale into the registry. And the
+**compounding residual**: decay is multiplicative and obligations are per round, so a
+logic can apply it up to N times per case — N is 16 at the shipped ruleset and 81 at
+governance caps — and no floor that admits the shipped 0.95 bounds `0.95^81`. The
+floor bounds the step; only the logic's own once-per-case rule bounds the count.
 
 **Do not read the differential campaign as an oracle** (item 11, partly built).
 `simulation/vectors/reference_int.py` is a **port** of the Solidity, not an
@@ -146,9 +157,9 @@ untouched by that**, and closing one should not be read as closing both: the vec
 still cannot express a banked round or `target > seats seated`.
 
 After the post-close regression pass, the second structural split, the split's
-follow-up, and post-close items 2b, 4, 5, 8, 9 and 10: `Moderation` **19,980 (4,596
-free)**, `Settlement` 6,796, `StakeRegistry` 12,126, `IndexRegistry` 6,256,
-`RulesetGovernor` 4,246.
+follow-up, and every post-close item through K-5: `Moderation` **19,980 (4,596
+free)**, `Settlement` 6,674, `StakeRegistry` 12,906, `IndexRegistry` 6,256,
+`RulesetGovernor` 4,430.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
 and a further 761 when VOID disposal followed settlement across the seam, so it
@@ -246,6 +257,10 @@ Added by the post-close items, each with its own section in the work order:
 - **Track decay must be STRICTLY below parity** (P1-3's residual): the validator
   accepted `trackDecay == WAD`, which is no decay at all — track then grew without
   bound on repeated coherent participation, and it feeds the §6.4 freeze curve.
+- **Track writes are obligation-scoped** (K-5): `setTrack` is deleted, the registry
+  computes the transition instead of accepting a value, and the decay factor is bound
+  per case-round so it cannot be varied between moderators after the outcome is
+  known.
 
 ## Judgment calls — don't silently reverse them
 

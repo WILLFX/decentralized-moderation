@@ -6,13 +6,13 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
 > independently verified and eight blocking regressions were found in items marked
 > closed, plus three fixes that no test discriminated. They are fixed on top of it,
-> as are the post-close items 2b, 4, 5, 8, 9, 10, 11 and P1-3's residual; the tag is
+> as are the post-close items 2b, 4, 5, 8, 9, 10, 11, P1-3's residual and K-5; the tag is
 > not moved, because it is the
 > commit the audit ran against. See the "Regressions found after the close" table
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **256 passing tests** (188 at the tag) including a
+> registries — with **264 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a 52-vector differential regression test
 > against a Python integer reference (a port of the Solidity, not an independent
 > derivation — see `Differential.t.sol`'s header for what that does and does not
@@ -77,7 +77,7 @@ lived only in the module map above.
 
 | # | step | why here |
 |---|---|---|
-| 1 | `StakeRegistry(token, timelock, minStake, activationDelay, exitCooldown, riskPerSeat, epochBlocks)` | governance is `msg.sender` |
+| 1 | `StakeRegistry(token, timelock, minStake, activationDelay, exitCooldown, riskPerSeat, epochBlocks, minTrackDecay)` | governance is `msg.sender`; `minTrackDecay` is immutable and every ruleset must sit inside it (K-5) |
 | 2 | `IndexRegistry(timelock)` | governance is `msg.sender` |
 | 3 | `RulesetGovernor(governance, timelock)` | **before** `Moderation` — `Moderation.governor` is immutable |
 | 4 | deploy + link `Settlement` | Foundry's job; see the link note below |
@@ -95,8 +95,10 @@ it, with no repair from either side.
 unusable, so a broken deployment fails the script rather than the first case: one
 token across `Moderation` and the registry; `OPEN_AND_SETTLE` on **both** registries
 (desynchronised authorization is its own failure, not half of one); the bind checked
-from both sides; `stakeReg.riskPerSeat() >= moderation.getParams().riskPerSeat`; and
-the linked library.
+from both sides; `stakeReg.riskPerSeat() >= moderation.getParams().riskPerSeat`;
+`moderation.getParams().trackDecay >= stakeReg.minTrackDecay()` (K-5 — below the
+floor, every case opens and then reverts in `claim()` forever); and the linked
+library.
 
 **The link is the one thing no in-script check can prove.** The library address is
 baked into `Moderation`'s bytecode at link time and Solidity cannot read its own link

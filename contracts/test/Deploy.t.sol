@@ -41,6 +41,7 @@ contract DeployTest is Test {
             exitCooldown: 7 days,
             riskPerSeat: 10 * XBZZ,
             epochBlocks: 256,
+            minTrackDecay: (1e18 * 9) / 10,
             governorTimelock: 7 days,
             governanceOwner: address(0)
         });
@@ -62,7 +63,7 @@ contract DeployTest is Test {
     /// binds afterward.
     function test_moderation_cannot_be_deployed_before_its_governor() public {
         StakeRegistry sr = new StakeRegistry(
-            IERC20(address(bzz)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256
+            IERC20(address(bzz)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256, (1e18 * 9) / 10
         );
         IndexRegistry ir = new IndexRegistry(7 days);
         vm.expectRevert(Moderation.ZeroGovernor.selector);
@@ -80,7 +81,7 @@ contract DeployTest is Test {
         // the mismatch is between the two constructor arguments, which is exactly
         // how it would arise from a copy-pasted address.
         StakeRegistry sr = new StakeRegistry(
-            IERC20(address(other)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256
+            IERC20(address(other)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256, (1e18 * 9) / 10
         );
         IndexRegistry ir = new IndexRegistry(7 days);
         RulesetGovernor g = new RulesetGovernor(address(this), 7 days);
@@ -174,7 +175,7 @@ contract DeployTest is Test {
     function test_verify_rejects_a_governor_that_was_never_bound() public {
         // Everything except the bind.
         StakeRegistry sr = new StakeRegistry(
-            IERC20(address(bzz)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256
+            IERC20(address(bzz)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256, (1e18 * 9) / 10
         );
         IndexRegistry ir = new IndexRegistry(7 days);
         RulesetGovernor g = new RulesetGovernor(address(this), 7 days);

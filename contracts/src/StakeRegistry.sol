@@ -66,25 +66,43 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///   correct.
 /// - Governance still names the authorized logic, behind a timelock. That remains
 ///   the trust root.
-/// - **`setTrack` is NOT scoped, and that is a live gap, not a rough edge.** It
-///   takes no `caseRef` and performs an absolute write, so `onlyLogic` is its only
-///   gate — and `onlyLogic` blocks a REVOKED logic, nothing more. Trust model #3
-///   keeps both logics authorized through a handover *deliberately*, so the risk is
-///   not a buggy contract: a concurrently authorized logic can overwrite any
-///   moderator's track while the outgoing one is still settling, by design of the
-///   handover rather than in spite of it. No test covers this and none can be
-///   written against the current signature.
+/// - **`setTrack` is GONE (M2.6-K-5).** It took no `caseRef` and wrote an absolute
+///   value, so a concurrently authorized logic could overwrite any moderator's
+///   track — including moderators it had never drawn — by design of the handover
+///   rather than in spite of it. `recordParticipation` replaces it: the caller must
+///   hold an obligation created by a draw, may use it once, may credit no more than
+///   the seats it drew, must pass a decay factor inside this contract's immutable
+///   envelope, and must use the SAME factor for every moderator in one case-round.
+///   The value itself stays global — `m.track` is untouched by the change, so
+///   standing accumulates across logic versions and no migration resets it. That is
+///   the point of the registry outliving the game, and it is why the authority is
+///   scoped rather than the value.
 ///
-///   It cannot move, freeze or credit a wei, so it is not a solvency problem. What
-///   it corrupts is the moderator's accumulated standing: `track` drives the §6.4
-///   freezing-power curve, so a wrong value changes the penalties an honest
-///   moderator can impose and must suffer, and it is the protocol's only
-///   reputation signal (design principle 4). Severity **High**, tracked as **K-5**
-///   in `specs/m2_6-work-order.md`. Unfixed here because `setTrack` is on the
-///   production path via `Moderation._touchTrack` (so deletion is not available the
-///   way it was for `penalizeNoShow`), because scoping it first needs the per-logic
-///   vs global track question settled, and because it does not fit `Moderation`'s
-///   remaining EIP-170 margin.
+///   **The accepted surface, and why it is a consequence rather than an oversight.**
+///   Three things the registry still permits that the honest logic does not do:
+///
+///     (a) a track write for a holder that was drawn but never committed;
+///     (b) a track write on a case that VOIDed;
+///     (c) a track write at any point in the case's lifecycle, including before it
+///         has finished.
+///
+///   All three have ONE cause: tightening any of them requires knowing whether a
+///   seat committed, whether a case voided, or what phase it is in — and every one
+///   of those is game state this contract deliberately does not hold. That is the
+///   same reason the update RULE could not move here wholesale: coherence is a
+///   function of the final outcome, so `coherentUnits` is a claim this contract
+///   bounds but cannot verify. Buying (a)-(c) back would mean importing the case
+///   state machine into the permanent registry, which is the coupling this
+///   architecture exists to avoid.
+///
+///   **What remains open, stated as a bound rather than a hope.** A logic can still
+///   corrupt the standing of moderators it legitimately drew, within the envelope
+///   and once per obligation. Obligations are per case-ROUND while the decay rule is
+///   per CASE, so the registry cannot enforce once-per-case without parsing
+///   `caseRef` — which would re-couple it to a replaceable logic's encoding. Decay
+///   compounds: `N` writes multiply to `minTrackDecay^N`, `N` up to 81 at governance
+///   caps. See `minTrackDecay` for why no admissible floor bounds that, and
+///   `specs/m2_6-work-order.md` K-5 for the full accounting.
 /// - `reward` is likewise per-moderator rather than per-obligation, but it is
 ///   funded-on-call and balance-checked (P0-4), so the worst an authorized logic
 ///   does is credit a reward out of its own money.
@@ -166,6 +184,27 @@ contract StakeRegistry {
     ///         that check trustworthy — a mutable value could be lowered after a
     ///         ruleset was validated against it.
     uint256 public immutable riskPerSeat;
+
+    uint256 internal constant WAD = 1e18;
+
+    /// @notice M2.6-K-5. The floor on how much standing one track write may
+    ///         destroy: `recordParticipation` accepts a decay factor only in
+    ///         `[minTrackDecay, WAD)`. Same shape as `riskPerSeat` — the registry
+    ///         owns the range, the ruleset picks a value inside it, and the
+    ///         governor rejects any ruleset that does not.
+    /// @dev **Read the residual before choosing this number.** Decay is
+    ///      MULTIPLICATIVE and this bounds ONE write. A logic holds one obligation
+    ///      per case-round, so a moderator drawn into every round of a case can be
+    ///      decayed `N` times, and the compounded floor is `minTrackDecay^N`, not
+    ///      `minTrackDecay`. `N` is 16 at the shipped ruleset and 81 at governance
+    ///      caps. At `N = 81`: 0.99 retains 44%, 0.95 retains 1.6%, 0.9 retains
+    ///      0.02%. Since a legitimate ruleset must be admitted and the shipped
+    ///      decay is 0.95, no floor at or above 0.95 is available — so this
+    ///      constant CANNOT bound the compounded case, and does not claim to. It
+    ///      bounds the step. The count is bounded only by the logic's own
+    ///      once-per-case rule, which this contract cannot enforce without parsing
+    ///      `caseRef` — see the accepted surface in the header.
+    uint256 public immutable minTrackDecay;
 
     // --- eligibility epochs (M2.6-P0-3) --------------------------------------
     //
@@ -286,15 +325,38 @@ contract StakeRegistry {
     /// in the protocol — it moves `MAX_PANEL` directly.
     ///
     /// Ranges: xBZZ has 16 decimals and a supply around 6.25e23 base units, so
-    /// `uint112` (~5.2e33) cannot be reached by any real amount; seats per case
-    /// are bounded by `MAX_PANEL`, far inside `uint32`.
+    /// `uint104` (~2.0e31, 32 million times the supply) cannot be reached by any
+    /// real amount; seats for one moderator in one case-round are bounded by
+    /// `(1 + MAX_RULE_WIDEN) * MAX_PANEL = 1152` and by `MAX_TOTAL_DRAWS = 4000`
+    /// across the whole case, far inside `uint16`.
+    ///
+    /// **M2.6-K-5 re-packed this struct rather than growing it.** The layout is
+    /// 104 + 104 + 16 + 16 + 8 = **248 bits**, still one slot with 8 to spare. The
+    /// obvious layout — keeping `uint112` twice and adding the two new fields —
+    /// comes to 264 and spills into a second slot, because Solidity stores a
+    /// `bool` in a whole BYTE, not a bit. That would put a second cold SSTORE on
+    /// `drawPanel`'s per-seat path, ~40,000 gas per seat on the most expensive
+    /// transaction in the protocol, which moves `MAX_PANEL` directly. The money
+    /// fields lost 8 bits each to pay for it and are still absurdly oversized.
     struct Obligation {
-        uint112 committed; // stake locked against this specific case
-        uint112 dutyBonded; // escrow posted for its seats
-        uint32 dutyUnits; // seats outstanding for it
+        uint104 committed; // stake locked against this specific case
+        uint104 dutyBonded; // escrow posted for its seats
+        uint16 dutyUnits; // seats OUTSTANDING for it — consumed by settleDuty
+        /// Seats this obligation was ever DRAWN for. Set at the draw and **never
+        /// decremented**. M2.6-K-5: this is what `recordParticipation` reads, for
+        /// both its existence test and its magnitude bound, so neither check
+        /// depends on running before `settleDuty` consumes `dutyUnits`. A nonzero
+        /// value is itself the "created by a draw" proof — no separate flag.
+        uint16 drawnUnits;
+        /// M2.6-K-5: one track write per obligation, ever.
+        bool trackRecorded;
     }
 
     mapping(bytes32 => Obligation) internal obligations;
+    /// M2.6-K-5: the decay factor bound to a case-round on its first track write,
+    /// keyed `keccak256(authEpoch, logic, caseRef)` — deliberately WITHOUT the
+    /// moderator, since making it uniform across moderators is the whole point.
+    mapping(bytes32 => uint256) internal caseTrackDecay;
     /// Bumped each time a logic is authorized, so a contract re-authorized after
     /// revocation cannot inherit handles from its previous life.
     mapping(address => uint256) public authEpoch;
@@ -348,7 +410,18 @@ contract StakeRegistry {
     event StakeReleased(address indexed moderator, uint256 amount);
     event StakeFrozen(address indexed moderator, uint256 amount, uint256 until);
     event Rewarded(address indexed moderator, uint256 amount);
-    event TrackSet(address indexed moderator, uint256 track);
+    /// M2.6-K-5: replaces `TrackSet`. Carries the whole basis of the write — who
+    /// claimed it, under which obligation, the credit claimed and the factor
+    /// applied — because `coherentUnits` is a claim this contract bounds but
+    /// cannot verify, and an unverifiable input should at least be observable.
+    event ParticipationRecorded(
+        address indexed moderator,
+        address indexed logic,
+        uint256 caseRef,
+        uint256 coherentUnits,
+        uint256 decayFactor,
+        uint256 newTrack
+    );
     event DutyUnitsSet(address indexed moderator, uint256 units, uint256 reserved);
     event NoShowPenalized(address indexed moderator, uint256 penalty, uint256 until);
 
@@ -383,6 +456,10 @@ contract StakeRegistry {
     error EpochNotSettled(); // M2.6-P0-3: call advanceEpoch() to apply staged changes
     error NotYourObligation(); // M2.6-P0-5: only the creating case may discharge it
     error LogicStillHasObligations(); // M2.6-P0-5: cannot revoke a logic mid-flight
+    error TrackAlreadyRecorded(); // M2.6-K-5: one track write per obligation
+    error TrackCreditExceedsSeats(); // M2.6-K-5: credit above seats actually drawn
+    error BadTrackDecay(); // M2.6-K-5: decay outside the immutable envelope
+    error TrackDecayNotUniform(); // M2.6-K-5: one decay factor per case-round
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -401,11 +478,15 @@ contract StakeRegistry {
         uint256 _activationDelay,
         uint256 _exitCooldown,
         uint256 _riskPerSeat,
-        uint256 _epochBlocks
+        uint256 _epochBlocks,
+        uint256 _minTrackDecay
     ) {
         if (_epochBlocks == 0) revert AmountZero();
         if (address(_token) == address(0)) revert ZeroAddress();
         if (_riskPerSeat == 0) revert AmountZero();
+        // M2.6-K-5: the envelope must admit a usable decay and must not be WAD
+        // (which is no decay at all — see M2.6-P1-3).
+        if (_minTrackDecay == 0 || _minTrackDecay >= WAD) revert BadTrackDecay();
         token = _token;
         timelockDelay = _timelockDelay;
         minStake = _minStake;
@@ -414,6 +495,7 @@ contract StakeRegistry {
         epochBlocks = _epochBlocks;
         appliedEpoch = block.number / _epochBlocks;
         riskPerSeat = _riskPerSeat;
+        minTrackDecay = _minTrackDecay;
         governance = msg.sender;
         stakeTree.initialize(2);
     }
@@ -577,11 +659,11 @@ contract StakeRegistry {
             totalFreeStake -= fromFree;
         }
         if (fromBond > 0) {
-            o.dutyBonded -= uint112(fromBond);
+            o.dutyBonded -= uint104(fromBond);
             m.dutyBonded -= fromBond;
             totalDutyBondedStake -= fromBond;
         }
-        o.committed += uint112(amount);
+        o.committed += uint104(amount);
         logicCommitted[msg.sender] += amount;
         m.committed += amount;
         totalCommittedStake += amount;
@@ -644,9 +726,76 @@ contract StakeRegistry {
         emit Rewarded(moderator, amount);
     }
 
-    function setTrack(address moderator, uint256 newTrack) external onlyLogic {
-        moderators[moderator].track = newTrack;
-        emit TrackSet(moderator, newTrack);
+    /// @notice Apply one case's track transition to a moderator, scoped to the
+    ///         obligation the caller drew it under (M2.6-K-5).
+    /// @dev **This replaces `setTrack(address,uint256)`, which is DELETED.** That
+    ///      function took no `caseRef` and wrote an absolute value, so `onlyLogic`
+    ///      was its only gate — and `onlyLogic` blocks a revoked logic, nothing
+    ///      more. Trust model #3 keeps both logics authorized through a handover by
+    ///      design, so a concurrently authorized logic could overwrite ANY
+    ///      moderator's track, including moderators it had never drawn.
+    ///
+    ///      What a logic may legitimately do to standing is: report the outcome of
+    ///      an obligation IT created, about the moderator that obligation belongs
+    ///      to, in a magnitude bounded by the work that obligation represents.
+    ///      Every check below is one clause of that sentence.
+    ///
+    ///      **The registry computes the transition; it does not accept a value.**
+    ///      An absolute-value setter cannot be bounded without reconstructing the
+    ///      rule anyway, and it makes a lost update REPRESENTABLE: a logic may read
+    ///      `trackOf` in one transaction and write a value derived from it in
+    ///      another, silently discarding whatever a concurrently authorized logic
+    ///      wrote in between. Today's `Moderation` reads and writes inside one
+    ///      call, so it does not do this — but "no current caller does it" is the
+    ///      argument that failed for `penalizeNoShow`. Here the read-modify-write
+    ///      happens inside the registry, so no caller can express it.
+    ///
+    ///      **What the registry cannot check, and why that is a consequence rather
+    ///      than an oversight:** coherence is a function of the case's final
+    ///      outcome, which is game state this contract deliberately does not hold.
+    ///      So `coherentUnits` is a CLAIM, bounded but not verified. Every widening
+    ///      in the accepted surface (see the header) has that same single cause.
+    /// @param caseRef The caller's own case identity, treated opaquely.
+    /// @param coherentUnits Units of standing earned, bounded by seats drawn.
+    /// @param decayFactor The ruleset's per-case decay, WAD-scaled. Bound to the
+    ///        `caseRef` on first use: every moderator in one case-round decays by
+    ///        the same factor or the call reverts.
+    function recordParticipation(address moderator, uint256 caseRef, uint256 coherentUnits, uint256 decayFactor)
+        external
+        onlyLogic
+    {
+        Obligation storage o = _ob(moderator, caseRef);
+        // (1) Created by a draw. `drawnUnits` is never decremented, so this holds
+        //     wherever in settlement the caller chooses to run.
+        if (o.drawnUnits == 0) revert NotYourObligation();
+        // (2) Once per obligation, ever.
+        if (o.trackRecorded) revert TrackAlreadyRecorded();
+        // (3) Bounded by work actually done under this obligation.
+        if (coherentUnits > o.drawnUnits) revert TrackCreditExceedsSeats();
+        // (4) Inside the immutable envelope. The ruleset picks the value; this
+        //     contract owns the range, exactly as it owns `riskPerSeat` while the
+        //     ruleset picks what a case locks.
+        if (decayFactor < minTrackDecay || decayFactor >= WAD) revert BadTrackDecay();
+        // (5) One factor per case-round, across every moderator in it. Without
+        //     this the factor is chosen per call, at settlement, with the outcome
+        //     already known — so a logic could hand the ruleset's decay to the
+        //     moderators it likes and the floor to the ones it does not, and all
+        //     four checks above would pass. No legitimate ruleset can express a
+        //     decay that varies between moderators inside one case: `trackDecay` is
+        //     per case and H-11 pins it. Binding it here makes per-target selection
+        //     unrepresentable while leaving a replacement logic free to pick its
+        //     own decay. Zero is not a legal factor (check 4), so zero means unset
+        //     and no existence flag is needed.
+        bytes32 ck = keccak256(abi.encode(authEpoch[msg.sender], msg.sender, caseRef));
+        uint256 bound = caseTrackDecay[ck];
+        if (bound == 0) caseTrackDecay[ck] = decayFactor;
+        else if (bound != decayFactor) revert TrackDecayNotUniform();
+
+        o.trackRecorded = true;
+        Moderator storage m = moderators[moderator];
+        uint256 next = (m.track * decayFactor) / WAD + coherentUnits * WAD;
+        m.track = next;
+        emit ParticipationRecorded(moderator, msg.sender, caseRef, coherentUnits, decayFactor, next);
     }
 
     /// Stake-weighted draw over the currently eligible set (read-only preview).
@@ -728,7 +877,12 @@ contract StakeRegistry {
             // M2.6-P0-5: the seat and its escrow belong to THIS case.
             Obligation storage ob = _ob(seat, caseRef);
             ob.dutyUnits += 1;
-            ob.dutyBonded += uint112(riskPerSeat);
+            // M2.6-K-5: the permanent record that this obligation came from a draw.
+            // `dutyUnits` is the OUTSTANDING count and `settleDuty` consumes it;
+            // this one is never decremented, so `recordParticipation` can test
+            // existence and bound magnitude without depending on running first.
+            ob.drawnUnits += 1;
+            ob.dutyBonded += uint104(riskPerSeat);
             logicDutyReserved[msg.sender] += 1;
             seats[drawn++] = seat;
             // The persistent weight shrink is STAGED for the next epoch. Applying
@@ -749,7 +903,7 @@ contract StakeRegistry {
     ///      settlement later, where the cause was no longer visible.
     function _debit(Obligation storage o, uint256 amount) internal {
         if (o.committed < amount) revert NotYourObligation();
-        o.committed -= uint112(amount);
+        o.committed -= uint104(amount);
         logicCommitted[msg.sender] -= amount;
     }
 
@@ -795,7 +949,7 @@ contract StakeRegistry {
         // the moderator's pooled totals is what let a settlement hand back escrow
         // belonging to another case's outstanding seat.
         uint256 rel = units > o.dutyUnits ? o.dutyUnits : units;
-        o.dutyUnits -= uint32(rel);
+        o.dutyUnits -= uint16(rel);
         logicDutyReserved[msg.sender] -= rel;
         m.dutyReserved -= rel;
 
@@ -805,7 +959,7 @@ contract StakeRegistry {
             _syncTree(moderator, m);
             return;
         }
-        o.dutyBonded -= uint112(seatBond);
+        o.dutyBonded -= uint104(seatBond);
         m.dutyBonded -= seatBond;
         totalDutyBondedStake -= seatBond;
 

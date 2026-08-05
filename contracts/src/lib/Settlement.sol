@@ -396,14 +396,20 @@ library Settlement {
     ) private {
         if (decayed[a]) return;
         decayed[a] = true;
-        uint256 t = (x.stakeReg.trackOf(a) * p.trackDecay) / WAD;
         // M2.6-item-2b: "undisputed" means never APPEALED. `rounds.length == 1` was
         // that test only while a depth held one round; a case that stalled once and
         // then adjudicated was never disputed either. Equivalent before 2b.
-        if (c.depth == 0 && r.reveals[a] != Moderation.Vote.None && _coherent(r.reveals[a], fo)) {
-            t += WAD; // +1 for a coherent, undisputed participation
-        }
-        x.stakeReg.setTrack(a, t);
+        //
+        // M2.6-K-5: the registry now COMPUTES the transition — this passes the
+        // credit and the ruleset's factor instead of a finished value, and the
+        // `trackOf` read is gone with the absolute write it fed. The dedup above is
+        // still what makes decay once-per-CASE: the registry's one-shot flag is per
+        // OBLIGATION, and a case holds one per round, so dropping this map would
+        // compound the decay by the round count. It is enforced here because only
+        // the logic knows what a case is.
+        uint256 coherentUnits =
+            (c.depth == 0 && r.reveals[a] != Moderation.Vote.None && _coherent(r.reveals[a], fo)) ? 1 : 0;
+        x.stakeReg.recordParticipation(a, r.caseRef, coherentUnits, p.trackDecay);
     }
 
     /// @dev H-07/H-10: settle a seat-holder's duty reservations, penalising the

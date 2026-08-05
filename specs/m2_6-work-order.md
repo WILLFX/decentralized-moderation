@@ -426,8 +426,10 @@ actually scoped and actually tested; see `test_cross_logic_discharge_reverts`.)*
   performs an absolute write (`StakeRegistry.sol:571`), so `onlyLogic` is the only
   gate — which blocks a revoked logic and nothing else. During a handover both
   logics are authorized, so B can overwrite any moderator's track. This is
-  **K-5** in the open table below; it was not built and cannot be tested as
-  written.
+  **K-5**, and it is now BUILT — `setTrack` is deleted and the test that could not
+  be written against the old signature exists against the new one
+  (`test_a_concurrent_logic_cannot_touch_a_moderator_it_never_drew`). See the "K-5"
+  section.
 
 Also tested: `canRevoke` is false until counters hit zero; a retiring logic rejects
 submissions but still settles; a revoked logic refuses fees rather than trapping
@@ -775,8 +777,8 @@ fixes with no discriminating test coverage. They are recorded in their own secti
 fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
 deliberately NOT moved, because it is the commit the audit ran against and moving
 it would invalidate that verification. Current state, after the regression pass and
-post-close items 2b, 4, 5, 8, 9, 10 and 11: **256 tests, 21 suites**, green at every
-commit, `Moderation` 19,980 B (4,596 free — see "Size position"). The
+post-close items 2b, 4, 5, 8, 9, 10, 11, P1-3 and K-5: **264 tests, 21 suites**, green
+at every commit, `Moderation` 19,980 B (4,596 free — see "Size position"). The
 seventeenth suite is `StalledDraw.t.sol`, split out of `CaseLifecycle.t.sol` when
 that contract outgrew the `via_ir` pipeline; a file move, not new coverage. The
 eighteenth is `SeatDraw.t.sol`; the last three are `StallRound.t.sol` (item 2b),
@@ -925,24 +927,30 @@ missed. None is a P0.
 Named here so a re-auditor does not read them as misses. None is being fixed in
 this pass.
 
-**Read K-5 first.** With item 10 built (`e072945`) and struck from this table, K-5 is
-the highest-severity entry left, and it is the one a re-auditor should check before
-anything else here. Nothing remaining in this table is a live defect on shipped code
-of item 10's kind; K-5 is a scoping hole reachable only during a handover, and the
-rest are gaps, inefficiencies or design questions.
+**Nothing in this table is High any more.** Item 10 was built and struck; K-5 was
+built and struck. What remains is K-1, K-2 and K-3 — one efficiency gap, one
+economics question and one ordering wrinkle, none of them a live defect on shipped
+code. A re-auditor should read the ACCEPTED SURFACE recorded under "K-5" below
+rather than this table: closing K-5 left three widenings the registry permits and
+the honest logic does not, and they are deliberate.
 
 | # | Item | Severity | Why not P0 |
 |---|---|---|---|
 | K-1 | **Keeper economics: unpaid work, and work decoupled from progress.** *(Two findings, merged — one gap.)* **(a)** Batched settlement (H-04), batched seat drawing (P1-2) and batched VOID disposal (P0-7) all pay the claim bounty to whoever sends the **last** batch. Every earlier batch is unpaid gas, so only the terminal one is incentivised and a large case can sit part-settled. **(b)** M2.6-P0-3b added a second unpaid path, and it is worse in kind: a `realizeSeats` poke that finds the epoch unsettled spends itself draining and **advances no case at all** — it seats nobody, moves no phase, and cannot become the terminal batch that earns the bounty. A full 128-item batch measures 1.83M gas over a 1000-leaf tree (~840k at the suite's fixture scale). The fix that removed the keeper REQUIREMENT therefore left keeper-shaped work with no reward attached to it. | **P1** | Permissionless, and several parties hold a direct claim on completion — the submitter's refund, winning appeal contributors' payouts, and every seat-holder's committed stake are all released by it. An efficiency and latency problem, not a stuck-funds one. (b) is additionally self-healing: the drain is permissionless, anyone can call `advanceEpoch` directly, and the epoch completes the moment somebody does. A pro-rata bounty split across batches addresses (a); (b) needs the drain to be attributable in the first place, since it is tied to no case today. |
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
-| K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and when this was written it did not fit the 469 bytes left in `Moderation`. The size objection is now spent — the second structural split left 4,596 bytes free — so what remains is the design question alone. |
 
-K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which is the
+K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which was the
 only caller of `setTrack`), and when this table was written it had no room for
 them — which is why the second structural split was a precondition for that work
 rather than an optimisation to consider afterwards. The split has since happened;
-`Moderation` has 4,596 bytes free, and size no longer defers any of the three.
+`Moderation` has 4,596 bytes free, size no longer defers any of the three, and K-5
+is built. Worth recording how the byte objection actually resolved: K-5 cost
+`Moderation` **nothing**. The whole change landed in `StakeRegistry` and
+`Settlement`, and `Settlement` got *smaller*, because deleting the `trackOf` read
+removed a cross-contract call. The margin was never the real obstacle — the design
+question was — which is the thing the circularity note below was written to make
+visible.
 
 **Closed after this table was written:**
 
@@ -950,6 +958,11 @@ rather than an optimisation to consider afterwards. The split has since happened
   from the table above. It was the only entry that was a live defect on shipped code.
   See the "Item 10" section for the derivation, the neutraliser and what the build
   found that the design did not.
+- **K-5, the unscoped `setTrack`, is BUILT** and struck from the table above.
+  `setTrack(address,uint256)` is deleted; `recordParticipation(moderator, caseRef,
+  coherentUnits, decayFactor)` replaces it, scoped to an obligation the caller drew.
+  Full design, the three constraints it satisfies, and the accepted surface are in
+  the "K-5" section below. **This was the last High.**
 - **P1-3's `trackDecay < WAD` residual is BUILT** and struck from the table above:
   `RulesetGovernor.sol:240` was `> L.WAD`, so parity was accepted, and parity is not
   slow decay but NO decay — track then grows without bound on repeated coherent
@@ -1824,6 +1837,177 @@ still be drawn.
 > gap; the three that stand, stand because they argue from structure (escrow at draw
 > time, a superseded selector, a superseded field) rather than from a derived weight.
 
+## K-5 — `setTrack` is obligation-scoped (BUILT, post-close). The last High
+
+**Severity: High. Was live on shipped code. BUILT.** `StakeRegistry.setTrack(address,
+uint256)` was `onlyLogic`, took no `caseRef` and wrote an absolute value. `onlyLogic`
+blocks a REVOKED logic and nothing more, and trust model #3 keeps both logics
+authorized through a handover *by design*, so a concurrently authorized logic could
+overwrite the standing of a moderator it had never drawn. Not a solvency bug — track
+is not stake — but track drives the §6.4 freeze curve and is the protocol's only
+accumulated-standing signal (design principle 4), so the harm is reputation
+corruption and freezing-power manipulation.
+
+### The question, stated before the mechanism
+
+*How do you scope writes to a value whose reads must be global?* A global track is the
+point of the registry outliving the game: standing accumulates across logic versions.
+A per-case handle in the P0-5 shape implies per-version semantics, which would reset
+standing on migration and defeat the purpose.
+
+Framed as a permission instead of a signature, the answer falls out:
+
+> A logic may report the outcome of a seat obligation **it created**, about **the
+> moderator that obligation belongs to**, in a magnitude bounded by **the work that
+> obligation represents**.
+
+Every check in `recordParticipation` is one clause of that sentence.
+
+### The three constraints, simultaneously
+
+**C1 — Scoped authority.** No logic may change standing except as a consequence of an
+obligation it created.
+
+**C2 — Global accumulation.** The value survives migration; nothing may namespace it
+per logic.
+
+**C3 — Rule stability under a bounded envelope.** Neither the rule nor the magnitude
+may be caller-chosen, or the farming vector `trackDecay < WAD` just closed comes back
+through a different door.
+
+C1 and C2 are the tension, and the resolution is the house pattern already stated at
+`StakeRegistry.sol`'s obligation block: **obligations are the authorization layer,
+per-moderator aggregates are the accounting layer.** Stake works this way already.
+Track now scopes the *authority* and leaves the *value* global — `m.track` is
+untouched by this change, so no migration and no backfill.
+
+### Shape A — move the update rule into the registry. REJECTED, on two reasons
+
+The motivating analogy was P0-1b: a value that must outlive the logic should have its
+rule outlive the logic too. It does not carry.
+
+1. **The registry cannot evaluate the rule's discriminating input.** Coherence is a
+   function of the case's final outcome — game state the registry deliberately does
+   not hold. The registry would own the arithmetic and none of the claim.
+2. **`trackDecay` is pinned per case by H-11.** A registry-side parameter has no
+   per-case pinning, so a case opened under 0.95 would settle under whatever is
+   current.
+
+The auditor checked whether either reason alone is fatal: it is not — a registry could
+own decay-only and take coherence as an input — so **(2) is the load-bearing one.**
+Recorded that way because the ordering matters if anyone revisits this.
+
+The `penalizeNoShow` analogy does not carry either: deletion removed that class because
+the selector had no legitimate use left. `setTrack` has one, so this class could only
+be **bounded**.
+
+### What was built
+
+```
+recordParticipation(address moderator, uint256 caseRef, uint256 coherentUnits, uint256 decayFactor)
+```
+
+1. `o.drawnUnits != 0` — created by a draw.
+2. `!o.trackRecorded` — once per obligation, ever.
+3. `coherentUnits <= o.drawnUnits` — bounded by work actually done.
+4. `decayFactor` in `[minTrackDecay, WAD)` — the registry's immutable envelope.
+5. `decayFactor` equal to the factor bound to this `caseRef` on its first track write.
+6. `m.track = m.track * decayFactor / WAD + coherentUnits * WAD`.
+
+`setTrack` is deleted. `RulesetGovernor` rejects any ruleset whose `trackDecay` is
+below `stakeReg.minTrackDecay()`, and `Deploy.verify` asserts the same at deployment —
+both for the `riskPerSeat` reason: H-11 pins the ruleset per case, so a decay the
+registry will reject is not a parameter noticed later, it is a case that opens and can
+never settle.
+
+**Check 5 is the one that would have been missed.** Without it the factor is chosen per
+call, at settlement, with the outcome already known, so a logic could hand the
+ruleset's decay to the moderators it likes and the floor to the ones it does not — and
+checks 1-4 all pass. No legitimate ruleset can express a decay that varies between
+moderators inside one case. Binding it per `caseRef` makes per-target selection
+unrepresentable while leaving a replacement logic free to pick its own decay. It binds
+per ROUND rather than per case, the same boundary as the residual below and for the
+same reason.
+
+**The registry computes the transition rather than accepting a value**, which also
+fixes a live bug rather than avoiding a new one. An absolute-value setter makes a lost
+update REPRESENTABLE: a logic may read `trackOf` in one transaction and write a value
+derived from it in another, discarding whatever a concurrently authorized logic wrote
+in between. Today's `Moderation` reads and writes inside one call so it does not do
+this — but "no current caller does it" is the argument that failed for
+`penalizeNoShow`. The read-modify-write now happens inside the registry, so no caller
+can express it. (An earlier draft of this design had the direction of that argument
+inverted, claiming Shape D merely avoided introducing the problem.)
+
+### Two things the build corrected in the ruling
+
+**The packing does not fit as specified.** `uint112 + uint112 + uint24 + bool + bool`
+is **264 bits**, not 250: Solidity stores a `bool` in a whole BYTE, not a bit. That
+spills `Obligation` into a second slot and puts a second cold SSTORE on `drawPanel`'s
+per-seat path — ~40,000 gas per seat on the most expensive transaction in the protocol,
+which moves `MAX_PANEL` directly. Built as `uint104 + uint104 + uint16 + uint16 + bool`
+= **248 bits**, one slot with 8 spare. The money fields lost 8 bits each and remain
+absurdly oversized: `uint104` is 2.0e31 against an xBZZ supply near 6.25e23, a factor
+of 32 million.
+
+**One field replaced both new ones, and closes the ordering hazard in check 3 as well
+as check 1.** The ruling fixed the existence check by reading a `drawn` bit that
+`settleDuty` does not consume. But check 3 reads `dutyUnits` too, and `settleDuty`
+consumes exactly that — so the same fragility survived one clause further on, which is
+P0-3d's lesson (closing the levers you can name is not closing the property). A single
+`drawnUnits`, set at the draw and never decremented, serves as the existence proof AND
+the magnitude bound, so **no check reads a value another call consumes**. The separate
+`drawn` bool is unnecessary: a nonzero count is the proof. Pinned by mutation — making
+either check read `dutyUnits` fails `test_track_write_survives_duty_settlement_running_first`.
+
+### The accepted surface
+
+Three writes the registry permits that the honest logic never makes:
+
+- **(a)** a track write for a holder that was drawn but never committed;
+- **(b)** a track write on a case that VOIDed;
+- **(c)** a track write at any lifecycle point, including before the case finishes.
+
+All three have **one cause**: tightening any of them requires knowing whether a seat
+committed, whether a case voided, or what phase it is in, and every one of those is
+game state the registry deliberately does not hold. That is the same fact that
+rejected Shape A. Buying (a)-(c) back means importing the case state machine into the
+permanent registry, which is the coupling this architecture exists to avoid. They are
+consequences, not oversights, and they are recorded in the registry header as the
+accepted surface.
+
+### The residual, with the exponent
+
+A logic can still corrupt the standing of moderators it legitimately drew, within the
+envelope, once per obligation. Two things make that bound weaker than it first reads,
+and neither is closed:
+
+**Obligations are per case-ROUND; the decay rule is per CASE.** The registry cannot
+enforce once-per-case without parsing `caseRef`, which would re-couple the permanent
+registry to a replaceable logic's encoding. So the logic enforces the per-case rule
+(`trackDecayed`, still in `Settlement`) and the registry enforces per-obligation. Check
+5 binds the factor per round for the same reason and does **not** reduce the count.
+
+**Decay COMPOUNDS.** "Per seat-round" reads as one step; it is not. `N` writes multiply
+to `decayFactor^N`, and `N` is the rounds a moderator can be drawn into for one case —
+**16 at the shipped ruleset, 81 at governance caps**. That exponent, not the single-step
+floor, is what `minTrackDecay` must be chosen against:
+
+| floor | retained at N=16 | retained at N=81 |
+|---|---|---|
+| 0.99 | 85% | 44% |
+| 0.95 | 44% | 1.6% |
+| 0.90 | 19% | 0.02% |
+
+**And no admissible floor bounds the compounded case.** The floor must admit every
+legitimate ruleset, the shipped decay is 0.95, so the floor cannot exceed 0.95 — and
+0.95 itself retains 1.6% at `N = 81`. `minTrackDecay` therefore bounds the STEP and
+does not claim to bound the total; the count is bounded only by the logic's own
+once-per-case rule. Shipped at **0.9**, which admits the shipped 0.95 and ordinary
+recalibration below it. The tension is real and is stated rather than papered over: a
+tighter floor buys compounded safety by forbidding faster decay, which is a legitimate
+calibration choice.
+
 ## Item 11 — the differential campaign is a regression net, not an oracle (FILED, not built)
 
 **Filed post-close. Partly built: the DRIVEN half is closed, the CORPUS half is not.**
@@ -2052,8 +2236,8 @@ widen tranche is filed here too**, since separating tranches needs the same
 per-seat window provenance and should be built once), P1-4 (retry
 economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadlines
 — shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference
-time, = K-3), plus K-1 (keeper per-batch payment) and K-5 (`setTrack` is not
-obligation-scoped — the residual of P0-5, severity High), and the P2 list.
+time, = K-3), plus K-1 (keeper per-batch payment), and the P2 list. **K-5 has left
+this list: it is built.**
 
 **Item 10 was never in that category, and it is now closed** (`e072945`). It was a
 live defect on shipped code at severity High — appeal panels paid to overturn
@@ -2061,8 +2245,10 @@ wherever the deciding round splits evenly, plus turnout suppression enriching th
 survivors — deferred past the close only because its fix had to be calibrated
 against post-2b code. It was. See "Item 10" above.
 
-**Of the list above, K-5 is the one to read first**; it is the only remaining entry
-at severity High.
+**Nothing in the list above is High.** K-5 was the last one and it is built; see
+the "K-5" section. What a re-auditor should carry forward from it is not an open
+item but an accepted surface — three writes the registry permits that the honest
+logic never makes, each for the same stated reason.
 
 **P1-3 has left this list and is closed.** Its clamping half landed post-close and
 its `trackDecay < WAD` half landed here — `RulesetGovernor.sol:240` accepted parity,

@@ -3,7 +3,8 @@
 **All P0 items are closed.** The re-audit should target the **`m2.6-close` tag**.
 The last code change *before that tag* is `51af155`; everything between it and the
 tag is documentation. Code has landed since — the post-close regression pass and
-post-close items 2b, 4, 5, 8, 9 and 10 — and the tag is deliberately not moved to
+post-close items 2b, 4, 5, 8, 9, 10, 11 and P1-3's residual — and the tag is
+deliberately not moved to
 cover it; see the note below.
 
 > **Post-close, read this first.** `m2.6-close` was independently verified, and
@@ -72,7 +73,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass + the post-close items): **254
+**Suite now** (tag + the post-close regression pass + the post-close items): **256
 passing, 21 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
@@ -116,9 +117,11 @@ derivation, the counterexample that bounds the claim, and what the build found t
 the design did not.
 
 **The highest-severity thing still open is K-5** — `StakeRegistry.setTrack` is not
-obligation-scoped — with the `trackDecay < WAD` clause the other named residual, the
-one part of P1-3 that did not land with the clamping fix. Both are in the work
-order's "Knowingly open" table.
+obligation-scoped — and it is now the only named residual carried by severity: the
+`trackDecay < WAD` clause closed with P1-3 (`RulesetGovernor.sol:240` accepted decay
+at parity, which is no decay at all, so track grew without bound on repeated coherent
+participation — the WO-6 farming vector, feeding the §6.4 freeze curve). K-5 and the
+rest of the P1/P2 list are in the work order.
 
 **Do not read the differential campaign as an oracle** (item 11, partly built).
 `simulation/vectors/reference_int.py` is a **port** of the Solidity, not an
@@ -145,7 +148,7 @@ still cannot express a banked round or `target > seats seated`.
 After the post-close regression pass, the second structural split, the split's
 follow-up, and post-close items 2b, 4, 5, 8, 9 and 10: `Moderation` **19,980 (4,596
 free)**, `Settlement` 6,796, `StakeRegistry` 12,126, `IndexRegistry` 6,256,
-`RulesetGovernor` 4,245.
+`RulesetGovernor` 4,246.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
 and a further 761 when VOID disposal followed settlement across the seam, so it
@@ -238,6 +241,11 @@ Added by the post-close items, each with its own section in the work order:
   assertion that `verify` REJECTS each broken stack.
 - **Reward is allocated per adjudicating round with a depth-dependent divisor**
   (item 10), so no depth's per-seat payout is a function of another depth's vote.
+- **A short panel is driven through settlement** (item 11's driven half), so item
+  10's normalizer and divisor are exercised on the one shape where they diverge.
+- **Track decay must be STRICTLY below parity** (P1-3's residual): the validator
+  accepted `trackDecay == WAD`, which is no decay at all — track then grew without
+  bound on repeated coherent participation, and it feeds the §6.4 freeze curve.
 
 ## Judgment calls — don't silently reverse them
 

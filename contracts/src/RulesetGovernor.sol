@@ -228,7 +228,16 @@ contract RulesetGovernor {
         // reaches a recoverable state — every settlement attempt would revert,
         // permanently, and H-11 pins the ruleset per case.
         if (p.freezeCap < L.WAD || p.freezeCap > L.MAX_FREEZE_MULTIPLIER) revert BadParams();
-        if (p.trackDecay > L.WAD) revert BadParams(); // decay is a fraction
+        // M2.6-P1-3 residual: STRICTLY less than WAD. `> L.WAD` accepted
+        // `trackDecay == WAD`, which is not a decay at all — `_touchTrack` computes
+        // `t = track * trackDecay / WAD` and then adds a whole WAD for a coherent
+        // undisputed participation, so at parity every case adds 1 and nothing ever
+        // comes off. Track grows without bound on repeated coherent participation,
+        // which is the farming vector WO-6 recalibrated against; below parity it
+        // converges to `1 / (1 - trackDecay)` (20 WAD at the shipped 0.95). The
+        // `Params` comment already said `< 1e18` — the check was the thing that
+        // disagreed with it.
+        if (p.trackDecay >= L.WAD) revert BadParams(); // decay is a fraction, strictly
         if (p.claimBountyFrac + p.bonusFrac > L.WAD) revert BadParams(); // distributable stays >= 0
 
         // H-11: hard protocol caps + cross-field sanity so governance cannot brick

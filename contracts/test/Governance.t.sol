@@ -493,6 +493,65 @@ contract GovernanceTest is ModerationTestBase {
         _assertConservation();
     }
 
+    // --- M2.6-P1-3 residual: track decay must be STRICTLY below parity --------
+
+    /// `trackDecay == WAD` was accepted: the check was `> L.WAD` where P1-3
+    /// prescribed `< WAD`. At parity there is no decay — `_touchTrack` computes
+    /// `t = trackOf(a) * trackDecay / WAD` and then adds a whole WAD for a coherent
+    /// undisputed participation, so every case adds 1 and nothing ever comes off.
+    /// Track then grows without bound on repeated coherent participation, which is
+    /// the farming vector WO-6 recalibrated against and which the §6.4 freeze curve
+    /// reads directly. Strictly below parity, track converges to `1 / (1 - decay)`.
+    function test_track_decay_at_or_above_parity_is_rejected() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        // Parity itself: the value the old bound let through, and the whole point.
+        p.trackDecay = 1e18;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+
+        // Above parity was already rejected and must stay rejected.
+        p = mod.getParams();
+        p.trackDecay = 1e18 + 1;
+        vm.expectRevert(RulesetGovernor.BadParams.selector);
+        governor.proposeParameters(p, cts, aws);
+
+        // And the bound is tight, not a blanket: one wei below parity is legal.
+        // Slow decay is a calibration choice; NO decay is a different mechanism.
+        p = mod.getParams();
+        p.trackDecay = 1e18 - 1;
+        governor.proposeParameters(p, cts, aws); // must not revert
+    }
+
+    /// The shipped decay must survive the tightened bound — asserted, not assumed.
+    /// A parameter fix that rejects the protocol's own default is a brick.
+    ///
+    /// **This is a GUARD, not a discriminating test.** It passes both before and
+    /// after the `> L.WAD` -> `>= L.WAD` fix, because 0.95 WAD is legal under either.
+    /// It cannot fail for the reason the fix exists; what it catches is a FUTURE
+    /// tightening that moves the bound past the shipped value, or a change to the
+    /// shipped value that walks into it.
+    /// `test_track_decay_at_or_above_parity_is_rejected` is the discriminating one.
+    function test_shipped_track_decay_passes_the_tightened_bound() public {
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = mod.getCommitTargets();
+        uint256[] memory aws = mod.getAppealWindows();
+
+        assertEq(p.trackDecay, (1e18 * 95) / 100, "shipped TRACK_DECAY is 0.95 WAD");
+        assertLt(p.trackDecay, 1e18, "and it is strictly below parity");
+        governor.proposeParameters(p, cts, aws); // must not revert
+
+        // It also has to still APPLY and settle a case, not merely validate.
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        governor.executeParameters();
+        uint256 caseId = _runUndisputed(mods[0], Moderation.Vote.Approve);
+        mod.claim(caseId);
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.SETTLED), "settles under the shipped decay");
+        _assertConservation();
+    }
+
     /// The ruleset the protocol actually ships must survive its own validator.
     function test_default_ruleset_still_validates_under_the_cap() public {
         Moderation.Params memory p = mod.getParams();

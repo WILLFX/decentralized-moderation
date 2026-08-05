@@ -568,10 +568,26 @@ per-depth budget (`1 + maxWiden` today), so a retry axis added later multiplies 
 `attempts` and needs no new term and no second loop. This was a precondition for the
 item-2b stall round, which adds exactly such an axis.
 
-The `freezeCap` / `freezeBase * power` caps landed with P0-8. **Remaining:
-`trackDecay < WAD`** — the check is `> L.WAD`, so `trackDecay == WAD` is still
-accepted. Deliberately not folded in here; it is a calibration question, not a
-bound-shape one.
+The `freezeCap` / `freezeBase * power` caps landed with P0-8.
+
+**`trackDecay < WAD` is now CLOSED too, and P1-3 with it** (`RulesetGovernor.sol:240`,
+`> L.WAD` -> `>= L.WAD`). It had been carried as a calibration question rather than a
+bound-shape one, and that was the wrong reading: `trackDecay == WAD` is not a slow
+decay, it is **no decay**. `_touchTrack` computes `t = trackOf(a) * trackDecay / WAD`
+and then adds a whole WAD for a coherent undisputed participation, so at parity every
+case adds 1 and nothing ever comes off — track grows without bound on repeated
+coherent participation, which is the farming vector WO-6 recalibrated against, and it
+feeds the §6.4 freeze curve directly. Strictly below parity, track converges to
+`1 / (1 - trackDecay)`: 20 WAD at the shipped 0.95. The `Params` comment had said
+`< 1e18` since M2 — the check was the thing that disagreed with the record.
+
+Two tests. `test_track_decay_at_or_above_parity_is_rejected` is the discriminating
+one (it passes at parity on the pre-fix bound and fails it after), and it also pins
+the bound as tight rather than blanket: `WAD - 1` stays legal, because slow decay is a
+calibration choice and no decay is a different mechanism.
+`test_shipped_track_decay_passes_the_tightened_bound` asserts the protocol's own
+0.95 still validates, applies and settles — labelled a GUARD in its own body, since it
+passes under both bounds and cannot fail for the reason the fix exists.
 
 ### P1-4. Retry economics
 Rejection clears the dedup reservation, so identical content is resubmittable at the
@@ -759,7 +775,7 @@ fixes with no discriminating test coverage. They are recorded in their own secti
 fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
 deliberately NOT moved, because it is the commit the audit ran against and moving
 it would invalidate that verification. Current state, after the regression pass and
-post-close items 2b, 4, 5, 8, 9 and 10: **254 tests, 21 suites**, green at every
+post-close items 2b, 4, 5, 8, 9, 10 and 11: **256 tests, 21 suites**, green at every
 commit, `Moderation` 19,980 B (4,596 free — see "Size position"). The
 seventeenth suite is `StalledDraw.t.sol`, split out of `CaseLifecycle.t.sol` when
 that contract outgrew the `via_ir` pipeline; a file move, not new coverage. The
@@ -921,7 +937,6 @@ rest are gaps, inefficiencies or design questions.
 | K-2 | **Retry economics (P1-4).** A REJECT clears the content reservation, so identical content is resubmittable at the base fee — cheaper than the ≥2× pot appeal, with a fresh panel and a fresh probabilistic draw. `N` retries succeed with `1−(1−p)^N`. | **P1** | Every attempt pays a real fee to real moderators, so it is not free; and the escalation it evades (appeal) exists for disputes, not for resubmission. Needs review history persisted in the **registry** so a migration does not reset the counter — which is why it is registry work, not logic work. |
 | K-3 | **Settlement-order dependence, and per-batch freeze expiry.** `_disposeSeat` computes `until` as `block.timestamp + s.freezeDur` at the moment its batch runs, and `_voidStep` recomputes `freezeUntil` per batch. Two seat-holders of the same round therefore thaw at different times purely by which batch disposed them. The reward channel has the same shape: `distributed` accumulates across batches and the final claimer absorbs the pro-rata dust. | **P1** for the freeze, **P2** for the dust | The freeze duration itself (`s.freezeDur`) is computed once at `_settleInit` from state frozen at reveal, so nobody can *lengthen* a freeze by choosing the batching — only shift its start by however long settlement takes, which is bounded against a 7-day base. The dust is bounded by one wei per claimant and is a documented consequence of pull-based payout (C-01). Fix: snapshot one `settleStartedAt` in `SettleState` and derive every `until` from it. |
 | K-5 | **`setTrack` is the residual of P0-5's scoping.** `StakeRegistry.setTrack(moderator, newTrack)` (`:571`) takes no `caseRef` and performs an **absolute write**, so every other write to moderator state names the case it belongs to and this one does not. `onlyLogic` blocks a revoked logic and nothing more, and during a handover both logics are authorized by design (trust model #3) — so logic B can overwrite any moderator's track at will while A is still settling. No test covers this and none can be written against the current signature; the only `setTrack` call in `Registries.t.sol` (`:984`) is incidental inside an epoch test. | **High** | Not a fund drain: track is not stake, and `setTrack` cannot move, freeze or credit a wei. The harm is **reputation corruption and freezing-power manipulation** — track drives the §6.4 freeze curve, so a corrupted track lengthens or shortens the penalties an honest moderator can impose and suffer, and it is the protocol's only accumulated-standing signal (design principle 4). **Why it is not fixed here:** `setTrack` is on the production path via `_touchTrack`, so deletion is not available the way it was for `penalizeNoShow`; scoping it raises an open design question — whether track is per-logic or global, since a global track is the whole point of the registry outliving the game, but a per-case handle implies per-version semantics; and when this was written it did not fit the 469 bytes left in `Moderation`. The size objection is now spent — the second structural split left 4,596 bytes free — so what remains is the design question alone. |
-| P1-3 residual | **`trackDecay == WAD` is still accepted.** The validator's check is `> L.WAD`, so a ruleset can set decay to exactly 1.0 and track never decays. The clamping half of P1-3 landed post-close, and the `freezeCap` / `freezeBase * power` caps landed with P0-8; this clause did not. | **Residual of P1-3 (filed P1)**; no separate severity is assigned to the clause here | A calibration question, not a bound-shape one: `trackDecay == WAD` produces a monotonically non-decreasing track, which is a governance choice a validator arguably should not be the thing to forbid. Deliberately not folded into the clamping fix, so that the fix stayed one property. See "P1-3" above. |
 
 K-1, K-3 and K-5 all land in `Moderation` (K-5 via `_touchTrack`, which is the
 only caller of `setTrack`), and when this table was written it had no room for
@@ -935,6 +950,13 @@ rather than an optimisation to consider afterwards. The split has since happened
   from the table above. It was the only entry that was a live defect on shipped code.
   See the "Item 10" section for the derivation, the neutraliser and what the build
   found that the design did not.
+- **P1-3's `trackDecay < WAD` residual is BUILT** and struck from the table above:
+  `RulesetGovernor.sol:240` was `> L.WAD`, so parity was accepted, and parity is not
+  slow decay but NO decay — track then grows without bound on repeated coherent
+  participation (the WO-6 farming vector) and feeds the §6.4 freeze curve. One
+  character, plus a discriminating test and a labelled guard for the shipped 0.95.
+  It had been carried here as a calibration question, which was the wrong reading of
+  it; see "P1-3" above. **P1-3 is now closed entirely.**
 
 **Closed in this pass rather than carried:**
 
@@ -2027,8 +2049,7 @@ and hot-path storage stays put.
 P1-1 (**re-scoped**: inert widen seats, and the reopened commit window — NOT
 "widen escrow", which was a misreading of a test harness; **P0-6c's over-penalised
 widen tranche is filed here too**, since separating tranches needs the same
-per-seat window provenance and should be built once), P1-3 (validator runtime
-state space — partly done via the MAX_PANEL and freeze bounds), P1-4 (retry
+per-seat window provenance and should be built once), P1-4 (retry
 economics, = K-2), P1-6 (`balance >= liabilities`), P1-7 (widen tranche deadlines
 — shares a mechanism with P1-1(b), fix together), P1-8 (one penalty reference
 time, = K-3), plus K-1 (keeper per-batch payment) and K-5 (`setTrack` is not
@@ -2041,8 +2062,11 @@ survivors — deferred past the close only because its fix had to be calibrated
 against post-2b code. It was. See "Item 10" above.
 
 **Of the list above, K-5 is the one to read first**; it is the only remaining entry
-at severity High. The `trackDecay < WAD` clause is the other named residual — the
-one part of P1-3 that did not land with the clamping fix.
+at severity High.
+
+**P1-3 has left this list and is closed.** Its clamping half landed post-close and
+its `trackDecay < WAD` half landed here — `RulesetGovernor.sol:240` accepted parity,
+which is no decay rather than slow decay. See "P1-3" above.
 
 **Item 11 is partly built**: the differential campaign is a regression net, not an
 oracle, and two of the reference's assumptions are mirrored in the injector so no

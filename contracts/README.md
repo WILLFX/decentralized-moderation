@@ -6,12 +6,13 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
 > independently verified and eight blocking regressions were found in items marked
 > closed, plus three fixes that no test discriminated. They are fixed on top of it,
-> as are the post-close items 2b, 4, 5, 8, 9 and 10; the tag is not moved, because it is the
+> as are the post-close items 2b, 4, 5, 8, 9, 10, 11 and P1-3's residual; the tag is
+> not moved, because it is the
 > commit the audit ran against. See the "Regressions found after the close" table
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **254 passing tests** (188 at the tag) including a
+> registries — with **256 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a 52-vector differential regression test
 > against a Python integer reference (a port of the Solidity, not an independent
 > derivation — see `Differential.t.sol`'s header for what that does and does not

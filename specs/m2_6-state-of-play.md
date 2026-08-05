@@ -120,7 +120,7 @@ obligation-scoped — with the `trackDecay < WAD` clause the other named residua
 one part of P1-3 that did not land with the clamping fix. Both are in the work
 order's "Knowingly open" table.
 
-**Do not read the differential campaign as an oracle** (item 11, filed not built).
+**Do not read the differential campaign as an oracle** (item 11, partly built).
 `simulation/vectors/reference_int.py` is a **port** of the Solidity, not an
 independent derivation, so 52 vectors agreeing at wei resolution proves the two have
 not drifted apart — not that the arithmetic is right; a wrong formula would be wrong
@@ -132,6 +132,15 @@ sought; `__injectSeat` does `r.target += seats`). Those are item 10's two degree
 freedom exactly. Both shapes are covered by unit fixtures, so it is a coverage-shape
 gap rather than an unchecked property — but the campaign is a regression net, and the
 record previously described it in terms that invited an auditor to price it higher.
+
+There were **two** holes here and only one is closed. The driven one was:
+`test_panel_short_of_target_when_capacity_is_scarce` produced a short panel and
+stopped at COMMIT, so item 10's allocation was never exercised end-to-end on the shape
+where its normalizer and divisor diverge. It now runs to settlement — 2 seats against
+a target of 20, a divisor of 1 against 2 revealed, nine tenths of the pot back to the
+fee payer — with both terms mutated to confirm it discriminates. **The corpus hole is
+untouched by that**, and closing one should not be read as closing both: the vectors
+still cannot express a banked round or `target > seats seated`.
 
 After the post-close regression pass, the second structural split, the split's
 follow-up, and post-close items 2b, 4, 5, 8, 9 and 10: `Moderation` **19,980 (4,596

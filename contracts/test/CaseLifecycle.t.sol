@@ -844,6 +844,142 @@ contract CaseLifecycleTest is ModerationTestBase {
         (, uint256 r0,) = sr.dutyOf(few[0]);
         (, uint256 r1,) = sr.dutyOf(few[1]);
         assertEq(r0 + r1, 2, "both moderators' capacity is in use");
+
+        // --- M2.6-item-11: carry the short panel through SETTLEMENT ----------
+        //
+        // Stopping at COMMIT was the gap. `r.target` (capacity SOUGHT) and
+        // `revealedSeats` are item 10's normalizer and its divisor input, and a
+        // short panel is the one shape where they diverge — so up to here nothing
+        // DRIVEN exercised item 10's allocation off its degenerate case, and the
+        // differential corpus cannot express it at all (`__injectSeat` does
+        // `r.target += seats`, so sought == seated in every vector).
+        _shortPanelThroughSettlement(m, sr, caseId, few);
+    }
+
+    /// The settlement half of `test_panel_short_of_target_when_capacity_is_scarce`.
+    /// Split out for the `via_ir` stack, not because it is a separate property.
+    function _shortPanelThroughSettlement(
+        ModerationHarness m,
+        StakeRegistryHarness sr,
+        uint256 caseId,
+        address[2] memory few
+    ) internal {
+        uint256 pot = _potOf(m, caseId);
+
+        // Both seats commit. That is 2 against `minReveals` of 3, so `_endCommit`
+        // WIDENS rather than opening reveal — and each widen buys another target's
+        // worth of capacity that does not exist, seats nobody, and falls through to
+        // COMMIT again (the zero-seat batch path). Three widens exhaust the shared
+        // per-depth budget and the round finally reaches REVEAL.
+        _commitBoth(m, caseId, few);
+        uint256 guard;
+        while (uint256(_phaseOfLocal(m, caseId)) != uint256(Moderation.Phase.REVEAL)) {
+            require(guard++ < 24, "never reached REVEAL");
+            if (uint256(_phaseOfLocal(m, caseId)) == uint256(Moderation.Phase.COMMIT)) {
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+                m.closeCommit(caseId);
+            } else {
+                _pokeSeats(m, sr, caseId);
+            }
+        }
+
+        (uint256 nSeats,,,,,, uint256 widens,,,) = m.roundInfo(caseId, 0);
+        assertEq(nSeats, 2, "still two seats: the widens found no capacity to add");
+        assertEq(widens, 3, "the whole shared per-depth budget was spent widening");
+
+        // Reveal SPLIT — one each way, as committed (M-01 binds the vote into the
+        // commit hash, so the split is chosen at commit time above).
+        //
+        // The split is what makes the divisor assertion below discriminating. With
+        // both revealers on the winning side, `w == revealedSeats` and a divisor of
+        // `revealedSeats` is indistinguishable from the winning side — the fixture
+        // would pass against the very mutation it exists to catch. One seat each way
+        // separates them: 1 winning against 2 revealed.
+        //
+        // `revealedCount == committedCount` closes reveal inline: 2 < minReveals
+        // with the budget spent, so the depth adjudicates on its last revealing
+        // round, marked under-quorum (H-09).
+        vm.prank(few[0]);
+        m.revealVote(caseId, Moderation.Vote.Approve, SALT);
+        vm.prank(few[1]);
+        m.revealVote(caseId, Moderation.Vote.Reject, SALT);
+        assertTrue(m.__underQuorum(caseId, 0), "a 2-of-3 reveal decides under quorum");
+
+        guard = 0;
+        while (uint256(_phaseOfLocal(m, caseId)) == uint256(Moderation.Phase.TALLY)) {
+            require(guard++ < 24, "never left TALLY");
+            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+            m.realizeOutcome(caseId);
+        }
+        (,,,,, uint256 deadline,) = m.caseInfo(caseId);
+        vm.warp(deadline);
+        m.finalize(caseId);
+        m.claim(caseId);
+
+        // --- the assertion this fixture exists for ---------------------------
+        //
+        // One target at open plus one per widen: 5 + 3x5 = 20 seats SOUGHT, 2
+        // revealed. Item 10 allocates `distributable x revealed / sought`, so this
+        // round earns a tenth of the pot and the nine tenths no adjudicating depth
+        // earned goes back to the FEE PAYER — not to the keeper, which is where it
+        // went before item 10, and not to the two revealers, which is where a
+        // `revealedSeats` normalizer would have sent it.
+        (uint256 pool, uint256 divisor, uint256 revealed, uint256 target) = m.__rewardTerms(caseId, 0);
+        assertEq(target, 20, "capacity SOUGHT: one target at open plus one per widen");
+        assertEq(revealed, 2, "capacity SEATED and revealed");
+        assertEq(divisor, 1, "the deciding depth divides by its WINNING side, not by everyone who revealed");
+
+        uint256 bounty = (pot * m.getParams().claimBountyFrac) / 1e18;
+        uint256 distributable = pot - bounty; // no appeal, so no refunds and no bonus pool
+        assertEq(pool, (distributable * revealed) / target, "allocation scales by revealed/sought");
+        assertGt(distributable - pool, (distributable * 8) / 10, "and most of the pot is unearned here");
+        assertEq(
+            m.submitterRefundOwed(caseId),
+            distributable - pool,
+            "what no adjudicating depth earned is owed to the fee payer"
+        );
+
+        // The winning seat takes the whole allocation and the losing one takes none
+        // of it. Which address won is whichever way the outcome seed fell — the
+        // tally is 1-1 — so read it rather than assume it.
+        (,,,,,, Moderation.Outcome fo) = m.caseInfo(caseId);
+        (address winner, address loser) =
+            fo == Moderation.Outcome.Approve ? (few[0], few[1]) : (few[1], few[0]);
+
+        (uint256 wFree,,, uint256 wFrozen,,,,,) = sr.moderatorInfo(winner);
+        assertEq(wFree - 100 * XBZZ, pool, "the winning seat takes the round's whole pool");
+        assertEq(wFrozen, 0, "and is not frozen");
+
+        (uint256 lFree,,, uint256 lFrozen,,,,,) = sr.moderatorInfo(loser);
+        uint256 risk = m.getParams().riskPerSeat;
+        assertEq(lFrozen, risk, "the incoherent seat is frozen, not slashed");
+        assertEq(lFree, 100 * XBZZ - risk, "and earns nothing from the pool");
+    }
+
+    /// One seat each way: `few[0]` Approve, `few[1]` Reject. M-01 binds the vote
+    /// into the commit hash, so a split reveal has to be committed as a split.
+    function _commitBoth(ModerationHarness m, uint256 caseId, address[2] memory few) internal {
+        Moderation.Vote[2] memory votes = [Moderation.Vote.Approve, Moderation.Vote.Reject];
+        for (uint256 i = 0; i < 2; i++) {
+            bytes32 h = m.computeCommit(caseId, 0, few[i], votes[i], SALT);
+            vm.prank(few[i]);
+            m.commitVote(caseId, h);
+        }
+    }
+
+    /// DRAW -> COMMIT against a locally-deployed stack (the base helper drives the
+    /// suite-level one). M2.6-P0-3: settle the epoch before poking.
+    function _pokeSeats(ModerationHarness m, StakeRegistryHarness sr, uint256 caseId) internal {
+        (,,,,,,,, uint256 snapshotBlock,) = m.roundInfo(caseId, m.__roundCount(caseId) - 1);
+        uint256 to = snapshotBlock + 1;
+        if (vm.getBlockNumber() < to) vm.roll(to);
+        else vm.roll(vm.getBlockNumber() + 1);
+        sr.advanceEpoch(type(uint256).max);
+        m.realizeSeats(caseId);
+    }
+
+    function _potOf(ModerationHarness m, uint256 caseId) internal view returns (uint256 pot) {
+        (,,,, pot,,) = m.caseInfo(caseId);
     }
 
     function _phaseOfLocal(ModerationHarness m, uint256 caseId) internal view returns (Moderation.Phase p) {

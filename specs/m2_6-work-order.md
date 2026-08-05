@@ -1804,7 +1804,11 @@ still be drawn.
 
 ## Item 11 — the differential campaign is a regression net, not an oracle (FILED, not built)
 
-**Filed post-close. Not built; no code in this commit.** This item exists because the
+**Filed post-close. Partly built: the DRIVEN half is closed, the CORPUS half is not.**
+The driven gap — no fixture reached settlement on a short panel — was found while
+writing this section and closed immediately in `CaseLifecycle.t.sol`; see "Severity"
+below. What stays open is the differential corpus, which still cannot express either
+of the two shapes. This item exists because the
 record described the campaign in terms a re-auditor would reasonably read as an
 oracle, and it is not one. The description is corrected wherever it appeared
 (`README.md`, `contracts/README.md`, `specs/state-machine.md`, `m2-work-order.md`'s
@@ -1862,21 +1866,36 @@ and every vector holds the divisor and the normalizer at their degenerate values
 
 Both shapes have unit coverage built with them, and the property is checked there:
 `StallRound.t.sol:217` drives a banked round carrying coherent revealers through
-settlement (the exact case where a wrong divisor overpays), `RewardScoping.t.sol` pins
-the depth-dependent divisor and the short-turnout allocation by injection, and
-`CaseLifecycle.t.sol:839` drives the short panel itself — 2 seats seated against a
-target of 5, COMMIT opening anyway. So this is filed as **a gap in the shape of the
-corpus, not an unchecked property**. One thing to pin when the item is built: whether
-any driven fixture carries a short-panel round all the way through *settlement* with
-`target > nSeats` in an ADJUDICATING round, or whether that combination is currently
-only reachable by injection. It is reachable in production either way — the mechanism
-is above — but "which fixture proves it" should not be an open question in a record
-that is about exactly this failure mode. What it costs is the campaign's *value as
+settlement (the exact case where a wrong divisor overpays), and `RewardScoping.t.sol`
+pins the depth-dependent divisor and the short-turnout allocation by injection. So
+this is filed as **a gap in the shape of the corpus, not an unchecked property**.
+
+**There were two holes, not one, and the driven one is now CLOSED.** The open question
+this section first carried — whether any *driven* fixture reached settlement on a
+short panel — was answered no.
+`CaseLifecycle.t.sol:test_panel_short_of_target_when_capacity_is_scarce` was the only
+fixture that produced the condition and it stopped at COMMIT, so everything past that
+point was injection-only. It now runs to settlement and asserts item 10's allocation
+on the shape where the two terms diverge: two seats against a target of **20** (one
+target at open plus one per widen, the whole shared budget spent finding capacity that
+does not exist), a pool of `distributable × 2 / 20`, a divisor of 1 against 2 revealed,
+and the nine tenths no adjudicating depth earned owed to the **fee payer** rather than
+swept by the keeper. Both terms were mutated to confirm the fixture discriminates:
+normalizer `r.target -> r.revealedSeats` fails it, divisor `w -> r.revealedSeats`
+fails it. The first version of that extension had both seats voting the same way,
+which made `w == revealedSeats` and let the divisor mutation pass — the split vote is
+there for that reason and says so in the fixture.
+
+**The corpus hole is untouched by that.** A driven fixture proves the contract; it
+does nothing about vectors that cannot vary the term. The two are separate and closing
+one must not read as closing both: after this change, the short panel is exercised
+end-to-end in Solidity, and the differential corpus still cannot express either
+`target > seats seated` or a banked round. The build below is what closes the second. What it costs is the campaign's *value as
 evidence*: a re-auditor told "52 vectors, bit-exact, against a Python reference" will
 price it as an oracle unless the record says otherwise, and the two things it most
 needs to cross-check are the two it cannot see.
 
-### The build, when it is taken
+### The build that remains — the corpus half, when it is taken
 
 1. Make `__injectRound` able to express a **banked** round: take `adjudicated` as an
    argument rather than stamping it, and take the adjudicating index per depth rather
@@ -2025,11 +2044,14 @@ against post-2b code. It was. See "Item 10" above.
 at severity High. The `trackDecay < WAD` clause is the other named residual — the
 one part of P1-3 that did not land with the clamping fix.
 
-**Item 11 is filed and not built**: the differential campaign is a regression net, not
-an oracle, and two of the reference's assumptions are mirrored in the injector so no
-vector can vary them — both of them item 10's degrees of freedom. It belongs in this
-list rather than in the severity table above, because it is a coverage-shape gap with
-the underlying property covered elsewhere, not a defect. See "Item 11".
+**Item 11 is partly built**: the differential campaign is a regression net, not an
+oracle, and two of the reference's assumptions are mirrored in the injector so no
+vector can vary them — both of them item 10's degrees of freedom. Its **driven** half
+is closed (`test_panel_short_of_target_when_capacity_is_scarce` now runs a short panel
+through settlement and asserts item 10's allocation on it); its **corpus** half is
+open. It belongs in this list rather than in the severity table above, because it is a
+coverage-shape gap with the underlying property covered elsewhere, not a defect. See
+"Item 11".
 
 These go to the external reviewer as known-open rather than being worked in
 another internal round. K-4 was the exception and is closed, because it was a P0

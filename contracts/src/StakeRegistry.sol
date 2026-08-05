@@ -83,8 +83,8 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///
 ///     (a) a track write for a holder that was drawn but never committed;
 ///     (b) a track write on a case that VOIDed;
-///     (c) a track write at any point in the case's lifecycle, including before it
-///         has finished.
+///     (c) a track write at any point in or AFTER the case's lifecycle, for as long
+///         as the logic remains authorized.
 ///
 ///   All three have ONE cause: tightening any of them requires knowing whether a
 ///   seat committed, whether a case voided, or what phase it is in — and every one
@@ -94,6 +94,33 @@ import {SortitionTree} from "./lib/SortitionTree.sol";
 ///   bounds but cannot verify. Buying (a)-(c) back would mean importing the case
 ///   state machine into the permanent registry, which is the coupling this
 ///   architecture exists to avoid.
+///
+///   **(c) is a FORCED TRADE and is wider than it looks — read this before
+///   re-tightening it.** An earlier shape had these checks read `dutyUnits`, which
+///   `settleDuty` consumes, so settlement closed the write window as a side effect.
+///   Reading `drawnUnits` is what removes the ordering dependency, and it removes
+///   that closure with it: "closes at settlement" means "reads a field settlement
+///   consumes", which IS the dependency. You cannot have both. The dependency was
+///   the worse of the two — it is invisible until someone reorders two lines eight
+///   apart in `Settlement` — so the trade is deliberate.
+///
+///   What it leaves behind is a population of standing, unfired writes. After a case
+///   settles, an unfired `recordParticipation` remains available for: every no-show
+///   holder (widening (a) — the honest logic never writes for them, since
+///   `_touchTrack` sits behind `if (r.committed[a])`), every seat of a VOIDed case
+///   (widening (b)), and every case the logic simply never recorded. For any
+///   `caseRef` where no write ever happened, `caseTrackDecay[ck]` is unset — so the
+///   uniformity check binds nothing and the factor is free at firing time, anywhere
+///   in `[minTrackDecay, WAD)`.
+///
+///   **Revocation is the bound, and it is a real one.** `onlyLogic` refuses a logic
+///   in state `NONE`, so revoking ends every unfired write it holds at once. But note
+///   what `canRevoke` actually reads: `logicCommitted` and `logicDutyReserved`, both
+///   of which drain at settlement and neither of which knows anything about
+///   `trackRecorded`. So a logic that has settled everything is revocable **while
+///   still holding unfired track writes** — governance can revoke it, and until
+///   governance does, the window is open. Re-authorizing it later does not reopen the
+///   old handles: `authEpoch` is bumped, which renames the whole namespace.
 ///
 ///   **What remains open, stated as a bound rather than a hope.** A logic can still
 ///   corrupt the standing of moderators it legitimately drew, within the envelope

@@ -1960,13 +1960,36 @@ the magnitude bound, so **no check reads a value another call consumes**. The se
 `drawn` bool is unnecessary: a nonzero count is the proof. Pinned by mutation — making
 either check read `dutyUnits` fails `test_track_write_survives_duty_settlement_running_first`.
 
+### A coverage signal that pointed the wrong way
+
+That mutation fails **twelve-plus tests** across the suite. It reads as a heavily
+covered property and is not: every failure but one is the INJECTOR's, not the
+property's. `__injectObligation` leaves `dutyUnits == 0`, so an injected fixture
+reverts the instant any check reads that field, whether or not the ordering is
+correct — those tests would fail identically against a correct fix.
+
+Exactly one test, `test_track_write_survives_duty_settlement_running_first`, drives a
+real draw, a real `settleDuty` and then the write, so it is the only one whose failure
+means what it says. It now records that in its own body, so nobody weakens it on the
+strength of the other twelve.
+
+The generalisation is the fourth entry in `specs/m2_6-state-of-play.md`'s pattern
+list, and the lesson is new: the first three were "a fixture asserts nothing", this
+one is **a mutation's failure count is not a coverage measure when an injector
+diverges from the production writer**. Standing rule: an injector mirrors the
+production writer field-for-field, or documents each omission at the injector — not
+topped up when a new check starts reading a new field. The deliberate divergence here
+(committed-side only) is documented at `__injectObligation` with what it costs, and
+its full-fidelity rebuild is folded into item 11 as step 4b.
+
 ### The accepted surface
 
 Three writes the registry permits that the honest logic never makes:
 
 - **(a)** a track write for a holder that was drawn but never committed;
 - **(b)** a track write on a case that VOIDed;
-- **(c)** a track write at any lifecycle point, including before the case finishes.
+- **(c)** a track write at any point in **or after** the case's lifecycle, for as
+  long as the logic remains authorized.
 
 All three have **one cause**: tightening any of them requires knowing whether a seat
 committed, whether a case voided, or what phase it is in, and every one of those is
@@ -1975,6 +1998,32 @@ rejected Shape A. Buying (a)-(c) back means importing the case state machine int
 permanent registry, which is the coupling this architecture exists to avoid. They are
 consequences, not oversights, and they are recorded in the registry header as the
 accepted surface.
+
+**(c) widened as a direct result of the ordering fix, and that is a forced trade
+rather than an accident.** Under the original `dutyUnits` reads, settlement closed the
+write window as a side effect — once duty was settled, the window was shut. Reading
+`drawnUnits` is what removes the ordering dependency, and it removes that closure with
+it: "closes at settlement" means "reads a field settlement consumes", which *is* the
+dependency. The two cannot both be had. The dependency is the worse of the two, being
+invisible until someone reorders two lines eight apart in `Settlement`, so the trade
+is correct — but it must be recorded as a trade, not left for a re-auditor to
+discover.
+
+What (c) leaves is a standing population of unfired writes. After a case settles, one
+remains available for every no-show holder (widening (a): the honest logic never
+writes for them, since `_touchTrack` sits behind `if (r.committed[a])`), every seat of
+a VOIDed case (widening (b)), and every case the logic simply never recorded. For a
+`caseRef` where no write ever happened, `caseTrackDecay[ck]` is unset, so the
+uniformity check binds nothing and **the factor is free at firing time**, anywhere in
+`[minTrackDecay, WAD)`.
+
+**Revocation bounds it, and the bound is looser than it sounds.** `onlyLogic` refuses a
+logic in state `NONE`, so revoking ends every unfired write at once. But `canRevoke`
+reads `logicCommitted` and `logicDutyReserved` — both drain at settlement, and neither
+knows anything about `trackRecorded`. So a logic that has settled everything is
+revocable **while still holding unfired track writes**: governance *can* end the
+window, and until it does, the window is open. Re-authorizing later does not reopen the
+old handles, because `authEpoch` is bumped and the whole namespace is renamed.
 
 ### The residual, with the exponent
 
@@ -2116,6 +2165,19 @@ needs to cross-check are the two it cannot see.
    whose revealers are coherent with the final outcome (the case where a wrong divisor
    overpays) and a depth whose draw came up short (the case where a wrong normalizer
    oversubscribes the pot — the failure the build hit at `Σct`).
+4b. **Rebuild `__injectObligation` to full fidelity, folded in here from K-5.** It
+   currently writes three fields — `o.committed`, `o.drawnUnits`, `logicCommitted` —
+   against the six per seat that `drawPanel` writes on the duty side, so an injected
+   obligation sits post-lock with `dutyUnits == 0` and `dutyBonded == 0`, a state no
+   real obligation holds. The consequence is that **`settleDuty` is a no-op in every
+   injected fixture**: the corpus is silent on escrow release and the H-07/H-10
+   no-show penalty. It is folded in here rather than fixed at K-5 for one reason —
+   full fidelity makes `settleDuty` fire inside injected settlements, which moves the
+   vectors' expected values and requires `reference_int.py` to learn duty disposal.
+   That is a corpus regeneration, and this item already scopes one; doing it
+   separately means regenerating twice. A PARTIAL fix is worse than none: setting
+   `o.dutyUnits = seats` without raising `m.dutyReserved` and `logicDutyReserved`
+   underflows `settleDuty`.
 5. **Derive the reference from the algebra, with the Solidity closed.** This is the
    half that makes it an oracle rather than a wider net, and it is the half that is
    easy to skip. If the derivation reproduces the port line for line, that is a

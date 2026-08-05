@@ -158,7 +158,7 @@ still cannot express a banked round or `target > seats seated`.
 
 After the post-close regression pass, the second structural split, the split's
 follow-up, and every post-close item through K-5: `Moderation` **19,980 (4,596
-free)**, `Settlement` 6,674, `StakeRegistry` 12,906, `IndexRegistry` 6,256,
+free)**, `Settlement` 6,674, `StakeRegistry` 12,734, `IndexRegistry` 6,256,
 `RulesetGovernor` 4,430.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
@@ -340,6 +340,24 @@ And one about tests rather than code: **three fixes could be reverted with the
 suite green.** A fixture that cannot distinguish the old behaviour from the new is
 not coverage, however green it is — the H-09 fixture used one address holding one
 seat, which satisfies "count revealers" and "count seats" identically.
+
+And a fourth in that family, which is NOT the same lesson: **a mutation's failure
+count is not a coverage measure.** The first three instances were all "a fixture
+asserts nothing". This one is subtler and was nearly missed. Mutating K-5's ordering
+fix — pointing its checks at the field `settleDuty` consumes — failed twelve-plus
+tests, which reads as heavily covered. All but one failed for the INJECTOR's reason
+rather than the property's: `__injectObligation` leaves `dutyUnits == 0`, so every
+injected fixture reverts the instant a check reads that field, regardless of whether
+the ordering is right. Exactly one driven test actually pins the property, and it now
+says so in its own body.
+
+The standing rule: **an injector mirrors the production writer field-for-field, or
+documents each omission at the injector.** Not topped up when a new check starts
+reading a new field — that is how a partial mirror accumulates, and a partial mirror
+turns a mutation run into a confidence signal pointing the wrong way. Where a
+divergence is deliberate (the committed-side-only obligation, kept because full
+fidelity forces a corpus regeneration), it is written at the injector as a scope
+limit, with what it costs: no injected fixture exercises duty disposal.
 
 And one about triage: **a selector nothing calls is still a selector.**
 `penalizeNoShow` was filed P1 because it had no production caller, then deleted as

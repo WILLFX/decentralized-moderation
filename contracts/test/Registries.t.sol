@@ -1474,6 +1474,16 @@ contract RegistriesTest is Test {
     /// a test rather than a comment at both call sites, because a safety property
     /// living in a comment is this milestone's standing lesson and it has cost four
     /// findings already.
+    ///
+    /// **THIS TEST IS THE ONLY THING PINNING THAT PROPERTY. Do not weaken it on the
+    /// evidence that the mutation is well covered — it is not.** Pointing the checks
+    /// at `dutyUnits` fails twelve-plus tests across the suite, which reads like
+    /// heavy coverage and is not: every one of the others fails for the INJECTOR's
+    /// reason, not the property's. `__injectObligation` leaves `dutyUnits == 0` (see
+    /// its scope limit), so injected fixtures revert the moment a check reads that
+    /// field, whatever the ordering is. They would fail identically if the ordering
+    /// were correct. This fixture is driven — a real draw, then a real `settleDuty`,
+    /// then the write — so it is the only one whose failure means what it says.
     function test_track_write_survives_duty_settlement_running_first() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         _drawSeatFor(oldLogic, alice, CASE_A);

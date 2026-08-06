@@ -18,6 +18,7 @@ contract RegistriesTest is Test {
     uint256 internal constant ACTIVATION = 7 days;
     uint256 internal constant COOLDOWN = 7 days;
     uint256 internal constant RISK_PER_SEAT = 10 * XBZZ;
+    uint256 internal constant EPOCH_BLOCKS = 256; // M2.6-P0-3 eligibility-epoch cadence
 
     MockBZZ internal bzz;
     StakeRegistry internal stakeReg;
@@ -29,10 +30,26 @@ contract RegistriesTest is Test {
     address internal bob = makeAddr("bob");
 
     bytes32 internal constant TK = keccak256("marine biology");
+    /// M2.6-P0-5: obligations are keyed per case-round. These stand in for two
+    /// distinct cases in the registry-level fixtures.
+    uint256 internal constant CASE_A = (1 << 8) | 0;
+    uint256 internal constant CASE_B = (2 << 8) | 0;
+    uint256 internal constant MIN_TRACK_DECAY = (1e18 * 9) / 10;
+    uint256 internal constant WAD = 1e18;
+    uint256 internal constant MAX_FREEZE = 365 days; // ProtocolLimits.MAX_FREEZE
 
     function setUp() public {
         bzz = new MockBZZ();
-        stakeReg = new StakeRegistry(IERC20(address(bzz)), TIMELOCK, MIN_STAKE, ACTIVATION, COOLDOWN, RISK_PER_SEAT);
+        stakeReg = new StakeRegistry(
+            IERC20(address(bzz)),
+            TIMELOCK,
+            MIN_STAKE,
+            ACTIVATION,
+            COOLDOWN,
+            RISK_PER_SEAT,
+            EPOCH_BLOCKS,
+            MIN_TRACK_DECAY
+        );
         indexReg = new IndexRegistry(TIMELOCK);
         _authorize(oldLogic);
     }
@@ -43,6 +60,12 @@ contract RegistriesTest is Test {
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         stakeReg.executeLogic();
         indexReg.executeLogic();
+    }
+
+    /// Cross an eligibility-epoch boundary and apply staged changes (M2.6-P0-3).
+    function _settleEpoch() internal {
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
     }
 
     function _stake(address who, uint256 amount) internal {
@@ -62,6 +85,7 @@ contract RegistriesTest is Test {
         uint256 units = amount / RISK_PER_SEAT;
         vm.prank(who);
         stakeReg.setDutyUnits(units);
+        _settleEpoch(); // pledged capacity is drawable from the next epoch
     }
 
     // --- the point of the split ---------------------------------------------
@@ -83,7 +107,7 @@ contract RegistriesTest is Test {
 
         // And the new logic can immediately use her stake.
         vm.prank(newLogic);
-        stakeReg.lock(alice, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
         (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(committed, 10 * XBZZ, "new logic operates on the existing stake");
     }
@@ -92,7 +116,7 @@ contract RegistriesTest is Test {
     /// the game is redeployed.
     function test_approvals_survive_a_logic_upgrade() public {
         vm.prank(oldLogic);
-        indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true);
+        indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true, 0, 0, bytes32(0));
         assertEq(indexReg.entryCount(TK), 1);
 
         _authorize(newLogic);
@@ -117,7 +141,7 @@ contract RegistriesTest is Test {
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK);
         stakeReg.executeLogic();
-        assertTrue(stakeReg.isLogic(newLogic));
+        assertTrue(stakeReg.logicState(newLogic) != StakeRegistry.LogicState.NONE);
     }
 
     /// Trust model #2: a moderator who rejects an announced migration can always
@@ -145,15 +169,15 @@ contract RegistriesTest is Test {
     function test_handover_window_lets_old_logic_settle_in_flight_cases() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.prank(oldLogic);
-        stakeReg.lock(alice, 10 * XBZZ); // an in-flight case
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ); // an in-flight case
 
         _authorize(newLogic); // both authorized now
-        assertTrue(stakeReg.isLogic(oldLogic), "old logic still authorized during handover");
-        assertTrue(stakeReg.isLogic(newLogic));
+        assertTrue(stakeReg.logicState(oldLogic) != StakeRegistry.LogicState.NONE, "old logic still authorized during handover");
+        assertTrue(stakeReg.logicState(newLogic) != StakeRegistry.LogicState.NONE);
 
         // The old logic settles its open case.
         vm.prank(oldLogic);
-        stakeReg.release(alice, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
         (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(committed, 0, "in-flight case settled under the old logic");
 
@@ -161,7 +185,7 @@ contract RegistriesTest is Test {
         stakeReg.revokeLogic(oldLogic);
         vm.prank(oldLogic);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.lock(alice, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
     }
 
     /// Governance may NAME the logic contract and nothing else: it can never move,
@@ -171,20 +195,20 @@ contract RegistriesTest is Test {
 
         // The test contract is governance; it is not a logic contract.
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.lock(alice, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.freeze(alice, 1, vm.getBlockTimestamp() + 1 days);
+        stakeReg.freeze(alice, CASE_A, 1, vm.getBlockTimestamp() + 1 days);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
         stakeReg.reward(alice, 1);
         vm.expectRevert(IndexRegistry.NotLogic.selector);
-        indexReg.writeEntry(TK, 1, bytes32(0), bytes32(0), true, true);
+        indexReg.writeEntry(TK, 1, bytes32(0), bytes32(0), true, true, 0, 0, bytes32(0));
     }
 
     function test_unauthorized_caller_cannot_use_the_privileged_api() public {
         _stake(alice, 100 * XBZZ);
         vm.prank(bob);
         vm.expectRevert(StakeRegistry.NotLogic.selector);
-        stakeReg.lock(alice, 1);
+        stakeReg.lock(alice, CASE_A, 1);
         vm.prank(bob);
         vm.expectRevert(StakeRegistry.NotGovernance.selector);
         stakeReg.proposeLogic(bob);
@@ -197,10 +221,10 @@ contract RegistriesTest is Test {
         _stakeActivatePledge(bob, 50 * XBZZ);
 
         vm.startPrank(oldLogic);
-        stakeReg.lock(alice, 30 * XBZZ);
-        stakeReg.freeze(alice, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
-        stakeReg.release(alice, 20 * XBZZ);
-        stakeReg.lock(bob, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
+        stakeReg.release(alice, CASE_A, 20 * XBZZ);
+        stakeReg.lock(bob, CASE_A, 10 * XBZZ);
         vm.stopPrank();
 
         // Every token held is somebody's stake, in exactly one bucket.
@@ -216,7 +240,12 @@ contract RegistriesTest is Test {
         _stake(bob, 50 * XBZZ);
         uint256 bobBefore = stakeReg.totalStakeOf(bob);
 
-        bzz.mint(address(stakeReg), 5 * XBZZ); // fee money arriving with the reward
+        // M2.6-P0-4: the logic contract must HOLD the reward and let the registry
+        // pull it. Previously this test minted straight into the registry, which
+        // masked the fact that reward() never checked its own funding.
+        bzz.mint(oldLogic, 5 * XBZZ);
+        vm.prank(oldLogic);
+        bzz.approve(address(stakeReg), 5 * XBZZ);
         vm.prank(oldLogic);
         stakeReg.reward(alice, 5 * XBZZ);
 
@@ -225,11 +254,67 @@ contract RegistriesTest is Test {
         assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
     }
 
+    /// M2.6-P0-4. The registry must not credit stake it was not funded for.
+    /// Before this fix, an authorized logic — superseded, buggy, or malicious —
+    /// could mint withdrawable claims from nothing and drain real stakers'
+    /// principal via requestExit/withdraw. The funding rule lived only in a
+    /// comment; now the registry pulls and verifies it.
+    function test_unfunded_reward_reverts() public {
+        _stake(alice, 100 * XBZZ);
+        uint256 liabilitiesBefore = stakeReg.stakeBuckets();
+
+        // oldLogic is authorized but holds nothing and approved nothing.
+        vm.prank(oldLogic);
+        vm.expectRevert();
+        stakeReg.reward(alice, 5 * XBZZ);
+
+        assertEq(stakeReg.stakeBuckets(), liabilitiesBefore, "no liability was created");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation intact");
+    }
+
+    /// The full attack the audit described, end to end: an authorized logic mints
+    /// itself a balance and walks it out through the ordinary exit path, taking
+    /// other stakers' tokens. It must be impossible at step one.
+    function test_authorized_logic_cannot_mint_and_drain() public {
+        _stake(alice, 100 * XBZZ); // a real staker's principal sits in the registry
+        address attacker = makeAddr("attacker");
+        uint256 registryFunds = bzz.balanceOf(address(stakeReg));
+
+        // Step 1: the malicious logic tries to conjure a balance.
+        vm.prank(oldLogic);
+        vm.expectRevert();
+        stakeReg.reward(attacker, registryFunds);
+
+        // Nothing was created, so there is nothing to exit with.
+        assertEq(stakeReg.totalStakeOf(attacker), 0, "no phantom balance");
+        vm.prank(attacker);
+        vm.expectRevert(StakeRegistry.AmountZero.selector);
+        stakeReg.requestExit(0);
+
+        // Alice's principal is untouched and still fully backed.
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "still solvent");
+    }
+
+    /// Approving less than the credit must fail too — the registry verifies the
+    /// measured balance delta, not the caller's word.
+    function test_underfunded_reward_reverts() public {
+        _stake(alice, 100 * XBZZ);
+        bzz.mint(oldLogic, 2 * XBZZ);
+        vm.prank(oldLogic);
+        bzz.approve(address(stakeReg), 5 * XBZZ); // approves 5, holds only 2
+
+        vm.prank(oldLogic);
+        vm.expectRevert();
+        stakeReg.reward(alice, 5 * XBZZ);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation intact");
+    }
+
     function test_frozen_stake_is_excluded_from_draws_until_thaw() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         vm.startPrank(oldLogic);
-        stakeReg.lock(alice, 10 * XBZZ);
-        stakeReg.freeze(alice, 10 * XBZZ, vm.getBlockTimestamp() + 3 days);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 3 days);
         vm.stopPrank();
 
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> fully excluded from draws");
@@ -248,7 +333,7 @@ contract RegistriesTest is Test {
         assertEq(stakeReg.totalEligibleWeight(), 0, "passive stake is not in the draw pool");
 
         vm.prank(oldLogic);
-        (address[] memory seats,) = stakeReg.drawPanel(5, keccak256("s"), 0);
+        (address[] memory seats,) = stakeReg.drawPanel(5, keccak256("s"), 0, CASE_A);
         assertEq(seats.length, 0, "nobody can be drafted into duty");
     }
 
@@ -260,31 +345,49 @@ contract RegistriesTest is Test {
         stakeReg.activate(alice);
         vm.prank(alice);
         stakeReg.setDutyUnits(3); // only 3 seats pledged
+        _settleEpoch();
 
         vm.prank(oldLogic);
-        (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0);
+        (address[] memory seats,) = stakeReg.drawPanel(10, keccak256("s"), 0, CASE_A);
         assertEq(seats.length, 3, "seated exactly the pledged capacity");
-        (, uint256 reserved) = stakeReg.dutyOf(alice);
+        (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 3, "one unit reserved per seat");
+        assertEq(bonded, 3 * RISK_PER_SEAT, "and one unit's collateral ESCROWED per seat (P0-2)");
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "capacity exhausted -> out of the pool");
 
         // Releasing capacity puts the moderator back in the pool.
         vm.prank(oldLogic);
-        stakeReg.releaseDuty(alice, 3);
-        (, reserved) = stakeReg.dutyOf(alice);
+        stakeReg.settleDuty(alice, CASE_A, 3, 0, vm.getBlockTimestamp() + 1 days);
+        (, reserved, bonded) = stakeReg.dutyOf(alice);
         assertEq(reserved, 0);
+        assertEq(bonded, 0, "escrow returned to free stake");
         assertGt(stakeReg.eligibleWeightOf(alice), 0, "eligible again once the case ends");
     }
 
     /// The no-show penalty (H-07/H-10): a pledged moderator that is drawn and does
     /// not serve pays a freeze of its OWN stake — never a transfer to anyone.
+    ///
+    /// Since M2.6-P0-2 the penalty is taken from the escrow the DRAW posted, so
+    /// the moderator has to actually be seated first. That is the point: there is
+    /// no longer a reachable-balance calculation for the moderator to manipulate.
     function test_no_show_penalty_freezes_own_stake_only() public {
         _stakeActivatePledge(alice, 100 * XBZZ);
         _stakeActivatePledge(bob, 100 * XBZZ);
         uint256 bobBefore = stakeReg.totalStakeOf(bob);
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.drawPanel(1, keccak256("noshow"), 0, CASE_A); // seats alice or bob; both are pledged
+        // Penalize whoever was actually seated.
+        (,, uint256 aliceBond) = stakeReg.dutyOf(alice);
+        address seated = aliceBond > 0 ? alice : bob;
+        if (seated != alice) {
+            // Re-point the assertions at the seated moderator.
+            (alice, bob) = (bob, alice);
+            bobBefore = stakeReg.totalStakeOf(bob);
+        }
+
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
 
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, RISK_PER_SEAT, "one seat's worth frozen");
@@ -295,38 +398,599 @@ contract RegistriesTest is Test {
     }
 
     /// Stake that never opted in cannot be penalized — it was never drawable, so
-    /// submission spam cannot grief passive stakers.
+    /// submission spam cannot grief passive stakers. Under M2.6-P0-2 this holds by
+    /// construction rather than by a `dutyUnits == 0` guard: a moderator that was
+    /// never seated has nothing bonded, and the penalty can only reach escrow.
+    /// Since P0-5a it is stronger still — the penalty can only reach escrow THIS
+    /// case posted, so an empty obligation makes it a no-op regardless of what the
+    /// moderator holds elsewhere.
     function test_unpledged_stake_cannot_be_penalized() public {
         _stake(alice, 100 * XBZZ);
         vm.warp(vm.getBlockTimestamp() + ACTIVATION);
         stakeReg.activate(alice);
 
         vm.prank(oldLogic);
-        stakeReg.penalizeNoShow(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
         (, , , uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
         assertEq(frozen, 0, "passive staker is untouchable");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    // --- M2.6-P0-2: duty reservation escrows real collateral -----------------
+    //
+    // `drawPanel` used to increment `dutyReserved` and move no tokens, so a seat's
+    // backing stayed in `free` and stayed user-controlled. The no-show penalty is
+    // the stated defence against appeal-panel obstruction (H-10); it cost nothing.
+
+    /// Seat one moderator and return it. Both are pledged, so the draw picks one
+    /// of them; the test asserts against whichever was actually seated.
+    function _seatOne(bytes32 seed) internal returns (address seated, address other) {
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, seed, 0, CASE_A);
+        (,, uint256 aliceBond) = stakeReg.dutyOf(alice);
+        return aliceBond > 0 ? (alice, bob) : (bob, alice);
+    }
+
+    /// The escrow itself: drawing moves collateral out of free stake.
+    function test_draw_escrows_collateral_out_of_free_stake() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("escrow"), 0, CASE_A);
+
+        (uint256 freeAfter,,,,,,,,) = stakeReg.moderatorInfo(alice);
+        (,, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, RISK_PER_SEAT, "one seat's collateral is escrowed");
+        assertEq(freeBefore - freeAfter, RISK_PER_SEAT, "and it left free stake");
+        assertEq(stakeReg.totalDutyBondedStake(), RISK_PER_SEAT, "tracked in its own bucket");
+        assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ, "still the moderator's own money");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation across four buckets");
+    }
+
+    /// Bypass 1: `setDutyUnits(0)` after selection. It used to make the
+    /// then-current penalty function return on its `dutyUnits == 0` guard.
+    /// Driven through `settleDuty`, the production path, since M2.6-P0-5c deleted
+    /// the unscoped one.
+    function test_bypass_setDutyUnits_zero_after_selection() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        (address seated,) = _seatOne(keccak256("b1"));
+
+        vm.prank(seated);
+        vm.expectRevert(StakeRegistry.DutyReserved.selector);
+        stakeReg.setDutyUnits(0);
+
+        // Reducing to below what live panels hold is refused; the escrow is intact.
+        (,, uint256 bonded) = stakeReg.dutyOf(seated);
+        assertEq(bonded, RISK_PER_SEAT, "escrow survives the un-pledge attempt");
+
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(seated, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, RISK_PER_SEAT, "the penalty is payable and applied");
+    }
+
+    /// M2.6-P0-5c: the unscoped no-show penalty must stay deleted, and the
+    /// property its deletion restores must hold.
+    ///
+    /// `penalizeNoShow` had lost its caller — `settleDuty` supersedes it — but kept
+    /// a live selector that wrote the POOLED `m.dutyBonded` with no `caseRef`.
+    /// `dutyBonded` pools escrow across every case a moderator is seated in, so any
+    /// authorized logic could freeze collateral posted for a different case's
+    /// outstanding seat: the exact class P0-5a made unrepresentable everywhere else.
+    /// It was deleted rather than given a `caseRef`, because a scoped version would
+    /// be dead code with a live selector.
+    ///
+    /// This test fails if it is ever reintroduced under its old signature.
+    function test_unscoped_no_show_penalty_selector_is_gone() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        (address seated,) = _seatOne(keccak256("p05c"));
+        uint256 until = vm.getBlockTimestamp() + 1 days;
+
+        bytes memory unscoped =
+            abi.encodeWithSignature("penalizeNoShow(address,uint256,uint256)", seated, RISK_PER_SEAT, until);
+        vm.prank(oldLogic);
+        (bool ok,) = address(stakeReg).call(unscoped);
+        assertFalse(ok, "no such function and no fallback: pooled dutyBonded is unreachable");
+
+        // The surviving path cannot substitute for it either: naming the WRONG case
+        // reaches nothing, because the escrow belongs to CASE_A's obligation.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(seated, CASE_B, 1, RISK_PER_SEAT, until);
+        (,, uint256 bonded) = stakeReg.dutyOf(seated);
+        assertEq(bonded, RISK_PER_SEAT, "another case's settlement cannot reach this case's escrow");
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, 0, "and it cannot freeze it either");
+
+        // Named correctly, it settles — so the capability was not lost, only scoped.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(seated, CASE_A, 1, RISK_PER_SEAT, until);
+        (,,, frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, RISK_PER_SEAT, "the owning case can still penalise");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Bypass 2: `requestExit(all free)` after selection. The then-current penalty
+    /// function subtracted `exitAmount` from what it could reach, so the penalty
+    /// silently became a no-op — and the exit did not even have to complete.
+    function test_bypass_requestExit_after_selection() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        (address seated,) = _seatOne(keccak256("b2"));
+
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(seated);
+        vm.prank(seated);
+        stakeReg.requestExit(free); // everything still withdrawable
+
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(seated, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(seated);
+        assertEq(frozen, RISK_PER_SEAT, "escrow is not reachable by the exit path");
+
+        // And the exit cannot carry the bonded collateral out.
+        vm.warp(vm.getBlockTimestamp() + COOLDOWN);
+        vm.prank(seated);
+        stakeReg.withdraw();
+        (,, uint256 bondedAfter) = stakeReg.dutyOf(seated);
+        assertEq(bondedAfter, 0, "bond was consumed by the penalty, not withdrawn");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Bypass 4: the same free stake backing several outstanding assignments.
+    /// Capacity was reserved without moving tokens, so one balance could back
+    /// every seat it was drawn for. A seat is now only issued if its collateral
+    /// can be escrowed, so backing cannot be double-spent across cases.
+    function test_bypass_same_backing_cannot_cover_two_assignments() public {
+        // Pledge two units against two units of stake — valid at pledge time —
+        // then reserve half of it for exit. Pledged CAPACITY is still 2, but the
+        // stake actually available to back an assignment is now 1 unit.
+        _stake(alice, 2 * RISK_PER_SEAT);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        stakeReg.activate(alice);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(2);
+        _settleEpoch(); // capacity is live from here
+        // The exit reservation lands mid-epoch: the TREE still shows two units of
+        // capacity, but the struct — which is what `drawPanel` checks before
+        // escrowing — shows only one unit of usable stake.
+        vm.prank(alice);
+        stakeReg.requestExit(RISK_PER_SEAT);
+
+        vm.prank(oldLogic);
+        (address[] memory seats,) = stakeReg.drawPanel(2, keccak256("b4"), 0, CASE_A);
+
+        // Before the escrow, capacity alone gated the draw: both seats were issued
+        // and both were "backed" by the same single unit of usable stake.
+        assertEq(seats.length, 1, "seated only what the stake can actually escrow");
+        (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(reserved, 1, "capacity consumed matches collateral posted");
+        assertEq(bonded, RISK_PER_SEAT, "every seated assignment is fully backed");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "no unbacked capacity remains drawable");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Escrow returns to free stake when the case ends, and only once.
+    function test_release_returns_escrow_exactly_once() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(2, keccak256("rel"), 0, CASE_A);
+
+        vm.startPrank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 2, 0, vm.getBlockTimestamp() + 1 days);
+        stakeReg.settleDuty(alice, CASE_A, 2, 0, vm.getBlockTimestamp() + 1 days); // a double release must not mint stake
+        vm.stopPrank();
+
+        (uint256 freeAfter,,,,,,,,) = stakeReg.moderatorInfo(alice);
+        (,, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, 0, "escrow fully returned");
+        assertEq(freeAfter, freeBefore, "and exactly restored, not doubled");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A committed seat's bond becomes committed stake rather than being released
+    /// twice: `lock` draws from the escrow that was posted for it.
+    function test_commit_converts_escrow_not_free_stake() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("conv"), 0, CASE_A);
+        (uint256 freeAfterDraw,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.prank(oldLogic);
+        stakeReg.lock(alice, CASE_A, RISK_PER_SEAT);
+
+        (uint256 free,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        (,, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(committed, RISK_PER_SEAT, "the vote is collateralized");
+        assertEq(bonded, 0, "out of escrow");
+        assertEq(free, freeAfterDraw, "free stake was not touched a second time");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// Settling one case's assignment must not consume escrow belonging to
+    /// another case's outstanding seat.
+    ///
+    /// `dutyBonded` is a pool shared across every case a moderator is seated in.
+    /// Penalising and releasing as two calls reads that pool twice: the penalty
+    /// takes a seat's worth, and the release then still hands back a full
+    /// `riskPerSeat` — draining the OTHER case's collateral and silently
+    /// un-bonding its seat, so that case's own penalty later becomes a no-op.
+    /// Nothing is minted, so conservation still holds and the leak is invisible
+    /// unless the two are one operation.
+    function test_settling_one_case_cannot_drain_another_cases_escrow() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+
+        // M2.6-item-5: BOTH draws named `CASE_A`, so "two cases" was one obligation
+        // seated twice and the cross-case property the test is named for was never
+        // exercised. A version of `settleDuty` that read the pooled `dutyBonded`
+        // instead of the per-case obligation — the exact defect this exists to
+        // catch — would have passed it.
+        vm.startPrank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("caseA"), 0, CASE_A);
+        stakeReg.drawPanel(1, keccak256("caseB"), 0, CASE_B);
+        vm.stopPrank();
+        (, uint256 reserved, uint256 bonded) = stakeReg.dutyOf(alice);
+        assertEq(reserved, 2, "two outstanding assignments");
+        assertEq(bonded, 2 * RISK_PER_SEAT, "each with its own escrow");
+
+        // Case A settles — and asks for MORE than it holds. This is what makes the
+        // fixture discriminate: with symmetric one-unit settlements, a per-case
+        // obligation and one merged pool produce identical numbers, so the test
+        // would pass either way. Over-asking is the only shape where "cannot reach
+        // another case's escrow" is observable — the clamp must bound it to A's own
+        // unit and leave B's untouched.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 2, 2 * RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+
+        uint256 reservedAfter;
+        (, reservedAfter, bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, RISK_PER_SEAT, "case B's escrow is untouched");
+        assertEq(reservedAfter, 1, "and B's assignment is still outstanding");
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, RISK_PER_SEAT, "A's penalty is bounded by A's own escrow");
+
+        // Case B settles against its OWN obligation; its penalty is still payable,
+        // which is the point — A's settlement must not have consumed B's escrow.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_B, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 2 * RISK_PER_SEAT, "B's penalty applied too");
+        (,, bonded) = stakeReg.dutyOf(alice);
+        assertEq(bonded, 0);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A moderator that served gets its escrow back rather than frozen.
+    function test_settling_a_served_assignment_returns_the_escrow() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        (uint256 freeBefore,,,,,,,,) = stakeReg.moderatorInfo(alice);
+
+        vm.startPrank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("served"), 0, CASE_A);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, vm.getBlockTimestamp() + 1 days); // no penalty
+        vm.stopPrank();
+
+        (uint256 free,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 0, "serving costs nothing");
+        assertEq(free, freeBefore, "escrow returned in full");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A moderator whose ENTIRE stake is escrowed against its own assignment must
+    /// still be able to commit it. The collateral is in `dutyBonded`, not `free`,
+    /// so a commit path that measures only free stake would refuse the very seat
+    /// the escrow was posted for — the H-07 liveness failure, reintroduced by the
+    /// escrow itself if the buckets are not both counted.
+    function test_fully_bonded_moderator_can_still_commit_its_seat() public {
+        _stake(alice, RISK_PER_SEAT); // exactly one unit, nothing spare
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        stakeReg.activate(alice);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(1);
+        _settleEpoch();
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("bonded"), 0, CASE_A);
+
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(free, 0, "every token is escrowed");
+        assertEq(stakeReg.dutyBondedOf(alice), RISK_PER_SEAT, "and visible as backing");
+
+        // The commit converts that escrow; it must not need free stake.
+        vm.prank(oldLogic);
+        stakeReg.lock(alice, CASE_A, RISK_PER_SEAT);
+        (, , uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(committed, RISK_PER_SEAT, "the seat it was drawn for is collateralized");
+        assertEq(stakeReg.dutyBondedOf(alice), 0);
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    // --- M2.6-P0-5: obligations are keyed, not pooled -------------------------
+
+    /// The cross-CASE drain, which per-logic scoping alone would not have caught.
+    ///
+    /// `dutyBonded` was one pool per moderator. A moderator seated in two cases
+    /// held 2x escrow in it, and case A settling one seat handed back a full
+    /// `riskPerSeat` bounded only by that pool — draining case B's escrow and
+    /// silently un-bonding B's outstanding seat, so B's no-show penalty became a
+    /// no-op. Nothing is minted, so conservation still holds and the leak is
+    /// invisible from the aggregates. P0-2 shipped `settleDuty` as one atomic
+    /// operation to stop it; handles make it unrepresentable.
+    function test_settling_one_case_cannot_touch_another_cases_escrow() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+
+        vm.startPrank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("A"), 0, CASE_A);
+        stakeReg.drawPanel(1, keccak256("B"), 0, CASE_B);
+        vm.stopPrank();
+
+        (,, uint256 bondA) = stakeReg.obligationOf(oldLogic, alice, CASE_A);
+        (,, uint256 bondB) = stakeReg.obligationOf(oldLogic, alice, CASE_B);
+        assertEq(bondA, RISK_PER_SEAT, "case A escrowed its own seat");
+        assertEq(bondB, RISK_PER_SEAT, "and so did case B");
+
+        // Case A settles, asking to release far more than it ever reserved.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 10, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+
+        (,, bondB) = stakeReg.obligationOf(oldLogic, alice, CASE_B);
+        assertEq(bondB, RISK_PER_SEAT, "B's escrow is untouched by A's over-ask");
+
+        // And B's penalty is therefore still payable — the property the drain
+        // silently removed.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_B, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 2 * RISK_PER_SEAT, "both cases' penalties applied");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// The same shape for committed stake: a double release must revert, not be
+    /// absorbed. Under pooled accounting the second call simply succeeded against
+    /// whatever aggregate remained.
+    function test_double_release_reverts_rather_than_being_absorbed() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.lock(alice, CASE_B, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        vm.stopPrank();
+
+        // A is discharged; releasing it again must not reach into B's obligation.
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+
+        (uint256 committedB,,) = stakeReg.obligationOf(oldLogic, alice, CASE_B);
+        assertEq(committedB, 10 * XBZZ, "B's commitment intact");
+    }
+
+    /// Cross-LOGIC: during a handover both are authorized, and B must not be able
+    /// to discharge anything A created.
+    function test_cross_logic_discharge_reverts() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.drawPanel(1, keccak256("A"), 0, CASE_A);
+        vm.stopPrank();
+
+        _authorize(newLogic); // handover: both authorized
+
+        // Same case reference, different logic — a different obligation entirely.
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 1 days);
+
+        // Duty settlement clamps to B's own (empty) obligation rather than
+        // discharging A's seat.
+        vm.prank(newLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        (,, uint256 bondA) = stakeReg.obligationOf(oldLogic, alice, CASE_A);
+        assertEq(bondA, RISK_PER_SEAT, "A's escrow untouched by B");
+
+        // A's own settlement still works, which is the point of the handover.
+        vm.prank(oldLogic);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        (,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(committed, 0, "the rightful owner settles normally");
+    }
+
+    /// Re-authorizing a revoked logic rotates its handle namespace.
+    ///
+    /// **M2.6-item-5: renamed, and one assertion deleted as over-determined.** The
+    /// test closed by expecting `NotYourObligation` on an old `caseRef`, presented as
+    /// proof that old handles are unreachable. It proved nothing: the fixture
+    /// RELEASES before revoking, because `revokeLogic` requires `canRevoke` and
+    /// `canRevoke` requires a full drain. So the obligation was already empty, and
+    /// `NotYourObligation` is exactly what an empty obligation returns whether or
+    /// not the namespace rotated.
+    ///
+    /// **The stronger property is unreachable by construction, and that is the
+    /// finding rather than a gap to fill.** A surviving old handle cannot exist
+    /// across a revocation: the drain gate (P0-5b) guarantees every obligation is
+    /// closed before `revokeLogic` succeeds, so there is never an old handle for a
+    /// re-authorized logic to reach. No fixture can discriminate on it, and one that
+    /// appeared to would be reading an empty slot.
+    ///
+    /// What IS observable, and what this now asserts, is the rotation itself —
+    /// `authEpoch` strictly increases, so handles minted after re-authorization are
+    /// in a different namespace from anything the previous life could have minted.
+    /// The live-logic case, where orphaning WOULD be reachable, is P0-5d's
+    /// `test_reauthorizing_a_live_logic_cannot_orphan_its_obligations` below.
+    function test_reauthorization_rotates_the_handle_namespace() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ); // drain: revocation requires it
+        vm.stopPrank();
+        uint256 epochBefore = stakeReg.authEpoch(oldLogic);
+        assertTrue(stakeReg.canRevoke(oldLogic), "the drain gate is what empties the old namespace");
+
+        stakeReg.revokeLogic(oldLogic);
+        _authorize(oldLogic); // same address, authorized again
+        assertGt(stakeReg.authEpoch(oldLogic), epochBefore, "a new namespace");
+
+        // And the new namespace is live: a handle minted now works, so the rotation
+        // did not merely break the old one.
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        vm.stopPrank();
+        (,, uint256 committed,,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(committed, 0, "the re-authorized logic settles under its own epoch");
+    }
+
+    /// M2.6-item-5 / P0-3c: the `frozen` disjunct in `drawPanel`'s rejection filter.
+    ///
+    /// `drawPanel` denies a seat when `block.timestamp < m.frozenUntil`, and that
+    /// clause had no test. It is easy to assume it is dead — `_eligibleWeight`
+    /// returns 0 for a frozen moderator, so a frozen address should not be in the
+    /// tree to draw. It is NOT dead, and the reason is P0-3: `freeze` calls
+    /// `_syncTree`, which STAGES the weight change to the next epoch boundary. A
+    /// moderator frozen mid-epoch keeps its tree weight for the rest of that epoch
+    /// and can still be drawn — the disjunct is the only thing that stops it taking
+    /// a seat it can no longer back.
+    ///
+    /// The fixture asserts the tree still carries the weight, or the denial would be
+    /// equally explained by an empty tree.
+    function test_a_moderator_frozen_mid_epoch_is_denied_a_seat_while_still_in_the_tree() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 weightBefore = stakeReg.totalEligibleWeight();
+        assertGt(weightBefore, 0, "alice is drawable to begin with");
+
+        // Freeze her, in the middle of the epoch, through the real path.
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, vm.getBlockTimestamp() + 7 days);
+        vm.stopPrank();
+
+        // P0-3: the weight change is STAGED, so the tree is unchanged this epoch.
+        // This is what makes the disjunct reachable rather than dead code.
+        assertEq(stakeReg.totalEligibleWeight(), weightBefore, "the tree still carries her weight");
+        assertEq(stakeReg.eligibleWeightOf(alice), 0, "while her LIVE weight is already zero");
+
+        // A draw in this epoch must still refuse her.
+        vm.prank(oldLogic);
+        (address[] memory seats, uint256 attempts) = stakeReg.drawPanel(1, keccak256("frozen"), 0, CASE_B);
+        assertGt(attempts, 0, "the draw actually ran");
+        for (uint256 i = 0; i < seats.length; i++) {
+            assertTrue(seats[i] != alice, "a frozen moderator is denied even while drawable");
+        }
+    }
+
+    /// M2.6-P0-5d: governance must not be able to orphan live obligation handles.
+    ///
+    /// `executeLogic` bumped `authEpoch` unconditionally, and `authEpoch` is part of
+    /// every handle. Re-executing a proposal for an ALREADY-authorized logic — a
+    /// duplicate proposal, a re-run script, a governance mistake — renamed the whole
+    /// namespace in one transaction. Every live handle was orphaned: `_debit` then
+    /// reverted `NotYourObligation` on the rightful owner's own settlement,
+    /// permanently, so committed stake was stranded, escrow could not be released,
+    /// and the per-logic counters never reached zero — `canRevoke` stayed false
+    /// forever and the contract could not even be retired out of the way.
+    ///
+    /// Nothing is minted and conservation still holds, which is why it would not
+    /// show up in the invariant campaign.
+    function test_reauthorizing_a_live_logic_cannot_orphan_its_obligations() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.drawPanel(1, keccak256("live"), 0, CASE_A);
+        indexReg.openCase(1); // the same case, index-side (M2.6-P0-5b)
+        vm.stopPrank();
+        assertFalse(stakeReg.canRevoke(oldLogic), "a live case is outstanding");
+        assertFalse(indexReg.canRevoke(oldLogic), "index-side too");
+        uint256 epochBefore = stakeReg.authEpoch(oldLogic);
+
+        // The proposal is legitimate and the timelock is honoured; only the drain
+        // state makes it unsafe.
+        stakeReg.proposeLogic(oldLogic);
+        indexReg.proposeLogic(oldLogic);
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK);
+        vm.expectRevert(StakeRegistry.LogicStillHasObligations.selector);
+        stakeReg.executeLogic();
+        // Both registries refuse together, so governance cannot desync them by
+        // executing the pair.
+        vm.expectRevert(IndexRegistry.LogicStillHasObligations.selector);
+        indexReg.executeLogic();
+
+        assertEq(stakeReg.authEpoch(oldLogic), epochBefore, "the namespace is intact");
+
+        // And the obligations it already held still settle normally, which is the
+        // property the bump would have destroyed.
+        vm.prank(oldLogic);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, vm.getBlockTimestamp() + 1 days);
+        vm.prank(oldLogic);
+        indexReg.closeCase(1);
+        assertTrue(stakeReg.canRevoke(oldLogic), "drained normally");
+        assertTrue(indexReg.canRevoke(oldLogic), "index-side too");
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+
+        // Once drained, the same proposal executes: the gate is about live state,
+        // not about forbidding re-authorization.
+        stakeReg.executeLogic();
+        assertGt(stakeReg.authEpoch(oldLogic), epochBefore, "a fresh namespace, safely");
+    }
+
+    /// A FIRST authorization is unaffected — that is the only case where the
+    /// `authEpoch` bump has a job to do.
+    function test_first_authorization_from_none_still_bumps_the_namespace() public {
+        assertEq(uint256(stakeReg.logicState(newLogic)), uint256(StakeRegistry.LogicState.NONE));
+        uint256 before = stakeReg.authEpoch(newLogic);
+        _authorize(newLogic);
+        assertGt(stakeReg.authEpoch(newLogic), before, "fresh namespace on a first authorization");
+        assertEq(uint256(stakeReg.logicState(newLogic)), uint256(StakeRegistry.LogicState.OPEN_AND_SETTLE));
+    }
+
+    /// The per-logic totals are a real drain signal, unlike `openPotsTotal`.
+    function test_logic_totals_track_outstanding_obligations() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        assertEq(stakeReg.logicCommitted(oldLogic), 0);
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 10 * XBZZ);
+        stakeReg.drawPanel(1, keccak256("A"), 0, CASE_A);
+        vm.stopPrank();
+        assertEq(stakeReg.logicCommitted(oldLogic), 10 * XBZZ);
+        assertEq(stakeReg.logicDutyReserved(oldLogic), 1);
+
+        vm.startPrank(oldLogic);
+        stakeReg.release(alice, CASE_A, 10 * XBZZ);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, vm.getBlockTimestamp() + 1 days);
+        vm.stopPrank();
+        assertEq(stakeReg.logicCommitted(oldLogic), 0, "drained");
+        assertEq(stakeReg.logicDutyReserved(oldLogic), 0, "drained");
     }
 
     // --- index registry ------------------------------------------------------
 
     function test_supersafe_requires_uncontested_full_quorum_and_age() public {
         vm.startPrank(oldLogic);
-        indexReg.writeEntry(TK, 1, keccak256("a"), bytes32(0), true, true); // qualifies
-        indexReg.writeEntry(TK, 2, keccak256("b"), bytes32(0), false, true); // contested
-        indexReg.writeEntry(TK, 3, keccak256("c"), bytes32(0), true, false); // under-quorum
+        indexReg.writeEntry(TK, 1, keccak256("a"), bytes32(0), true, true, 0, 0, bytes32(0)); // qualifies
+        indexReg.writeEntry(TK, 2, keccak256("b"), bytes32(0), false, true, 0, 0, bytes32(0)); // contested
+        indexReg.writeEntry(TK, 3, keccak256("c"), bytes32(0), true, false, 0, 0, bytes32(0)); // under-quorum
         vm.stopPrank();
 
         assertEq(indexReg.supersafeEntries(TK, 96 hours, 0, 10).length, 0, "too young");
         vm.warp(vm.getBlockTimestamp() + 96 hours);
         IndexRegistry.Entry[] memory ss = indexReg.supersafeEntries(TK, 96 hours, 0, 10);
         assertEq(ss.length, 1, "only the uncontested full-quorum entry");
-        assertEq(ss[0].caseId, 1);
+        assertEq(ss[0].localCaseId, 1);
     }
 
     function test_reads_are_paginated_and_never_gated() public {
         vm.startPrank(oldLogic);
         for (uint256 i = 0; i < 25; i++) {
-            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true);
+            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0, bytes32(0));
         }
         vm.stopPrank();
 
@@ -336,58 +1000,908 @@ contract RegistriesTest is Test {
         vm.prank(bob);
         IndexRegistry.Entry[] memory page = indexReg.entries(TK, 10, 10);
         assertEq(page.length, 10, "paginated slice");
-        assertEq(page[0].caseId, 10);
+        assertEq(page[0].localCaseId, 10);
         assertEq(indexReg.entries(TK, 20, 10).length, 5, "final short page");
     }
 
     function test_index_deletion_is_o1_and_relocates_positions() public {
+        uint256[] memory ids = new uint256[](5);
         vm.startPrank(oldLogic);
         for (uint256 i = 0; i < 5; i++) {
-            indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true);
+            ids[i] = indexReg.writeEntry(TK, i, keccak256(abi.encode(i)), bytes32(0), true, true, 0, 0, bytes32(0));
         }
-        indexReg.deleteEntry(TK, 0); // front entry: swap-pop with the last
+        indexReg.deleteEntry(TK, ids[0]); // front entry: swap-pop with the last
         vm.stopPrank();
 
         assertEq(indexReg.entryCount(TK), 4);
-        assertFalse(indexReg.isIndexed(TK, 0), "deleted");
-        assertTrue(indexReg.isIndexed(TK, 4), "moved entry still addressable");
+        assertFalse(indexReg.isIndexed(TK, ids[0]), "deleted");
+        assertTrue(indexReg.isIndexed(TK, ids[4]), "moved entry still addressable");
         // The relocated entry can still be deleted by id (position map is correct).
         vm.prank(oldLogic);
-        indexReg.deleteEntry(TK, 4);
+        indexReg.deleteEntry(TK, ids[4]);
         assertEq(indexReg.entryCount(TK), 3);
-        assertFalse(indexReg.isIndexed(TK, 4));
+        assertFalse(indexReg.isIndexed(TK, ids[4]));
     }
 
-    /// H-05: the seat seed is armed against `eligibilityAddVersion`, so EVERY
-    /// path that adds draw-eligible weight must bump it. If one does not, an
-    /// attacker can wait for a snapshot block's hash to become public and only
-    /// then reshape the tree in its favour — the draw would proceed on entropy
-    /// the attacker already knew. activate() and thaw() were both silent here,
-    /// which retired the defence the moment staking moved off the monolith.
-    function test_eligibility_version_bumps_on_every_weight_add() public {
-        _stake(alice, 100 * XBZZ);
-        uint256 v0 = stakeReg.eligibilityAddVersion();
+    // --- M2.6-P0-1b: the content reservation is as permanent as the entry ----
 
-        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
-        stakeReg.activate(alice);
-        uint256 v1 = stakeReg.eligibilityAddVersion();
-        assertGt(v1, v0, "activate: pending stake becomes drawable");
+    /// The reservation must not die with the logic that took it. Held in
+    /// `Moderation`, it restarted empty on every redeployment, so a replacement
+    /// logic re-indexed content already live in this index.
+    function test_content_reservation_survives_a_logic_upgrade() public {
+        bytes32 key = keccak256("content-key");
+
+        vm.prank(oldLogic);
+        bool first = indexReg.tryReserveContent(key, 0); // case 0 — a fresh logic starts there too
+        assertTrue(first, "first reservation succeeds");
+
+        (bool exists, address logic, uint256 caseId) = indexReg.contentReservation(key);
+        assertTrue(exists, "reserved");
+        assertEq(logic, oldLogic, "owned by the logic that took it");
+        assertEq(caseId, 0, "and by its own case 0");
+
+        _authorize(newLogic);
+        indexReg.revokeLogic(oldLogic);
+
+        assertTrue(indexReg.isContentReserved(key), "reservation survives the upgrade");
+        // Call BEFORE asserting: an external call inside the assert's argument
+        // list would consume the prank (StackDeployer header, trap 1).
+        vm.prank(newLogic);
+        bool second = indexReg.tryReserveContent(key, 0);
+        assertFalse(second, "the replacement logic is refused content already live in the index");
+    }
+
+    /// H-02 ownership keying, widened across versions: a replacement logic must
+    /// not be able to free live content by naming a case id it also holds. Both
+    /// logics number their first case 0, so this is the collision to close.
+    function test_replacement_logic_cannot_release_a_legacy_reservation() public {
+        bytes32 key = keccak256("content-key");
+        vm.prank(oldLogic);
+        indexReg.tryReserveContent(key, 0);
+
+        _authorize(newLogic);
+
+        // Same case id, different logic: a no-op, not a release.
+        vm.prank(newLogic);
+        indexReg.releaseContent(key, 0);
+        assertTrue(indexReg.isContentReserved(key), "another logic cannot free it");
+
+        // Right logic, wrong case: also a no-op (the stale-removal case, H-02).
+        vm.prank(oldLogic);
+        indexReg.releaseContent(key, 7);
+        assertTrue(indexReg.isContentReserved(key), "a different case cannot free it");
+
+        // Only the owning (logic, case) pair releases.
+        vm.prank(oldLogic);
+        indexReg.releaseContent(key, 0);
+        assertFalse(indexReg.isContentReserved(key), "the owner releases it");
+
+        // And then it is available again.
+        vm.prank(newLogic);
+        indexReg.tryReserveContent(key, 0);
+        (, address logicAfter,) = indexReg.contentReservation(key);
+        assertEq(logicAfter, newLogic, "freed content is reservable by the new logic");
+    }
+
+    /// Reservations are logic-facing state, not public: an arbitrary caller must
+    /// not be able to squat content keys or free live ones.
+    function test_content_reservation_is_logic_gated() public {
+        bytes32 key = keccak256("content-key");
+        vm.prank(alice);
+        vm.expectRevert(IndexRegistry.NotLogic.selector);
+        indexReg.tryReserveContent(key, 0);
+
+        vm.prank(oldLogic);
+        indexReg.tryReserveContent(key, 0);
 
         vm.prank(alice);
+        vm.expectRevert(IndexRegistry.NotLogic.selector);
+        indexReg.releaseContent(key, 0);
+        assertTrue(indexReg.isContentReserved(key), "still held");
+    }
+
+    // --- M2.6-P0-3: eligibility is constant within an epoch -------------------
+
+    /// The property, stated directly rather than through a change counter: no
+    /// weight-changing path — in EITHER direction — moves the sortition tree
+    /// inside an epoch.
+    ///
+    /// This replaces `test_eligibility_version_bumps_on_every_weight_add`, which
+    /// asserted that `eligibilityAddVersion` was bumped. That counter was the
+    /// defence and it was broken both ways: `setDutyUnits(sameValue)` bumped it
+    /// with no change (so a griefer could re-arm every pending case forever),
+    /// while `release`, `reward` and `releaseDuty` grew the drawable set and never
+    /// bumped it at all. Decreases — `requestExit`, `freeze` — were never tracked
+    /// either, and removing an interval remaps the whole weighted tree.
+    function test_weight_changes_do_not_move_the_tree_within_an_epoch() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+
+        uint256 totalAtEpochStart = stakeReg.totalEligibleWeight();
+        uint256 aliceAtEpochStart = stakeReg.eligibleWeightOf(alice);
+        assertGt(totalAtEpochStart, 0, "there is a live eligible set to move");
+
+        // INCREASES: the paths the old counter missed entirely.
+        _stake(alice, 50 * XBZZ);
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        stakeReg.activate(alice);
+        // `reward` pulls its own funding (M2.6-P0-4), so fund the caller first.
+        bzz.mint(oldLogic, 5 * XBZZ);
+        vm.prank(oldLogic);
+        bzz.approve(address(stakeReg), type(uint256).max);
+        vm.startPrank(oldLogic);
+        stakeReg.reward(alice, 5 * XBZZ); // credit path: grew weight, never bumped the counter
+        // M2.6-K-5: an incidental `setTrack(alice, 1)` stood here. It was never part
+        // of this property — track is not a tree input — and the write it stood for
+        // now requires an obligation this fixture has no reason to create. The
+        // scoped replacement has its own section below.
+        vm.stopPrank();
+
+        // DECREASES: never tracked at all, and they remap the whole tree.
+        vm.prank(bob);
+        stakeReg.requestExit(20 * XBZZ);
+        vm.prank(oldLogic);
+        stakeReg.lock(bob, CASE_A, RISK_PER_SEAT);
+        vm.prank(oldLogic);
+        stakeReg.freeze(bob, CASE_A, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+
+        // A no-op re-pledge: the exact call that used to re-arm every case.
+        vm.prank(alice);
         stakeReg.setDutyUnits(10);
-        uint256 v2 = stakeReg.eligibilityAddVersion();
-        assertGt(v2, v1, "setDutyUnits: pledging capacity adds draw weight");
+        vm.prank(alice);
+        stakeReg.setDutyUnits(10);
+
+        assertEq(stakeReg.totalEligibleWeight(), totalAtEpochStart, "total unmoved within the epoch");
+        assertEq(stakeReg.eligibleWeightOf(alice), aliceAtEpochStart, "and so is every leaf");
+
+        // They are not lost — they land at the boundary, together.
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
+        assertTrue(
+            stakeReg.totalEligibleWeight() != totalAtEpochStart,
+            "staged changes take effect at the next epoch"
+        );
+    }
+
+    /// The griefing half: a no-op `setDutyUnits` used to bump the global counter
+    /// and force every pending case to re-arm. There is no counter to bump now,
+    /// and repeating it cannot disturb the epoch's eligible set.
+    function test_repeated_noop_setDutyUnits_cannot_disturb_the_epoch() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 before = stakeReg.totalEligibleWeight();
+
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(alice);
+            stakeReg.setDutyUnits(10);
+            assertEq(stakeReg.totalEligibleWeight(), before, "no-op re-pledge moves nothing");
+        }
+        assertTrue(stakeReg.epochSettled(), "and the epoch stays settled");
+    }
+
+    /// A draw leaves the tree exactly as it found it: seats are held out of the
+    /// rest of THIS draw by the exclusion list, and the persistent weight shrink
+    /// is staged for the next epoch (M2.6-P0-2 + P0-3).
+    function test_a_draw_does_not_move_the_tree_for_concurrent_cases() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        uint256 before = stakeReg.totalEligibleWeight();
+
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(3, keccak256("concurrent"), 0, CASE_A);
+
+        assertEq(stakeReg.totalEligibleWeight(), before, "the sampling distribution is unchanged mid-epoch");
+        // The escrow is real regardless — the struct is the authority for seating.
+        assertEq(stakeReg.totalDutyBondedStake(), 3 * RISK_PER_SEAT, "collateral was still escrowed");
+    }
+
+    // --- M2.6-P0-3d / H-03A + H-03B: the draw must not write the tree ---------
+    //
+    // P0-3 froze the sortition TREE for the duration of an epoch and concluded that
+    // "eligibility is constant by construction, so there is nothing to grind". The
+    // tree is constant. The SEATABLE SET is not: `drawPanel` reads the live
+    // moderator struct to decide whether a drawn address may actually be seated —
+    // which P0-2 requires, since a seat may only be issued if its collateral can be
+    // escrowed right now — and rejects an unseatable address with
+    // `stakeTree.set(seat, 0)`, which REMAPS every subsequent interval of the draw.
+    //
+    // `setDutyUnits` only refuses `units < dutyReserved`, so a moderator holding no
+    // seat (`dutyReserved == 0`) may zero its duty AFTER its seed's blockhash is
+    // public. `requestExit(free)` is the same lever through `usable`.
+
+    /// Stake, activate and pledge a set of moderators of equal weight, then settle
+    /// the epoch so they are all drawable.
+    function _spawnDrawable(uint256 n, uint256 amount) internal returns (address[] memory who) {
+        who = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            who[i] = address(uint160(uint256(keccak256(abi.encode("h03a", i)))));
+            _stake(who[i], amount);
+        }
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        for (uint256 i = 0; i < n; i++) {
+            stakeReg.activate(who[i]);
+            vm.prank(who[i]);
+            stakeReg.setDutyUnits(amount / RISK_PER_SEAT);
+        }
+        _settleEpoch();
+    }
+
+    function _drawOnce(uint256 count, bytes32 seed) internal returns (address[] memory seats) {
+        vm.prank(oldLogic);
+        (seats,) = stakeReg.drawPanel(count, seed, 0, CASE_A);
+    }
+
+    /// Everything the panel contains except `skip`, in order. The attacker's own
+    /// seats are legitimately absent once it has made itself unseatable, so what
+    /// has to be compared is whether the draw landed differently ON EVERYONE ELSE.
+    function _without(address[] memory seats, address skip) internal pure returns (address[] memory out) {
+        out = new address[](seats.length);
+        uint256 n;
+        for (uint256 i = 0; i < seats.length; i++) {
+            if (seats[i] != skip) out[n++] = seats[i];
+        }
+        assembly {
+            mstore(out, n)
+        }
+    }
+
+    /// The panels cannot be compared for equality: the attacker's slots are freed
+    /// in the second draw, so it runs further down the same attempt sequence and
+    /// seats MORE non-attacker addresses. The property is that it seats the same
+    /// ones IN THE SAME ORDER — i.e. the attempt -> address mapping never moved.
+    /// A remap shows up as a divergence part-way through, not as a length change.
+    function _assertPrefix(address[] memory shorter, address[] memory longer, string memory what) internal pure {
+        require(shorter.length <= longer.length, "fixture: expected the ungrindable draw to be at least as long");
+        for (uint256 i = 0; i < shorter.length; i++) {
+            assertEq(longer[i], shorter[i], what);
+        }
+    }
+
+    /// The grind, run twice off one armed seed. Same seed, same tree, same epoch —
+    /// the only difference is a post-seed `setDutyUnits(0)` from a holder that is
+    /// not seated and therefore is not refused.
+    ///
+    /// Pre-fix the two panels differ: zeroing duty made the attacker unseatable,
+    /// the draw removed its leaf, and every later interval shifted. With `k`
+    /// identities that is a choice among subsets of a public-seed draw for gas plus
+    /// one epoch of eligibility.
+    function test_H03A_post_seed_setDutyUnits_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawable(12, 100 * XBZZ);
+        bytes32 seed = keccak256("h03a-duty");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        // An attacker the clean draw DID land on, and which holds no seat of its
+        // own at the moment it acts — so `setDutyUnits` does not refuse it.
+        address attacker = clean[0];
+        (, uint256 reserved,) = stakeReg.dutyOf(attacker);
+        assertEq(reserved, 0, "not seated: the un-pledge is permitted");
+
+        vm.prank(attacker);
+        stakeReg.setDutyUnits(0); // the seed's blockhash is already public
+        assertTrue(stakeReg.epochSettled(), "and the tree has NOT moved: staged for next epoch");
+        assertEq(stakeReg.totalEligibleWeight(), stakeReg.totalEligibleWeight(), "same epoch, same distribution");
+
+        address[] memory ground = _drawOnce(8, seed);
+
+        _assertPrefix(
+            _without(clean, attacker),
+            _without(ground, attacker),
+            "a self-directed un-pledge must not move anyone else's seat"
+        );
+        // It still excludes ITSELF — the seatability read stays live, so P0-2's
+        // guarantee that a seat is only issued against escrow is untouched.
+        for (uint256 i = 0; i < ground.length; i++) {
+            assertTrue(ground[i] != attacker, "the attacker is not seated");
+        }
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// `requestExit(free)` is the second lever and closes the same way.
+    function test_H03A_post_seed_requestExit_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawable(12, 100 * XBZZ);
+        who;
+        bytes32 seed = keccak256("h03a-exit");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        address attacker = clean[0];
+        (uint256 free,,,,,,,,) = stakeReg.moderatorInfo(attacker);
+        vm.prank(attacker);
+        stakeReg.requestExit(free); // reserves everything: `usable` drops to zero
+
+        address[] memory ground = _drawOnce(8, seed);
+
+        _assertPrefix(
+            _without(clean, attacker),
+            _without(ground, attacker),
+            "a self-directed exit request must not move anyone else's seat"
+        );
+        assertEq(bzz.balanceOf(address(stakeReg)), stakeReg.stakeBuckets(), "conservation");
+    }
+
+    /// A freeze must still keep a penalised moderator out of the panel. Since
+    /// M2.6-P0-3d it does so by DENIAL rather than by removal from the tree — the
+    /// substance (never seated) is unchanged, and it stops being a remap lever,
+    /// which P0-3c had had to carve out as an accepted residual because `claim()`
+    /// is permissionless and its timing is actor-chosen.
+    function test_H03A_a_freeze_still_denies_for_the_rest_of_the_draw() public {
+        address[] memory who = _spawnDrawable(12, 100 * XBZZ);
+        who;
+        bytes32 seed = keccak256("h03a-freeze");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        address penalised = clean[0];
+        vm.startPrank(oldLogic);
+        stakeReg.lock(penalised, CASE_B, RISK_PER_SEAT);
+        stakeReg.freeze(penalised, CASE_B, RISK_PER_SEAT, vm.getBlockTimestamp() + 30 days);
+        vm.stopPrank();
+
+        address[] memory ground = _drawOnce(8, seed);
+        for (uint256 i = 0; i < ground.length; i++) {
+            assertTrue(ground[i] != penalised, "a frozen moderator is not seated");
+        }
+    }
+
+    /// The cut is not ignored — only its within-epoch remapping side effect is.
+    /// At the next boundary the weight change lands in full.
+    function test_H03A_the_cut_still_lands_at_the_next_epoch() public {
+        address[] memory who = _spawnDrawable(4, 100 * XBZZ);
+        uint256 before = stakeReg.totalEligibleWeight();
+
+        vm.prank(who[0]);
+        stakeReg.setDutyUnits(0);
+        assertEq(stakeReg.totalEligibleWeight(), before, "unmoved within the epoch");
+
+        _settleEpoch();
+        assertLt(stakeReg.totalEligibleWeight(), before, "and fully applied at the boundary");
+        assertEq(stakeReg.eligibleWeightOf(who[0]), 0, "the un-pledge really did take effect");
+    }
+
+    // --- M2.6-F2: the freeze term is bounded by the CUSTODY contract ----------
+
+    /// F2(b). `L.MAX_FREEZE` was applied only by `FreezeMath.freezeDuration`, which
+    /// is called from `Settlement` — the replaceable side. This contract accepted any
+    /// `until`, so the permanent custody contract was inheriting a custody bound from
+    /// a contract designed to be swapped out.
+    ///
+    /// **Driven from the logic boundary, and that is the whole point of the fixture.**
+    /// `Settlement` is not in this call path at all: the test pranks an authorized
+    /// logic address and calls `freeze` directly, exactly as a replacement logic
+    /// would. So this cannot pass on `Settlement`'s clamp — if the bound were
+    /// enforced only one layer up, as it was before this fix, the assertion below
+    /// fails. Routing it through settlement instead is precisely what would hide the
+    /// gap, because the caller would have clamped the argument before the registry
+    /// ever saw it.
+    ///
+    /// It SATURATES rather than reverting: `freeze` is reachable from settlement, so
+    /// a revert here would be the M2.6-F1 brick one contract over — see the docblock
+    /// on `freeze` for why, and for the precedent in `FreezeMath`.
+    function test_F2_the_registry_bounds_the_freeze_term_itself() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 t0 = vm.getBlockTimestamp();
 
         vm.startPrank(oldLogic);
-        stakeReg.lock(alice, RISK_PER_SEAT);
-        stakeReg.freeze(alice, RISK_PER_SEAT, vm.getBlockTimestamp() + 1 days);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        // An absurd term, of the shape a buggy or hostile replacement logic produces.
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, type(uint256).max);
         vm.stopPrank();
-        uint256 v3 = stakeReg.eligibilityAddVersion();
-        assertEq(stakeReg.eligibleWeightOf(alice), 0, "frozen -> out of the pool");
 
-        vm.warp(vm.getBlockTimestamp() + 1 days + 1);
+        (,,,, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozenUntil, t0 + MAX_FREEZE, "the registry holds the bound itself");
+
+        // And the bound is real, not cosmetic: the stake actually thaws.
+        vm.warp(t0 + MAX_FREEZE);
         stakeReg.thaw(alice);
-        assertGt(stakeReg.eligibilityAddVersion(), v3, "thaw: a frozen moderator re-enters the pool");
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 0, "stake is recoverable at the bound, not held forever");
+    }
+
+    /// F2, SECOND DOOR. `freeze` is not the only logic-callable writer of
+    /// `m.frozenUntil`: `settleDuty` — the H-07/H-10 no-show penalty — takes `until`
+    /// from the caller and writes it too. The first version of this fix clamped
+    /// `freeze` alone and the docblock then claimed the term was "bounded here, by
+    /// this contract", which was false on the path whose whole purpose is to punish
+    /// and which is therefore the likelier of the two to carry a hostile term.
+    ///
+    /// Unclamped, one call froze a moderator until `2**256 - 1`: `thaw` reverts
+    /// `NotFrozen` forever, and by the aggregation rule one clock governs the whole
+    /// pooled balance, so every later tranche is trapped behind it too.
+    ///
+    /// Driven from the logic boundary, like its sibling — `Settlement` is not in this
+    /// path. Mutation-checked: with only the `freeze` clamp in place this test fails,
+    /// which matters because the sibling test passing is exactly what made F2 look
+    /// closed when it was open on one of two writers.
+    function test_F2_the_registry_bounds_the_no_show_penalty_term_too() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 t0 = vm.getBlockTimestamp();
+        _drawSeatFor(oldLogic, alice, CASE_A); // a real seat, so there is duty to settle
+
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, type(uint256).max);
+
+        (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertGt(frozen, 0, "the penalty actually froze something");
+        assertEq(frozenUntil, t0 + MAX_FREEZE, "the punish path is bounded by the registry too");
+
+        // And it is a real bound: the stake comes back.
+        vm.warp(t0 + MAX_FREEZE);
+        stakeReg.thaw(alice);
+        (,,, uint256 after_,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(after_, 0, "recoverable at the bound rather than frozen forever");
+    }
+
+    /// A term INSIDE the bound is untouched — the clamp must narrow the hostile case
+    /// without rewriting the honest one. This is what makes the fix a narrowing that
+    /// cannot change behaviour today: every term the shipped `Settlement` produces is
+    /// already within `MAX_FREEZE`.
+    ///
+    /// **GUARD, not a discriminating test.** It passes before and after the fix — a
+    /// lawful term was never clamped by anything. What it catches is a future clamp
+    /// written too tight, or the bound lowered under a ruleset that relies on it.
+    function test_F2_a_lawful_freeze_term_is_not_rewritten() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 want = vm.getBlockTimestamp() + 7 days;
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, want);
+        vm.stopPrank();
+
+        (,,,, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozenUntil, want, "a lawful term passes through unchanged");
+    }
+
+    /// F2(a). Freezes aggregate by MAX over a pooled balance and one clock, so a
+    /// later penalty extends the lock on stake an earlier one froze, past that
+    /// earlier term. Deliberate — `min` would let a moderator shorten a long freeze
+    /// by incurring a short one, and per-tranche expiry needs a queue this contract
+    /// should not grow — but it is a punishment rule, and a rule that lives only in
+    /// the reader's head is the thing this project keeps getting caught by. Asserted
+    /// as behaviour so it cannot be changed silently.
+    ///
+    /// **CHARACTERIZATION, not a fix.** F2(a) changed no code: this rule was already
+    /// the behaviour and passes identically before and after. It is here because the
+    /// rule was written nowhere, and prose alone is what this milestone's standing
+    /// lesson is about. It is not vacuous — switching the aggregation to `min` fails
+    /// the first assertion ("a shorter later freeze never shortens the lock").
+    function test_F2_freezes_aggregate_by_max_over_one_clock() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 t0 = vm.getBlockTimestamp();
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, t0 + 30 days); // the long one
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, t0 + 1 days); // a shorter, later one
+        vm.stopPrank();
+
+        (,,,, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozenUntil, t0 + 30 days, "a shorter later freeze never shortens the lock");
+
+        // And the converse: the later, LONGER penalty drags the earlier tranche with
+        // it. Both tranches sit in one pooled balance under one clock.
+        vm.prank(oldLogic);
+        stakeReg.freeze(alice, CASE_A, 5 * XBZZ, t0 + 60 days);
+        (,,, uint256 frozen, uint256 until2,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(until2, t0 + 60 days, "the whole pooled balance takes the longest term");
+        assertEq(frozen, 25 * XBZZ, "including stake frozen before that penalty existed");
+
+        vm.warp(t0 + 30 days);
+        vm.expectRevert(StakeRegistry.NotFrozen.selector);
+        stakeReg.thaw(alice); // the first tranche's own term has passed; it stays locked
+    }
+
+    // --- M2.6-K-5: track writes are obligation-scoped -----------------------
+
+    /// Draw `who` a seat under `caseRef` so the caller holds a real obligation.
+    /// The draw is stake-weighted WITH REPLACEMENT over everyone eligible, so a
+    /// single draw lands on an arbitrary staker — re-seed until it lands on the
+    /// one this fixture needs, rather than assuming a one-staker set.
+    function _drawSeatFor(address logic, address who, uint256 caseRef) internal {
+        for (uint256 i = 0; i < 32; i++) {
+            (, uint256 have,) = stakeReg.obligationOf(logic, who, caseRef);
+            if (have > 0) return;
+            vm.prank(logic);
+            stakeReg.drawPanel(1, keccak256(abi.encode("k5", who, caseRef, i)), 0, caseRef);
+        }
+        (, uint256 units,) = stakeReg.obligationOf(logic, who, caseRef);
+        require(units > 0, "fixture: no seat drawn");
+    }
+
+    /// THE K-5 PROPERTY. `setTrack` took no `caseRef` and wrote an absolute value,
+    /// so `onlyLogic` was its only gate — and trust model #3 keeps BOTH logics
+    /// authorized through a handover by design. A concurrently authorized logic
+    /// could therefore overwrite the standing of a moderator it had never drawn.
+    ///
+    /// Track is not stake, so this was never a solvency bug. It is a reputation
+    /// one: track drives the §6.4 freeze curve, so a corrupted value changes the
+    /// penalties an honest moderator can impose and must suffer.
+    function test_a_concurrent_logic_cannot_touch_a_moderator_it_never_drew() public {
+        _authorize(newLogic); // the handover window: both logics live, by design
+        _stakeActivatePledge(alice, 100 * XBZZ);
+
+        // `oldLogic` draws alice and legitimately records her participation.
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        uint256 earned = stakeReg.trackOf(alice);
+        assertEq(earned, WAD, "a coherent participation is worth one unit");
+
+        // `newLogic` never drew her. Under `setTrack` this was an unguarded write.
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+
+        // Nor by naming a case of its own: the obligation key includes the CALLER,
+        // so inventing a caseRef does not conjure an obligation.
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_B, 1, MIN_TRACK_DECAY);
+
+        assertEq(stakeReg.trackOf(alice), earned, "standing untouched by the logic that never drew her");
+    }
+
+    /// The attack that claims NOTHING, in its own test because the assertions above
+    /// would mask it. `coherentUnits = 0` is a PURE DECAY write: it asks for no
+    /// credit, so the credit bound cannot see it, and any legal factor satisfies the
+    /// envelope. Corrupting standing DOWNWARD is the harm K-5 names — track drives
+    /// the §6.4 curve, so shaving an honest moderator's standing weakens the
+    /// penalties it can impose — and the obligation check is the ONLY check that
+    /// stops this one. Verified by mutation: neutralising that check makes this test
+    /// fail on this line, while the broader test above still fails on the credit
+    /// bound and would have hidden which check was doing the work.
+    function test_a_concurrent_logic_cannot_decay_standing_it_never_earned() public {
+        _authorize(newLogic);
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        uint256 earned = stakeReg.trackOf(alice);
+
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 0, MIN_TRACK_DECAY);
+
+        assertEq(stakeReg.trackOf(alice), earned, "standing cannot be shaved by a logic that drew nothing");
+    }
+
+    /// THE MUTATION THAT MATTERS. Every other check passes here: the caller owns
+    /// both obligations, both were created by draws, neither has been used, and
+    /// both credits are within the seats drawn. What is being caught is the factor
+    /// varying BETWEEN moderators inside one case-round.
+    ///
+    /// Without the binding, the factor is chosen per call, at settlement, with the
+    /// outcome already known — so a logic could hand the ruleset's decay to the
+    /// moderators it likes and the floor to the ones it does not. No legitimate
+    /// ruleset can express that: `trackDecay` is per case and H-11 pins it.
+    function test_the_decay_factor_is_bound_to_the_case_not_chosen_per_moderator() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _stakeActivatePledge(bob, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        _drawSeatFor(oldLogic, bob, CASE_A);
+
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, WAD - 1); // binds the factor
+
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.TrackDecayNotUniform.selector);
+        stakeReg.recordParticipation(bob, CASE_A, 1, MIN_TRACK_DECAY);
+
+        // The bound factor itself is fine, and a DIFFERENT case-round is free to
+        // pick its own — the binding is per case-round, not global.
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(bob, CASE_A, 1, WAD - 1);
+        _drawSeatFor(oldLogic, alice, CASE_B);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_B, 1, MIN_TRACK_DECAY);
+    }
+
+    /// No ordering dependency exists between the track write and duty settlement.
+    /// `recordParticipation` reads `drawnUnits`, which the draw sets and nothing
+    /// decrements; `settleDuty` consumes `dutyUnits`, a different field. Written as
+    /// a test rather than a comment at both call sites, because a safety property
+    /// living in a comment is this milestone's standing lesson and it has cost four
+    /// findings already.
+    ///
+    /// **THIS TEST IS THE ONLY THING PINNING THAT PROPERTY. Do not weaken it on the
+    /// evidence that the mutation is well covered — it is not.** Pointing the checks
+    /// at `dutyUnits` fails twelve-plus tests across the suite, which reads like
+    /// heavy coverage and is not: every one of the others fails for the INJECTOR's
+    /// reason, not the property's. `__injectObligation` leaves `dutyUnits == 0` (see
+    /// its scope limit), so injected fixtures revert the moment a check reads that
+    /// field, whatever the ordering is. They would fail identically if the ordering
+    /// were correct. This fixture is driven — a real draw, then a real `settleDuty`,
+    /// then the write — so it is the only one whose failure means what it says.
+    function test_track_write_survives_duty_settlement_running_first() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+
+        // Settle the duty FIRST — the reverse of what `Settlement` does today.
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, 0, 0);
+        (, uint256 unitsLeft,) = stakeReg.obligationOf(oldLogic, alice, CASE_A);
+        assertEq(unitsLeft, 0, "duty units are consumed");
+
+        // The track write still works, and still bounds the credit by seats drawn.
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        assertEq(stakeReg.trackOf(alice), WAD, "credited after the units were consumed");
+    }
+
+    /// One write per obligation, ever. The registry cannot enforce once-per-CASE —
+    /// obligations are per case-ROUND and collapsing them would mean parsing
+    /// `caseRef`, which re-couples the permanent registry to a replaceable logic's
+    /// encoding. Once per obligation is the bound it can enforce, and the logic
+    /// enforces the per-case rule on its side.
+    function test_one_track_write_per_obligation() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.TrackAlreadyRecorded.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 0, MIN_TRACK_DECAY);
+    }
+
+    /// The credit is bounded by work actually done under this obligation, and the
+    /// factor by the registry's immutable envelope.
+    function test_credit_and_factor_are_both_bounded() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+
+        vm.startPrank(oldLogic);
+        vm.expectRevert(StakeRegistry.TrackCreditExceedsSeats.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 2, MIN_TRACK_DECAY); // one seat drawn
+
+        vm.expectRevert(StakeRegistry.BadTrackDecay.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY - 1); // below the floor
+
+        vm.expectRevert(StakeRegistry.BadTrackDecay.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, WAD); // parity is no decay (P1-3)
+        vm.stopPrank();
+
+        assertEq(stakeReg.trackOf(alice), 0, "nothing was written by any of them");
+    }
+
+    /// C2, the constraint that ruled out the obvious per-case-handle shape: the
+    /// VALUE is global and survives migration. Only the AUTHORITY is scoped.
+    function test_standing_accumulates_across_a_logic_migration() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        _drawSeatFor(oldLogic, alice, CASE_A);
+        vm.prank(oldLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        uint256 underOldLogic = stakeReg.trackOf(alice);
+        assertEq(underOldLogic, WAD, "earned under the outgoing logic");
+
+        // Migrate. The successor inherits nothing of the old logic's obligations...
+        _authorize(newLogic);
+        vm.prank(newLogic);
+        vm.expectRevert(StakeRegistry.NotYourObligation.selector);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+
+        // ...but it continues the same accumulated standing from its own draws.
+        _drawSeatFor(newLogic, alice, CASE_A);
+        vm.prank(newLogic);
+        stakeReg.recordParticipation(alice, CASE_A, 1, MIN_TRACK_DECAY);
+        assertEq(
+            stakeReg.trackOf(alice),
+            (underOldLogic * MIN_TRACK_DECAY) / WAD + WAD,
+            "the successor decays and extends the EXISTING track, it does not restart one"
+        );
+    }
+
+    /// M2.6-P0-3d, the DOWNWARD class P0-3c aimed at, now driven at the exhaustion
+    /// site rather than the denial site.
+    ///
+    /// `riskPerSeat == MIN_STAKE` in the default ruleset, so a minimum-stake
+    /// identity has one duty unit and exhausts on its FIRST seat. Under exclusion
+    /// that meant: seated-then-exhausted removed its leaf and remapped the rest of
+    /// the draw, while the same identity having cut beforehand was never seated and
+    /// never removed. Two trees, third parties move — and P0-3c's `!cut` guard did
+    /// not close it, because the asymmetry is between the cut and no-cut runs.
+    function test_H03D_exhaustion_asymmetry_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawableUnits(16, 1); // one duty unit each
+        bytes32 seed = keccak256("h03d-exhaust");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(8, seed);
+        vm.revertToState(snap);
+
+        // The attacker must be seated at a NON-FINAL position, or exhaustion has no
+        // subsequent intervals to remap and this passes vacuously.
+        address attacker = clean[0];
+        uint256 lastAt;
+        for (uint256 i = 0; i < clean.length; i++) {
+            if (clean[i] == attacker) lastAt = i;
+        }
+        assertLt(lastAt, clean.length - 1, "attacker is seated before the end of the run");
+        (, uint256 reserved,) = stakeReg.dutyOf(attacker);
+        assertEq(reserved, 0);
+
+        vm.prank(attacker);
+        stakeReg.setDutyUnits(0);
+        address[] memory ground = _drawOnce(8, seed);
+
+        _assertPrefix(
+            _without(clean, attacker), _without(ground, attacker), "exhaustion must not move anyone else"
+        );
+        who;
+    }
+
+    /// The multi-unit variant, so the fix cannot special-case the one-unit path:
+    /// two duty units, offered three times.
+    function test_H03D_multi_unit_holder_cannot_reshape_the_draw() public {
+        address[] memory who = _spawnDrawableUnits(10, 2);
+        bytes32 seed = keccak256("h03d-multi");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory clean = _drawOnce(12, seed);
+        vm.revertToState(snap);
+
+        address attacker = clean[0];
+        uint256 offered;
+        for (uint256 i = 0; i < clean.length; i++) {
+            if (clean[i] == attacker) offered++;
+        }
+        assertGe(offered, 2, "the multi-seat case is actually exercised");
+
+        vm.prank(attacker);
+        stakeReg.setDutyUnits(0);
+        address[] memory ground = _drawOnce(12, seed);
+
+        _assertPrefix(_without(clean, attacker), _without(ground, attacker), "multi-unit holder moves nobody");
+        who;
+    }
+
+    /// M2.6-P0-3d, the dependency the whole design rests on, pinned directly:
+    /// `addr(i)` is a pure function of (seed, attempt index, epoch-start tree).
+    ///
+    /// Precompute the walk off the PRE-DRAW tree through the public `draw` view,
+    /// then assert the seats the draw returns are an in-order subsequence of it.
+    /// Needs no model of seatability, and fails the moment any exclusion remaps,
+    /// because post-exclusion draws come from a mutated tree and stop appearing.
+    function test_H03D_seats_are_a_subsequence_of_the_predrawn_walk() public {
+        _spawnDrawableUnits(20, 2);
+        bytes32 seed = keccak256("h03d-walk");
+        uint256 n = 48;
+
+        address[] memory walk = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            walk[i] = stakeReg.draw(uint256(keccak256(abi.encode(seed, i))));
+        }
+        // Make some of the walk unseatable so exclusions WOULD fire under the old
+        // shape; the subsequence must survive it.
+        for (uint256 i = 0; i < n; i += 5) {
+            (, uint256 res,) = stakeReg.dutyOf(walk[i]);
+            if (res == 0) {
+                vm.prank(walk[i]);
+                stakeReg.setDutyUnits(0);
+            }
+        }
+
+        address[] memory seats = _drawOnce(12, seed);
+        uint256 w;
+        for (uint256 s_ = 0; s_ < seats.length; s_++) {
+            bool found;
+            while (w < n) {
+                if (walk[w++] == seats[s_]) {
+                    found = true;
+                    break;
+                }
+            }
+            assertTrue(found, "every seat comes from the pre-draw walk, in order");
+        }
+    }
+
+    /// M2.6-P0-3d: the cursor accumulates ATTEMPTS, so batches are contiguous
+    /// segments of one walk and batching is transparent. A seat-based cursor would
+    /// leak across batches exactly as in-memory exclusion does — this is the single
+    /// fact the whole design rests on, and it is one refactor away from being
+    /// silently broken.
+    ///
+    /// GUARD, not a discriminator: it passes on the pre-fix code too, because the
+    /// restore loop left the tree identical between calls there. It exists to fail
+    /// if the cursor ever becomes seat-based.
+    ///
+    /// Ordinary regime deliberately: `maxAttempts` is per call, so under heavy
+    /// absorption a batched and an unbatched run can hit their caps at different
+    /// points and diverge legitimately.
+    function test_H03D_batching_is_transparent() public {
+        _spawnDrawableUnits(40, 4);
+        bytes32 seed = keccak256("h03d-batch");
+
+        uint256 snap = vm.snapshotState();
+        address[] memory whole = _drawOnce(12, seed);
+        vm.revertToState(snap);
+
+        vm.prank(oldLogic);
+        (address[] memory b1, uint256 a1) = stakeReg.drawPanel(5, seed, 0, CASE_A);
+        vm.prank(oldLogic);
+        (address[] memory b2,) = stakeReg.drawPanel(7, seed, a1, CASE_A);
+
+        assertEq(b1.length + b2.length, whole.length, "same total seats");
+        for (uint256 i = 0; i < b1.length; i++) {
+            assertEq(b1[i], whole[i], "batch 1 matches the unbatched prefix");
+        }
+        for (uint256 i = 0; i < b2.length; i++) {
+            assertEq(b2[i], whole[b1.length + i], "batch 2 continues the same walk");
+        }
+    }
+
+    /// Constraint 2: the attempt budget has to hold panel fill, or the leak has been
+    /// traded for a liveness regression.
+    function test_H03D_panel_fills_under_absorption() public {
+        address[] memory who = _spawnDrawableUnits(40, 1); // capacity 40
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(who[i]);
+            stakeReg.setDutyUnits(0); // 25% absorbing
+        }
+        for (uint256 t = 0; t < 20; t++) {
+            uint256 snap = vm.snapshotState();
+            address[] memory seats = _drawOnce(24, keccak256(abi.encode("fill", t)));
+            assertEq(seats.length, 24, "the panel still fills against 25% absorption");
+            vm.revertToState(snap);
+        }
+    }
+
+    /// M2.6-P0-3d: `voluntaryCutEpoch` is superseded and must stay deleted — same
+    /// reasoning as `penalizeNoShow` (K-4). A mechanism with nothing left to do but
+    /// a live write path reads as defence it no longer provides.
+    function test_H03D_voluntary_cut_epoch_selector_is_gone() public {
+        (bool ok,) = address(stakeReg).call(abi.encodeWithSignature("voluntaryCutEpoch(address)", alice));
+        assertFalse(ok, "superseded by the no-write invariant");
+    }
+
+    /// Spawn `n` moderators pledging exactly `units` each.
+    function _spawnDrawableUnits(uint256 n, uint256 units) internal returns (address[] memory who) {
+        who = new address[](n);
+        uint256 amount = units * RISK_PER_SEAT;
+        for (uint256 i = 0; i < n; i++) {
+            who[i] = address(uint160(uint256(keccak256(abi.encode("u", units, i)))));
+            _stake(who[i], amount);
+        }
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION);
+        for (uint256 i = 0; i < n; i++) {
+            stakeReg.activate(who[i]);
+            vm.prank(who[i]);
+            stakeReg.setDutyUnits(units);
+        }
+        _settleEpoch();
+    }
+
+    /// `drawPanel` refuses to sample an epoch whose staged changes are not yet in.
+    function test_draw_refuses_an_unsettled_epoch() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS * 2);
+        vm.prank(alice);
+        stakeReg.setDutyUnits(9); // stages into this epoch
+        vm.roll(vm.getBlockNumber() + EPOCH_BLOCKS);
+
+        assertFalse(stakeReg.epochSettled(), "an epoch boundary passed with changes staged");
+
+        // M2.6-P0-3b: a settled epoch is a PRECONDITION of the draw, not something
+        // the draw arranges. This used to drain a bounded budget first and revert
+        // if that was not enough — discarding the drain along with the draw, so an
+        // oversized epoch could never complete and every draw stayed blocked. The
+        // assertion here was "the draw applied the backlog itself", which is the
+        // behaviour that made the discard possible.
+        vm.prank(oldLogic);
+        vm.expectRevert(StakeRegistry.EpochNotSettled.selector);
+        stakeReg.drawPanel(1, keccak256("settles"), 0, CASE_A);
+        assertEq(stakeReg.drainCursor(), 0, "and it did no work it would have had to unwind");
+
+        // The drain is its own permissionless call, and it commits.
+        stakeReg.advanceEpoch(type(uint256).max);
+        assertTrue(stakeReg.epochSettled(), "backlog applied");
+        vm.prank(oldLogic);
+        stakeReg.drawPanel(1, keccak256("settles"), 0, CASE_A);
     }
 
     function test_two_step_governance_transfer() public {

@@ -56,7 +56,7 @@ as a mental model and directly testable in M2.
 | `FEE_PER_TOPIC` | Per-topic part of the fee floor | *(working)* |
 | `MAX_TOPICS` | Topics per submission | 5 |
 | `CLAIM_BOUNTY` | Bounty paid to the finalization claimant, from the pot | *(working)* |
-| `SUPERSAFE_AGE` | Age an uncontested entry must reach for supersafe view | 96 h |
+| `SUPERSAFE_AGE` | Age an uncontested, full-quorum entry must reach for supersafe view (§8.1, §8.3) | 96 h |
 
 `minFee = FEE_BASE + FEE_PER_TOPIC * nTopics` (P8). Submitters MAY overpay.
 `FEE_BASE` covers the depth-0 panel's minimum voter pay (`COMMIT_TARGET[0] ·
@@ -111,7 +111,14 @@ Entry {
   bytes32 contentHash
   bytes32 metaHash
   uint40  approvalTime
-  bool    uncontested   // true iff no reject vote AND never appealed; cleared by any contest
+  bool    uncontested   // true iff no Reject vote was ever revealed, in any round.
+                        // An appeal ALONE does not clear it — §8.1 is normative
+                        // and states why. (This line previously said "never
+                        // appealed; cleared by any contest", contradicting §8.1
+                        // and the implementation.)
+  bool    fullQuorum    // H-09: no round decided below MIN_REVEALS after max
+                        // widen, and the deciding round had >= MIN_REVEALS
+                        // independent revealers (§8.1)
   uint    caseId        // back-reference for removal/settlement
 }
 ```
@@ -433,17 +440,33 @@ provisional entry briefly polluted the index. Writing at settlement fixes both.
 
 On a submission finalizing **APPROVE**, write an `Entry` per topic:
 ```
-Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId }
+Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested,
+       fullQuorum, globalId, originLogic, localCaseId, rulesVersion,
+       guidelinesVersion, dedupKey }
 ```
 - `approvalTime` is the settlement time (used by the supersafe age filter, §8.3).
-- **`uncontested = true` iff no `Reject` vote was ever revealed in any round of
+- **THE NORMATIVE DEFINITION OF `uncontested`. It is stated once, here; §4 and
+  `README.md` §3.8 defer to it and must not restate it differently.**
+
+  **`uncontested = true` iff no `Reject` vote was ever revealed in any round of
   the case.** An **appeal alone does not clear it**: a frivolous appeal that draws
   a fresh panel which again reveals *no* reject vote leaves the entry uncontested.
   Rationale: `uncontested` exists to mark entries no dissenting voter ever
   opposed; unanimous rounds involve no probabilistic draw, so the "snuck back in
   via a lucky draw" concern the flag guards against cannot arise. This also closes
-  a griefing vector — under the old rule a vandal could permanently exclude any
-  entry from the supersafe view for the price of one abandoned appeal.
+  a griefing vector — under the alternative (process-uncontested: cleared by the
+  ACT of appealing) a vandal could permanently exclude any entry from the
+  supersafe view for the price of one abandoned appeal.
+  Implemented by `Moderation._noRejectEver`.
+- **`fullQuorum = true` iff** no round in the case was armed below `MIN_REVEALS`
+  after the widen cap (`underQuorum`), **and** the deciding round drew at least
+  `MIN_REVEALS` **independent revealers** — distinct addresses, not seats. Seats
+  are drawn with replacement, so one multi-seat voter must not satisfy quorum
+  alone (H-09). Implemented by `Moderation._fullQuorum`.
+- `globalId` is minted by `IndexRegistry`, not by the logic contract: a logic
+  contract's own case id restarts at 0 on every redeployment, so it is not a safe
+  index handle (M2.6-P0-1). `dedupKey` binds the entry to the content reservation
+  protecting it, so deleting the entry frees the content (M2.6-P0-1c).
 
 ### 8.2 At SETTLED
 
@@ -459,8 +482,13 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 ### 8.3 Search views (client-side, from view functions)
 
 - **Superset:** every current `Entry` under a topic.
-- **Supersafe subset:** `uncontested == true && now − approvalTime ≥ SUPERSAFE_AGE`.
-- Provisional badge (P7): `now − approvalTime < SUPERSAFE_AGE || !uncontested`.
+- **Supersafe subset:** `uncontested && fullQuorum && now − approvalTime ≥ SUPERSAFE_AGE`
+  (H-09 added the `fullQuorum` conjunct; see §8.1 for both flags). Served by
+  `IndexRegistry.supersafeEntries(topic, minAge, cursor, limit)` — paginated,
+  because an unbounded view over a large index exceeds practical RPC response
+  limits (M-04). `minAge` is a caller argument rather than registry state: age is
+  a display policy, and the index outlives any particular parameter set.
+- Provisional badge (P7): `now − approvalTime < SUPERSAFE_AGE || !uncontested || !fullQuorum`.
 
 ### 8.4 Topic hygiene (P2)
 
@@ -474,23 +502,56 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 
 ## 9. Invariants (must hold at every block)
 
-1. **Conservation:** `tokenBalance(contract) == totalFreeStake + Σ committed +
-   Σ frozen + Σ live case pots`. No idle treasury (README §4).
+1. **Conservation:** spans two balances since the M2.5 split, and four stake
+   buckets since M2.6-P0-2 added escrow:
+   `balanceOf(Moderation) == openPotsTotal + totalPendingBond + totalPendingPayout
+   + totalSettling` and
+   `balanceOf(StakeRegistry) == totalFreeStake + totalCommittedStake +
+   totalFrozenStake + totalDutyBondedStake`. No idle treasury (README §4).
+
+   **The first equality holds at TRANSACTION boundaries, not at every intermediate
+   state.** Since M2.6's second structural split, `Settlement._disposeBatch`
+   decrements `totalSettling` once per batch from the delta in `s.distributed`,
+   where the pre-split code decremented it per reward inside the loop. From the
+   first reward credit of a batch the registry has already pulled that reward out
+   of `Moderation`, so its balance has fallen while `totalSettling` has not; the
+   equality is untrue until the batch returns. It is acceptable because **no
+   execution can observe the window**: `claim` is `nonReentrant`, the only external
+   calls in the loop are into `StakeRegistry` (which never calls back into a logic
+   contract), and the token is a fixed ERC-20 with no transfer hook. All three are
+   load-bearing — a callback-bearing token would make the intermediate state
+   reachable and force the per-reward form back.
+
+   The second equality is **not** weakened and holds at every block.
 2. **No internal transfer:** no execution path moves stake principal from one
    moderator to another. Rewards credited to voters come only from `pot` (fees +
    forfeited bonds). *(Test: property test that Σ principal per address is
    non-decreasing except by that address's own `requestExit`/withdraw.)*
-3. **Stake sub-state partition:** for every moderator, `free + committed + frozen`
-   equals their tracked stake; each unit in exactly one sub-state.
+3. **Stake sub-state partition:** for every moderator,
+   `free + committed + frozen + dutyBonded` equals their tracked stake; each unit
+   in exactly one sub-state. `dutyBonded` is the collateral escrowed against
+   outstanding draw assignments (M2.6-P0-2): not free, not exitable, not reducible
+   by `setDutyUnits`, and not available to another case.
 4. **Freeze is release-only-forward:** a frozen balance can only become free after
    `frozenUntil`; it can never be paid out to anyone.
 5. **Withdrawals never pausable** (P6): `requestExit`/`withdraw` have no admin gate.
 6. **Guidelines pinning:** a case's `guidelinesVersion` never changes after submit.
-7. **Dedup:** `submissionExists[H(content,meta,topicKey)]` prevents a duplicate
+7. **Dedup:** a reservation on `H(content,meta,topicKey)` prevents a duplicate
    (content,meta,topic) triple (P3); different topics for same content are
-   distinct keys and each pays its own fee.
-8. **Finalizability:** every case that reaches FINALIZED can be SETTLED within one
-   block's gas (bounded by `MAX_TOPICS` and seat-panel sizes) — no stranded pots.
+   distinct keys and each pays its own fee. Since M2.6-P0-1b the reservation is
+   held by `IndexRegistry`, not the logic contract, so it is exactly as permanent
+   as the index entry it protects: a logic upgrade does not reset it, and content
+   live in the index cannot be re-submitted by a replacement logic. It is keyed by
+   its owning `(logic, caseId)` and released only by that case, or by deletion of
+   the entry it protects.
+8. **Finalizability:** every case that reaches FINALIZED can be SETTLED, and every
+   case that cannot proceed reaches a terminal state — no stranded pots. The
+   guarantee is *bounded batches*, not one block: settlement (H-04), seat drawing
+   (M2.6-P1-2) and VOID disposal (M2.6-P0-7) each advance a cursor a bounded number
+   of steps per call, and every one of those pokes is permissionless. A draw that
+   can never complete for want of network capacity ends via `resolveStalledDraw`
+   (M2.6-P0-6). Some large configurations REQUIRE batching rather than merely
+   permitting it — see `contracts/GAS_BUDGETS.md`.
 9. **Governance bound (P6):** only the §1 numeric parameters are mutable, and new
    `guidelinesHashByVersion` entries may be added (never mutated), all via
    multisig+timelock; core transitions in §3/§5 are immutable and withdrawals are
@@ -503,6 +564,16 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 11. **Funds conservation:** for every settled case, `fee + Σ bonds == Σ refunds +
     claim bounty + Σ rewards` — no path mints or destroys value (WO-1). *(Test:
     `test_settlement_conserves_funds`.)*
+12. **Obligation ownership (M2.6-P0-5):** every committed-stake and duty obligation
+    is keyed `keccak256(authEpoch, logic, moderator, caseRef)`, and only the case
+    that created one may discharge it. No authorized logic can release, freeze or
+    settle an obligation belonging to another logic (during a handover both are
+    authorized) or to another case of its own. Aggregates alone cannot express
+    this, which is why the pooled form leaked silently: nothing was minted, so
+    conservation still held. *(Tests:
+    `test_cross_logic_discharge_reverts`,
+    `test_settling_one_case_cannot_touch_another_cases_escrow`,
+    `test_double_release_reverts_rather_than_being_absorbed`.)*
 
 ---
 
@@ -510,7 +581,12 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested, caseId
 
 - Finalization/settlement at `nTopics == MAX_TOPICS` and largest subset
   (`COMMIT_TARGET[MAX_DEPTH]`) stays under block gas limit (Invariant 8).
-- A case that reaches MAX_DEPTH with maximal reveals settles in one `claim()`.
+- A case that reaches MAX_DEPTH with maximal reveals settles in bounded batches of
+  `claim(caseId, maxSteps)`. **Not** in one `claim()`: the depth-3 / 86-seat
+  configuration measured 4,699,258 gas at the start of M2.6 and 8,019,298 after the
+  per-seat escrow, staged weight and obligation writes landed. Batching is the
+  guarantee; the one-shot overload is a convenience that no longer covers the
+  largest cases (`contracts/GAS_BUDGETS.md`).
 - Widen-on-under-participation cannot loop unboundedly.
 - Duplicate submission rejected (P3). Over-`MAX_TOPICS` rejected (P2).
 - Removal of a non-existent / already-removed entry is a no-op / reverts cleanly.
@@ -599,6 +675,12 @@ on-chain constraints. Each is documented with rationale and threat-model impact 
 
 Every structural guarantee this spec asserts is test-guarded in M2: funds conservation
 and no-internal-transfer as Foundry invariants over a 16k-call campaign, the settlement
-arithmetic as a 52-vector differential test against an independent Python integer
+arithmetic as a 52-vector differential test against a Python integer
 reference, and the single-stake-benefit property (§5.2, invariant 10) as a statistical
 test.
+
+The differential campaign is a **regression net, not an oracle**, and should not be
+read as one: `reference_int.py` is a port of the Solidity rather than an independent
+derivation, so wei-exact agreement proves the two have not drifted apart, not that
+the arithmetic is right. Its header states the limit and names the two assumptions
+the corpus cannot currently vary.

@@ -9,6 +9,7 @@ import {ModerationTestBase} from "./base/ModerationTestBase.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {StakeRegistryHarness} from "./harnesses/StakeRegistryHarness.sol";
+import {ProtocolLimits as L} from "../src/lib/ProtocolLimits.sol";
 
 /// Gas-bound and failure-mode suite (spec §10, work order M2-9). The load-bearing
 /// assertion is that worst-case settlement fits in ONE transaction under the 8M
@@ -71,13 +72,27 @@ contract GasBoundsTest is ModerationTestBase {
             sr.activate(address(uint160(uint256(keccak256(abi.encode("wv", j))))));
         }
 
-        uint256 g0 = gasleft();
-        m.claim(caseId);
-        uint256 used = g0 - gasleft();
-
-        emit log_named_uint("worst_case_claim_gas", used);
-        assertLt(used, HARD_CEILING, "worst-case claim must fit under the 8M hard ceiling");
+        // The BATCHED path is the one the protocol guarantees (H-04). Assert it
+        // first, so the guarantee is tested before the convenience.
+        uint256 maxBatch;
+        while (_phaseOf(m, caseId) != Moderation.Phase.SETTLED) {
+            uint256 g = gasleft();
+            m.claim(caseId, 40);
+            uint256 batch = g - gasleft();
+            if (batch > maxBatch) maxBatch = batch;
+        }
+        emit log_named_uint("worst_case_max_batch_gas", maxBatch);
+        assertLt(maxBatch, HARD_CEILING, "every settlement batch fits under the 8M ceiling");
         assertEq(uint256(_phaseOf(m, caseId)), uint256(Moderation.Phase.SETTLED));
+
+        // The ONE-SHOT `claim(caseId)` for this configuration measured 4,699,258
+        // at the start of M2.6 and 8,019,298 after P0-2/P0-3/P0-5 — it no longer
+        // fits the 8M budget. That is recorded rather than papered over: this
+        // depth-3 / 86-seat case now REQUIRES batching, exactly as the 344-seat
+        // case already did. The budget is not raised to make a convenience pass;
+        // the guarantee above is what the protocol actually relies on.
+        // See GAS_BUDGETS.md and ProtocolLimits.MAX_PANEL — the same per-seat
+        // storage growth drives both, and P1-2 is the fix for both.
     }
 
     function _phaseOf(ModerationHarness m, uint256 caseId) internal view returns (Moderation.Phase p) {
@@ -286,12 +301,14 @@ contract GasBoundsTest is ModerationTestBase {
         MockBZZ b = new MockBZZ();
         (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
         bytes32 topic = keccak256("bigtopic");
+        uint256 frontId;
         for (uint256 i = 0; i < n; i++) {
-            m.__pushEntry(topic, i);
+            uint256 gid = m.__pushEntry(topic, i);
+            if (i == 0) frontId = gid; // registry-minted handle (M2.6-P0-1)
         }
         assertEq(m.entryCount(topic), n);
         uint256 g = gasleft();
-        m.__deleteEntry(topic, 0); // front entry -> swap-pop with the last
+        m.__deleteEntry(topic, frontId); // front entry -> swap-pop with the last
         used = g - gasleft();
         assertEq(m.entryCount(topic), n - 1, "entry removed");
     }
@@ -362,6 +379,218 @@ contract GasBoundsTest is ModerationTestBase {
         emit log_named_uint("contributeAppealBond_gas", g - gasleft());
     }
 
+    /// M2.6-P0-7: `closeReveal` must never do unbounded work, and VOID disposal
+    /// must drain in bounded batches.
+    ///
+    /// `_void` used to dispose every seat-holder inline, from inside `closeReveal`
+    /// — a PHASE TRANSITION. Exceeding the block limit reverted the transition
+    /// itself and stranded the case in an expired REVEAL with no other exit, which
+    /// is strictly worse than an expensive settlement: that at least fails without
+    /// destroying reachability.
+    function test_void_closes_o1_and_drains_in_bounded_batches() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+
+        uint256 pot = 100 * XBZZ;
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, pot);
+        b.mint(address(m), pot);
+        m.__injectRound(caseId);
+
+        // A panel at the validator's cap, every holder committed-and-vanished:
+        // the most expensive VOID an accepted ruleset can produce.
+        uint256 camt = 10 * XBZZ;
+        for (uint256 i = 0; i < L.MAX_PANEL; i++) {
+            address v = address(uint160(uint256(keccak256(abi.encode("voidcap", i)))));
+            m.__injectSeat(caseId, 0, v, 1, camt, 0); // committed, never revealed
+        }
+        b.mint(address(sr), L.MAX_PANEL * camt);
+
+        // Opening the VOID is O(1) in the panel: it only flips the phase.
+        uint256 g = gasleft();
+        m.__openVoid(caseId);
+        uint256 openGas = g - gasleft();
+        emit log_named_uint("void_open_gas", openGas);
+        assertLt(openGas, 100_000, "opening a VOID is O(1) in panel size");
+        assertEq(uint256(_phaseOf(m, caseId)), uint256(Moderation.Phase.VOID_SETTLING));
+
+        // Then it drains behind the cursor, every batch under the ceiling.
+        uint256 maxBatch;
+        uint256 batches;
+        while (_phaseOf(m, caseId) != Moderation.Phase.VOID) {
+            uint256 g2 = gasleft();
+            m.claim(caseId, 12);
+            uint256 used = g2 - gasleft();
+            if (used > maxBatch) maxBatch = used;
+            batches++;
+            assertLt(batches, 64, "the drain terminates");
+        }
+        emit log_named_uint("void_max_batch_gas", maxBatch);
+        emit log_named_uint("void_batches", batches);
+        assertLt(maxBatch, HARD_CEILING, "every VOID batch fits under the 8M ceiling");
+        assertLt(maxBatch, (HARD_CEILING * 80) / 100, "with real margin");
+    }
+
+    /// M2.6-P1-2: the unit that must fit a transaction is now the seat-draw
+    /// BATCH, not the whole panel.
+    ///
+    /// `realizeSeats` used to attempt an entire commit target in one call, which
+    /// made `MAX_PANEL` nothing more than the block limit divided by the per-seat
+    /// cost — and that cost rose three times in M2.6, taking a cap-sized panel to
+    /// 90% of the ceiling. Batching decouples the two: the panel can be any size
+    /// the rest of the machinery supports, and only a batch has to fit.
+    ///
+    /// Reads the batch size from the contract, so changing it without re-measuring
+    /// fails the suite.
+    function test_seat_draw_batch_fits_the_ceiling() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("capmod", i)))));
+            b.mint(a, 1000 * XBZZ);
+            vm.prank(a);
+            b.approve(address(sr), type(uint256).max);
+            vm.prank(a);
+            sr.stake(80 * XBZZ);
+        }
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("capmod", i)))));
+            sr.activate(a);
+            vm.prank(a);
+            sr.setDutyUnits(8);
+        }
+        _settleEpoch(sr);
+
+        uint256 batch = m.__drawBatchSize();
+        uint256 caseId = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectRound(caseId);
+        uint256 g = gasleft();
+        m.__drawPanel(caseId, 0, batch, keccak256("batch"));
+        uint256 used = g - gasleft();
+
+        emit log_named_uint("draw_batch_seats", batch);
+        emit log_named_uint("draw_batch_gas", used);
+        assertEq(m.__seatCount(caseId, 0), batch, "a FULL batch was seated, not a short one");
+        assertLt(used, HARD_CEILING, "a seat-draw batch must fit one transaction");
+        // The 80% margin is restored: batching is what bought it back, and it is
+        // what keeps the next per-seat write from being blocked on a size cliff.
+        assertLt(used, (HARD_CEILING * 80) / 100, "with real margin, restored by batching");
+    }
+
+    /// M2.6-P0-3b: `EPOCH_DRAIN_STEPS` is what a `realizeSeats` poke spends when it
+    /// finds the epoch unsettled, so a full batch must fit one transaction — over a
+    /// tree big enough that each drained item pays a realistic O(log n) update.
+    function test_realize_seats_epoch_drain_batch_is_under_ceiling() public {
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistryHarness sr,) = _deployStack(b);
+
+        // A 1000-leaf tree, all already applied, so the batch measured below pays
+        // tree UPDATE cost rather than the cheaper first insert.
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("drainmod", i)))));
+            b.mint(a, 1000 * XBZZ);
+            vm.prank(a);
+            b.approve(address(sr), type(uint256).max);
+            vm.prank(a);
+            sr.stake(80 * XBZZ);
+        }
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        for (uint256 i = 0; i < 1000; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("drainmod", i)))));
+            sr.activate(a);
+            vm.prank(a);
+            sr.setDutyUnits(8);
+        }
+        _settleEpoch(sr);
+
+        // Now stage a full batch's worth of changes inside one epoch and let it
+        // elapse, so the next poke has exactly `EPOCH_DRAIN_STEPS` to do.
+        uint256 batch = m.__epochDrainSteps();
+        for (uint256 i = 0; i < batch; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("drainmod", i)))));
+            vm.prank(a);
+            sr.setDutyUnits(7); // a real weight change, one staged entry each
+        }
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        assertFalse(sr.epochSettled(), "a full batch is waiting");
+
+        uint256 g = gasleft();
+        sr.advanceEpoch(batch);
+        uint256 used = g - gasleft();
+
+        emit log_named_uint("epoch_drain_batch_items", batch);
+        emit log_named_uint("epoch_drain_batch_gas", used);
+        assertTrue(sr.epochSettled(), "the batch cleared it, so this measured a FULL one");
+        assertLt(used, HARD_CEILING, "a drain batch must fit one transaction");
+        assertLt(used, (HARD_CEILING * 80) / 100, "with margin");
+    }
+
+    /// A panel at the validator's cap completes in a bounded number of batches.
+    ///
+    /// **M2.6-item-5: this drove the DEFAULT five-seat panel and never read
+    /// `L.MAX_PANEL`.** Five seats fit in one `DRAW_SEATS_PER_BATCH` batch, so the
+    /// loop ran once, "bounded batches" was one batch, and raising `MAX_PANEL` could
+    /// not have moved it. The name claimed a property the fixture never reached.
+    ///
+    /// It now proposes a ruleset AT the cap, reading the constant directly so that
+    /// raising `MAX_PANEL` re-exercises this rather than silently passing, and
+    /// pledges enough capacity to fill it.
+    function test_max_panel_completes_in_bounded_batches() public {
+        // Capacity for a cap-sized panel, on top of the base fixture's eight.
+        uint256 riskPerSeat = mod.getParams().riskPerSeat;
+        for (uint256 i = 0; i < L.MAX_PANEL; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("panelmod", i)))));
+            bzz.mint(a, 100 * XBZZ);
+            vm.prank(a);
+            bzz.approve(address(stakeReg), type(uint256).max);
+            vm.prank(a);
+            stakeReg.stake(20 * XBZZ);
+        }
+        vm.warp(vm.getBlockTimestamp() + ACTIVATION_DELAY);
+        for (uint256 i = 0; i < L.MAX_PANEL; i++) {
+            address a = address(uint160(uint256(keccak256(abi.encode("panelmod", i)))));
+            stakeReg.activate(a);
+            vm.prank(a);
+            stakeReg.setDutyUnits((20 * XBZZ) / riskPerSeat);
+        }
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
+
+        // A depth-0 target AT the cap. Defaults are read from the live ruleset and
+        // one field changed — never a re-declared copy.
+        Moderation.Params memory p = mod.getParams();
+        uint256[] memory cts = new uint256[](1);
+        cts[0] = L.MAX_PANEL;
+        uint256[] memory aws = new uint256[](1);
+        aws[0] = 4 days;
+        p.maxDepth = 0;
+        p.maxWiden = 0;
+        governor.proposeParameters(p, cts, aws);
+        vm.warp(vm.getBlockTimestamp() + GOV_TIMELOCK);
+        governor.executeParameters();
+
+        uint256 caseId = _submit(mods[0]);
+        uint256 batches;
+        while (_phase(caseId) == Moderation.Phase.DRAW) {
+            _rollToSeed(caseId);
+            uint256 g = gasleft();
+            mod.realizeSeats(caseId);
+            uint256 used = g - gasleft();
+            batches++;
+            assertLt(used, HARD_CEILING, "every seat-draw batch fits");
+            assertLt(used, (HARD_CEILING * 80) / 100, "with margin");
+            assertLt(batches, 64, "the draw terminates");
+        }
+        assertEq(uint256(_phase(caseId)), uint256(Moderation.Phase.COMMIT), "panel complete");
+
+        // The fixture must actually have reached the cap, or it is measuring a
+        // short panel again and the name lies a second time.
+        (uint256 nSeats,,,,,,,,,) = mod.roundInfo(caseId, 0);
+        assertEq(nSeats, L.MAX_PANEL, "the panel really is cap-sized");
+        assertGt(batches, 1, "and it really did take more than one batch");
+        emit log_named_uint("batches_for_max_panel", batches);
+    }
+
     /// The seat-draw poke over a large tree (D9's 2M budget row): a full 47-seat
     /// depth-panel draw over 1000 activated moderators.
     function test_measure_draw_poke_1000_mods() public {
@@ -386,6 +615,8 @@ contract GasBoundsTest is ModerationTestBase {
             vm.prank(a);
             sr.setDutyUnits(2);
         }
+        // M2.6-P0-3: pledged capacity is drawable from the NEXT epoch.
+        _settleEpoch(sr);
         assertEq(sr.totalEligibleWeight(), 1000 * 20 * XBZZ, "all 1000 are actually drawable");
 
         // Inject a FINALIZED-then-reopened depth-3 round? Simpler: measure a
@@ -397,15 +628,29 @@ contract GasBoundsTest is ModerationTestBase {
         m.__drawPanel(caseId, 0, 47, keccak256("seed"));
         uint256 used = g - gasleft();
         emit log_named_uint("draw_poke_47seats_1000mods_gas", used);
-        // Soft budget re-set against a real measurement. The previous 3,500,000
+        // Soft budget re-set against a real measurement. The original 3,500,000
         // was never met — it was never TESTED: the fixture left the tree empty,
         // so the draw returned immediately and the assertion passed on ~5k gas.
-        // A genuine 47-seat draw over 1000 pledged moderators costs ~4.40M
+        // A genuine 47-seat draw over 1000 pledged moderators cost ~4.40M
         // (~4.35M before the M2.5 port, so the cross-contract call is ~1% of it).
-        // The load-bearing bound is the 8M single-transaction ceiling, which it
-        // clears with room to spare.
+        //
+        // M2.6-P0-3d re-measured this row: 7,201,469 before, 7,039,728 after. The
+        // no-write draw pays extra descents and saves exclusion+restore tree writes,
+        // and the writes cost more. (The ~5.41M cited below is stale — it predates
+        // P0-5's obligation handles landing in this loop.)
+        //
+        // M2.6-P0-2 raised it to ~5.41M, and the increase is structural rather
+        // than incidental: escrowing a seat's collateral writes `dutyBonded` for
+        // that moderator, and for a moderator not yet holding duty that is a COLD
+        // SSTORE — 20,000 gas, once per distinct moderator seated. 47 seats over a
+        // 1000-moderator tree land on ~47 distinct addresses, so ~940k of the
+        // ~1.01M increase is exactly that, and it is the price of the escrow being
+        // real. It is not recoverable by tuning; the previous number bought its
+        // cheapness by leaving the collateral user-controlled (four bypasses).
+        //
+        // The load-bearing bound is the 8M single-transaction ceiling.
         assertLt(used, HARD_CEILING, "47-seat draw must fit one transaction");
-        assertLt(used, 5_000_000, "47-seat draw over 1000 moderators (soft budget)");
+        assertLt(used, 7_500_000, "47-seat draw over 1000 moderators (post-escrow, post-obligations)");
     }
 
     function _measureSubmit5Topics() internal {
@@ -446,25 +691,47 @@ contract GasBoundsTest is ModerationTestBase {
         mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, six, 0, fee);
     }
 
+    /// **M2.6-item-5: this was vacuous, and it was vacuous in the worst way — it
+    /// exited before the thing it names could happen.** The loop had no DRAW branch,
+    /// so the `else break` fired the moment the first widen sent the round back to
+    /// DRAW. One iteration, `widenCount == 1`, and `assertLe(1, MAX_WIDEN)` passes
+    /// whatever the contract does. A widen that looped forever would have passed it
+    /// too, because the fixture stopped at the first widen.
+    ///
+    /// Rewritten against item 2b's commit-time trigger rather than repaired: the
+    /// widen fires at close-of-COMMIT now, and the budget it spends is the SHARED
+    /// per-depth counter that stall rounds draw on too. So the bound to assert is
+    /// that counter, not one round's `widenCount`.
     function test_widen_cannot_loop_unboundedly() public {
         uint256 caseId = _submit(mods[0]);
-        _realizeSeats(caseId);
-        // Never participate; drive until terminal — must stop within MAX_WIDEN+2 cycles.
+        uint256 maxAttempts = mod.getParams().maxWiden;
+
+        // Never participate, and drive EVERY phase — including DRAW, which is where
+        // the old fixture gave up.
         uint256 guard;
-        while (_phase(caseId) != Moderation.Phase.VOID && _phase(caseId) != Moderation.Phase.FINALIZED) {
-            require(guard++ < 2 * (MAX_WIDEN + 2), "widen looped unboundedly");
-            Moderation.Phase p = _phase(caseId);
-            if (p == Moderation.Phase.COMMIT) {
+        while (_phase(caseId) != Moderation.Phase.VOID && _phase(caseId) != Moderation.Phase.VOID_SETTLING) {
+            require(guard++ < 4 * (maxAttempts + 2), "the round machine looped unboundedly");
+            Moderation.Phase ph = _phase(caseId);
+            if (ph == Moderation.Phase.DRAW) {
+                _rollToSeed(caseId);
+                mod.realizeSeats(caseId);
+            } else if (ph == Moderation.Phase.COMMIT) {
                 vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
                 mod.closeCommit(caseId);
-            } else if (p == Moderation.Phase.REVEAL) {
+            } else if (ph == Moderation.Phase.REVEAL) {
                 vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
                 mod.closeReveal(caseId);
             } else {
-                break;
+                revert("unexpected phase");
             }
+            // The bound holds at EVERY step, not only at the end — an overrun that
+            // corrected itself before the loop exited would otherwise be invisible.
+            assertLe(mod.__attemptsUsed(caseId), maxAttempts, "the shared budget is never exceeded");
         }
-        (,,,,,, uint256 widenCount,,,) = mod.roundInfo(caseId, 0);
-        assertLe(widenCount, MAX_WIDEN, "widen bounded by MAX_WIDEN");
+
+        // And the fixture must have actually spent the budget, or it proves nothing
+        // about a bound it never approached.
+        assertEq(mod.__attemptsUsed(caseId), maxAttempts, "the budget was fully spent");
+        assertGt(guard, maxAttempts, "and the machine really did run past one widen");
     }
 }

@@ -67,7 +67,11 @@ abstract contract ModerationTestBase is StackDeployer {
             vm.prank(mods[i]);
             stakeReg.setDutyUnits(units);
         }
-        vm.roll(vm.getBlockNumber() + 1);
+        // M2.6-P0-3: newly staked/pledged weight becomes drawable at the NEXT
+        // eligibility epoch, not immediately — that deferral is the whole point.
+        // Cross the boundary and apply, so the fixture starts with a live pool.
+        vm.roll(vm.getBlockNumber() + REG_EPOCH_BLOCKS);
+        stakeReg.advanceEpoch(type(uint256).max);
     }
 
     function _topics() internal pure returns (bytes32[] memory t) {
@@ -76,6 +80,16 @@ abstract contract ModerationTestBase is StackDeployer {
     }
 
     function _submit(address who) internal returns (uint256 caseId) {
+        return _submitContent(who, CONTENT, META);
+    }
+
+    /// Submit specific content. Dedup is registry-owned and permanent since
+    /// M2.6-P0-1b, so a test that wants a SECOND indexable case under the same
+    /// topic must vary the content — reusing it is now correctly refused.
+    function _submitContent(address who, bytes32 contentHash, bytes32 metaHash)
+        internal
+        returns (uint256 caseId)
+    {
         // Compute minFee before arming the prank: an external call in the arg
         // list would consume the prank and run submit as the test contract.
         uint256 fee = mod.minFee(1);
@@ -83,7 +97,40 @@ abstract contract ModerationTestBase is StackDeployer {
         vm.prank(who);
         bzz.approve(address(mod), type(uint256).max);
         vm.prank(who);
-        caseId = mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, _topics(), 0, fee);
+        caseId = mod.submit(Moderation.Kind.SUBMISSION, contentHash, metaHash, _topics(), 0, fee);
+    }
+
+    /// Open a legacy removal (M2.6-P0-1c) against a permanent registry entry id.
+    function _submitLegacyRemoval(address who, uint256 globalEntryId) internal returns (uint256 caseId) {
+        uint256 fee = mod.minFee(1); // before the prank: an external call in the arg list eats it
+        _fund(who, fee);
+        vm.prank(who);
+        caseId = mod.submitLegacyRemoval(globalEntryId, fee);
+    }
+
+    /// The supersafe subset for a topic. `Moderation.supersafeEntries(bytes32)`
+    /// was removed in M2.6 (unbounded, and the contract is EIP-170-bound), so the
+    /// tests read the registry's paginated view the way a front end now must.
+    ///
+    /// Reads the registry `m` ACTUALLY writes to, not the suite-level `indexReg`.
+    /// Several tests deploy their own stack and pass that `m` in; against the base
+    /// fixture's registry those entries do not exist, so every `length == 0`
+    /// assertion held vacuously and could not have caught a supersafe regression.
+    function _supersafe(ModerationHarness m, bytes32 topicKey)
+        internal
+        view
+        returns (IndexRegistry.Entry[] memory)
+    {
+        IndexRegistry ir = m.indexReg();
+        return ir.supersafeEntries(topicKey, m.getParams().supersafeAge, 0, ir.entryCount(topicKey));
+    }
+
+    /// The (logic, caseId) currently holding a content reservation, or (0,0).
+    /// Replaces the removed, ambiguous `Moderation.dedupOwner`.
+    function _dedupOwner(bytes32 key) internal view returns (address logic, uint256 caseId) {
+        bool exists;
+        (exists, logic, caseId) = indexReg.contentReservation(key);
+        if (!exists) return (address(0), 0);
     }
 
     function _phase(uint256 caseId) internal view returns (Moderation.Phase p) {
@@ -94,13 +141,31 @@ abstract contract ModerationTestBase is StackDeployer {
         (, , , d, , , ) = mod.caseInfo(caseId);
     }
 
+    /// Drive DRAW -> COMMIT. M2.6-P0-3: staged eligibility changes are applied at
+    /// the epoch boundary by a permissionless keeper call, so settle the epoch
+    /// before poking — `drawPanel` refuses to sample an unsettled epoch.
     function _realizeSeats(uint256 caseId) internal {
-        vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+        _rollToSeed(caseId);
         mod.realizeSeats(caseId);
         while (_phase(caseId) == Moderation.Phase.DRAW) {
-            vm.roll(vm.getBlockNumber() + SEED_LAG + 1);
+            _rollToSeed(caseId);
             mod.realizeSeats(caseId);
         }
+    }
+
+    /// Roll past this round's snapshot block and apply any staged eligibility
+    /// changes. M2.6-P0-3: a seed whose window would straddle an epoch boundary is
+    /// DEFERRED to the next epoch, so the snapshot block can be well beyond
+    /// `seedLag` — rolling a fixed `SEED_LAG + 1` is no longer enough.
+    function _rollToSeed(uint256 caseId) internal {
+        // M2.6-item-2b: `roundInfo` is indexed by ROUND, and a depth now holds
+        // several. Reading by depth would poll a stale round's snapshot block and
+        // `realizeSeats` would revert `SeedNotReady` forever.
+        (,,,,,,,, uint256 snapshotBlock,) = mod.roundInfo(caseId, mod.__roundCount(caseId) - 1);
+        uint256 target = snapshotBlock + 1;
+        if (vm.getBlockNumber() < target) vm.roll(target);
+        else vm.roll(vm.getBlockNumber() + 1);
+        stakeReg.advanceEpoch(type(uint256).max);
     }
 
     function _commitAll(uint256 caseId, uint256 depth, Moderation.Vote vote) internal {
@@ -110,6 +175,23 @@ abstract contract ModerationTestBase is StackDeployer {
             bytes32 commitHash = mod.computeCommit(caseId, depth, sh, vote, SALT); // M-01: bound per voter
             vm.prank(sh);
             mod.commitVote(caseId, commitHash);
+        }
+    }
+
+    /// M2.6-item-2b: COMMIT no longer always closes to REVEAL. Commitment below
+    /// `minReveals` WIDENS instead — a round that cannot reach quorum should draw
+    /// more seats, not open a reveal window it can never fill. Fixtures that
+    /// exercise the reveal path with a handful of committers therefore need the rest
+    /// of the panel to commit too. Commits every seat-holder that has not already.
+    function _topUpCommitQuorum(uint256 caseId, Moderation.Vote vote) internal {
+        uint256 ri = mod.__roundCount(caseId) - 1;
+        (, uint256 n,,,,,,,,) = mod.roundInfo(caseId, ri);
+        for (uint256 i = 0; i < n; i++) {
+            address sh = mod.seatHolderAt(caseId, ri, i);
+            if (mod.__committedSeats(caseId, ri, sh) > 0) continue;
+            bytes32 h = mod.computeCommit(caseId, ri, sh, vote, SALT);
+            vm.prank(sh);
+            mod.commitVote(caseId, h);
         }
     }
 
@@ -170,7 +252,15 @@ abstract contract ModerationTestBase is StackDeployer {
 
     /// Submit an undisputed case, run round 0 with `vote`, and finalize it.
     function _runUndisputed(address submitter, Moderation.Vote vote) internal returns (uint256 caseId) {
-        caseId = _submit(submitter);
+        return _runUndisputedContent(submitter, CONTENT, META, vote);
+    }
+
+    /// As `_runUndisputed`, for specific content.
+    function _runUndisputedContent(address submitter, bytes32 contentHash, bytes32 metaHash, Moderation.Vote vote)
+        internal
+        returns (uint256 caseId)
+    {
+        caseId = _submitContent(submitter, contentHash, metaHash);
         _realizeSeats(caseId);
         _runRoundToAppealWindow(caseId, 0, vote);
         _finalize(caseId);

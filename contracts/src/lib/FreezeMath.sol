@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
+import {ProtocolLimits as L} from "./ProtocolLimits.sol";
 
 /// @title FreezeMath
 /// @notice The freezing-power curve of spec §6.4:
@@ -33,7 +34,11 @@ library FreezeMath {
         int256 arg = -int256((meanTrackWad * WAD) / satWad);
         uint256 e = uint256(FixedPointMathLib.expWad(arg)); // (0, 1e18]
         uint256 oneMinusE = WAD - e; // [0, 1e18)
-        uint256 term = ((capWad - WAD) * oneMinusE) / WAD; // [0, capWad-WAD)
+        // M2.6-P0-8: full-precision. `(capWad - WAD) * oneMinusE` overflows for a
+        // large cap, and this runs inside `_settleInit` — before the case reaches
+        // any recoverable state — so an overflow here bricks settlement rather
+        // than failing one call.
+        uint256 term = FixedPointMathLib.fullMulDiv(capWad - WAD, oneMinusE, WAD); // [0, capWad-WAD)
         powerWad = WAD + term; // [1e18, capWad)
     }
 
@@ -44,6 +49,10 @@ library FreezeMath {
         returns (uint256)
     {
         uint256 p = freezingPower(meanTrackWad, satWad, capWad);
-        return (baseSeconds * p) / WAD;
+        uint256 dur = FixedPointMathLib.fullMulDiv(baseSeconds, p, WAD);
+        // Defensive clamp: validation already bounds the product, but this runs on
+        // the settlement path and a future validation slip must not be able to
+        // brick it. Belt and braces, deliberately.
+        return dur > L.MAX_FREEZE ? L.MAX_FREEZE : dur;
     }
 }

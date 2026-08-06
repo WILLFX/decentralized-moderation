@@ -185,6 +185,14 @@ stop and report rather than improvise.
 
 ### D10. The simulation is the test oracle (differential testing)
 
+> **Corrected post-close (M2.6-item-11): the heading over-promises and the built
+> artefact is not an oracle.** `reference_int.py` was written as a port of the
+> Solidity rather than derived from the spec algebra, so it catches transcription
+> drift and regression and cannot catch a wrong formula — a wrong formula is wrong in
+> both. Read what follows as the prescription for a regression net. What it would
+> take to make it the oracle this heading claims is filed as item 11 in
+> `specs/m2_6-work-order.md`.
+
 Floats in the sim can't be compared to uint256 directly, so:
 
 - Write `simulation/vectors/reference_int.py`: a small **integer** reference

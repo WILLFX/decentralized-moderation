@@ -2,8 +2,44 @@
 
 This mirrors ``claim()`` in ``contracts/src/Moderation.sol`` exactly — same order,
 same floor divisions, same dust-to-bounty sweep — so the Foundry differential test
-(``test/Differential.t.sol``) can assert bit-exact agreement between the Solidity
-implementation and this independent reimplementation (work order D10).
+(``test/Differential.t.sol``) can assert bit-exact agreement (work order D10).
+
+WHAT THIS PROVES, AND WHAT IT DOES NOT
+--------------------------------------
+This file is a **port** of the Solidity, not an independent derivation of the
+arithmetic. Same variable roles, same loop structure, and the reasoning comments
+were carried across verbatim — including the ones below. So the campaign is a
+**regression net**: it catches transcription drift and regression (a changed
+constant, a dropped floor division, a reordered step, a term that moved between
+buckets), and it catches them at wei resolution across 52 shapes, which is worth
+having. It **cannot catch a wrong formula**, because a wrong formula is wrong in
+both files. Agreement here is not evidence that the payout rule is right; it is
+evidence that two expressions of the same rule have not drifted apart.
+
+Two of its assumptions are FALSE in the contract, and the injector
+(``ModerationHarness.__injectRound`` / ``__injectSeat``) mirrors both, so no vector
+in the corpus can express the difference:
+
+1. ``adj_round = len(rounds) - 1`` assumes the last round pushed is the one whose
+   tally drew the outcome. Under M2.6-item-2b a round that stalls short of
+   ``minReveals`` is BANKED and a later stall round adjudicates the depth, so a
+   real case carries rounds with ``adjudicated == false``. ``__injectRound``
+   stamps ``adjudicated = true`` on every injected round and points ``adjRound``
+   at the last, so a banked round is not constructible in a vector.
+2. ``capacity = sum(injected seats)`` assumes seats sought equals seats seated.
+   In the contract ``r.target`` is capacity SOUGHT (one target at ``_pushRound``,
+   one more per widen) while ``r.nSeats`` is what the draw actually seated, and
+   the two diverge whenever a draw comes up short. ``__injectSeat`` does
+   ``r.target += seats``, so ``target > seats seated`` is not constructible
+   either.
+
+Those are exactly item 10's two new degrees of freedom — which round decides, and
+what the allocation normalizes by. Both shapes DO have unit coverage
+(``StallRound.t.sol`` for the banked round, the P0-6 short-draw family for an
+unfilled target), so this is a gap in the shape of the corpus rather than an
+unchecked property. Extending the injector to express both, regenerating the
+corpus, and re-deriving this file from the algebra without the Solidity open is
+filed as its own item in ``specs/m2_6-work-order.md``.
 
 It covers the *payout* arithmetic (rewards, refunds, bonuses, claim bounty, and the
 committed→free/frozen disposition). Freeze *durations* depend on solady's expWad and
@@ -34,12 +70,28 @@ def settle(case: dict) -> dict:
     fo = case["finalOutcome"]
     rounds = case["rounds"]
 
-    # winners' seats (coherent revealers, all rounds)
+    # M2.6-item-10. `winners_seats` survives ONLY as the denominator of the
+    # mean-track that drives the freeze curve; it is no longer the reward divisor.
+    # Scoping one half of a mean without the other leaves a ratio that is not a mean
+    # of anything, so the pair stays paired.
     winners_seats = 0
     for r in rounds:
         for (_vi, seats, _camt, rc) in r["seats"]:
             if rc != 0 and coherent(rc, fo):
                 winners_seats += seats
+
+    # Per-round revealed seats (side-agnostic: a vote moves between the two side
+    # counters and never the sum) and capacity sought. The injector records one
+    # unit of capacity per injected seat, mirroring `_openRound`'s `r.target`.
+    revealed = [sum(seats for (_v, seats, _c, rc) in r["seats"] if rc != 0) for r in rounds]
+    capacity = [sum(seats for (_v, seats, _c, _rc) in r["seats"]) for r in rounds]
+    win_d = [
+        sum(seats for (_v, seats, _c, rc) in r["seats"] if rc != 0 and coherent(rc, fo))
+        for r in rounds
+    ]
+    sum_capacity = sum(capacity)
+    # The last round is the one whose tally drew the outcome.
+    adj_round = len(rounds) - 1
 
     # winning-appeal refunds
     refunds = 0
@@ -55,16 +107,32 @@ def settle(case: dict) -> dict:
     bonus_pool = 0 if winning_contrib_tot == 0 else residual * BONUS_FRAC // WAD
     distributable = residual - bounty - bonus_pool
 
+    # M2.6-item-10: allocate per round, then divide by a DEPTH-DEPENDENT divisor.
+    #
+    # Winning seats where the outcome is drawn (the cancellation is the neutrality),
+    # revealed seats at a superseded depth (side-agnostic, so no factor lands on top
+    # of the belief ratio). No single divisor is neutral at both.
+    pool = [0] * len(rounds)
+    divisor = [0] * len(rounds)
+    payable = 0
+    for d in range(len(rounds)):
+        pool[d] = 0 if sum_capacity == 0 else distributable * revealed[d] // sum_capacity
+        divisor[d] = win_d[d] if d == adj_round else revealed[d]
+        if divisor[d] != 0:
+            payable += pool[d] * win_d[d] // divisor[d]
+    # What no adjudicating depth earned returns to the case's fee payer.
+    submitter_refund = distributable - payable
+
     # rewards + committed disposition
     distributed = 0
     free: dict[int, int] = {}
     frozen: dict[int, int] = {}
-    for r in rounds:
+    for d, r in enumerate(rounds):
         for (vi, seats, camt, rc) in r["seats"]:
             if rc == 0:
                 frozen[vi] = frozen.get(vi, 0) + camt          # failed reveal -> frozen
             elif coherent(rc, fo):
-                reward = 0 if winners_seats == 0 else distributable * seats // winners_seats
+                reward = 0 if divisor[d] == 0 else pool[d] * seats // divisor[d]
                 distributed += reward
                 free[vi] = free.get(vi, 0) + camt + reward     # stake back + reward
             else:
@@ -87,5 +155,16 @@ def settle(case: dict) -> dict:
     # bounty no longer includes ``bonus_pool - bonus_paid``. ``payout`` here is the
     # pristine (pre-pull) per-contributor amount the on-chain view reports.
     _ = bonus_paid  # retained for clarity; not swept to the bounty
-    claim_bounty = bounty + (distributable - distributed)
-    return {"free": free, "frozen": frozen, "payout": payout, "claimBounty": claim_bounty}
+    # M2.6-item-10: the keeper's residue is bounded by ROUNDING — at most one wei
+    # per paid seat-holder, independent of the size of the pot. It reads `payable`,
+    # not `distributable`: the unclaimed allocation never enters the reward channel,
+    # so it cannot be swept here. Left in `distributable`, the empty-winning-side
+    # case hands the WHOLE allocation to whoever sends the last batch.
+    claim_bounty = bounty + (payable - distributed)
+    return {
+        "free": free,
+        "frozen": frozen,
+        "payout": payout,
+        "claimBounty": claim_bounty,
+        "submitterRefund": submitter_refund,
+    }

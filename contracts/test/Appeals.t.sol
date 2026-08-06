@@ -172,6 +172,96 @@ contract AppealsTest is ModerationTestBase {
         assertEq(uint256(fo), uint256(Moderation.Outcome.Approve), "prior outcome stands");
     }
 
+    // --- item 2b close-out: a depth the case never reached ---------------------
+
+    /// **`reclaimBond` had no depth bound**, so an out-of-range depth resolved
+    /// through `adjRoundAt`'s zero default to ROUND 0 and the call succeeded against
+    /// depth 0's bookkeeping. It was safe only because a caller naming a bogus depth
+    /// usually has nothing at round 0 either — safe on today's call sites, unsafe as
+    /// a property. Same shape as `settleDuty`'s clamp, `unbackedSeats`,
+    /// `penalizeNoShow` and the amnesty gate.
+    ///
+    /// The discriminating case is a contributor that DOES hold an unmet-floor bond at
+    /// depth 0: pre-fix it could reclaim that bond by naming a depth the case never
+    /// reached, which is a successful call that should not exist.
+    function test_reclaim_bond_rejects_a_depth_the_case_never_reached() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+
+        // An appeal contribution that never meets its floor, so it stays reclaimable.
+        address ap = makeAddr("underfunded");
+        uint256 small = mod.appealFloor(caseId) / 4;
+        bzz.mint(ap, small);
+        vm.prank(ap);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(ap);
+        mod.contributeAppealBond(caseId, small);
+        _finalize(caseId);
+        assertEq(mod.bondContribOf(caseId, 0, ap), small, "the contribution is live at depth 0");
+
+        // Naming a depth the case never reached must not reach depth 0's bond.
+        vm.prank(ap);
+        vm.expectRevert(Moderation.DepthNotAdjudicated.selector);
+        mod.reclaimBond(caseId, 5);
+
+        // And the real depth still works, so the bound did not break the path.
+        uint256 before = bzz.balanceOf(ap);
+        vm.prank(ap);
+        mod.reclaimBond(caseId, 0);
+        assertEq(bzz.balanceOf(ap) - before, small, "the genuine reclaim is unaffected");
+    }
+
+    /// **`claimAppealPayout` bounded the depth but not whether it ADJUDICATED.** A
+    /// depth reached and then failed for want of a panel (`_failAppealRound`) never
+    /// runs `_armOutcome`, so it has no adjudicating round — and the zero default
+    /// resolved it to round 0, paying out the PREVIOUS depth's entitlement under the
+    /// wrong index. It survived only because the second call finds `contrib == 0`.
+    function test_claim_appeal_payout_rejects_a_depth_that_never_adjudicated() public {
+        uint256 caseId = _submit(mods[0]);
+        _realizeSeats(caseId);
+        _runRoundToAppealWindow(caseId, 0, Moderation.Vote.Approve);
+        address challenger = makeAddr("challenger");
+        _appeal(caseId, challenger); // depth 1 opens, funded from depth 0's round
+        _realizeSeats(caseId);
+
+        // Nobody participates at depth 1: the appeal fails and the prior outcome
+        // stands, so depth 1 never adjudicates.
+        uint256 guard;
+        while (_phase(caseId) != Moderation.Phase.FINALIZED) {
+            require(guard++ < 20, "did not finalize");
+            Moderation.Phase ph = _phase(caseId);
+            if (ph == Moderation.Phase.DRAW) {
+                _rollToSeed(caseId);
+                mod.realizeSeats(caseId);
+            } else if (ph == Moderation.Phase.COMMIT) {
+                vm.warp(vm.getBlockTimestamp() + COMMIT_TIMEOUT);
+                mod.closeCommit(caseId);
+            } else if (ph == Moderation.Phase.REVEAL) {
+                vm.warp(vm.getBlockTimestamp() + REVEAL_WINDOW);
+                mod.closeReveal(caseId);
+            } else {
+                revert("unexpected phase");
+            }
+        }
+        mod.claim(caseId);
+
+        (, bool adjudicated) = mod.adjudicatingRoundAt(caseId, 1);
+        assertFalse(adjudicated, "depth 1 was reached but never adjudicated");
+        assertGt(mod.appealPayoutOwed(caseId, challenger), 0, "and the challenger IS owed, at depth 0");
+
+        // Claiming at the un-adjudicated depth must not pay depth 0's entitlement.
+        vm.prank(challenger);
+        vm.expectRevert(Moderation.DepthNotAdjudicated.selector);
+        mod.claimAppealPayout(caseId, 1);
+
+        // The genuine depth still pays.
+        uint256 before = bzz.balanceOf(challenger);
+        vm.prank(challenger);
+        mod.claimAppealPayout(caseId, 0);
+        assertGt(bzz.balanceOf(challenger) - before, 0, "the real depth is unaffected");
+    }
+
     // --- F3: floor underflow guarded across a mid-window governance change ---
 
     // H-11: an open case's appeal floor is pinned to the ruleset live at submit,
@@ -183,7 +273,7 @@ contract AppealsTest is ModerationTestBase {
         p.bondMultiplier = 1;
         uint256[] memory cts = mod.getCommitTargets();
         uint256[] memory aws = mod.getAppealWindows();
-        mod.proposeParameters(p, cts, aws);
+        governor.proposeParameters(p, cts, aws);
         uint256 eta = vm.getBlockTimestamp() + 7 days;
 
         // Open the case ~3.5 days before eta so the 4-day appeal window is still
@@ -204,7 +294,7 @@ contract AppealsTest is ModerationTestBase {
 
         // Governance executes mid-window: the LIVE multiplier drops to 1.
         vm.warp(eta);
-        mod.executeParameters();
+        governor.executeParameters();
         assertEq(mod.getParams().bondMultiplier, 1, "live param changed");
 
         // The open case is unaffected: its floor is still the pinned 2x, so the

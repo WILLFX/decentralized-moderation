@@ -29,14 +29,21 @@ contract IndexTest is ModerationTestBase {
     }
 
     // H-02: an obsolete removal must never clear a dedup reservation that a newer
-    // resubmission now owns. Dedup is keyed by owner (caseId+1), so only the
-    // current holder can release it.
+    // resubmission now owns. The reservation is keyed by its owner — (logic,
+    // caseId) since M2.6-P0-1b — so only the current holder can release it.
+    //
+    // Read through `_dedupOwner`, which reports the owning LOGIC as well as the
+    // case. The removed `mod.dedupOwner` returned a bare caseId, and the target
+    // here is case 0, so two of these assertions could not tell "T owns it" from
+    // "nobody owns it" and passed either way.
     function test_obsolete_removal_cannot_wipe_newer_reservation() public {
         bytes32 key = keccak256(abi.encode(CONTENT, META, TK));
 
         uint256 t = _runUndisputed(mods[0], Moderation.Vote.Approve);
         mod.claim(t);
-        assertEq(mod.dedupOwner(key), t, "T owns the reservation");
+        (address ownerLogic, uint256 ownerCase) = _dedupOwner(key);
+        assertEq(ownerLogic, address(mod), "T's reservation is held by this logic");
+        assertEq(ownerCase, t, "T owns the reservation");
 
         // Two removals opened against T while it is still indexed.
         uint256 rem1 = _submitRemoval(mods[1], t);
@@ -45,18 +52,23 @@ contract IndexTest is ModerationTestBase {
         // First removal frees the reservation.
         _settleRemovalApprove(rem1);
         assertEq(mod.entryCount(TK), 0);
-        assertEq(mod.dedupOwner(key), 0, "reservation freed after removal");
+        (ownerLogic,) = _dedupOwner(key);
+        assertEq(ownerLogic, address(0), "reservation freed after removal");
 
         // Same content resubmitted: N now owns the reservation and is indexed.
         uint256 nCase = _runUndisputed(mods[0], Moderation.Vote.Approve);
         mod.claim(nCase);
-        assertEq(mod.dedupOwner(key), nCase, "N now owns the reservation");
+        (ownerLogic, ownerCase) = _dedupOwner(key);
+        assertEq(ownerLogic, address(mod), "N's reservation is held by this logic");
+        assertEq(ownerCase, nCase, "N now owns the reservation");
         assertEq(mod.entryCount(TK), 1);
 
         // The obsolete removal (targets T) settles: it must not touch N's
         // reservation or entry.
         _settleRemovalApprove(rem2);
-        assertEq(mod.dedupOwner(key), nCase, "obsolete removal leaves N's reservation intact");
+        (ownerLogic, ownerCase) = _dedupOwner(key);
+        assertEq(ownerLogic, address(mod), "obsolete removal leaves the holder intact");
+        assertEq(ownerCase, nCase, "obsolete removal leaves N's reservation intact");
         assertEq(mod.entryCount(TK), 1, "N's entry untouched");
 
         // Proof the reservation is really held: a duplicate is rejected.
@@ -84,7 +96,7 @@ contract IndexTest is ModerationTestBase {
         IndexRegistry.Entry memory e = mod.entryAt(TK, 0);
         assertEq(e.contentHash, CONTENT);
         assertEq(e.metaHash, META);
-        assertEq(e.caseId, caseId);
+        assertEq(e.localCaseId, caseId);
         assertTrue(e.uncontested, "all-approve -> uncontested");
     }
 
@@ -232,7 +244,57 @@ contract IndexTest is ModerationTestBase {
         assertFalse(e.fullQuorum, "one independent revealer is not full quorum");
 
         vm.warp(vm.getBlockTimestamp() + 200 hours);
-        assertEq(m.supersafeEntries(TK).length, 0, "under-quorum approval never supersafe, regardless of age");
+        assertEq(_supersafe(m, TK).length, 0, "under-quorum approval never supersafe, regardless of age");
+    }
+
+    // H-09, the half the test above cannot reach. It uses ONE address holding ONE
+    // seat, so `revealedCount` and `revealedSeats` are both 1 and the assertion
+    // passes under either definition — the fix could be reverted with the suite
+    // still green.
+    //
+    // The property is that quorum counts independent REVEALERS, not seats: one
+    // multi-seat voter must not satisfy it alone. Seats are drawn with replacement,
+    // so a single moderator holding a whole small panel is an ordinary outcome, and
+    // supersafe is the strongest claim this protocol makes about a piece of content.
+    //
+    // Paired with a positive control that differs in exactly one dimension: the
+    // same number of revealed seats, spread across `minReveals` addresses.
+    function test_full_quorum_counts_revealers_not_seats() public {
+        uint256 minReveals = mod.getParams().minReveals;
+
+        MockBZZ b = new MockBZZ();
+        (ModerationHarness m, StakeRegistry sr,) = _deployStack(b);
+        sr;
+        uint256 solo = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(solo, TK);
+        m.__injectRound(solo);
+        // One address, a whole quorum's worth of SEATS.
+        m.__injectSeat(solo, 0, makeAddr("whale"), minReveals, 0, 1);
+        m.claim(solo);
+
+        (,, uint256 cCount, uint256 rCount,,,,,,) = m.roundInfo(solo, 0);
+        cCount;
+        assertEq(rCount, 1, "one independent revealer");
+        IndexRegistry.Entry memory e = m.entryAt(TK, 0);
+        assertFalse(e.fullQuorum, "one voter's seats are not a quorum, however many it holds");
+        vm.warp(vm.getBlockTimestamp() + 200 hours);
+        assertEq(_supersafe(m, TK).length, 0, "and it never reaches supersafe");
+
+        // Control: the same revealed seats, spread across `minReveals` addresses.
+        bytes32 tk2 = keccak256("control topic");
+        uint256 spread = m.__injectFinalized(0, Moderation.Outcome.Approve, 0);
+        m.__injectTopic(spread, tk2);
+        m.__injectRound(spread);
+        for (uint256 i = 0; i < minReveals; i++) {
+            m.__injectSeat(spread, 0, makeAddr(string(abi.encodePacked("indep", i))), 1, 0, 1);
+        }
+        m.claim(spread);
+
+        IndexRegistry.Entry memory e2 = m.entryAt(tk2, 0);
+        assertTrue(e2.fullQuorum, "the same seats across enough revealers IS a quorum");
+        vm.warp(vm.getBlockTimestamp() + 200 hours); // age past supersafeAge
+        assertEq(_supersafe(m, tk2).length, 1, "and it does reach supersafe");
+        assertEq(_supersafe(m, TK).length, 0, "while the multi-seat solo still does not");
     }
 
     // An appealed case whose EARLIER round was decided under quorum is also barred
@@ -256,7 +318,7 @@ contract IndexTest is ModerationTestBase {
         IndexRegistry.Entry memory e = m.entryAt(TK, 0);
         assertFalse(e.fullQuorum, "a degraded earlier round bars supersafe");
         vm.warp(vm.getBlockTimestamp() + 200 hours);
-        assertEq(m.supersafeEntries(TK).length, 0, "not supersafe");
+        assertEq(_supersafe(m, TK).length, 0, "not supersafe");
     }
 
     // --- supersafe view ------------------------------------------------------
@@ -266,10 +328,10 @@ contract IndexTest is ModerationTestBase {
         mod.claim(caseId);
         // Fresh uncontested entry: in the superset but not yet supersafe.
         assertEq(mod.entryCount(TK), 1);
-        assertEq(mod.supersafeEntries(TK).length, 0, "too young for supersafe");
+        assertEq(_supersafe(mod, TK).length, 0, "too young for supersafe");
 
         vm.warp(vm.getBlockTimestamp() + 96 hours);
-        assertEq(mod.supersafeEntries(TK).length, 1, "aged uncontested -> supersafe");
+        assertEq(_supersafe(mod, TK).length, 1, "aged uncontested -> supersafe");
     }
 
     function test_contested_entry_never_supersafe() public {
@@ -284,6 +346,69 @@ contract IndexTest is ModerationTestBase {
 
         vm.warp(vm.getBlockTimestamp() + 200 hours);
         assertEq(mod.entryCount(TK), 1, "in superset");
-        assertEq(mod.supersafeEntries(TK).length, 0, "contested is never supersafe, regardless of age");
+        assertEq(_supersafe(mod, TK).length, 0, "contested is never supersafe, regardless of age");
+    }
+
+    // --- M2.6-F1: topic 0 is a sentinel, not a topic --------------------------
+
+    /// `IndexRegistry.legacyEntryInfo` returns `topicKey == 0` to mean "not live",
+    /// and its docblock claimed no live entry could sit there because `globalId`
+    /// starts at 1. Those are different sentinels: `nextEntryId = 1` says nothing
+    /// about which topic an entry is filed under, and nothing rejected topic 0 at
+    /// the mint.
+    ///
+    /// The bite is not that the sentinel is untidy. A live entry under topic 0
+    /// reads as dead through `legacyEntryInfo`, so `submitLegacyRemoval` refuses it
+    /// — while `deleteEntry` still works through the LOCAL route, because
+    /// `entryPosPlusOne[0][globalId]` is non-zero. So the entry becomes unremovable
+    /// at exactly the moment its writing logic is superseded, which is the one
+    /// situation P0-1c exists to cover, and the content reservation goes with it:
+    /// `deleteEntry` is the only release path, so that content is permanently
+    /// unsubmittable too.
+    ///
+    /// Enforced in the PERMANENT registry, because it is the registry's docblock
+    /// that claims the sentinel holds. A guard in `Moderation` alone would leave
+    /// the claim false for the next logic.
+    function test_F1_an_entry_cannot_be_minted_under_the_zero_topic() public {
+        // Driven from the logic boundary, as a real settlement would call it.
+        vm.prank(address(mod));
+        vm.expectRevert(IndexRegistry.ZeroTopicKey.selector);
+        indexReg.writeEntry(bytes32(0), 1, keccak256("c"), keccak256("m"), true, true, 1, 1, keccak256("d"));
+
+        // The sentinel is only sound because of that refusal, so assert the pair:
+        // a real topic still mints, and the id it mints is reachable.
+        vm.prank(address(mod));
+        uint256 gid = indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true, 1, 1, keccak256("d"));
+        (bytes32 topicKey,,,) = indexReg.legacyEntryInfo(gid);
+        assertEq(topicKey, TK, "a live entry reports its topic, never zero");
+    }
+
+    /// The other half, and it is NOT a second home for the invariant. Settlement
+    /// writes entries from `_settleFinish`, so a case carrying topic 0 that reached
+    /// APPROVE would revert inside `claim()` on the registry's guard — permanently,
+    /// with every seat-holder's stake locked behind it (item 4's failure class).
+    /// That is strictly worse than the unremovable entry the registry guard exists
+    /// to prevent. Refusing at submit is what makes the registry's revert
+    /// unreachable from settlement.
+    function test_F1_a_case_carrying_the_zero_topic_cannot_be_opened() public {
+        bytes32[] memory withZero = new bytes32[](1);
+        withZero[0] = bytes32(0);
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[0], fee);
+        vm.prank(mods[0]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[0]);
+        vm.expectRevert(Moderation.ZeroTopicKey.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, withZero, 0, fee);
+
+        // And in company: one good topic does not launder a zero one.
+        bytes32[] memory mixed = new bytes32[](2);
+        mixed[0] = TK;
+        mixed[1] = bytes32(0);
+        uint256 fee2 = mod.minFee(2);
+        bzz.mint(mods[0], fee2);
+        vm.prank(mods[0]);
+        vm.expectRevert(Moderation.ZeroTopicKey.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, mixed, 0, fee2);
     }
 }

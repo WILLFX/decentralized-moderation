@@ -88,8 +88,11 @@ contract StakingTest is StackDeployer {
         vm.prank(alice);
         stakeReg.stake(100 * XBZZ);
 
-        // In the free bucket, but not draw-eligible yet.
+        // In the free bucket, but not draw-eligible yet. Two reasons now: the
+        // activation delay (H-07 pledge aside), and M2.6-P0-3 — weight becomes
+        // drawable only at the next eligibility-epoch boundary.
         assertEq(stakeReg.totalStakeOf(alice), 100 * XBZZ);
+        _settleEpoch(stakeReg);
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "pending: not in tree");
         assertEq(stakeReg.totalEligibleWeight(), 0);
 
@@ -106,6 +109,7 @@ contract StakingTest is StackDeployer {
         uint256 units = 100 * XBZZ / mod.getParams().riskPerSeat;
         vm.prank(alice);
         stakeReg.setDutyUnits(units);
+        _settleEpoch(stakeReg); // P0-3: drawable from the next epoch
         assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ, "pledged: full weight in tree");
         assertEq(stakeReg.totalEligibleWeight(), 100 * XBZZ);
     }
@@ -266,11 +270,11 @@ contract StakingTest is StackDeployer {
         assertEq(stakeReg.eligibleWeightOf(alice), 100 * XBZZ);
 
         // Commit 40 (free->committed), then a settlement freezes that slice.
-        mod.__commit(alice, 40 * XBZZ);
+        mod.__commit(alice, 0, 40 * XBZZ);
         assertEq(stakeReg.eligibleWeightOf(alice), 60 * XBZZ, "committed stake leaves the tree");
 
         uint256 until = vm.getBlockTimestamp() + 7 days;
-        mod.__freeze(alice, 40 * XBZZ, until); // committed 40 -> frozen
+        mod.__freeze(alice, 0, 40 * XBZZ, until); // committed 40 -> frozen
 
         // D6: the WHOLE moderator is excluded while frozen, not just the slice.
         assertEq(stakeReg.eligibleWeightOf(alice), 0, "fully excluded while frozen");
@@ -337,10 +341,10 @@ contract StakingTest is StackDeployer {
                 // commitVote -> settlement-freeze path.
                 (uint256 free, uint256 pending, uint256 committed,,,,uint256 exitAmount,,) = stakeReg.moderatorInfo(a);
                 if (committed > 0) {
-                    mod.__freeze(a, committed, vm.getBlockTimestamp() + 3 days);
+                    mod.__freeze(a, 0, committed, vm.getBlockTimestamp() + 3 days);
                 } else {
                     uint256 eligible = free > pending + exitAmount ? free - pending - exitAmount : 0;
-                    if (amt <= eligible && amt > 0) mod.__commit(a, amt);
+                    if (amt <= eligible && amt > 0) mod.__commit(a, 0, amt);
                 }
             } else {
                 // advance time (lets activation delays / cooldowns / freezes elapse)

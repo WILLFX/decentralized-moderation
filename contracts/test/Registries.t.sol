@@ -1403,6 +1403,40 @@ contract RegistriesTest is Test {
         assertEq(frozen, 0, "stake is recoverable at the bound, not held forever");
     }
 
+    /// F2, SECOND DOOR. `freeze` is not the only logic-callable writer of
+    /// `m.frozenUntil`: `settleDuty` — the H-07/H-10 no-show penalty — takes `until`
+    /// from the caller and writes it too. The first version of this fix clamped
+    /// `freeze` alone and the docblock then claimed the term was "bounded here, by
+    /// this contract", which was false on the path whose whole purpose is to punish
+    /// and which is therefore the likelier of the two to carry a hostile term.
+    ///
+    /// Unclamped, one call froze a moderator until `2**256 - 1`: `thaw` reverts
+    /// `NotFrozen` forever, and by the aggregation rule one clock governs the whole
+    /// pooled balance, so every later tranche is trapped behind it too.
+    ///
+    /// Driven from the logic boundary, like its sibling — `Settlement` is not in this
+    /// path. Mutation-checked: with only the `freeze` clamp in place this test fails,
+    /// which matters because the sibling test passing is exactly what made F2 look
+    /// closed when it was open on one of two writers.
+    function test_F2_the_registry_bounds_the_no_show_penalty_term_too() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 t0 = vm.getBlockTimestamp();
+        _drawSeatFor(oldLogic, alice, CASE_A); // a real seat, so there is duty to settle
+
+        vm.prank(oldLogic);
+        stakeReg.settleDuty(alice, CASE_A, 1, RISK_PER_SEAT, type(uint256).max);
+
+        (,,, uint256 frozen, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertGt(frozen, 0, "the penalty actually froze something");
+        assertEq(frozenUntil, t0 + MAX_FREEZE, "the punish path is bounded by the registry too");
+
+        // And it is a real bound: the stake comes back.
+        vm.warp(t0 + MAX_FREEZE);
+        stakeReg.thaw(alice);
+        (,,, uint256 after_,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(after_, 0, "recoverable at the bound rather than frozen forever");
+    }
+
     /// A term INSIDE the bound is untouched — the clamp must narrow the hostile case
     /// without rewriting the honest one. This is what makes the fix a narrowing that
     /// cannot change behaviour today: every term the shipped `Settlement` produces is

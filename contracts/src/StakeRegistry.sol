@@ -711,6 +711,39 @@ contract StakeRegistry {
         emit StakeReleased(moderator, amount);
     }
 
+    /// @dev **The ONLY writer of `m.frozenUntil`, and both punishment paths route
+    ///      through it (M2.6-F2).** There is one bound on this field and therefore
+    ///      one implementation of it; a third punishment path added later inherits
+    ///      the bound by calling this rather than by remembering to.
+    ///
+    ///      This exists because the first attempt at F2 clamped `freeze` and left
+    ///      `settleDuty` open, and the docblock then claimed the term was "bounded
+    ///      here, by this contract" while one of the two writers was unbounded. The
+    ///      lesson is recorded in `specs/m2_6-state-of-play.md`: a bound is a
+    ///      property of the FIELD, not of the function you happened to be editing,
+    ///      so it is enforced at the field's single write point.
+    ///
+    ///      Two rules, both deliberate:
+    ///
+    ///      **Saturates, never reverts.** Both callers are reachable from settlement
+    ///      (`Settlement.sol:198`, `:380`, and `_settleDuty`), so a revert here would
+    ///      let a logic produce cases that finalize and then revert forever inside
+    ///      `claim()`, with every seat-holder's stake locked behind them — the
+    ///      M2.6-F1 failure class. `FreezeMath.freezeDuration` already made this call
+    ///      one layer up for the same reason: it clamps rather than reverting,
+    ///      "because this runs on the settlement path and a future validation slip
+    ///      must not be able to brick it".
+    ///
+    ///      **Extends by MAX, and the bound is per CALL.** No single call can leave a
+    ///      moderator frozen more than `MAX_FREEZE` beyond the moment of that call.
+    ///      That is not a cap on total time frozen: by the aggregation rule, repeated
+    ///      penalties keep extending, which is the punishment working as designed.
+    function _extendFreeze(Moderator storage m, uint256 until) internal {
+        uint256 cap = block.timestamp + L.MAX_FREEZE;
+        if (until > cap) until = cap;
+        if (until > m.frozenUntil) m.frozenUntil = until;
+    }
+
     /// Move `amount` committed -> frozen until `until` (penalty; never a transfer).
     ///
     /// @dev **Two rules live here, and both are stated because neither is obvious
@@ -727,32 +760,25 @@ contract StakeRegistry {
     ///      coherent rule over one clock and a pooled balance, but it is a rule about
     ///      how punishment compounds and it was previously written nowhere.
     ///
-    ///      **(2) The term is bounded HERE, by this contract (M2.6-F2b).** The
-    ///      365-day bound is `L.MAX_FREEZE`, and until now it was applied only by
-    ///      `FreezeMath.freezeDuration`, which is called from `Settlement` — the
-    ///      REPLACEABLE side. This contract accepted any `until` at all, so the
-    ///      permanent custody contract was inheriting a custody bound from a contract
-    ///      designed to be swapped out. A replacement logic could freeze stake past
-    ///      any horizon, and rule (1) means one such call drags the whole pooled
-    ///      balance with it. `ProtocolLimits` exists so that the contract validating a
-    ///      ruleset and the contract enforcing it cannot drift; custody is the third
-    ///      party that must not drift from either.
+    ///      **(2) The TERM IS BOUNDED BY THIS CONTRACT, on every path that writes it
+    ///      (M2.6-F2b).** The 365-day bound is `L.MAX_FREEZE`, and it used to be
+    ///      applied only by `FreezeMath.freezeDuration`, called from `Settlement` —
+    ///      the REPLACEABLE side. Permanent custody was inheriting a custody bound
+    ///      from a contract designed to be swapped out, and by rule (1) one over-long
+    ///      call drags the whole pooled balance with it.
     ///
-    ///      **Why it SATURATES rather than reverting.** `freeze` is called from
-    ///      settlement (`Settlement.sol:198`, `:380`), so a revert here is reachable
-    ///      from a path that must not revert: a logic computing an over-long term
-    ///      would produce cases that finalize and then revert forever inside
-    ///      `claim()`, with every seat-holder's stake locked behind them. That is the
-    ///      failure class M2.6-F1 hit one contract over. The same call was already
-    ///      made one layer up for the same reason — `FreezeMath.freezeDuration`
-    ///      clamps rather than reverting, "because this runs on the settlement path
-    ///      and a future validation slip must not be able to brick it". Reverting
-    ///      here would contradict that decision inside the same code path.
+    ///      **`m.frozenUntil` has exactly two writers and both are bounded**: this
+    ///      function and `settleDuty` (the H-07/H-10 no-show penalty). Both write it
+    ///      only through `_extendFreeze`, which is where the clamp lives and why the
+    ///      claim is about the FIELD rather than about this function. The remaining
+    ///      mentions of `frozenUntil` in this contract are reads — `thaw`'s expiry
+    ///      gate, `drawPanel`'s rejection filter, `_eligibleWeight`'s exclusion, the
+    ///      two event emits and `moderatorInfo` — and a read cannot widen a bound.
     ///
-    ///      The bound is per CALL, and says so precisely: no single `freeze` can
-    ///      leave a moderator frozen more than `MAX_FREEZE` beyond the moment of that
-    ///      call. It is not a cap on total time frozen — rule (1) means repeated
-    ///      penalties keep extending, which is the punishment working as designed.
+    ///      The first version of this fix clamped only `freeze` while claiming the
+    ///      term was "bounded here, by this contract". That was false on the punish
+    ///      path, which is the likelier one to carry a hostile term. See
+    ///      `_extendFreeze` for the standing rule that came out of it.
     function freeze(address moderator, uint256 caseRef, uint256 amount, uint256 until) external onlyLogic {
         Moderator storage m = moderators[moderator];
         _debit(_ob(moderator, caseRef), amount);
@@ -760,9 +786,7 @@ contract StakeRegistry {
         m.frozen += amount;
         totalCommittedStake -= amount;
         totalFrozenStake += amount;
-        uint256 cap = block.timestamp + L.MAX_FREEZE;
-        if (until > cap) until = cap;
-        if (until > m.frozenUntil) m.frozenUntil = until;
+        _extendFreeze(m, until);
         _syncTree(moderator, m);
         emit StakeFrozen(moderator, amount, m.frozenUntil);
     }
@@ -1038,7 +1062,11 @@ contract StakeRegistry {
         if (p > 0) {
             m.frozen += p;
             totalFrozenStake += p;
-            if (until > m.frozenUntil) m.frozenUntil = until;
+            // M2.6-F2: the SECOND writer of `frozenUntil`, and the one whose whole
+            // purpose is to punish — so if either path carries a hostile term it is
+            // more likely to be this one. It goes through the same helper for the
+            // same reason; see `_extendFreeze`.
+            _extendFreeze(m, until);
             emit NoShowPenalized(moderator, p, m.frozenUntil);
         }
         uint256 back = seatBond - p;

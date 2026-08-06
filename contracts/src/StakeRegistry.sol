@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {SortitionTree} from "./lib/SortitionTree.sol";
+import {ProtocolLimits as L} from "./lib/ProtocolLimits.sol";
 
 /// @title StakeRegistry
 /// @notice Custody + bookkeeping for moderator stake, independent of the
@@ -711,6 +712,47 @@ contract StakeRegistry {
     }
 
     /// Move `amount` committed -> frozen until `until` (penalty; never a transfer).
+    ///
+    /// @dev **Two rules live here, and both are stated because neither is obvious
+    ///      from the three lines that implement them.**
+    ///
+    ///      **(1) Freezes AGGREGATE BY MAX, and that is a punishment rule (M2.6-F2a).**
+    ///      `m.frozen` is a pooled balance with one clock, and `thaw` is
+    ///      all-or-nothing. So a later penalty extends the lock on stake frozen by an
+    ///      earlier one, past the earlier one's own term. That is deliberate: with a
+    ///      single clock, `min` would release an unexpired penalty early — a
+    ///      moderator could shorten a long freeze by incurring a short one — and
+    ///      per-tranche expiry needs a queue, which is unbounded per-moderator state
+    ///      this contract should not grow for a penalty path. `max` is the only
+    ///      coherent rule over one clock and a pooled balance, but it is a rule about
+    ///      how punishment compounds and it was previously written nowhere.
+    ///
+    ///      **(2) The term is bounded HERE, by this contract (M2.6-F2b).** The
+    ///      365-day bound is `L.MAX_FREEZE`, and until now it was applied only by
+    ///      `FreezeMath.freezeDuration`, which is called from `Settlement` — the
+    ///      REPLACEABLE side. This contract accepted any `until` at all, so the
+    ///      permanent custody contract was inheriting a custody bound from a contract
+    ///      designed to be swapped out. A replacement logic could freeze stake past
+    ///      any horizon, and rule (1) means one such call drags the whole pooled
+    ///      balance with it. `ProtocolLimits` exists so that the contract validating a
+    ///      ruleset and the contract enforcing it cannot drift; custody is the third
+    ///      party that must not drift from either.
+    ///
+    ///      **Why it SATURATES rather than reverting.** `freeze` is called from
+    ///      settlement (`Settlement.sol:198`, `:380`), so a revert here is reachable
+    ///      from a path that must not revert: a logic computing an over-long term
+    ///      would produce cases that finalize and then revert forever inside
+    ///      `claim()`, with every seat-holder's stake locked behind them. That is the
+    ///      failure class M2.6-F1 hit one contract over. The same call was already
+    ///      made one layer up for the same reason — `FreezeMath.freezeDuration`
+    ///      clamps rather than reverting, "because this runs on the settlement path
+    ///      and a future validation slip must not be able to brick it". Reverting
+    ///      here would contradict that decision inside the same code path.
+    ///
+    ///      The bound is per CALL, and says so precisely: no single `freeze` can
+    ///      leave a moderator frozen more than `MAX_FREEZE` beyond the moment of that
+    ///      call. It is not a cap on total time frozen — rule (1) means repeated
+    ///      penalties keep extending, which is the punishment working as designed.
     function freeze(address moderator, uint256 caseRef, uint256 amount, uint256 until) external onlyLogic {
         Moderator storage m = moderators[moderator];
         _debit(_ob(moderator, caseRef), amount);
@@ -718,6 +760,8 @@ contract StakeRegistry {
         m.frozen += amount;
         totalCommittedStake -= amount;
         totalFrozenStake += amount;
+        uint256 cap = block.timestamp + L.MAX_FREEZE;
+        if (until > cap) until = cap;
         if (until > m.frozenUntil) m.frozenUntil = until;
         _syncTree(moderator, m);
         emit StakeFrozen(moderator, amount, m.frozenUntil);

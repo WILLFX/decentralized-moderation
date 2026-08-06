@@ -73,7 +73,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass + the post-close items): **266
+**Suite now** (tag + the post-close regression pass + the post-close items): **269
 passing, 21 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
@@ -159,7 +159,7 @@ still cannot express a banked round or `target > seats seated`.
 
 After the post-close regression pass, the second structural split, the split's
 follow-up, and every post-close item through the external-audit findings: `Moderation` **20,012 (4,564
-free)**, `Settlement` 6,674, `StakeRegistry` 12,734, `IndexRegistry` 6,277,
+free)**, `Settlement` 6,674, `StakeRegistry` 12,780, `IndexRegistry` 6,277,
 `RulesetGovernor` 4,430.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split

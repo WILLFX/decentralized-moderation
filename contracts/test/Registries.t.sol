@@ -36,6 +36,7 @@ contract RegistriesTest is Test {
     uint256 internal constant CASE_B = (2 << 8) | 0;
     uint256 internal constant MIN_TRACK_DECAY = (1e18 * 9) / 10;
     uint256 internal constant WAD = 1e18;
+    uint256 internal constant MAX_FREEZE = 365 days; // ProtocolLimits.MAX_FREEZE
 
     function setUp() public {
         bzz = new MockBZZ();
@@ -1361,6 +1362,105 @@ contract RegistriesTest is Test {
         _settleEpoch();
         assertLt(stakeReg.totalEligibleWeight(), before, "and fully applied at the boundary");
         assertEq(stakeReg.eligibleWeightOf(who[0]), 0, "the un-pledge really did take effect");
+    }
+
+    // --- M2.6-F2: the freeze term is bounded by the CUSTODY contract ----------
+
+    /// F2(b). `L.MAX_FREEZE` was applied only by `FreezeMath.freezeDuration`, which
+    /// is called from `Settlement` — the replaceable side. This contract accepted any
+    /// `until`, so the permanent custody contract was inheriting a custody bound from
+    /// a contract designed to be swapped out.
+    ///
+    /// **Driven from the logic boundary, and that is the whole point of the fixture.**
+    /// `Settlement` is not in this call path at all: the test pranks an authorized
+    /// logic address and calls `freeze` directly, exactly as a replacement logic
+    /// would. So this cannot pass on `Settlement`'s clamp — if the bound were
+    /// enforced only one layer up, as it was before this fix, the assertion below
+    /// fails. Routing it through settlement instead is precisely what would hide the
+    /// gap, because the caller would have clamped the argument before the registry
+    /// ever saw it.
+    ///
+    /// It SATURATES rather than reverting: `freeze` is reachable from settlement, so
+    /// a revert here would be the M2.6-F1 brick one contract over — see the docblock
+    /// on `freeze` for why, and for the precedent in `FreezeMath`.
+    function test_F2_the_registry_bounds_the_freeze_term_itself() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 t0 = vm.getBlockTimestamp();
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        // An absurd term, of the shape a buggy or hostile replacement logic produces.
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, type(uint256).max);
+        vm.stopPrank();
+
+        (,,,, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozenUntil, t0 + MAX_FREEZE, "the registry holds the bound itself");
+
+        // And the bound is real, not cosmetic: the stake actually thaws.
+        vm.warp(t0 + MAX_FREEZE);
+        stakeReg.thaw(alice);
+        (,,, uint256 frozen,,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozen, 0, "stake is recoverable at the bound, not held forever");
+    }
+
+    /// A term INSIDE the bound is untouched — the clamp must narrow the hostile case
+    /// without rewriting the honest one. This is what makes the fix a narrowing that
+    /// cannot change behaviour today: every term the shipped `Settlement` produces is
+    /// already within `MAX_FREEZE`.
+    ///
+    /// **GUARD, not a discriminating test.** It passes before and after the fix — a
+    /// lawful term was never clamped by anything. What it catches is a future clamp
+    /// written too tight, or the bound lowered under a ruleset that relies on it.
+    function test_F2_a_lawful_freeze_term_is_not_rewritten() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 want = vm.getBlockTimestamp() + 7 days;
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, want);
+        vm.stopPrank();
+
+        (,,,, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozenUntil, want, "a lawful term passes through unchanged");
+    }
+
+    /// F2(a). Freezes aggregate by MAX over a pooled balance and one clock, so a
+    /// later penalty extends the lock on stake an earlier one froze, past that
+    /// earlier term. Deliberate — `min` would let a moderator shorten a long freeze
+    /// by incurring a short one, and per-tranche expiry needs a queue this contract
+    /// should not grow — but it is a punishment rule, and a rule that lives only in
+    /// the reader's head is the thing this project keeps getting caught by. Asserted
+    /// as behaviour so it cannot be changed silently.
+    ///
+    /// **CHARACTERIZATION, not a fix.** F2(a) changed no code: this rule was already
+    /// the behaviour and passes identically before and after. It is here because the
+    /// rule was written nowhere, and prose alone is what this milestone's standing
+    /// lesson is about. It is not vacuous — switching the aggregation to `min` fails
+    /// the first assertion ("a shorter later freeze never shortens the lock").
+    function test_F2_freezes_aggregate_by_max_over_one_clock() public {
+        _stakeActivatePledge(alice, 100 * XBZZ);
+        uint256 t0 = vm.getBlockTimestamp();
+
+        vm.startPrank(oldLogic);
+        stakeReg.lock(alice, CASE_A, 30 * XBZZ);
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, t0 + 30 days); // the long one
+        stakeReg.freeze(alice, CASE_A, 10 * XBZZ, t0 + 1 days); // a shorter, later one
+        vm.stopPrank();
+
+        (,,,, uint256 frozenUntil,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(frozenUntil, t0 + 30 days, "a shorter later freeze never shortens the lock");
+
+        // And the converse: the later, LONGER penalty drags the earlier tranche with
+        // it. Both tranches sit in one pooled balance under one clock.
+        vm.prank(oldLogic);
+        stakeReg.freeze(alice, CASE_A, 5 * XBZZ, t0 + 60 days);
+        (,,, uint256 frozen, uint256 until2,,,,) = stakeReg.moderatorInfo(alice);
+        assertEq(until2, t0 + 60 days, "the whole pooled balance takes the longest term");
+        assertEq(frozen, 25 * XBZZ, "including stake frozen before that penalty existed");
+
+        vm.warp(t0 + 30 days);
+        vm.expectRevert(StakeRegistry.NotFrozen.selector);
+        stakeReg.thaw(alice); // the first tranche's own term has passed; it stays locked
     }
 
     // --- M2.6-K-5: track writes are obligation-scoped -----------------------

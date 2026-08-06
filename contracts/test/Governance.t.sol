@@ -5,6 +5,8 @@ import {Moderation} from "../src/Moderation.sol";
 import {RulesetGovernor} from "../src/RulesetGovernor.sol";
 import {ProtocolLimits as L} from "../src/lib/ProtocolLimits.sol";
 import {ModerationTestBase} from "./base/ModerationTestBase.sol";
+import {ModerationHarness} from "./harnesses/ModerationHarness.sol";
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 contract GovernanceTest is ModerationTestBase {
     // The test contract deploys the harness, so it is `governance`.
@@ -658,6 +660,36 @@ contract GovernanceTest is ModerationTestBase {
         vm.prank(stranger);
         vm.expectRevert(RulesetGovernor.NotGovernance.selector);
         fresh.bindModeration(mod);
+    }
+
+    /// M2.6-F3. A bind only means something if it is MUTUAL. Nothing checked that
+    /// the `Moderation` being bound names THIS governor, so a governor could bind to
+    /// a game contract that had never heard of it — and the mistake stayed invisible
+    /// through `proposeParameters` and a full timelock, surfacing at
+    /// `executeParameters` as a revert out of `applyRuleset`. That is the worst place
+    /// for it: after the wait, from the call that looks like the change landing.
+    ///
+    /// **No existing bind fixture discriminates this.** `test_bind_is_one_way` binds
+    /// an already-bound governor (`AlreadyBound` fires first) and then binds from a
+    /// stranger (`NotGovernance` fires first, in the modifier, before the body runs).
+    /// Both still pass with this check removed — verified by mutation. This fixture
+    /// is the only one that fails without it.
+    function test_F3_a_bind_must_be_mutual() public {
+        // A `Moderation` wired to a DIFFERENT governor — the copy-paste error this
+        // catches, and the one that used to survive until post-timelock.
+        RulesetGovernor other = new RulesetGovernor(address(this), TIMELOCK);
+        ModerationHarness strayed = new ModerationHarness(IERC20(address(bzz)), stakeReg, indexReg, address(other));
+
+        RulesetGovernor fresh = new RulesetGovernor(address(this), TIMELOCK);
+        vm.expectRevert(RulesetGovernor.BindingNotMutual.selector);
+        fresh.bindModeration(strayed);
+
+        // Unbound, so nothing downstream can be attempted either.
+        assertEq(address(fresh.moderation()), address(0), "a refused bind leaves the governor unbound");
+
+        // And the mutual case still binds: `other` is the governor `strayed` names.
+        other.bindModeration(strayed);
+        assertEq(address(other.moderation()), address(strayed), "the matching governor binds");
     }
 
     /// An unbound governor cannot execute anything — it has nothing to apply to.

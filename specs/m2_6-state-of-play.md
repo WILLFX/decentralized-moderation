@@ -73,7 +73,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass + the post-close items): **270
+**Suite now** (tag + the post-close regression pass + the post-close items): **271
 passing, 21 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
@@ -159,8 +159,8 @@ still cannot express a banked round or `target > seats seated`.
 
 After the post-close regression pass, the second structural split, the split's
 follow-up, and every post-close item through the external-audit findings: `Moderation` **20,012 (4,564
-free)**, `Settlement` 6,674, `StakeRegistry` 12,933, `IndexRegistry` 6,277,
-`RulesetGovernor` 4,430.
+free)**, `Settlement` 6,674, `StakeRegistry` 12,761, `IndexRegistry` 6,277,
+`RulesetGovernor` 4,565.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
 and a further 761 when VOID disposal followed settlement across the seam, so it
@@ -379,6 +379,22 @@ One stale artifact set put a wrong size in a commit message, a wrong size in thi
 file, and three wrong entries in `.gas-snapshot` — all from the same build. Any
 figure quoted as evidence (sizes, gas, EIP-170 headroom) comes off a clean build or
 it is not quoted.
+
+**And a clean build is necessary, not sufficient: a per-contract size is not a pure
+function of that contract's source.** Measured at M2.6-F3 — editing
+`RulesetGovernor.sol` moved `StakeRegistry`'s deployed bytecode from 12,933 to 12,761
+with `StakeRegistry.sol` byte-identical to the previous commit, verified by diffing
+the compiled output (172 bytes shorter, first difference at offset ~655, so real code
+rather than a metadata hash). `StakeRegistry` does not even depend on
+`RulesetGovernor`; the dependency runs the other way. `forge` hands the whole project
+to one solc invocation and the `via_ir` pipeline makes size-sensitive inlining
+decisions across it, so an unrelated contract growing can shift what an untouched one
+compiles to.
+
+The operational consequence: **measure every contract you quote on a clean build OF
+THE COMMIT YOU ARE REPORTING.** Never carry a figure forward from an earlier commit
+because that contract's file was not touched, and do not write "everything else
+byte-identical" unless you have just measured everything else.
 
 And one about triage: **a selector nothing calls is still a selector.**
 `penalizeNoShow` was filed P1 because it had no production caller, then deleted as

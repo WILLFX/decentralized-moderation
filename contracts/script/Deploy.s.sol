@@ -171,6 +171,14 @@ contract Deploy is Script {
 
         // 3. The bind, from BOTH sides. Step 6 is irreversible, so a half-bind is
         //    the one error this script exists to catch before it is permanent.
+        //
+        //    M2.6-F3 moved half of this INTO `bindModeration`, which now refuses a
+        //    `Moderation` that does not name it — so for anything deployed through
+        //    this script the second line below can no longer fail. It stays because
+        //    `verify` is also run against stacks this script did not build (that is
+        //    the point of taking a `Stack` rather than deploying one), and because a
+        //    check that has become unreachable through one path is not the same as a
+        //    check that is unnecessary.
         if (s.moderation.governor() != address(s.governor)) revert GovernorNotBound();
         if (address(s.governor.moderation()) != address(s.moderation)) revert ModerationNotBound();
 

@@ -83,6 +83,8 @@ contract RulesetGovernor {
     error BadParams();
     error AlreadyBound();
     error NotBound();
+    /// M2.6-F3: the `Moderation` offered does not name this governor.
+    error BindingNotMutual();
     error ZeroAddress();
     /// A proposed ruleset would lock more per seat than a pledged duty unit is
     /// worth, so panels could be seated on collateral that cannot cover them.
@@ -103,9 +105,38 @@ contract RulesetGovernor {
     ///         binding is the trust relationship, and `Moderation.governor` is
     ///         immutable on the other side, so a rebind could only ever create a
     ///         governor that governs nothing.
+    /// @dev **A successful bind means the binding is MUTUAL (M2.6-F3).** One-way-ness
+    ///      and non-zero were checked; that the other side names THIS governor was
+    ///      not. So a governor could bind to a `Moderation` that had never heard of
+    ///      it: the bind succeeded, `proposeParameters` succeeded, the timelock ran
+    ///      its full course, and the failure surfaced at `executeParameters` as a
+    ///      revert out of `applyRuleset` — after the wait, from the call that looks
+    ///      like the governance action landing. The check moves that failure to the
+    ///      transaction that causes it.
+    ///
+    ///      **Why a bind-time check closes it permanently, rather than snapshotting.**
+    ///      Per the M2.6-F2b rule, both fields were enumerated. `Moderation.governor`
+    ///      is `immutable` with its single write in the constructor
+    ///      (`Moderation.sol:179`); every other mention is the zero-check on the
+    ///      constructor argument, the declaration, or `onlyGovernor`'s read. This
+    ///      contract's `moderation` has exactly one assignment, the line below, with
+    ///      every other mention a read. So neither side can move after this returns,
+    ///      and a check at bind time is a permanent guarantee rather than a fact
+    ///      about one moment.
+    ///
+    ///      **Reverting is safe here** (the standing M2.6-F1 question). This is
+    ///      `onlyGovernance`, has no internal caller, and is not reachable from
+    ///      settlement or any permissionless poke — so a revert cannot strand a case
+    ///      or lock stake. It fails a deployment step, which is exactly where a
+    ///      mis-wired stack should fail.
+    ///
+    ///      It imposes NO new ordering constraint: `Moderation` must already name its
+    ///      governor at its own construction, because that field is immutable, so any
+    ///      order that could ever have worked already satisfies this check.
     function bindModeration(Moderation m) external onlyGovernance {
         if (address(moderation) != address(0)) revert AlreadyBound();
         if (address(m) == address(0)) revert ZeroAddress();
+        if (m.governor() != address(this)) revert BindingNotMutual();
         moderation = m;
         emit ModerationBound(address(m));
     }

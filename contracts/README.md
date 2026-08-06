@@ -12,7 +12,7 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **270 passing tests** (188 at the tag) including a
+> registries — with **271 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a 52-vector differential regression test
 > against a Python integer reference (a port of the Solidity, not an independent
 > derivation — see `Differential.t.sol`'s header for what that does and does not
@@ -82,7 +82,7 @@ lived only in the module map above.
 | 3 | `RulesetGovernor(governance, timelock)` | **before** `Moderation` — `Moderation.governor` is immutable |
 | 4 | deploy + link `Settlement` | Foundry's job; see the link note below |
 | 5 | `Moderation(token, stakeReg, indexReg, governor)` | reverts on a zero governor, and on `token != stakeReg.token()` |
-| 6 | `governor.bindModeration(moderation)` | **one-way and unrecoverable** |
+| 6 | `governor.bindModeration(moderation)` | **one-way and unrecoverable**; refuses a `Moderation` that does not name this governor (M2.6-F3), so the order above is enforced rather than merely required |
 | 7 | `proposeLogic` on BOTH registries → wait `timelockDelay` → `executeLogic()` on both | authorization |
 
 The circularity — the governor needs the game, the game needs the governor — resolves

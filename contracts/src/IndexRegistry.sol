@@ -167,6 +167,9 @@ contract IndexRegistry {
     error ZeroAddress();
     error BadRange();
     error LogicStillHasObligations(); // M2.6-P0-5b: cannot revoke a logic mid-flight
+    /// M2.6-F1: `topicOfEntry == 0` is this contract's "not live" sentinel, so a
+    /// live entry under topic 0 would make the sentinel lie. Refused at the mint.
+    error ZeroTopicKey();
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -231,6 +234,14 @@ contract IndexRegistry {
         uint256 guidelinesVersion,
         bytes32 dedupKey
     ) external onlyLogic returns (uint256 globalId) {
+        // M2.6-F1: topic 0 is this contract's "not live" sentinel (`legacyEntryInfo`,
+        // `topicOfEntry`). An entry minted under it would be live and unreachable
+        // through the cross-logic removal route at once. Enforced HERE, in the
+        // permanent registry, because it is this contract's docblock that claims the
+        // sentinel holds — a guard in the replaceable logic would leave the claim
+        // false for the next logic. The logic ALSO refuses it at submit, for a
+        // different reason: see `Moderation.submit`.
+        if (topicKey == bytes32(0)) revert ZeroTopicKey();
         if (!topicSeen[topicKey]) {
             topicSeen[topicKey] = true;
             emit TopicCreated(topicKey);
@@ -345,8 +356,20 @@ contract IndexRegistry {
 
     /// @notice Everything a logic contract needs to open a removal case against an
     ///         entry it did not write (M2.6-P0-1c). Returns `topicKey == 0` when
-    ///         the id is not live, which is the caller's existence check —
-    ///         `globalId` starts at 1, so no live entry can sit under topic 0.
+    ///         the id is not live, which is the caller's existence check.
+    /// @dev **Why the sentinel is sound (M2.6-F1).** It rests on `writeEntry`
+    ///      refusing `topicKey == 0`, and on nothing else. The justification this
+    ///      docblock used to give — "`globalId` starts at 1, so no live entry can
+    ///      sit under topic 0" — was a non-sequitur: `globalId`'s sentinel and
+    ///      `topicKey`'s sentinel are different sentinels, and `nextEntryId = 1`
+    ///      says nothing about which topic an entry is filed under. Nothing rejected
+    ///      topic 0 at the mint, so an approved submission carrying it produced a
+    ///      live entry that this function reported dead — `submitLegacyRemoval` then
+    ///      refused it as `TargetNotRemovable`, while `deleteEntry` still worked
+    ///      through the local route. The entry therefore became unremovable at
+    ///      exactly the moment its writing logic was superseded, which is the one
+    ///      situation P0-1c exists for, and its content reservation (released only
+    ///      by `deleteEntry`) went with it.
     /// @dev The payload comes from the registry, not the caller, so a removal
     ///      displays exactly what settlement will act on (H-01) even when the case
     ///      record that produced the entry lives in a contract this one cannot read.

@@ -541,6 +541,7 @@ contract Moderation is ReentrancyGuard {
     error FeeTooLow();
     error DuplicateSubmission();
     error DuplicateTopic(); // M-04: a submission's topic keys must be distinct
+    error ZeroTopicKey(); // M2.6-F1: topic 0 is IndexRegistry's "not live" sentinel
     error WrongPhase();
     error SeedNotReady();
     error NotSeatHolder();
@@ -617,7 +618,18 @@ contract Moderation is ReentrancyGuard {
 
         // M-04: topic keys must be distinct (n <= maxTopics is small). Duplicates
         // would double-write the entry and corrupt the O(1) position map (H-03).
+        //
+        // M2.6-F1: and none may be zero. The INVARIANT lives in `IndexRegistry`
+        // (topic 0 is its "not live" sentinel, and `writeEntry` refuses it) — this
+        // check is not a second home for it but a LIVENESS precondition. Settlement
+        // writes entries from `_settleFinish`, so without this a case could be
+        // submitted, adjudicated and approved, and then revert inside `claim()` on
+        // the registry's guard, permanently, with every seat-holder's stake locked
+        // behind it. That is item 4's failure class, and it would be a strictly worse
+        // outcome than the unremovable entry the registry guard exists to prevent.
+        // Refusing at submit makes the registry's revert unreachable from settlement.
         for (uint256 i; i < n; ++i) {
+            if (topicKeys[i] == bytes32(0)) revert ZeroTopicKey();
             for (uint256 j; j < i; ++j) {
                 if (topicKeys[i] == topicKeys[j]) revert DuplicateTopic();
             }

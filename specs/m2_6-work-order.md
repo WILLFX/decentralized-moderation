@@ -777,8 +777,8 @@ fixes with no discriminating test coverage. They are recorded in their own secti
 fixed on top in seven commits (`a05343a..4864d80`); the `m2.6-close` tag is
 deliberately NOT moved, because it is the commit the audit ran against and moving
 it would invalidate that verification. Current state, after the regression pass and
-post-close items 2b, 4, 5, 8, 9, 10, 11, P1-3 and K-5: **264 tests, 21 suites**, green
-at every commit, `Moderation` 19,980 B (4,596 free — see "Size position"). The
+post-close items 2b, 4, 5, 8, 9, 10, 11, P1-3, K-5 and the external-audit findings:
+**266 tests, 21 suites**, green at every commit, `Moderation` 20,012 B (4,564 free — see "Size position"). The
 seventeenth suite is `StalledDraw.t.sol`, split out of `CaseLifecycle.t.sol` when
 that contract outgrew the `via_ir` pipeline; a file move, not new coverage. The
 eighteenth is `SeatDraw.t.sol`; the last three are `StallRound.t.sol` (item 2b),

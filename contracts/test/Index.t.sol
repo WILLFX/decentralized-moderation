@@ -348,4 +348,67 @@ contract IndexTest is ModerationTestBase {
         assertEq(mod.entryCount(TK), 1, "in superset");
         assertEq(_supersafe(mod, TK).length, 0, "contested is never supersafe, regardless of age");
     }
+
+    // --- M2.6-F1: topic 0 is a sentinel, not a topic --------------------------
+
+    /// `IndexRegistry.legacyEntryInfo` returns `topicKey == 0` to mean "not live",
+    /// and its docblock claimed no live entry could sit there because `globalId`
+    /// starts at 1. Those are different sentinels: `nextEntryId = 1` says nothing
+    /// about which topic an entry is filed under, and nothing rejected topic 0 at
+    /// the mint.
+    ///
+    /// The bite is not that the sentinel is untidy. A live entry under topic 0
+    /// reads as dead through `legacyEntryInfo`, so `submitLegacyRemoval` refuses it
+    /// — while `deleteEntry` still works through the LOCAL route, because
+    /// `entryPosPlusOne[0][globalId]` is non-zero. So the entry becomes unremovable
+    /// at exactly the moment its writing logic is superseded, which is the one
+    /// situation P0-1c exists to cover, and the content reservation goes with it:
+    /// `deleteEntry` is the only release path, so that content is permanently
+    /// unsubmittable too.
+    ///
+    /// Enforced in the PERMANENT registry, because it is the registry's docblock
+    /// that claims the sentinel holds. A guard in `Moderation` alone would leave
+    /// the claim false for the next logic.
+    function test_F1_an_entry_cannot_be_minted_under_the_zero_topic() public {
+        // Driven from the logic boundary, as a real settlement would call it.
+        vm.prank(address(mod));
+        vm.expectRevert(IndexRegistry.ZeroTopicKey.selector);
+        indexReg.writeEntry(bytes32(0), 1, keccak256("c"), keccak256("m"), true, true, 1, 1, keccak256("d"));
+
+        // The sentinel is only sound because of that refusal, so assert the pair:
+        // a real topic still mints, and the id it mints is reachable.
+        vm.prank(address(mod));
+        uint256 gid = indexReg.writeEntry(TK, 1, keccak256("c"), keccak256("m"), true, true, 1, 1, keccak256("d"));
+        (bytes32 topicKey,,,) = indexReg.legacyEntryInfo(gid);
+        assertEq(topicKey, TK, "a live entry reports its topic, never zero");
+    }
+
+    /// The other half, and it is NOT a second home for the invariant. Settlement
+    /// writes entries from `_settleFinish`, so a case carrying topic 0 that reached
+    /// APPROVE would revert inside `claim()` on the registry's guard — permanently,
+    /// with every seat-holder's stake locked behind it (item 4's failure class).
+    /// That is strictly worse than the unremovable entry the registry guard exists
+    /// to prevent. Refusing at submit is what makes the registry's revert
+    /// unreachable from settlement.
+    function test_F1_a_case_carrying_the_zero_topic_cannot_be_opened() public {
+        bytes32[] memory withZero = new bytes32[](1);
+        withZero[0] = bytes32(0);
+        uint256 fee = mod.minFee(1);
+        bzz.mint(mods[0], fee);
+        vm.prank(mods[0]);
+        bzz.approve(address(mod), type(uint256).max);
+        vm.prank(mods[0]);
+        vm.expectRevert(Moderation.ZeroTopicKey.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, withZero, 0, fee);
+
+        // And in company: one good topic does not launder a zero one.
+        bytes32[] memory mixed = new bytes32[](2);
+        mixed[0] = TK;
+        mixed[1] = bytes32(0);
+        uint256 fee2 = mod.minFee(2);
+        bzz.mint(mods[0], fee2);
+        vm.prank(mods[0]);
+        vm.expectRevert(Moderation.ZeroTopicKey.selector);
+        mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, mixed, 0, fee2);
+    }
 }

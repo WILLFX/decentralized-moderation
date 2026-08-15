@@ -92,7 +92,7 @@ The mechanism above survived several adversarial redesigns; recording the reason
 
 ### 3.7 Randomness
 
-MVP: `block.prevrandao` on Gnosis, snapshotted by the first transaction after the relevant phase boundary. Proposer manipulation is real but only pays above per-case pot sizes that fee and bond caps keep small; the assumption is documented, with a VDF or randomness-oracle upgrade path if pots grow.
+MVP: `blockhash` of a snapshot block a few blocks past the relevant phase boundary, realized by the first transaction after it and domain-separated per case, depth and purpose. (The design draft said `block.prevrandao`; the EVM cannot read a past block's `prevrandao`, so `blockhash` is what the contract uses — `specs/state-machine.md` §7 and `contracts/DEVIATIONS.md` D-1.) Proposer manipulation is real. An earlier claim bounded its value by per-case pot size; that is wrong, because the attacker's prize is the **listing** itself, whose SEO value no pot cap bounds. It is an accepted MVP assumption — small per-case leverage on the Gnosis proposer set, and a biased listing stays re-litigable — with a VDF or randomness-oracle upgrade path if listing value grows large.
 
 ### 3.8 Publication and search
 

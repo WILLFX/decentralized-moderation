@@ -2057,6 +2057,61 @@ recalibration below it. The tension is real and is stated rather than papered ov
 tighter floor buys compounded safety by forbidding faster decay, which is a legitimate
 calibration choice.
 
+## Spec drift — normative sections describing replaced behaviour (FILED, not fixed)
+
+**Filed at M2.6-F6. Not built; nothing in this section is done.** F5 found
+`state-machine.md` §8.2 documenting one removal route as if it were the rule, and F6
+found §7 documenting `prevrandao` when the code reads `blockhash`. Both were
+corrected in place. The question that produced this list is the one those two raise:
+*what else in the normative spec describes a mechanism that has since changed?*
+
+The spec has no tests, so nothing catches this class automatically — which is exactly
+why it is worth a scoped pass rather than a tail on someone else's commit. Listed in
+severity order as judged here; a re-auditor should re-rank rather than inherit.
+
+1. **§5 transition table still contains the `TALLY -> DRAW (same depth, widen)`
+   edge.** This is the REVEAL -> DRAW backward edge that M2.6-item-2b **deleted**,
+   and deleting it *is* the P′-a fix: the widen now fires at COMMIT close, so no
+   tranche can commit against a disclosed tally. The normative table therefore
+   describes the pre-2b machine, including the security property 2b exists to
+   remove. The same cell also specifies `seatSeed = H(seatSeed, widen)`, where the
+   code re-arms a fresh snapshot block (H-05). **Largest known instance.**
+
+2. **§2's global-state block is a single contract.** The system is four contracts
+   plus two linked libraries. `submissionExists` is shown as a `Moderation` mapping;
+   dedup moved to `IndexRegistry` as per-topic content reservations at P0-1b, keyed
+   `(contentHash, metaHash, topicKey)`. Several transition rows still say "clear
+   `submissionExists[key]`".
+
+3. **§2's `Entry` struct is missing every field P0-1a/b added** — `globalId`,
+   `originLogic`, `localCaseId`, `rulesVersion`, `guidelinesVersion`, `dedupKey`.
+   The permanent global id is the whole basis of cross-version removal, and the
+   struct that defines an entry does not mention it.
+
+4. **§2's `Moderator` struct predates the H-07 duty pool** — no `dutyUnits`,
+   `dutyReserved`, `dutyBonded`, no `pending` bucket. Draw eligibility is pledged
+   capacity now, not stake alone, which is a change to who can be seated at all.
+
+5. **§1 parameter table carries superseded working values.** `FREEZE_CAP` is listed
+   at 8x; the shipped ruleset is 4x (WO-6 recalibration). `TRACK_SAT` and
+   `TRACK_DECAY` are still "*(working)*" with no value; shipped are 60 and 0.95.
+
+6. **§9.9 governance predates the `RulesetGovernor` split** — authoring, validation
+   and the timelock live in a separate contract, and ruleset storage deliberately
+   did not move with them.
+
+Not investigated: §6's settlement arithmetic against post-item-10 allocation, and
+§3's stake machine against the obligation layer. Both are large enough that a
+skim would produce a misleading entry, and a wrong entry here is worse than a
+missing one.
+
+Two things this pass should NOT do. It should not rewrite the spec into a
+description of the implementation — the deviations are recorded deliberately in
+`contracts/DEVIATIONS.md` and the spec's job is to say what the protocol means, not
+to mirror Solidity. And it should not silently restate a decision: where the code
+narrowed a spec'd behaviour on purpose, the spec should say so and point at the
+item, as §8.2 and §7 now do.
+
 ## Item 11 — the differential campaign is a regression net, not an oracle (FILED, not built)
 
 **Filed post-close. Partly built: the DRIVEN half is closed, the CORPUS half is not.**

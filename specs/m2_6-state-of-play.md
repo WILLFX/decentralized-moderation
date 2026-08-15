@@ -402,14 +402,28 @@ wrong. The isolation run behind it reverted a single test FILE while the rest of
 `test/` stayed in the unit, so it never removed the variable it was testing for — an
 isolation that changes one file of a group and concludes about the group.
 
-The operational rules: **quote src-only figures for anything deployable and say which
-build a number came from.** Measure on a clean build of the commit you are reporting,
+The operational rules: **quote src-only figures for anything deployable, and record
+the INVOCATION that produced them, not just "clean build".** The skip pattern is
+itself a variable — `--skip test` drops only `*.t.sol` and leaves the harnesses under
+`test/` in the unit, while `--skip 'test/**' --skip 'script/**'` drops the directory.
+Those are different builds and they gave different numbers here; a figure without its
+command is not reproducible. Measure on a clean build of the commit you are reporting,
 never carry a figure forward because a file was untouched, and do not write
 "everything else byte-identical" without having just measured everything else. The
 EIP-170 headroom the milestone steers by is unaffected — `Moderation` is 20,012 /
 4,564 free in BOTH builds, as are `IndexRegistry`, `Settlement` and `RulesetGovernor`;
 only `StakeRegistry` differs. That was luck rather than method, which is why the
 method is now written down.
+
+And one about documents: **a normative spec has no tests, so nothing catches it
+going stale.** Two of the six external findings were this — §7 describing
+`prevrandao` where the code reads `blockhash`, and §8.2 describing one removal route
+as if it were the rule. Neither was a code defect; both would have misled anyone
+building from the spec. The survey that followed is filed in the work order under
+"Spec drift", and the largest thing it found is worse than either: §5's transition
+table still carries the widen edge item 2b deleted for a security property. When a
+milestone narrows or splits a mechanism, the spec section that defines it is part of
+the change, not a follow-up.
 
 And one about triage: **a selector nothing calls is still a selector.**
 `penalizeNoShow` was filed P1 because it had no production caller, then deleted as

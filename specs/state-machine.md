@@ -20,7 +20,10 @@ as a mental model and directly testable in M2.
   anywhere in the contract.
 - **Time** is measured in block timestamps (seconds). Durations are `uint`
   seconds. All "days"/"hours" below are working values expressed as durations.
-- **Randomness** is `block.prevrandao` snapshotted per §7.
+- **Randomness** is `blockhash(snapshotBlock)` snapshotted per §7, domain-separated
+  per case/depth/purpose. (The M1 draft specified `block.prevrandao`; the EVM cannot
+  read a past block's `prevrandao`, so the implementation uses `blockhash` — §7 and
+  `contracts/DEVIATIONS.md` D-1 state the substitution and its consequences.)
 - **Probabilistic draw** means: given two non-negative weights `a` (approve) and
   `b` (reject) with `a + b > 0`, the outcome is `APPROVE` with probability
   `a / (a + b)` and `REJECT` otherwise, realized by comparing a uniform random
@@ -214,7 +217,7 @@ Case {
 Round {
   uint8    depth
   uint     nSeats            // COMMIT_TARGET[depth] — counted seats this round
-  uint     seatSnapshotBlock // block whose prevrandao seeds THIS round's seat draw
+  uint     seatSnapshotBlock // block whose BLOCKHASH seeds THIS round's seat draw (§7)
   uint     outcomeSnapshotBlock // block AFTER reveals close, seeding the outcome draw (§7)
   bytes32  seatSeed          // realized: the seat draw
   bytes32  outcomeSeed       // realized after reveals close: the outcome draw
@@ -288,12 +291,12 @@ Phase enum: `DRAW, COMMIT, REVEAL, TALLY, APPEAL_WINDOW, FINALIZED, VOID, SETTLE
 | From | To | Trigger | Guard / effect |
 |---|---|---|---|
 | (none) | DRAW (depth 0) | `submit(content,meta,topics,fee)` | `fee ≥ minFee`; `nTopics ≤ MAX_TOPICS`; `!submissionExists[key]` (P3); pull fee → `pot`; `seatSnapshotBlock = block + k`. |
-| DRAW | COMMIT | first tx after `seatSnapshotBlock` | Realize `seatSeed` from its prevrandao (§7); draw `nSeats` seats stake-weighted with replacement (§5.2). `phaseDeadline = now + COMMIT_TIMEOUT`. |
+| DRAW | COMMIT | first tx after `seatSnapshotBlock` | Realize `seatSeed` from its blockhash (§7); draw `nSeats` seats stake-weighted with replacement (§5.2). `phaseDeadline = now + COMMIT_TIMEOUT`. |
 | COMMIT | REVEAL | all seat-holders committed **or** `now ≥ phaseDeadline` | Only drawn seat-holders may `commitVote`. `phaseDeadline = now + REVEAL_WINDOW`. |
 | REVEAL | TALLY | `now ≥ phaseDeadline` (or all committers revealed) | Atomic. |
 | TALLY | DRAW (same depth, widen) | revealed seats `< MIN_REVEALS` and `widen < MAX_WIDEN` | Draw `nSeats` **additional** seats with `seatSeed = H(seatSeed, widen)`; reopen COMMIT. |
 | TALLY | VOID | revealed seats `== 0` after `MAX_WIDEN` | No outcome. Refund `fee − CLAIM_BOUNTY` to submitter; clear `submissionExists[key]` (resubmittable, §8/P3). |
-| TALLY | APPEAL_WINDOW | revealed seats `≥ MIN_REVEALS` | Set `outcomeSnapshotBlock = block + k`; realize `outcomeSeed` from its prevrandao; draw outcome ∝ seat counts (§0). `phaseDeadline = now + APPEAL_WINDOW[depth]`. |
+| TALLY | APPEAL_WINDOW | revealed seats `≥ MIN_REVEALS` | Set `outcomeSnapshotBlock = block + k`; realize `outcomeSeed` from its blockhash; draw outcome ∝ seat counts (§0). `phaseDeadline = now + APPEAL_WINDOW[depth]`. |
 | APPEAL_WINDOW | DRAW (depth+1) | flip-bond contributions reach `BOND_MULTIPLIER × pot` and `depth < MAX_DEPTH` (§5.4) | `bond → pot`; `depth++`; `appealFor = opposite(outcome)`; `seatSnapshotBlock = block + k`; `nSeats = COMMIT_TARGET[depth]`. |
 | APPEAL_WINDOW | FINALIZED | `now ≥ phaseDeadline` (bond floor not met) **or** `depth == MAX_DEPTH` window closes | `finalOutcome = rounds[last].outcome`. |
 | FINALIZED | SETTLED | `claim()` | Anyone; pays `CLAIM_BOUNTY`; runs §6/§8. Idempotent guard: only once. |
@@ -400,19 +403,38 @@ seat-weighted-mean freezing power (§6.4) is what bounds farming; `TRACK_DECAY` 
 
 ---
 
+> **Reader's warning (M2.6-F6).** This document is the M1 draft and parts of it
+> describe a system that has since been split, replaced or narrowed. Where §7 and
+> §8.2 were found saying that, they were corrected in place. A survey of the rest is
+> recorded in `specs/m2_6-work-order.md` under "Spec drift" — it is a scoped item,
+> not yet done. Until it is, **read this document against
+> `contracts/DEVIATIONS.md` and the contracts, and treat a conflict as the spec
+> being stale rather than the code being wrong.** The largest known instance: §5's
+> transition table still carries a `TALLY -> DRAW (widen)` edge that M2.6-item-2b
+> deliberately DELETED.
+
 ## 7. Randomness — two independent seeds
 
-- Seed source: `block.prevrandao` on Gnosis.
+- **Seed source: `blockhash(snapshotBlock)`, domain-separated.** The M1 draft
+  specified `block.prevrandao`; the EVM cannot read a *past* block's `prevrandao`,
+  so each round snapshots a future block number and later reads its `blockhash`,
+  **re-arming** to a fresh block if the 256-block window lapses before anyone pokes.
+  The raw hash is never used directly: each seed is
+  `H(chainid, contract, caseId, depth, purpose, blockhash)` (H-06), so two cases
+  snapshotting the same block — or one case at two depths — never draw identical
+  panels, and seat entropy stays independent of outcome entropy. Full rationale and
+  threat-model impact: `contracts/DEVIATIONS.md` D-1.
 - **Two seeds per round, not one.** The earlier design used a single snapshot for
   both the seat draw and the outcome draw; that seed is public before reveals
   close, so a voter could compute which tally wins under the known seed and
   withhold reveals to steer it — defeating "no outcome can be engineered"
   (README §2). The round therefore has:
-  - **`seatSeed`** — `prevrandao` of `seatSnapshotBlock` (a few blocks after the
-    round opens), realized by the first tx after it. Seeds the seat draw only.
-  - **`outcomeSeed`** — `prevrandao` of `outcomeSnapshotBlock`, set only **after
-    the reveal window closes** and the tally is fixed, realized by the first tx
-    after it. Seeds the probabilistic outcome draw only.
+  - **`seatSeed`** — domain-separated `blockhash` of `seatSnapshotBlock` (a few
+    blocks after the round opens), realized by the first tx after it. Seeds the seat
+    draw only.
+  - **`outcomeSeed`** — domain-separated `blockhash` of `outcomeSnapshotBlock`, set
+    only **after the reveal window closes** and the tally is fixed, realized by the
+    first tx after it. Seeds the probabilistic outcome draw only.
   Because the tally is final before `outcomeSeed` exists, strategic
   reveal-withholding cannot target a known draw. (Withholding a reveal still
   incurs the §6.3 failed-reveal freeze and forfeits that seat's pay.)

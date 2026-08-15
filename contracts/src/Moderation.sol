@@ -673,6 +673,19 @@ contract Moderation is ReentrancyGuard {
     ///         (not caller-supplied), so the removal cannot name a future case ID
     ///         or display a payload that differs from what settlement acts on
     ///         (H-01). Fee scales with the target's real topic count.
+    /// @dev **Granularity: ALL-OR-NOTHING, per CASE (M2.6-F5).** A multi-topic
+    ///      submission's entries are removed together or not at all — `_removeTarget`
+    ///      walks `target.entryIds` and deletes every one. That is deliberate: the
+    ///      case record is the unit that was ADJUDICATED, so removing part of it
+    ///      would leave a settled decision half-applied, and the panel that approved
+    ///      the removal never voted on "this topic but not that one".
+    ///
+    ///      `submitLegacyRemoval` is per ENTRY, and the asymmetry is real. It is not
+    ///      two ways to do one thing: the routes are DISJOINT by construction —
+    ///      that one refuses any entry whose `originLogic` is this contract, and this
+    ///      one requires a local case record, which a foreign entry does not have. So
+    ///      no entry is reachable by both, and each route carries the only
+    ///      granularity its addressing can express. See the other for the rest.
     function submitRemoval(uint256 targetCaseId, uint256 fee) external nonReentrant returns (uint256 caseId) {
         _requireOpen(); // M2.6-P0-5
         if (targetCaseId >= nextCaseId) revert TargetNotRemovable();
@@ -747,6 +760,20 @@ contract Moderation is ReentrancyGuard {
     ///         record, so they go through `submitRemoval`, which binds the whole
     ///         submission. Keeping the two disjoint stops a removal from being
     ///         opened by a route that cannot maintain `isIndexed` on the target.
+    /// @dev **What per-entry granularity LEAVES BEHIND, stated because a caller has
+    ///      to plan for it (M2.6-F5).** Removing one entry of a multi-topic legacy
+    ///      submission leaves its siblings LIVE under their own topics, and leaves
+    ///      their content reservations HELD — reservations are keyed
+    ///      `(contentHash, metaHash, topicKey)`, one per entry, and `deleteEntry`
+    ///      frees exactly the one it deleted. So after this route settles APPROVE:
+    ///      the content is resubmittable under the removed topic and still blocked
+    ///      under the others, and still discoverable under the others.
+    ///
+    ///      That is coherent rather than partial — each entry is an independent
+    ///      index membership adjudicated on its own merits — but it is NOT what
+    ///      `submitRemoval` does to a multi-topic target, which is all-or-nothing
+    ///      over the case. Clearing a legacy submission entirely means one removal
+    ///      case per entry. `specs/state-machine.md` §8.2 states both.
     function submitLegacyRemoval(uint256 globalEntryId, uint256 fee)
         external
         nonReentrant

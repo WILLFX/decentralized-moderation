@@ -479,6 +479,29 @@ Entry{ contentHash, metaHash, approvalTime = settlementTime, uncontested,
   swap-and-pop); clear that submission's `submissionExists` (P3).
 - Removal-request finalizes **REJECT** (keep) → no index change.
 
+**Two removal routes, two granularities (M2.6-F5).** The clause above describes
+`submitRemoval`, which is the only route this document originally had. M2.6-P0-1c
+added `submitLegacyRemoval`, for entries written by a **superseded logic**, and it
+removes **one entry by its permanent global id** rather than a case's worth:
+
+| route | addresses | deletes |
+|---|---|---|
+| `submitRemoval(targetCaseId)` | a case record in THIS logic | every entry of that case, across all its topics, all-or-nothing |
+| `submitLegacyRemoval(globalEntryId)` | one permanent entry id, written by another logic | that one entry |
+
+The asymmetry is deliberate and the routes are **disjoint**: the legacy route
+refuses any entry whose `originLogic` is the calling logic, and the local route
+needs a case record that a foreign entry does not have. So no entry is reachable by
+both, and each route carries the only granularity its addressing can express — the
+local one binds the unit that was *adjudicated* (removing part of a settled case
+would leave the decision half-applied), while the legacy one has no case record in
+this contract to bind and can only name entries.
+
+**Consequence a client must plan for:** removing one entry of a multi-topic legacy
+submission leaves its siblings live under their own topics and their content
+reservations held (reservations are keyed `(contentHash, metaHash, topicKey)`, one
+per entry). Clearing such a submission entirely takes one removal case per entry.
+
 ### 8.3 Search views (client-side, from view functions)
 
 - **Superset:** every current `Entry` under a topic.

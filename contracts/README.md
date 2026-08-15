@@ -12,7 +12,7 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **272 passing tests** (188 at the tag) including a
+> registries — with **274 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a 52-vector differential regression test
 > against a Python integer reference (a port of the Solidity, not an independent
 > derivation — see `Differential.t.sol`'s header for what that does and does not

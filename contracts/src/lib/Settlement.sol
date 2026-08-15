@@ -676,6 +676,9 @@ library Settlement {
         // superseded logic. Its permanent id is the whole binding, and the
         // registry no-ops if it has already been deleted, which is the same
         // concurrent-removal safety `isIndexed` gives the local path (H-01).
+        // M2.6-F5: ONE entry. The permanent id is the whole binding, so this route
+        // has no way to name siblings and does not try — see `submitLegacyRemoval`
+        // for what that leaves live and reserved.
         if (c.legacyEntryId != 0) {
             x.indexReg.deleteEntry(c.topicKeys[0], c.legacyEntryId);
             return;
@@ -684,6 +687,10 @@ library Settlement {
         // already deleted it). Bound to a specific caseId at submit, so this can
         // only ever delete the exact entries the removal was approved against.
         if (!target.isIndexed) return;
+        // M2.6-F5: EVERY entry of the case, together. The case record is the unit
+        // that was adjudicated, so a partial delete would leave a settled decision
+        // half-applied. The two granularities are disjoint by construction and the
+        // asymmetry is deliberate; both `submit*Removal` docblocks state it.
         uint256 n = target.entryIds.length;
         for (uint256 i; i < n; ++i) {
             // Delete by the registry-minted global id, not by our local caseId:

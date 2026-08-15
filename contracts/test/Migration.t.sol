@@ -223,6 +223,110 @@ contract MigrationTest is ModerationTestBase {
         mod = modB;
     }
 
+    /// M2.6-F5. The two removal routes have DIFFERENT GRANULARITY, and nothing
+    /// exercised that before this, because every prior fixture used a single-topic
+    /// submission — the one shape where the two are indistinguishable.
+    ///
+    /// The asymmetry is deliberate, not a defect: the routes are disjoint by
+    /// construction (the legacy route refuses `originLogic == address(this)`, the
+    /// local route needs a case record a foreign entry does not have), so each
+    /// carries the only granularity its addressing can express. What was missing was
+    /// anyone STATING it — `specs/state-machine.md` §8.2 described the case-wide rule
+    /// as if it were the only one, so a client built from the spec would be surprised
+    /// by the legacy route. Both docblocks and §8.2 now agree; this pins the
+    /// behaviour they describe.
+    function test_F5_the_two_removal_routes_have_different_granularity() public {
+        bytes32[] memory two = new bytes32[](2);
+        two[0] = TK;
+        two[1] = keccak256("geography");
+
+        // A two-topic submission under logic A, approved, so it holds TWO entries
+        // and TWO content reservations — one per (content, meta, topic).
+        uint256 fee = mod.minFee(2);
+        _fund(mods[0], fee);
+        vm.prank(mods[0]);
+        uint256 caseA = mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, two, 0, fee);
+        _realizeSeats(caseA);
+        _runRoundToAppealWindow(caseA, 0, Moderation.Vote.Approve);
+        _finalize(caseA);
+        mod.claim(caseA);
+
+        uint256[] memory ids = mod.caseEntryIds(caseA);
+        assertEq(ids.length, 2, "one entry per topic");
+        assertTrue(indexReg.isIndexed(two[0], ids[0]), "both live");
+        assertTrue(indexReg.isIndexed(two[1], ids[1]), "both live");
+
+        _migrateToNewLogic(); // A's entries are now LEGACY: only the per-entry route reaches them
+
+        // Remove ONE of the two through the legacy route.
+        uint256 rem = _submitLegacyRemoval(mods[1], ids[0]);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Approve);
+        _finalize(rem);
+        mod.claim(rem);
+
+        // THE ASYMMETRY: the sibling survives. A case-wide removal would have taken
+        // both; this route cannot name the sibling and does not try.
+        assertFalse(indexReg.isIndexed(two[0], ids[0]), "the targeted entry is gone");
+        assertTrue(indexReg.isIndexed(two[1], ids[1]), "its sibling is still live under its own topic");
+
+        // And the consequence a caller has to plan for: reservations are per entry,
+        // so the content is resubmittable under the removed topic and still blocked
+        // under the other.
+        assertFalse(
+            indexReg.isContentReserved(keccak256(abi.encode(CONTENT, META, two[0]))),
+            "the removed entry's reservation is freed"
+        );
+        assertTrue(
+            indexReg.isContentReserved(keccak256(abi.encode(CONTENT, META, two[1]))),
+            "the sibling's reservation is still held"
+        );
+    }
+
+    /// The other half of F5's asymmetry, on the SAME submission shape: the local
+    /// route takes every topic of its case. Without this the first test shows only
+    /// that one route deletes one entry, which is not an asymmetry — it is a fact
+    /// about one route.
+    ///
+    /// **CHARACTERIZATION, not a fix.** M2.6-F5 changed no behaviour; both routes
+    /// already worked this way. The pair is here because the rule lived nowhere. Not
+    /// vacuous: stopping `_removeTarget`'s loop after the first entry fails this
+    /// test's second assertion, and removing the legacy branch's `deleteEntry` fails
+    /// the first test's.
+    function test_F5_a_local_removal_takes_every_topic_of_its_case() public {
+        bytes32[] memory two = new bytes32[](2);
+        two[0] = TK;
+        two[1] = keccak256("geography");
+
+        uint256 fee = mod.minFee(2);
+        _fund(mods[0], fee);
+        vm.prank(mods[0]);
+        uint256 caseA = mod.submit(Moderation.Kind.SUBMISSION, CONTENT, META, two, 0, fee);
+        _realizeSeats(caseA);
+        _runRoundToAppealWindow(caseA, 0, Moderation.Vote.Approve);
+        _finalize(caseA);
+        mod.claim(caseA);
+        uint256[] memory ids = mod.caseEntryIds(caseA);
+
+        // No migration: the case record is still here, so the LOCAL route applies.
+        uint256 rfee = mod.minFee(2);
+        _fund(mods[1], rfee);
+        vm.prank(mods[1]);
+        uint256 rem = mod.submitRemoval(caseA, rfee);
+        _realizeSeats(rem);
+        _runRoundToAppealWindow(rem, 0, Moderation.Vote.Approve);
+        _finalize(rem);
+        mod.claim(rem);
+
+        assertFalse(indexReg.isIndexed(two[0], ids[0]), "first topic's entry gone");
+        assertFalse(indexReg.isIndexed(two[1], ids[1]), "and the second one too: all-or-nothing");
+
+        // Both reservations freed, so the content is fully resubmittable — the
+        // contrast with the legacy route, where only the removed topic's is.
+        assertFalse(indexReg.isContentReserved(keccak256(abi.encode(CONTENT, META, two[0]))), "freed");
+        assertFalse(indexReg.isContentReserved(keccak256(abi.encode(CONTENT, META, two[1]))), "freed");
+    }
+
     /// M2.6-P0-1c: a replacement logic can adjudicate an entry it did not write.
     ///
     /// The registry has permitted cross-version deletion since P0-1a, but the game

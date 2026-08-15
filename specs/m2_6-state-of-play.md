@@ -73,7 +73,7 @@ deliberately.
 **Branch:** `claude/determined-curie-nkf71s`, based on `main` @ `b09ce31`; open as PR #7.
 **Suite at the `m2.6-close` tag:** `forge test` = **188 passing, 16 suites**, default
 profile (`via_ir = true`), green at every commit. Baseline was 143 / 16.
-**Suite now** (tag + the post-close regression pass + the post-close items): **271
+**Suite now** (tag + the post-close regression pass + the post-close items): **272
 passing, 21 suites**.
 The seventeenth is `StalledDraw.t.sol` — the P0-6 family, moved out of
 `CaseLifecycle.t.sol` when that contract outgrew the `via_ir` pipeline (a file
@@ -158,8 +158,9 @@ untouched by that**, and closing one should not be read as closing both: the vec
 still cannot express a banked round or `target > seats seated`.
 
 After the post-close regression pass, the second structural split, the split's
-follow-up, and every post-close item through the external-audit findings: `Moderation` **20,012 (4,564
-free)**, `Settlement` 6,674, `StakeRegistry` 12,761, `IndexRegistry` 6,277,
+follow-up, and every post-close item through the external-audit findings (src-only
+build — see the pattern list on why that qualifier matters): `Moderation` **20,012 (4,564
+free)**, `Settlement` 6,674, `StakeRegistry` 12,933, `IndexRegistry` 6,277,
 `RulesetGovernor` 4,565.
 
 `Moderation` rose 841 bytes across the regression batch, fell 4,173 in the split
@@ -380,21 +381,35 @@ file, and three wrong entries in `.gas-snapshot` — all from the same build. An
 figure quoted as evidence (sizes, gas, EIP-170 headroom) comes off a clean build or
 it is not quoted.
 
-**And a clean build is necessary, not sufficient: a per-contract size is not a pure
-function of that contract's source.** Measured at M2.6-F3 — editing
-`RulesetGovernor.sol` moved `StakeRegistry`'s deployed bytecode from 12,933 to 12,761
-with `StakeRegistry.sol` byte-identical to the previous commit, verified by diffing
-the compiled output (172 bytes shorter, first difference at offset ~655, so real code
-rather than a metadata hash). `StakeRegistry` does not even depend on
-`RulesetGovernor`; the dependency runs the other way. `forge` hands the whole project
-to one solc invocation and the `via_ir` pipeline makes size-sensitive inlining
-decisions across it, so an unrelated contract growing can shift what an untouched one
-compiles to.
+**And a clean build is not one number: `forge build --sizes` reports the artifact
+compiled WITH `test/` and `script/` in the unit, which is not the artifact you
+deploy.** Measured across F3 and F4, at one tree (`631ab50`):
 
-The operational consequence: **measure every contract you quote on a clean build OF
-THE COMMIT YOU ARE REPORTING.** Never carry a figure forward from an earlier commit
-because that contract's file was not touched, and do not write "everything else
-byte-identical" unless you have just measured everything else.
+| build | StakeRegistry |
+|---|---|
+| full (`forge build --sizes`) | 12,761 |
+| src only (`--skip 'test/**' --skip 'script/**'`) | **12,933** |
+
+At the previous commit both builds gave 12,933, so what moved the full-build number
+was **a test fixture entering the compilation unit** — a test file changing a
+production contract's compiled size by 172 bytes. `forge` hands the whole project to
+one solc invocation and the `via_ir` pipeline makes size-sensitive inlining decisions
+across it. The DEPLOYABLE figure never moved.
+
+Two corrections this cost, both recorded because the second is the instructive one.
+The F3 commit attributed the shift to a `src/RulesetGovernor.sol` edit; that was
+wrong. The isolation run behind it reverted a single test FILE while the rest of
+`test/` stayed in the unit, so it never removed the variable it was testing for — an
+isolation that changes one file of a group and concludes about the group.
+
+The operational rules: **quote src-only figures for anything deployable and say which
+build a number came from.** Measure on a clean build of the commit you are reporting,
+never carry a figure forward because a file was untouched, and do not write
+"everything else byte-identical" without having just measured everything else. The
+EIP-170 headroom the milestone steers by is unaffected — `Moderation` is 20,012 /
+4,564 free in BOTH builds, as are `IndexRegistry`, `Settlement` and `RulesetGovernor`;
+only `StakeRegistry` differs. That was luck rather than method, which is why the
+method is now written down.
 
 And one about triage: **a selector nothing calls is still a selector.**
 `penalizeNoShow` was filed P1 because it had no production caller, then deleted as

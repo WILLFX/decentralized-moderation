@@ -344,6 +344,52 @@ rejects `REMOVAL` (`BadKind`).
 
 ---
 
+### D-16. A zero `timelockDelay` is accepted at construction (M2.6-F4)
+
+**The property, stated so the acceptance is legible.** *Governance cannot change a
+ruleset, a guidelines version, or the authorized logic contract without a delay
+during which moderators can see it coming and act.* That is what the three
+`timelockDelay` values are for.
+
+**It is not enforced.** All three are `immutable` and unchecked in their
+constructors — `RulesetGovernor.sol:101`, `StakeRegistry.sol:519`,
+`IndexRegistry.sol:185`, one write each, the constructor, confirmed by enumeration.
+A deployer may pass zero, and then every proposal is immediately executable. The
+external audit raised this against the governor; the same hole is in both permanent
+registries, where it gates the logic repoint — the protocol's trust root — and so
+matters more there than where it was found.
+
+**Why it is accepted rather than fixed with a floor.** A floor here is a governance
+opinion compiled into an immutable, and it lands in the two contracts specifically
+designed to be permanent. Getting the number wrong in `StakeRegistry` is not a
+redeploy — it is migrating every staker, which is the single thing this architecture
+exists to avoid; getting it wrong in `RulesetGovernor` costs a new `Moderation` too,
+because `Moderation.governor` is immutable on the other side. The cost of a wrong
+floor is highest exactly where the timelock matters most, and there is no number that
+is obviously right for every future deployment (a testnet, a bootstrap period and a
+mature mainnet want different ones).
+
+**What holds instead. Three things, in decreasing strength:**
+
+1. **Exit is never gated by logic** (trust model #2), and it is the load-bearing
+   protection. A moderator's escape is `requestExit`/`withdraw` against the registry's
+   immutable `exitCooldown`, which no timelock and no logic contract can extend or
+   block. The timelock provides NOTICE; the cooldown provides ESCAPE. A zero timelock
+   costs the notice and leaves the escape intact.
+2. **H-11 pins the ruleset per case.** An instantly-executed parameter change cannot
+   touch a case already open, so a zero-timelock ruleset change reaches only cases
+   submitted after it.
+3. **`Deploy.verify` refuses a zero timelock** on all three contracts, reading the
+   values off the deployed stack rather than the config. This is the deliberate home
+   for the policy: unlike an immutable it can be revised without migrating anyone.
+   Pinned by `test_verify_rejects_a_zero_timelock`, because an acceptance whose only
+   protection is a script is worth exactly as much as the script is tested.
+
+**What does NOT protect it:** nothing in the contracts themselves. A stack deployed
+without running `verify` has no in-contract floor at all, and the operator's published
+parameters are the only remaining signal. That is the honest statement of the residual
+and it is why the acceptance is recorded rather than assumed.
+
 ## M2.5 port: consequences of the storage/logic split
 
 ### D-11. Stake and index custody left `Moderation`

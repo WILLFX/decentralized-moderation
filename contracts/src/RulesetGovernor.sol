@@ -17,7 +17,11 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 ///   - *Authoring* is cold. A multisig proposes a ruleset, waits out a timelock,
 ///     executes. It runs a few times in the protocol's life, and it is where all
 ///     the validation lives — `_validateParams` is by far the largest cold blob
-///     in the system.
+///     in the system. **`timelockDelay` is not bounded below by this contract**
+///     (M2.6-F4): it is immutable and a deployer may pass zero, which makes every
+///     proposal immediately executable. That is an accepted deployment choice, not
+///     a guarantee this contract makes — `DEVIATIONS.md` D-16 records what holds
+///     instead, and `Deploy.verify` refuses a zero at deployment.
 ///   - *Enforcement* is hot. Every case reads its pinned ruleset on every phase
 ///     transition, through `Moderation._cp()`.
 ///

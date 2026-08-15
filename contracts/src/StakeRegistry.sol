@@ -30,7 +30,13 @@ import {ProtocolLimits as L} from "./lib/ProtocolLimits.sol";
 /// protocol's trust root, and it is deliberately constrained:
 ///
 /// 1. **Timelocked.** A repoint must be proposed and can only be executed after
-///    `timelockDelay`, so moderators always see a migration coming.
+///    `timelockDelay`, so moderators see a migration coming — **for any nonzero
+///    `timelockDelay`, which this contract does not enforce** (M2.6-F4). It is
+///    immutable and unchecked at construction, so a deployer may pass zero and this
+///    clause then buys nothing. What survives a zero is #2, and it is the load-
+///    bearing half: exit is never gated by logic, so the ESCAPE does not depend on
+///    the notice. `Deploy.verify` refuses a zero timelock and `DEVIATIONS.md` D-16
+///    records the acceptance.
 /// 2. **Exit is never gated by logic.** `requestExit`/`withdraw` are callable by
 ///    the owner of the stake and never consult the logic contract. A moderator who
 ///    dislikes an announced migration can always leave during the timelock window.

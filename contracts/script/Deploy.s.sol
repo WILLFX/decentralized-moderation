@@ -92,6 +92,7 @@ contract Deploy is Script {
     error ModerationNotBound();
     error SeatCollateralExceedsDutyUnit();
     error TrackDecayBelowRegistryFloor();
+    error ZeroTimelock();
     error SettlementNotDeployed();
     error SettlementWrongCode();
 
@@ -187,6 +188,21 @@ contract Deploy is Script {
         if (s.stakeReg.riskPerSeat() < s.moderation.getParams().riskPerSeat) {
             revert SeatCollateralExceedsDutyUnit();
         }
+
+        // 3b. M2.6-F4: no timelock may be zero. The three `timelockDelay` values are
+        //     IMMUTABLE and unchecked in their constructors, deliberately — a floor
+        //     compiled into a permanent registry is a governance opinion you cannot
+        //     revise without migrating every staker, which is the one thing this
+        //     architecture exists to avoid. So the policy lives HERE, where it can be
+        //     revised without a migration, and the acceptance is recorded in
+        //     `DEVIATIONS.md` (D-16) rather than implied.
+        //
+        //     Read off the deployed contracts, not `cfg`: `verify` also runs against
+        //     stacks this script did not build, and what matters is the value that
+        //     actually got baked in.
+        if (s.governor.timelockDelay() == 0) revert ZeroTimelock();
+        if (s.stakeReg.timelockDelay() == 0) revert ZeroTimelock();
+        if (s.indexReg.timelockDelay() == 0) revert ZeroTimelock();
 
         // 4b. M2.6-K-5: and the shipped ruleset's track decay must sit inside the
         //     registry's immutable envelope. Same class as 4 — the registry bound is

@@ -170,6 +170,41 @@ contract DeployTest is Test {
     /// **Step 6 is the one that cannot be undone.** A `Moderation` bound to a
     /// governor that was never pointed back at it is permanently ungovernable:
     /// `Moderation.governor` is immutable and `bindModeration` is one-way, so
+    /// M2.6-F4. A zero `timelockDelay` is ACCEPTED at construction — all three are
+    /// immutable and unchecked, deliberately, because a floor compiled into a
+    /// permanent registry is a governance opinion you cannot revise without
+    /// migrating every staker. See `DEVIATIONS.md` D-16 for the full acceptance:
+    /// the property, why it is not enforced in-contract, and what holds instead.
+    ///
+    /// The third thing that holds instead is this check, and an acceptance whose
+    /// only protection is a script is worth exactly what the script's tests are
+    /// worth. So the script is pinned here, on all three contracts, since the hole
+    /// is in all three and the registries are where it gates the logic repoint.
+    function test_verify_rejects_a_zero_timelock() public {
+        // Governor at zero.
+        Deploy.Config memory bad = cfg;
+        bad.governorTimelock = 0;
+        Deploy.Stack memory s = script.deployCore(bad);
+        script.proposeAuthorization(s);
+        vm.warp(vm.getBlockTimestamp() + bad.registryTimelock);
+        script.executeAuthorization(s);
+        vm.expectRevert(Deploy.ZeroTimelock.selector);
+        script.verify(s, bad, address(0));
+
+        // Both registries at zero — where it gates the logic repoint, the trust root.
+        bad = cfg;
+        bad.registryTimelock = 0;
+        s = script.deployCore(bad);
+        script.proposeAuthorization(s);
+        script.executeAuthorization(s); // no wait needed: that is the defect
+        vm.expectRevert(Deploy.ZeroTimelock.selector);
+        script.verify(s, bad, address(0));
+
+        // And the shipped config passes, so the check is a floor and not a wall.
+        Deploy.Stack memory good = _deployThroughScript();
+        script.verify(good, cfg, address(0));
+    }
+
     /// neither side can be repaired. This is the error the script exists to catch
     /// before it is written to a chain.
     function test_verify_rejects_a_governor_that_was_never_bound() public {

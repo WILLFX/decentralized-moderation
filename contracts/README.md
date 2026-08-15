@@ -12,7 +12,7 @@ Foundry. Work order: `specs/m2-work-order.md`.
 > in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
 > lifecycle, appeals, settlement, index, governance) is implemented across four
 > contracts — the replaceable game and its governor, plus two permanent
-> registries — with **271 passing tests** (188 at the tag) including a
+> registries — with **272 passing tests** (188 at the tag) including a
 > handler-driven invariant campaign, a 52-vector differential regression test
 > against a Python integer reference (a port of the Solidity, not an independent
 > derivation — see `Differential.t.sol`'s header for what that does and does not
@@ -97,8 +97,10 @@ token across `Moderation` and the registry; `OPEN_AND_SETTLE` on **both** regist
 (desynchronised authorization is its own failure, not half of one); the bind checked
 from both sides; `stakeReg.riskPerSeat() >= moderation.getParams().riskPerSeat`;
 `moderation.getParams().trackDecay >= stakeReg.minTrackDecay()` (K-5 — below the
-floor, every case opens and then reverts in `claim()` forever); and the linked
-library.
+floor, every case opens and then reverts in `claim()` forever); a nonzero
+`timelockDelay` on the governor and BOTH registries (F4 — the constructors accept
+zero deliberately, so this is where the policy lives; `DEVIATIONS.md` D-16); and the
+linked library.
 
 **The link is the one thing no in-script check can prove.** The library address is
 baked into `Moderation`'s bytecode at link time and Solidity cannot read its own link

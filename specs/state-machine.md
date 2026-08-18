@@ -1,8 +1,28 @@
 # Moderation Contract — Formal State-Machine Specification
 
-**Milestone:** M1
-**Status:** Draft for simulation. Parameters marked *(working)* are inputs to the
-M1 simulation, not final protocol values.
+> ## Which architecture this describes
+>
+> **This specifies the FIRST architecture — the one implemented in `contracts/`,
+> which README §8 calls M2.** In it, a panel of seats is actively drawn per round,
+> drawn moderators are obligated to serve and penalised if they do not, appeals are
+> funded by escalating bonds, and each deeper round supersedes the one before it.
+>
+> **It is not the current design.** README §3 describes the architecture the project
+> is now building (M2.5): no draw and no obligation, hash-based eligibility, a fixed
+> voting window open to every eligible moderator, votes pooled across challenge
+> rounds rather than superseded, flat stake, and serial freezes. README §8 lists
+> exactly what carries forward and what is replaced.
+>
+> This document is kept, not retired, because the contracts it specifies exist, are
+> tested and audited, and remain the reference implementation. Read it as an accurate
+> description of that code — subject to the drift caveat before §7 — and never as a
+> statement of where the protocol is going.
+
+**Milestone:** M1 (specification) · M2 (implemented)
+**Status:** Specification of the implemented first architecture. Superseded as a
+design document by README §3; retained as the normative description of
+`contracts/`. Parameters marked *(working)* were inputs to the M1 simulation, not
+final protocol values.
 **Scope:** the on-chain moderation contract (README §5, component 1). Everything
 else in the system is a client of this specification.
 

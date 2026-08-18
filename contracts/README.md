@@ -3,6 +3,14 @@
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
+> **This implements the FIRST architecture.** Panels are drawn, drawn moderators
+> are obligated to serve, appeals are bond-funded, and deeper rounds supersede
+> shallower ones. README §3 describes the architecture the project is now building
+> (M2.5) — no draw, no obligation, hash-based eligibility, pooled tallies — and
+> README §8 lists what carries forward from this code and what it replaces. Nothing
+> below is stale about *this* codebase; it simply describes the reference
+> implementation rather than the current design.
+
 > Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
 > independently verified and eight blocking regressions were found in items marked
 > closed, plus three fixes that no test discriminated. They are fixed on top of it,

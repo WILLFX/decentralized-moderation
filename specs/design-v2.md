@@ -4,6 +4,9 @@
 implements the first architecture (`specs/state-machine.md`); README §8 lists what
 carries forward and what this replaces.
 
+**Normative spec:** `specs/state-machine-v2.md` — the state machine, transitions
+and invariants derived from this document.
+
 **Scope:** the mechanism and its arithmetic. This document exists to get the
 payout derivation right *before* any Solidity, because the previous milestone's
 most expensive defects were formulas that looked correct, paid out wrong, and took

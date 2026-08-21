@@ -7,11 +7,12 @@
 > drawn moderators are obligated to serve and penalised if they do not, appeals are
 > funded by escalating bonds, and each deeper round supersedes the one before it.
 >
-> **It is not the current design.** README §3 describes the architecture the project
-> is now building (M2.5): no draw and no obligation, hash-based eligibility, a fixed
-> voting window open to every eligible moderator, votes pooled across challenge
-> rounds rather than superseded, flat stake, and serial freezes. README §8 lists
-> exactly what carries forward and what is replaced.
+> **It is not the current design.** README §3 and `specs/design-v2.md` describe the
+> architecture the project is now building (M2.5): no draw and no obligation,
+> hash-based eligibility, a fixed voting window open to every eligible moderator,
+> votes pooled across challenge rounds rather than superseded, flat stake, and
+> serial freezes. `design-v2.md` §7 lists exactly what carries forward from the
+> contracts specified here, and §8 which audit findings survive the change.
 >
 > This document is kept, not retired, because the contracts it specifies exist, are
 > tested and audited, and remain the reference implementation. Read it as an accurate

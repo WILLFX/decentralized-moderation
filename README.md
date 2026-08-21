@@ -6,7 +6,7 @@ Content publishers pay a fee to be moderated. Staked moderators (human or AI) ju
 
 This document sums up the aim of the project, the problems we are solving, and how we intend to solve them; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, cohort sizes, periods, fees) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
 
-> **Implementation status.** Section 3 describes the protocol as currently designed. The Solidity in `contracts/` implements an *earlier* architecture — one where panels were actively drawn and drawn moderators were obligated to serve. It is complete, tested and audited, and it is the reason the current design exists: building it is what exposed the capacity problem section 3.6 now opens with. See §8 for what carries forward and what it replaces.
+> **Implementation status.** Section 3 describes the protocol as currently designed; `specs/design-v2.md` carries the full mechanism and its arithmetic, including the payout derivation. The Solidity in `contracts/` implements an *earlier* architecture — one where panels were actively drawn and drawn moderators were obligated to serve. It is complete, tested and audited, and it is the reason the current design exists: building it is what exposed the capacity problem section 3.6 now opens with. See §8 for what carries forward and what it replaces.
 
 ## 1. Why this exists
 
@@ -227,7 +227,7 @@ Two external audits and a substantial internal remediation pass ran against it. 
 
 **What carries forward:** the permanent stake and index registries and their migration model; the probabilistic verdict; commit-reveal with domain-separated commitments; the settlement solvency ordering; the index fields and the supersafe view; the deduplication model; governance. **What it replaces:** the seat draw, the duty pool and no-show penalties, obligation accounting, escalating panel sizes, and bonded appeals.
 
-**M2.5 — Contract (current architecture).** Implementing §3: hash eligibility, fixed-window voting with no assignment, pooled tallies across challenge rounds, stake-backed challenges, serial freezes, flat stake. The payout derivation has to be redone first — every divisor in the existing settlement assumes a fixed cohort size and a round that replaces its predecessor, and both assumptions are gone. Design document and derivation land before any Solidity.
+**M2.5 — Contract (current architecture).** Implementing §3: hash eligibility, fixed-window voting with no assignment, pooled tallies across challenge rounds, stake-backed challenges, serial freezes, flat stake. The design and its arithmetic are in **`specs/design-v2.md`** — including the proof that a moderator's expected payout is the same whichever way a verdict goes, the corollary that this forces the lottery to stay linear, and the order-independent reputation update. A normative state-machine specification follows that document; Solidity follows the specification.
 
 **M3 — Interfaces.** The three web apps on a shared Rust/WASM core, in dependency order: moderator interface first (without moderators nothing gets approved), then the submit interface (creators feed the pipeline), then the search dapp (proves the end-to-end value) — plus the client library for AI moderators.
 

@@ -407,6 +407,15 @@ which no longer exist. These do not depend on the architecture and carry forward
 
 ## 9. Open questions, with owners
 
+> **First simulation results are in — `simulation/v2/FINDINGS-v2.md`.** Three of
+> these questions now have measurements against them, and two of the answers
+> contradict what this document assumed. `FREEZE_BASE` at 7 days makes honest
+> moderation irrational at *any* fee (the ratio is fee-invariant); `MAX_ROUNDS` at
+> 4 is measurably worse for the honest side than 1; and §4.6's dilution is not
+> merely a cost to bound but a composition attack that lifts the attacker's
+> verdict rate to 1.9× their population share at q=0.4. Question 7 below is new
+> and is a decision, not a measurement.
+
 An open question here names who can answer it and what an answer looks like. It is
 not a topic.
 
@@ -417,6 +426,7 @@ not a topic.
 | 3 | **`MAX_ROUNDS` and the dilution curve** (§4.6). Interacts with 2. | Simulation | Honest turnout in the final round is still above gas cost |
 | 4 | **Removal supply.** Charging the requester is neutral and unspammable but leaves removals undersupplied. Does removal need a paid *role* rather than a price, and where does that pool come from without becoming farmable? | Project owner + senior reviewer | A mechanism, or an explicit decision to ship the limitation |
 | 5 | **Cross-case retry** (§8). Per-content history in the permanent index — attempt counts, cooldowns, escalating fees for unchanged content. | Design | Specified and shown not to create a new farmable target |
+| 7 | **The neutrality trilemma.** Neutral payouts force `f(W) = c/W`, so the total paid is constant and dilution is unavoidable while challenges are free. Neutral payouts, free challenges, non-diluting pay — pick two. | Project owner + senior reviewer | A row of the table in FINDINGS-v2 §D is chosen, with the §C numbers in front of it |
 | 6 | **`ageFactor` growth rate** (§2.2). Too slow and quiet cases stall; too fast and the cohort loses its randomness advantage. | Simulation | A rate with a bound on worst-case time-to-quorum |
 
 ---

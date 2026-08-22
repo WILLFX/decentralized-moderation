@@ -39,10 +39,14 @@ right and its conclusions survive it.
 
 ## 2. One change closes six findings
 
-**Voluntary risk units.** An identity holds `K` units; committing to a case reserves
-one; settlement releases it (coherent), freezes it locally (incoherent), or applies
-a short fixed freeze (committed but never revealed). A submission still reserves
-nothing from anyone.
+**Voluntary risk units — the review's proposal, not this project's.** An identity
+holds `K` units; committing to a case reserves one; settlement releases it
+(coherent), freezes it locally (incoherent), or applies a short fixed freeze
+(committed but never revealed). A submission still reserves nothing from anyone.
+
+**Nothing below is closed.** Adopting this is a decision for the senior reviewer,
+since unlimited concurrency was his call. The table says what the change *would*
+close, not what has been fixed — see `v2-audit-checklist.md` for actual status.
 
 | Finding | Closed |
 |---|---|

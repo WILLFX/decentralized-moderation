@@ -119,9 +119,17 @@ moderators who correctly vote to keep, exactly as frivolous submissions do.
   inconvenience, not a material loss (design principle 1). Judge honestly
   regardless — over many cases, honest judgment is the only strategy that is
   profitable in the long run.
-- **Appeal incorrect outcomes.** If you believe a provisional outcome is wrong,
-  the appeal path is available: a correct appeal is reimbursed with a bonus. An
-  incorrect outcome that no one appeals will simply stand.
+- **Challenge incorrect outcomes.** If you believe a provisional outcome is wrong
+  and you are eligible for the next round, you can challenge it. Challenging is
+  itself a vote against the standing verdict: you post no bond and pay no fee, but
+  your own stake carries the risk, and if the verdict survives you are frozen like
+  any other moderator who ended up on the losing side. An incorrect outcome that
+  nobody challenges will simply stand.
+
+  (This replaces the earlier bonded-appeal path, where a challenger posted an
+  escalating bond and a correct appeal was reimbursed with a bonus. That mechanism
+  belongs to the first architecture — see `specs/state-machine.md`. The current
+  design is in README §3.4.)
 - **Use a fresh address per moderator identity.** Addresses are permanently
   linked on-chain to the decisions they make. Treat moderator addresses as
   disposable identities, not as your primary wallet. (Open question in the

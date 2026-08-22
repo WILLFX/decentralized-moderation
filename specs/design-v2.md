@@ -67,10 +67,18 @@ arrives. No enumeration, no panel assembly, no transaction.
 T(c) = MAX_UINT / totalModerators × targetCohort × ageFactor(c)
 ```
 
-`targetCohort` is the working value 32. `ageFactor` starts at 1 and grows slowly
-with the age of an unresolved case, so a case nobody judges becomes eligible to
+`targetCohort` is the working value 32. `ageFactor` starts at 1 and grows each time
+a round closes without reaching quorum, so a case nobody judges becomes eligible to
 progressively more of the network. This replaces widening entirely: no re-draw, no
 extra tranche, no call.
+
+**Growth is per failed round, not per elapsed second (M2.5-F6).** An earlier draft
+described it as a function of wall-clock age, which reads better and is wrong for
+the machine: a threshold that moves continuously means a moderator's eligibility can
+change between checking it off-chain and landing on-chain. Rounds pin their
+threshold at open (`state-machine-v2` §3.3), and quorum failure is the
+operational measure of "nobody judged this" — a case that is merely slow but has
+its votes does not need a wider net.
 
 `seed(c)` is `blockhash` of a block a few past submission, realized lazily by the
 first vote and re-armed if it ages out of the 256-block window. Lazy realization is

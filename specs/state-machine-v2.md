@@ -46,6 +46,7 @@ marked *(working)* are simulation inputs, not final values.
 | `EXIT_COOLDOWN` | 7 days | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 32 | Expected eligible moderators per round. |
 | `MIN_REVEALS` | 5 | Pooled reveals required before a verdict may be drawn. |
+| `MIN_NEW_REVEALS` | 3 | Fresh reveals a challenge round must add before it redraws (§4.7). |
 | `COMMIT_WINDOW` | 24 h | Commit phase duration. |
 | `REVEAL_WINDOW` | 24 h | Reveal phase duration. |
 | `CHALLENGE_WINDOW` | 3 d (first: 4 d) | Window in which a verdict may be challenged. |
@@ -98,9 +99,22 @@ moderators **may still reveal** votes committed while `ACTIVE`, and cases they h
 joined settle normally — the penalty removes future participation, never past
 judgment.
 
-`MATURATION ≥ FREEZE_BASE` is required, not advisory: it is what makes abandoning a
-suspended identity for a fresh one cost at least as much as serving the suspension
-(design-v2 §6).
+**`MATURATION` is set independently of `FREEZE_BASE`** (M2.5-F13). An earlier draft
+tied them — `MATURATION ≥ FREEZE_BASE` — so that abandoning a suspended identity
+could never be faster than serving the suspension. That coupling is unsafe in the
+direction the analysis now points: if the freeze term comes down (and both the
+simulation and the review argue it must), maturation would follow it down and a
+fresh Sybil identity would become usable in hours.
+
+They answer different questions. Maturation is how long an attacker must plan
+ahead before an identity is useful, so it is set from the attack-preparation
+horizon — days or epochs. Suspension is what repeated bad participation costs.
+Concurrent exposure is priced separately again, by per-vote risk accounting. Set
+each from its own threat.
+
+Maturation alone is not churn-resistance: a funded attacker pre-ages identities in
+bulk. What makes replacement expensive is that track record does not transfer
+(§6).
 
 ### 2.3 Transitions
 
@@ -139,18 +153,44 @@ instance's cohorts.
 
 ### 3.3 The threshold
 
+Each round pins a snapshot at the moment it opens, and the threshold is computed
+from that snapshot for the round's whole life:
+
 ```
-T(c) = (MAX_UINT256 / totalActiveModerators) × TARGET_COHORT × ageFactor(c)
-ageFactor(c) = AGE_FACTOR_STEP ^ extensions(c)
+snapshot(c, r) = { activeEpoch, activeCount, priorVoters, seed }
+remaining      = activeCount − priorVoters
+T(c, r)        = (MAX_UINT256 / remaining) × TARGET_COHORT × ageFactor(c)
+ageFactor(c)   = AGE_FACTOR_STEP ^ extensions(c)
 ```
 
-`totalActiveModerators` is maintained as a counter — flat stake is what makes this a
-meaningful number rather than a bookkeeping fiction.
+**The divisor is `remaining`, not the whole active set (M2.5-F8).** §3.4 lets a
+moderator vote once per case, so only the not-yet-voted may join round `r` — but an
+earlier draft divided by every active moderator, which shrinks each successive
+cohort instead of holding it steady. At 100 active with a target of 32 the rounds
+come out 32.0, 21.8, 14.8, 10.1: the fourth round is 31% of the first, and
+`design-v2` §2.5's claim that cohorts stay the same size fails exactly when the
+network is small. At 1000 active the same error costs 9% and is invisible, which is
+how it survived a simulation run at that size.
+
+**`activeCount` is a snapshot, not a live read (M2.5-F9).** ACTIVE is a time
+predicate — `now ≥ maturesAt`, `now ≥ suspendedUntil` — and no storage counter can
+follow a predicate that changes when time passes and nobody transacts. So:
+maturation and thaw are **explicit transactions** that move an identity into the
+active set for epoch `e+1`, exits and suspensions remove it from future epochs, and
+a round pins the epoch it drew against. The first architecture used explicit
+`activate()`/`thaw()` for this reason.
+
+Pinning also closes a race the live read created: without it, a moderator's
+eligibility could change between checking off-chain and landing on-chain, because
+someone else activated or exited in between.
+
+Implementations must define: `remaining == 0`; `TARGET_COHORT ≥ remaining` (clamp
+`T` to `MAX_UINT256`, everyone eligible); multiply-after-divide overflow; and the
+fixed-point representation of `ageFactor`.
 
 The expected cohort is `TARGET_COHORT` at `ageFactor = 1`, and the realized cohort
-is `Binomial(totalActiveModerators, TARGET_COHORT / totalActiveModerators)`.
-**Cohort size is a distribution, not a target.** Every formula downstream takes the
-realized count.
+is `Binomial(remaining, TARGET_COHORT / remaining)`. **Cohort size is a
+distribution, not a target.** Every formula downstream takes the realized count.
 
 `ageFactor` grows only on quorum-failure extension (§4.4). This replaces widening:
 no re-draw, no extra tranche, no call.
@@ -216,9 +256,9 @@ COMMIT ──▶ REVEAL ──▶ DRAW ──▶ CHALLENGE ──▶ FINALIZED �
 | `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` and `committedThisRound > 0` | `phaseDeadline = now + REVEAL_WINDOW` |
 | `COMMIT` | `COMMIT` | `now ≥ phaseDeadline` and `committedThisRound == 0` and `extensions < MAX_EXTENSIONS` | `extensions++`; re-arm seed; `phaseDeadline = now + COMMIT_WINDOW`. Threshold grows (§3.3). |
 | `COMMIT` | `VOID` | `now ≥ phaseDeadline` and `committedThisRound == 0` and `extensions == MAX_EXTENSIONS` | §4.8 |
-| `REVEAL` | `DRAW` | `now ≥ phaseDeadline` or all committers revealed | Pool this round's reveals into `pooledApprove`/`pooledReject`. If `pooled < MIN_REVEALS` → §4.4 instead. Arm outcome seed at `block + SEED_LAG`. |
-| `DRAW` | `CHALLENGE` | outcome seed available | Draw `provisional` from the pool (§4.5); `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `CHALLENGE` | `COMMIT` | a challenge is opened (§4.7) and `round + 1 < MAX_ROUNDS` | `round++`; record the challenger's vote; arm seed; `phaseDeadline = now + COMMIT_WINDOW` |
+| `REVEAL` | `DRAW` | `now ≥ phaseDeadline` or all committers revealed | Pool this round's reveals into `pooledApprove`/`pooledReject`. If `pooled < MIN_REVEALS` → §4.4 instead. The outcome seed block was fixed from the **scheduled reveal deadline** when the round opened (M2.5-F10) — closing early does not move it. |
+| `DRAW` | `CHALLENGE` | outcome seed available | Draw `provisional` from the pool (§4.5); **arm the seed for round `r+1`** (M2.5-F7 — it must exist before any challenge can be checked against it); `phaseDeadline = now + CHALLENGE_WINDOW` |
+| `CHALLENGE` | `COMMIT` | a challenge is opened (§4.7) and `round + 1 < MAX_ROUNDS` | `round++`; pin the round snapshot (§3.3); pool the challenger's vote (§4.7); `phaseDeadline = now + COMMIT_WINDOW`. The seed was armed on entering `CHALLENGE`, not here |
 | `CHALLENGE` | `FINALIZED` | `now ≥ phaseDeadline` with no challenge, **or** `round + 1 == MAX_ROUNDS` | `finalizedAt = now` — the single pinned penalty start (§5.1) |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 
@@ -285,6 +325,27 @@ the act therefore reveals the vote. This is accepted, not fixed: concealing it a
 restricting challenges to disagreement are mutually exclusive.
 
 Subsequent voters in round `r+1` commit normally, hidden.
+
+**The seed for round `r+1` is armed when the case enters `CHALLENGE`, not when a
+challenge opens (M2.5-F7).** Condition 1 is checked against `seed(c, r+1)`, so an
+earlier draft was circular: eligibility depended on a seed that only existed as a
+*result* of the challenge it was gating. Arming on entry to the challenge window
+breaks the cycle without publishing every future cohort at submission, which is
+what a single case-lifetime seed would do.
+
+**How the challenger counts (M2.5-F11).** The challenge is a revealed vote, not a
+commitment. It therefore:
+
+- pools immediately into `pooledApprove`/`pooledReject`;
+- does **not** increment `committedThisRound`, which counts hidden commitments and
+  is what §4.3's no-participation extension keys on;
+- does **not** by itself satisfy the round's participation requirement.
+
+A challenge round needs **both** `pooledApprove + pooledReject ≥ MIN_REVEALS`
+(already true, since a verdict was drawn) **and** `newRevealsThisRound ≥
+MIN_NEW_REVEALS`. Without the second condition a single public challenge vote would
+trigger a fresh verdict against an otherwise unchanged pool — one moderator
+re-rolling a case on their own. `MIN_NEW_REVEALS` is a working value of 3.
 
 ### 4.8 VOID
 
@@ -379,7 +440,7 @@ Two independent, domain-separated seeds per round:
 | Seed | Armed at | Purpose |
 |---|---|---|
 | `seed(c, r)` | round open + `SEED_LAG` | eligibility (§3.1) |
-| `outcomeSeed(c, r)` | reveal close + `SEED_LAG` | the draw (§4.5) |
+| `outcomeSeed(c, r)` | **scheduled** reveal deadline + `SEED_LAG` | the draw (§4.5) |
 
 Both are `H(domain, chainId, address(this), c, r, blockhash(armedBlock))`.
 
@@ -388,9 +449,20 @@ selection at zero dedicated transactions. If the armed block ages out of the
 256-block window before anyone touches it, the next toucher re-arms to a fresh
 block.
 
-The outcome seed is armed only *after* reveal closes, so the tally is fixed before
-the randomness that resolves it exists and cannot be steered by withholding a
-reveal.
+The outcome seed block is derived from the round's **scheduled** reveal deadline,
+never from the transaction that happens to close the phase (M2.5-F10). A round can
+close early when every committer has revealed, and an earlier draft armed the seed
+relative to that closing block — which handed the last outstanding committer a
+choice of entropy source: reveal now, reveal later, or force the deadline. It could
+not know the future blockhash, but choosing *which* future block supplies it is
+already too much influence, and more so for a committer who is also a proposer.
+
+The tally is still fixed before the randomness that resolves it exists. What a
+committer can influence is narrower but not nothing: withholding a reveal changes
+the *distribution* the draw runs over, since the pool it samples is smaller. The
+claim that the tally cannot be steered by withholding a reveal is therefore too
+strong — the sample is unknowable, its distribution is not. Pricing the withheld
+reveal is what the non-reveal penalty is for (`v2-audit-triage.md` §2).
 
 Proposer influence is real and accepted for the MVP: a proposer can bias both the
 eligible cohort and the draw. The prize is the listing, whose value no pot cap

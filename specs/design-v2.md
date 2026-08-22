@@ -1,6 +1,9 @@
 # Design v2 — Unassigned Moderation
 
-**Status:** Design. Nothing here is implemented. The Solidity in `contracts/`
+**Status:** Design, revision **v2.1**. Nothing here is implemented.
+**v2.1 changes:** voluntary risk units (§2.1, §5), a single final draw (§2.5),
+`MAX_ROUNDS` 2 (§4.6). All three answer the external review — see
+`specs/v2-audit-triage.md` and `specs/v2-audit-checklist.md`. The Solidity in `contracts/`
 implements the first architecture (`specs/state-machine.md`); README §8 lists what
 carries forward and what this replaces.
 
@@ -48,9 +51,23 @@ confers nothing. Influence is bought by running more identities at linear cost �
 the same capital cost as stake-weighting, without the bookkeeping, and with the
 property that the moderator count is a real number the protocol can read.
 
-A stake is not partitioned across cases. It backs every case its holder votes in,
-simultaneously and without limit. **There is no per-case collateral, no duty pool,
-and no reservation of any kind.**
+**Voting spends a risk unit; submitting spends nothing (v2.1).** An identity holds
+`K = stake / UNIT_STAKE` risk units, minimum one. Committing to a case reserves one
+unit. Settlement returns it if the vote was coherent, freezes *that unit* if it was
+not, and applies a short fixed freeze if the moderator committed and never revealed.
+
+Read what this does and does not restore. **A submission still reserves nothing from
+anybody** — the capacity attack that motivated this whole architecture stays dead,
+because a thousand junk cases consume no unit belonging to anyone who did not choose
+to vote. What comes back is a price on the *act of voting*, which an earlier draft
+made free by removing per-case collateral along with the obligation. Only the
+obligation caused the capacity attack; the collateral was removed with it by
+accident, and that is the single most consequential finding of the external review.
+
+Units buy **throughput, never weight**. `K` caps how many cases you can be voting in
+at once; it has no effect on any single case, where one identity still casts exactly
+one vote. Capital therefore buys concurrent work and cannot buy a louder voice —
+which preserves the flat-vote property while pricing concurrency.
 
 ### 2.2 Eligibility
 
@@ -118,6 +135,18 @@ This is the load-bearing structural decision and §4.5 derives why.
 
 Cohorts are the **same size** each round. Escalating cohorts would let the last
 round dominate the pool, which reintroduces the property pooling exists to remove.
+
+**One draw, at the end (v2.1).** Between rounds the contract publishes the running
+*plurality* — a fact about the votes, not a verdict. The probabilistic draw happens
+exactly once, after the last evidence round.
+
+An earlier draft drew a fresh verdict at every round close, which quietly reopened
+retry from a direction pooling does not cover. Pooling preserves the *votes*; it
+does not stop anyone asking for another *sample* of them. With a draw per round the
+stopping rule is asymmetric — lose the draw and challenge, win it and stop — so
+`R` rounds approach `1 − (1−q)^R` for an attacker willing to keep going. Drawing
+once removes the choice: a challenge buys more evidence, which is what a challenge
+was always meant to be.
 
 ---
 
@@ -277,12 +306,18 @@ The attacker cannot win outright by attrition, because votes already pooled do n
 expire — the honest votes from round 1 remain in the tally forever. But they can
 degrade the *marginal* rounds toward their own composition.
 
-**Mitigation: a depth cap.** Rounds are capped at `MAX_ROUNDS` (working value 4),
-after which the pooled verdict is final. This bounds both the dilution and the
-attacker's opportunity to force it. A cap is cruder than a dynamic rule and it is
-what the first architecture used; the alternative — an escalating cost to open each
-successive challenge — reintroduces the bond mechanics that self-selection exists to
-avoid.
+**Mitigation: a depth cap of two (v2.1).** Rounds are capped at `MAX_ROUNDS = 2`,
+after which the pooled verdict is final.
+
+Two, not four. The simulation measured the attacker's advantage against the cap and
+found caps of 1–3 flat near `q`, cap 4 at 1.4× and cap 6 at 2.9× — **four rounds are
+measurably worse for the honest side than allowing no challenge at all.** The
+external review reached the same number from the optional-stopping argument. When a
+measurement and a derivation agree on a parameter, that is the parameter.
+
+Note what the cap now bounds. With a single draw at the end (§2.5) it no longer
+limits re-rolls, because there are none; it limits how far the *composition* of the
+pool can be dragged by rounds that honest moderators have stopped attending.
 
 **This is an open parameter, not a settled one.** The interaction between the fee,
 the dilution curve, gas cost and honest turnout is exactly what simulation must
@@ -292,46 +327,88 @@ resolve (§9).
 
 ## 5. Freeze composition
 
-Incoherent voters are frozen. Duration is the first architecture's rule, unchanged:
+A vote that ends up incoherent freezes **the unit that backed it** — not the
+moderator, and not the other units.
 
 ```
-duration = FREEZE_BASE × min(FREEZE_CAP, trackFactor(winning side))
+unit.frozenUntil = case.finalizedAt + FREEZE_BASE × min(FREEZE_CAP, trackFactor)
 ```
 
-**Freezes stack serially:**
+Each unit carries its own expiry, dated by the case that froze it. That is the whole
+mechanism, and three earlier problems dissolve into it.
+
+### 5.1 Why per-unit freezing is order-independent for free
+
+The previous draft accumulated a single `suspendedUntil` on the identity:
 
 ```
-until := min( now + MAX_TOTAL_FREEZE,  max(now, until) + duration )
+until := min(finalizedAt + MAX_TOTAL, max(finalizedAt, until) + duration)
 ```
 
-Three penalties produce the sum of three terms, not the longest. This is not a
-refinement — it is required. Since one stake backs unlimited concurrent cases, a
-penalty that could only be served once would be diluted to nothing by an attacker
-voting in many cases simultaneously. **Time is the punishment currency precisely
-because it does not dilute under concurrency.**
+which is **not commutative**. Two seven-day penalties finalized at t=10 and t=5 give
+24 days settled A-then-B and 19 days settled B-then-A, and settlement is
+permissionless, so whoever pays gas first decides the punishment. Worse, the cap
+anchored to `finalizedAt` could *shorten* a longer existing suspension — an old case
+settling late could pull a moderator's expiry from day 500 back to day 365.
 
-**Flat stake makes this exact.** The first architecture pooled frozen *amounts*
-under a single clock, so per-tranche expiry was inexpressible and the rule had to
-be `max` rather than serial. Here there are no tranches: the whole stake is frozen
-or it is not, and a single accumulator is exactly right. One `uint`, O(1), no
-buckets. This is the clearest structural payoff of flat stake.
+Per-unit expiry has nothing to accumulate. Each unit's date is a function of its own
+case and nothing else, so settlement order cannot reach it. This is not a patch on
+the formula; it is the formula becoming unnecessary.
 
-While frozen: ineligible for new cases; **votes already cast still count** and
-cases already joined run to completion. The freeze removes future participation,
-never past judgment.
+### 5.2 Penalties still stack, and still do not dilute
 
-Frozen stake is never transferred. Principle 2 is unchanged and unconditional.
+Losing three cases freezes three units. The moderator's capacity drops by three for
+the duration, which is the sum of three penalties, not the maximum of them. Serial
+stacking — the property that made time the right punishment currency under
+concurrency — survives, and now it survives without a non-commutative accumulator.
 
-### 5.1 One penalty start per case
+### 5.3 The risk/reward ratio, derived
 
-Every voter penalised by the same case derives expiry from a **single pinned
-timestamp** — the case's finalization — not from the block in which their
-settlement batch happened to execute. The first architecture computed
-`block.timestamp + duration` per batch, so two moderators penalised by the same
-case received different expiries depending on processing order. Carried forward as a
-correction (§8).
+This is what makes honest moderation rational, and the earlier drafts got the
+statement wrong in two different ways.
 
----
+A unit is occupied by a case for `D_case` days. Freezing that unit for `F` days
+therefore costs exactly the cases *it* would have run in that window:
+
+```
+downside = (F / D_case) × pay_per_case
+upside   =                pay_per_case
+ratio    =  F / D_case
+```
+
+**`K` cancels.** A moderator's throughput is itself bounded by how many units they
+hold, so holding more units raises both the cases foregone and the cases available
+in the same proportion. The ratio depends on neither `K` nor the fee.
+
+At `F = 7 days` and `D_case = 5 days` the ratio is **1.4**, so voting is rational
+whenever confidence exceeds **58.3%**. An honest moderator's prior on a 95%-clear
+case with 30% of the network hostile is **66.5%**. Honest participation is
+rational **with the freeze term unchanged.**
+
+Compare the identity-suspension version, where losing one case took *every* unit
+out: the ratio was `F × cases_per_day` = 70, requiring 98.6% confidence, and no fee
+level moved it because raising the fee raised the foregone earnings identically.
+That is why the simulation found zero honest turnout at every fee it tested.
+
+Two proposals are superseded by this derivation. This project's — cut `FREEZE_BASE`
+to about an hour — was treating a symptom. The review's — divide the ratio by `K` —
+has the right direction and the wrong statement, since it suggests large moderators
+are safer than small ones when in fact the ratio is the same for everyone.
+
+### 5.4 One pinned penalty start per case
+
+Every unit frozen by a case derives its expiry from that case's `finalizedAt`, never
+from the block in which a settlement batch happened to execute.
+
+### 5.5 What a freeze is not
+
+Frozen stake is never transferred and never destroyed. Principle 2 is unchanged and
+unconditional: the moderator keeps every token, and loses only the use of that unit
+for the term.
+
+While a unit is frozen the moderator continues working with the rest. Votes already
+cast stand, and cases already joined run to completion — the penalty removes future
+capacity, never past judgment.
 
 ## 6. Reputation
 
@@ -450,6 +527,7 @@ not a topic.
 | 4 | **Removal supply.** Charging the requester is neutral and unspammable but leaves removals undersupplied. Does removal need a paid *role* rather than a price, and where does that pool come from without becoming farmable? | Project owner + senior reviewer | A mechanism, or an explicit decision to ship the limitation |
 | 5 | **Cross-case retry** (§8). Per-content history in the permanent index — attempt counts, cooldowns, escalating fees for unchanged content. | Design | Specified and shown not to create a new farmable target |
 | 7 | **The neutrality trilemma.** Neutral payouts force `f(W) = c/W`, so the total paid is constant and dilution is unavoidable while challenges are free. Neutral payouts, free challenges, non-diluting pay — pick two. | Project owner + senior reviewer | A row of the table in FINDINGS-v2 §D is chosen, with the §C numbers in front of it |
+| 8 | **`UNIT_STAKE`** (v2.1). Sets how many risk units a given stake buys, and therefore network throughput: `N` moderators at `K` units each support `N·K/turnout` concurrent cases. At `MIN_STAKE` 10 and `UNIT_STAKE` 1, a hundred minimum moderators support roughly 45 concurrent cases — more than the assigned design's 20, while pricing every vote. It does **not** affect the risk/reward ratio (§5.3), which is why it is a throughput dial rather than a safety one | Simulation | Throughput at plausible network sizes clears expected demand |
 | 6 | **`ageFactor` growth rate** (§2.2). Too slow and quiet cases stall; too fast and the cohort loses its randomness advantage. | Simulation | A rate with a bound on worst-case time-to-quorum |
 
 ---

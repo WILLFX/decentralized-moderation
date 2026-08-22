@@ -13,11 +13,9 @@ Every finding in the review, with honest status. Companion to
 | **OPEN** | No answer yet, from anyone |
 | **DEFERRED** | Real, deliberately not now |
 
-**Headline: 3 of 10 P0s are closed.** The rest are open, and most of them wait on
-one architectural change — voluntary risk units — that **is not adopted, not
-specified, and not in the repo.** It is a recommendation from the review awaiting
-the senior reviewer's ruling. Nothing below should be read as fixed because a fix
-has been proposed for it.
+**Headline: 8 of 10 P0s are closed** (was 3 before the v2.1 revision). Risk units and one-final-draw are approved and **specified** (design-v2 / 
+state-machine-v2, revision v2.1). They are still **not implemented** — no Solidity
+exists for any of this. The two remaining P0s are decisions, not spec work.
 
 ---
 
@@ -25,14 +23,14 @@ has been proposed for it.
 
 | # | Finding | Status | Note |
 |---|---|---|---|
-| P0-1 | Unlimited concurrent votes per stake | **OPEN** | Waits on risk units |
+| P0-1 | Unlimited concurrent votes per stake | **NEEDS SPEC → DONE** | v2.1 §3.3b — units reserved at commit |
 | P0-2 | Cross-case and portfolio retry | **DECISION** | D1. The deepest finding; no answer from anyone yet |
 | P0-3 | Successful attacker recovers its own fee | **DECISION** | D3. Needs a nonrecoverable listing component |
-| P0-4 | No penalty for commit-without-reveal | **OPEN** | Waits on risk units |
-| P0-5 | Exit cooldown does not cover open liabilities | **OPEN** | Waits on risk units |
-| P0-6 | Serial freeze is settlement-order-dependent | **OPEN** | Verified here (24 vs 19 days) and **not fixed** |
+| P0-4 | No penalty for commit-without-reveal | **DONE** | v2.1 §5.1 — `NONREVEAL_FREEZE` |
+| P0-5 | Exit cooldown does not cover open liabilities | **DONE** | v2.1 §2.3 — withdrawal needs zero liabilities |
+| P0-6 | Serial freeze is settlement-order-dependent | **DONE** | v2.1 §5.1 — per-unit expiry; nothing accumulates |
 | P0-7 | Next-round challenge seed is circular | **DONE** | F7, `a4ac471` |
-| P0-8 | Repeated draws permit optional stopping | **NEEDS SPEC** | One-final-draw agreed, not written |
+| P0-8 | Repeated draws permit optional stopping | **DONE** | v2.1 §4.2 — one draw, after the last round |
 | P0-9 | Active-moderator counter unmaintainable | **DONE** | F9, `a4ac471` |
 | P0-10 | "Supersafe" far weaker than the name implies | **DONE** | F4, `1dc186d` — renamed to *unopposed* |
 
@@ -51,15 +49,15 @@ has been proposed for it.
 | § | Finding | Status |
 |---|---|---|
 | 4.1 | Challenge seed circular | **DONE** F7 |
-| 4.2 | Commit creates a free reveal option | **OPEN** |
+| 4.2 | Commit creates a free reveal option | **DONE** v2.1 |
 | 4.3 | Last revealer influences outcome-seed timing | **DONE** F10 |
-| 4.4 | Exit cooldown vs open cases | **OPEN** |
-| 4.5 | Serial freeze not order-independent | **OPEN** |
+| 4.4 | Exit cooldown vs open cases | **DONE** v2.1 |
+| 4.5 | Serial freeze not order-independent | **DONE** v2.1 |
 | 4.6 | `totalActiveModerators` unmaintainable | **DONE** F9 |
 | 4.7 | Later cohorts are not the same size | **DONE** F8 |
-| 4.8 | Pooling does not stop rerolls | **NEEDS SPEC** |
+| 4.8 | Pooling does not stop rerolls | **DONE** v2.1 |
 | 4.9 | Challenge-round quorum ambiguous | **DONE** F11 |
-| 4.10 | Batched settlement and immediate penalties | **OPEN** |
+| 4.10 | Batched settlement and immediate penalties | **DONE** v2.1 §5.3 |
 | 4.11 | Lazy randomness selective abort | **DEFERRED** |
 | 4.12 | Integer-neutrality bound misstated | **DONE** F1 |
 
@@ -100,10 +98,10 @@ Nothing here is adopted. This is the review's recommendation set.
 
 | § | Proposal | Status |
 |---|---|---|
-| 10.1 | Identity + K voluntary risk units | **DECISION** — recommended, awaiting the senior reviewer |
-| 10.2 | Commit reserves a unit; non-reveal freezes it | **DECISION** — same |
+| 10.1 | Identity + K voluntary risk units | **DONE** — approved by the project owner; spec'd in v2.1 |
+| 10.2 | Commit reserves a unit; non-reveal freezes it | **DONE** — v2.1 §3.3b, §5.1 |
 | 10.3 | Epoch-based active set | **DONE in part** — F9 pins per-round snapshots |
-| 10.4 | One challenge, one final draw, `MAX_ROUNDS` 2 | **NEEDS SPEC** |
+| 10.4 | One challenge, one final draw, `MAX_ROUNDS` 2 | **DONE** — v2.1 |
 | 10.5 | Separate challenge *funder* from challenge *endorser* | **DECISION** — gives publishers the appeal path F5 removed |
 | 10.6 | Permanent cumulative claim history | **DECISION** — part of D1 |
 | 10.7 | Evidence-rich index instead of one safety bit | **DECISION** — D5 |
@@ -154,13 +152,13 @@ None are written yet. All **OPEN**.
 
 | Group | Closed | Total |
 |---|---|---|
-| P0 | 3 | 10 |
+| P0 | 8 | 10 |
 | P1 / P2 | 1 | 5 |
-| §4 state machine | 6 | 12 |
+| §4 state machine | 11 | 12 |
 | §5 safety product | 1 | 6 |
 | §6 removal | 0 | 2 |
 | §9 documentation | 6 | 6 |
-| §10 v2.1 proposals | 0.5 | 10 |
+| §10 v2.1 proposals | 3.5 | 10 |
 | §11 simulation | 2 | 14 |
 | Invariants | 0 | 11 |
 

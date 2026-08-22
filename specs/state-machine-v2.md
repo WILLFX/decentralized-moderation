@@ -1,7 +1,10 @@
 # Moderation Contract v2 — Formal State-Machine Specification
 
 **Milestone:** M2.5
-**Status:** Specification. Not implemented. Supersedes `specs/state-machine.md`,
+**Status:** Specification, revision **v2.1**. Not implemented.
+**v2.1 changes:** risk units reserved at commit (§3.3b), per-unit freezing (§5.1),
+withdrawal gated on zero liabilities (§2.3), one final draw (§4.2), `MAX_ROUNDS` 2,
+and invariants I13–I21 from the external review. Supersedes `specs/state-machine.md`,
 which specifies the first architecture and the contracts in `contracts/`.
 **Design:** `specs/design-v2.md` — mechanism and arithmetic, including the payout
 derivation this document takes as given.
@@ -41,7 +44,8 @@ marked *(working)* are simulation inputs, not final values.
 
 | Name | Working value | Meaning |
 |---|---|---|
-| `MIN_STAKE` | 10 xBZZ | The stake. Flat — every moderator holds exactly this. |
+| `MIN_STAKE` | 10 xBZZ | Floor to hold an identity. |
+| `UNIT_STAKE` | 1 xBZZ | Stake per risk unit. `K = stake / UNIT_STAKE`, minimum 1 (v2.1). |
 | `MATURATION` | ≥ `FREEZE_BASE` | Delay before newly staked value may vote (§2.2). |
 | `EXIT_COOLDOWN` | 7 days | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 32 | Expected eligible moderators per round. |
@@ -50,7 +54,7 @@ marked *(working)* are simulation inputs, not final values.
 | `COMMIT_WINDOW` | 24 h | Commit phase duration. |
 | `REVEAL_WINDOW` | 24 h | Reveal phase duration. |
 | `CHALLENGE_WINDOW` | 3 d (first: 4 d) | Window in which a verdict may be challenged. |
-| `MAX_ROUNDS` | 4 | Round cap. Bounds dilution (design-v2 §4.6). |
+| `MAX_ROUNDS` | 2 | Round cap (v2.1). Simulation and review agree; 4 was worse than 1. |
 | `MAX_EXTENSIONS` | 4 | Quorum-failure extensions before VOID. |
 | `AGE_FACTOR_STEP` | 1.5× per extension | Eligibility threshold growth (§3.3). |
 | `SEED_LAG` | 2 blocks | Blocks between arming and realizing a seed. |
@@ -71,14 +75,23 @@ marked *(working)* are simulation inputs, not final values.
 
 ```
 struct Moderator {
-    uint128 stake;          // 0 or MIN_STAKE. Flat: no other value is representable.
+    uint128 stake;          // >= MIN_STAKE while active
+    uint16  units;          // K = stake / UNIT_STAKE, min 1
+    uint16  unitsReserved;  // currently backing open votes
     uint40  maturesAt;      // stake may not vote before this
-    uint40  suspendedUntil; // serial freeze accumulator (§5)
     uint40  exitRequestedAt;
     uint32  trackEpoch;     // epoch of the last reputation write
     uint128 track;          // reputation, WAD-scaled (§6)
 }
+
+struct RiskUnit {           // one per reserved or frozen unit
+    uint64  caseRef;        // the case that reserved it
+    uint40  frozenUntil;    // 0 while merely reserved
+}
 ```
+
+There is no `suspendedUntil` on the identity. **Freezes attach to units, not to
+moderators** (v2.1), which is what makes them order-independent — see §5.
 
 `stake` is 0 or `MIN_STAKE`. There is no partial stake, no per-case allocation, and
 no duty accounting. **A moderator's stake backs every case they vote in,
@@ -90,9 +103,14 @@ simultaneously and without limit.**
 |---|---|
 | `NONE` | `stake == 0` |
 | `PENDING` | `stake > 0 && now < maturesAt` |
-| `ACTIVE` | `stake > 0 && now ≥ maturesAt && now ≥ suspendedUntil && exitRequestedAt == 0` |
-| `SUSPENDED` | `stake > 0 && now < suspendedUntil` |
-| `EXITING` | `exitRequestedAt != 0 && now < exitRequestedAt + EXIT_COOLDOWN` |
+| `ACTIVE` | `stake > 0 && now ≥ maturesAt && exitRequestedAt == 0` |
+| `EXITING` | `exitRequestedAt != 0` |
+
+A moderator is never globally suspended. What varies is how many **free units** they
+hold: `free = units − unitsReserved − (units frozen at `now`)`. An `ACTIVE`
+moderator with zero free units simply cannot commit to anything new until one
+returns. The states are mutually exclusive by construction, which the previous
+`SUSPENDED`/`EXITING` overlap was not.
 
 Only `ACTIVE` moderators may **commit** (§3.4). `SUSPENDED` and `EXITING`
 moderators **may still reveal** votes committed while `ACTIVE`, and cases they have
@@ -125,7 +143,19 @@ bulk. What makes replacement expensive is that track record does not transfer
 | `ACTIVE` | `SUSPENDED` | settlement of a case in which the moderator was incoherent | §5 |
 | `SUSPENDED` | `ACTIVE` | `now ≥ suspendedUntil` | none (predicate) |
 | `ACTIVE` | `EXITING` | `requestExit()` | `exitRequestedAt = now` |
-| `EXITING` | `NONE` | `withdraw()` after cooldown | transfer out; clear record except `track` |
+| `EXITING` | `NONE` | `withdraw()` after cooldown **and zero open liabilities** | transfer out; clear record except `track` |
+
+**Withdrawal requires no reserved and no frozen units (v2.1, P0-5).** `EXIT_COOLDOWN`
+is seven days; a case runs up to `MAX_ROUNDS` rounds of roughly five days and settles
+permissionlessly afterwards, so a cooldown alone let a voter commit, request exit,
+and withdraw before the case that would penalise them ever settled. The liability
+count is exact where a duration guess is not:
+
+```
+withdraw allowed iff  now ≥ exitRequestedAt + EXIT_COOLDOWN
+                 and  unitsReserved == 0
+                 and  no unit has frozenUntil > now
+```
 
 `track` survives exit and re-entry **for the same address**. It is not transferable
 and cannot be purchased; abandoning an address abandons it.
@@ -195,6 +225,28 @@ distribution, not a target.** Every formula downstream takes the realized count.
 `ageFactor` grows only on quorum-failure extension (§4.4). This replaces widening:
 no re-draw, no extra tranche, no call.
 
+### 3.3b Committing reserves a unit (v2.1)
+
+Eligibility (§3.1) says *which* cases a moderator may join. A **free risk unit** says
+*whether they can join another one at all*:
+
+```
+commit allowed iff  eligible(m, c, r)
+               and  m is ACTIVE
+               and  free units > 0
+               and  m has not voted in case c   (§3.4)
+```
+
+Committing moves one unit to `unitsReserved` against `caseRef = c`. Settlement
+returns it, freezes it, or applies the non-reveal penalty (§5).
+
+**This is what prices concurrency, and it is why submitting still costs nobody
+anything.** A case being opened reserves no unit from anyone; only a moderator's own
+decision to commit spends one of theirs. The capacity attack the architecture exists
+to prevent stays prevented, because an attacker cannot reach into anyone else's
+units — while the pre-settlement leverage of an earlier draft, where one stake backed
+unlimited simultaneous votes at zero marginal cost, is now bounded by `K`.
+
 ### 3.4 One vote per moderator per case
 
 **A moderator may commit at most once per case, across all its rounds.** Eligibility
@@ -240,13 +292,21 @@ round and are never reset. This is the design's load-bearing decision
 ### 4.2 Phases
 
 ```
-COMMIT ──▶ REVEAL ──▶ DRAW ──▶ CHALLENGE ──▶ FINALIZED ──▶ SETTLED
-   ▲                              │
-   └──────── challenge ───────────┘
+COMMIT ──▶ REVEAL ──▶ TALLY ──▶ CHALLENGE ──▶ DRAW ──▶ FINALIZED ──▶ SETTLED
+   ▲                                │
+   └────────── challenge ───────────┘
    └──────── extension ──┐
                          │ (quorum failure, §4.4)
         VOID ◀───────────┘ (after MAX_EXTENSIONS)
 ```
+
+**`TALLY` publishes the running plurality; `DRAW` happens once (v2.1).** The
+probabilistic draw sits after the last challenge window, not after every round. An
+earlier draft drew at every round close, which let a party who disliked a draw
+challenge and a party who liked one stop — an optional-stopping rule that approaches
+`1 − (1−q)^R` over `R` rounds and reopens exactly the retry that pooling was chosen
+to close. Between rounds the contract now publishes a *fact* (which side leads),
+never a verdict.
 
 ### 4.3 Transition table
 
@@ -386,27 +446,62 @@ must never reach the people choosing it.**
 No stake is ever transferred between moderators. Rewards are external money — fees —
 only.
 
-### 5.1 Suspension
+### 5.1 Per-unit freezing (v2.1)
+
+Every voter's reserved unit resolves at settlement:
 
 ```
-duration = FREEZE_BASE × min(FREEZE_CAP, trackFactor(winning side))
-until    = min(finalizedAt + MAX_TOTAL_FREEZE,
-               max(finalizedAt, m.suspendedUntil) + duration)
+coherent          -> unit released, moderator paid `share`
+incoherent        -> unit.frozenUntil = finalizedAt
+                                      + FREEZE_BASE × min(FREEZE_CAP, trackFactor)
+committed, never
+       revealed   -> unit.frozenUntil = finalizedAt + NONREVEAL_FREEZE
 ```
 
-**Serial, not maximum.** Three penalties give the sum of three terms. Required, not
-refined: one stake backs unlimited concurrent cases, so a penalty servable once
-would be diluted to nothing by voting in many cases at once. Time is the punishment
-currency because it does not dilute under concurrency.
+`NONREVEAL_FREEZE` is a short fixed term (working value 24h). It exists because
+committing and then not revealing is **not** the same as never voting: a committer
+who watches reveals arrive and withholds when the tally turns against them holds a
+free option, and can also keep a round below quorum. Before commit there is no
+obligation; after commit there is exactly one, and this prices it.
 
-Flat stake makes this exact with one accumulator. There are no partially-frozen
-tranches to expire separately, which is what forced the first architecture's
-`max` rule.
+The forfeited term costs the moderator the use of that unit. Nothing is transferred
+and nothing is burned — principle 2 holds unconditionally.
 
-**One pinned start.** Every moderator penalised by this case derives expiry from
-`finalizedAt`, never from the block their settlement batch executed in.
+**Order-independence is structural.** Each unit's expiry is a function of its own
+case's `finalizedAt` and nothing else, so no settlement order can change it. The
+previous identity-level accumulator was non-commutative — two seven-day terms
+finalized at t=10 and t=5 gave 24 days one way and 19 the other — and could even
+shorten a longer existing suspension. There is now nothing to accumulate.
 
----
+**Penalties still stack.** Three losses freeze three units, so capacity falls by
+three for the term: the sum, not the maximum. Time remains the punishment currency
+that does not dilute under concurrency, without needing a formula that does not
+commute.
+
+**Why this makes honest moderation rational.** A unit is occupied by a case for
+`D_case` days, so freezing it for `F` costs exactly the `F / D_case` cases it would
+otherwise have run:
+
+```
+ratio = F / D_case = 7 / 5 = 1.4      ->  vote when confidence > 58.3%
+```
+
+`K` cancels, because a moderator's throughput is bounded by the same `K`. The ratio
+is identical for a minimum-stake moderator and a large one, and it does not move
+with the fee. Under the previous identity-wide suspension the ratio was
+`F × cases_per_day` = 70, requiring 98.6% confidence — which is why the simulation
+measured zero honest turnout at every fee it tried. See `design-v2` §5.3.
+
+### 5.2 One pinned penalty start per case
+
+Every unit frozen by a case derives its expiry from that case's `finalizedAt`, never
+from the block in which its settlement batch executed.
+
+### 5.3 Settlement delay cannot be exploited
+
+A unit stays reserved from commit until its case settles. A moderator whose case has
+finalized but not yet been processed therefore cannot reuse that unit, so batching
+settlement cannot be turned into extra concurrency.
 
 ## 6. Reputation
 
@@ -515,6 +610,15 @@ Must hold at every block.
 | I10 | Reputation is invariant under permutation of concurrent-case settlement order |
 | I11 | No case reaches `SETTLED` in more rounds than `MAX_ROUNDS` |
 | I12 | No storage write reserves, locks, or obligates any moderator at submission |
+| I13 | `withdraw` implies `unitsReserved == 0` and no unit frozen |
+| I14 | A reserved unit cannot back a second case |
+| I15 | Commit implies either a reveal or an explicit non-reveal penalty |
+| I16 | A unit's `frozenUntil` never decreases because an older case settled |
+| I17 | Penalties are invariant under any permutation of settlement order |
+| I18 | The eligibility seed for round `r+1` exists before any challenge is verified |
+| I19 | A round's threshold is immutable after the round opens |
+| I20 | No case draws a final outcome more than once |
+| I21 | Every moderator state predicate is mutually exclusive |
 
 I12 is the architecture's defining property, stated as something a test can falsify.
 

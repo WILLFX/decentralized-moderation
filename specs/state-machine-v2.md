@@ -414,7 +414,14 @@ target and release its reservation.
   distinct moderators by construction (§3.4), so the v1 caveat about a multi-seat
   voter satisfying quorum alone does not arise.
 
-The **supersafe** view stays `uncontested && fullQuorum && now − approvalTime ≥ 96h`.
+The **unopposed** view stays `uncontested && fullQuorum && now − approvalTime ≥ 96h`.
+
+Note what `fullQuorum` actually asserts: the pooled tally reached `MIN_REVEALS`,
+whose working value is **5** — not that a full `TARGET_COHORT` turned out. Five
+unanimous votes satisfy it. The view was previously called *supersafe* and
+described as near-certainty, which this definition does not support (M2.5-F4).
+Either the name stays factual or the threshold rises; it must not be both loose
+and reassuring.
 
 ---
 

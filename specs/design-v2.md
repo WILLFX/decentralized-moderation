@@ -169,6 +169,18 @@ rounds recovering after a superficially reasonable divisor broke it, which is wh
 is stated as a theorem here and must be re-checked against any future change to
 either the lottery or the split.
 
+**What it does not prove.** The theorem fixes the final tally `A, B, N` and asks
+about cash. It is silent on everything the tally itself depends on: whether a vote
+makes a challenge more likely, how many rounds run, what the final turnout becomes,
+the reputation credit earned, and — most importantly — the suspension, whose length
+scales with the *winner's* track record and is therefore **not** direction-neutral.
+
+So `E[cash | fixed final tally]` is direction-independent, and
+`E[total utility | Approve] = E[total utility | Reject]` does not follow. The
+dynamic claim has to be established against a full strategy model of the challenge
+game, not inferred from the static split. Any statement of principle 4 that omits
+this qualification is an overclaim; see `specs/v2-audit-triage.md` F2 and D4.
+
 ### 4.3 Corollary — the lottery must be linear
 
 The audit raised a *power lottery*, `P(Approve) = A^α / (A^α + B^α)` with `α > 1`,
@@ -378,7 +390,7 @@ Carried forward substantially unchanged, and the reason each is worth keeping:
   case, round and voter.
 - **Settlement solvency ordering** — the pot is never over-committed, and rewards
   are external money only.
-- **The index fields and the supersafe view** (`uncontested`, `fullQuorum`, the 96h
+- **The index fields and the unopposed view** (`uncontested`, `fullQuorum`, the 96h
   seasoning), simplified because flat voting makes distinct votes distinct
   moderators by construction.
 - **Deduplication held by the permanent index**, released only by the case that

@@ -82,6 +82,9 @@ The review and this project's own simulation independently converge on
 
 ## 4. Fixes to make now (no decision required)
 
+> **All thirteen landed** — F1 in `ef78b15`, F2–F5 in `1dc186d`, F6–F13 in `a4ac471`.
+> The table below is kept as the record of what each one was.
+
 | # | Fix | Where |
 |---|---|---|
 | F1 | Integer-neutrality bound: `1/N` → one base unit | `design-v2` §4.4 |

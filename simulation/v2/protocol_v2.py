@@ -279,16 +279,32 @@ def run_case(p: ParamsV2, pop: List[Moderator], rng: random.Random,
         losing_pool = approve if losing_side == Vote.APPROVE else reject
         losing_share = losing_pool / n
 
+        # A challenger must actually be ELIGIBLE for the next round, not merely
+        # exist. The first version of this checked only "is there an unused
+        # attacker", which with hundreds of identities is always true and
+        # overstated the attacker's ability to force rounds. (External review,
+        # section 11.)
+        next_cohort = _eligible(pop, p, rng, voted, now, age_factor)
+        want = [m for m in next_cohort if m.attacker == (losing_side == attacker_side)]
+
         if losing_side == attacker_side:
-            # The attacker challenges whenever it still can — pay-insensitive.
-            challenged = any(m.attacker and m.active(now) and m.idx not in voted
-                             for m in pop)
+            challenged = len(want) > 0          # pay-insensitive, challenges if able
         else:
-            # Honest side challenges only when the pool is behind it.
-            challenged = losing_share >= p.honest_challenge_threshold
+            challenged = want and losing_share >= p.honest_challenge_threshold
 
         if not challenged:
             break
+
+        # The challenge IS a vote against the standing verdict, pooled immediately
+        # (state-machine-v2 §4.7). The first version opened a round without adding
+        # it, so a challenge cost nothing and added nothing.
+        challenger = want[0]
+        voted.add(challenger.idx)
+        if losing_side == Vote.APPROVE:
+            approve += 1
+        else:
+            reject += 1
+
         round_idx += 1
 
     # --- settlement (§5) ---

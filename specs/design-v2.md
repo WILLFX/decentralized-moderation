@@ -198,8 +198,11 @@ The contract has no rationals. With `pay = P / W` under floor division:
 E[pay | Approve] = (A/N)·⌊P/A⌋      E[pay | Reject] = (B/N)·⌊P/B⌋
 ```
 
-These differ by at most `1/N` base units — neutrality holds exactly over the
-rationals and to within one base unit under integer division. The remainder
+These differ by at most **one base unit** — neutrality holds exactly over the
+rationals and to within one base unit under integer division. (An earlier draft
+said `1/N`, which is wrong: the difference is `|(P mod B) − (P mod A)| / N`, and
+since `P mod A < A`, that approaches 1 rather than `1/N`. Worst case observed in a
+sweep: 0.95 base units, at `P=56, A=1, B=19`.) The remainder
 `P − W·⌊P/W⌋` is credited to the **submitter's refund**, never to moderators.
 
 That destination matters for principle 4. The remainder's *size* depends on `W`,

@@ -45,7 +45,13 @@ class ParamsV2:
     max_extensions: int = 4            # MAX_EXTENSIONS
 
     # --- rounds (§4) ---
-    max_rounds: int = 4                # MAX_ROUNDS
+    max_rounds: int = 2                # MAX_ROUNDS (v2.1: was 4)
+
+    # --- risk units (v2.1, state-machine-v2 §3.3b) ---
+    min_stake: float = 10.0            # MIN_STAKE
+    unit_stake: float = 1.0            # UNIT_STAKE -> K = stake / unit_stake
+    case_duration_days: float = 5.0    # D_case: how long a unit is tied up
+    nonreveal_freeze_days: float = 1.0 # NONREVEAL_FREEZE
 
     # --- money ---
     fee: float = 9.0                   # F, xBZZ. Working: ~6x v1's 1.5 to pay 32.
@@ -85,38 +91,63 @@ class ParamsV2:
         return self.pot / self.target_cohort
 
     @property
+    def units_per_moderator(self) -> int:
+        """K. Caps concurrency; has no effect on weight in any single case."""
+        return max(1, int(self.min_stake / self.unit_stake))
+
+    @property
     def freeze_cost(self) -> float:
-        """Opportunity cost of a suspension, in xBZZ.
+        """What freezing ONE unit costs, in xBZZ (v2.1).
 
-        Derived rather than assumed, and the derivation is the whole point:
-
-            freeze_cost = freeze_days x cases_per_day x pay_per_case
-
-        so the ratio of downside to upside is `freeze_days x cases_per_day`, and
-        it does NOT move with the fee -- raising the fee raises the reward and the
-        foregone earnings by the same factor. No fee level fixes a bad ratio.
+        A unit is occupied by a case for `case_duration_days`. Freezing it for
+        `freeze_base_days` costs exactly the cases THAT UNIT would have run in the
+        window -- not the moderator's whole book of work.
         """
-        return self.freeze_base_days * self.cases_per_day * self.pay_per_case
+        return self.risk_reward_ratio * self.pay_per_case
 
     @property
     def risk_reward_ratio(self) -> float:
-        """Downside/upside. Voting is rational only when p/(1-p) exceeds this."""
-        return self.freeze_base_days * self.cases_per_day
+        """Downside/upside = F / D_case.
+
+        K cancels: throughput is itself bounded by K, so holding more units raises
+        the cases foregone and the cases available in the same proportion. The ratio
+        depends on neither K nor the fee.
+
+        The pre-v2.1 model suspended the whole identity, giving
+        `freeze_days x cases_per_day` -- 70 at the working values, requiring 98.6%
+        confidence, which is why honest turnout measured zero at every fee.
+        """
+        return self.freeze_base_days / self.case_duration_days
 
 
 @dataclass
 class Moderator:
+    """v2.1: a moderator is never globally suspended. Units are."""
     idx: int
     attacker: bool
-    suspended_until: float = 0.0       # serial accumulator, in days (§5.1)
+    units: int = 10                    # K
+    reserved: int = 0                  # units backing open votes
+    frozen_until: List[float] = field(default_factory=list)  # one entry per frozen unit
+
+    def free_units(self, now: float) -> int:
+        still_frozen = sum(1 for t in self.frozen_until if t > now)
+        return self.units - self.reserved - still_frozen
 
     def active(self, now: float) -> bool:
-        return now >= self.suspended_until
+        """ACTIVE is about the identity; capacity is about units (§2.2)."""
+        return True
 
-    def suspend(self, now: float, duration: float, cap: float) -> None:
-        """Serial stacking: sum of terms, not the max of them."""
-        base = max(now, self.suspended_until)
-        self.suspended_until = min(now + cap, base + duration)
+    def reserve(self) -> None:
+        self.reserved += 1
+
+    def release(self) -> None:
+        self.reserved -= 1
+
+    def freeze_unit(self, finalized_at: float, duration: float) -> None:
+        """Per-unit expiry, dated by ITS OWN case -- so settlement order cannot
+        reach it. There is no accumulator left to be non-commutative (§5.1)."""
+        self.reserved -= 1
+        self.frozen_until.append(finalized_at + duration)
 
 
 @dataclass
@@ -190,11 +221,14 @@ def _honest_will_vote(p: ParamsV2, pooled: int, round_idx: int,
     expected_pay = p.pot / max(1.0, projected)
 
     p_coherent = _prior_coherence(p) if my_side_share is None else my_side_share
-    penalty = p.freeze_cost
+
+    # v2.1: the freeze costs `ratio` future cases, valued at the SAME expected rate
+    # this case pays. Pricing the penalty at pot/target_cohort while paying the voter
+    # pot/projected-turnout compares two different rates and overstates the penalty.
+    penalty = p.risk_reward_ratio * expected_pay
     if p.margin_scaled_freeze:
-        # Losing narrowly costs little; losing badly costs the full term. The
-        # expected margin for a voter on a side holding share s is (1 - s).
         penalty *= (1.0 - p_coherent)
+
     utility = p_coherent * expected_pay - (1.0 - p_coherent) * penalty - p.gas_cost
     return utility > 0.0, expected_pay
 

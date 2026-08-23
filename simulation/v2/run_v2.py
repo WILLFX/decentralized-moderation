@@ -8,6 +8,7 @@ covered by ``../run.py``.
 """
 
 from protocol_v2 import ParamsV2
+from campaign_v2 import e6_pre_settlement_leverage
 from experiments_v2 import (
     e1_pooling_holds_share,
     e2_dilution,
@@ -37,6 +38,7 @@ def main() -> None:
     e1_pooling_holds_share(viable)
     e2_dilution(viable)
     e4_round_cap(viable)
+    e6_pre_settlement_leverage()
     print()
 
 

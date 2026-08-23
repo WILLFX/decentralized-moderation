@@ -115,10 +115,10 @@ Nothing here is adopted. This is the review's recommendation set.
 |---|---|
 | Challenge check ignored real eligibility | **DONE** — fixed, `ef78b15` |
 | Challenger's vote never pooled | **DONE** — fixed, `ef78b15` |
-| One case at a time | **OPEN** — the largest gap; it is what hid P0-1 |
-| Risk units vs whole-identity suspension | **OPEN** |
+| One case at a time | **DONE** — `campaign_v2.py` models concurrent cases |
+| Risk units vs whole-identity suspension | **DONE** — E6 measures both arms |
 | Strategic commitment and selective reveal | **OPEN** |
-| Outcome-conditioned stopping | **OPEN** |
+| Outcome-conditioned stopping | **DONE** — removed by one-final-draw; E1 measures the effect |
 | Exits during unresolved cases | **OPEN** |
 | Settlement-order permutations | **OPEN** |
 | Pre-aged Sybil inventories | **OPEN** |
@@ -128,11 +128,12 @@ Nothing here is adopted. This is the review's recommendation set.
 | Successful-attacker fee recovery | **OPEN** |
 | Bribery, proposer bias | **OPEN** |
 
-**2 of 14.**
+**5 of 14.**
 
 ### Invariants the review asks the spec to add
 
-None are written yet. All **OPEN**.
+**All eleven written into `state-machine-v2` §9 as I13–I21 plus I4/I12.** None are
+*tested* — there is no implementation to test them against.
 
 - `withdraw` implies zero open liabilities
 - reserved risk units cannot be reused
@@ -159,8 +160,8 @@ None are written yet. All **OPEN**.
 | §6 removal | 0 | 2 |
 | §9 documentation | 6 | 6 |
 | §10 v2.1 proposals | 3.5 | 10 |
-| §11 simulation | 2 | 14 |
-| Invariants | 0 | 11 |
+| §11 simulation | 5 | 14 |
+| Invariants | 11 (written) / 0 (tested) | 11 |
 
 What has been closed is almost entirely **documentation and specification
 mechanics** — real work, and the cheapest tier. Every economic finding is open.

@@ -22,9 +22,10 @@ Nothing here is **implemented**. No Solidity exists for any of v2.
 
 **Read this before the tables.** Three external proposals have landed since the
 revision this file scores (parallel audit cohort; two-ticket confirmation with a
-terminal `CONTESTED`; adaptive phase windows). The specs do not yet describe any of
-them, so the tables below score `main` **as written**, not the design under
-discussion. Where a proposal names a replacement for something units used to close,
+terminal `CONTESTED`; adaptive phase windows). `specs/design-v3.md` now carries the
+adopted direction — challenge-free, two-ticket, terminal `CONTESTED` — but no
+state machine specifies it and nothing is implemented, so the tables below score
+`main` **as written**, not the design under discussion. Where a proposal names a replacement for something units used to close,
 it is noted as *shape agreed* — which means an answer exists and is not yet written
 down, not that the finding is closed.
 

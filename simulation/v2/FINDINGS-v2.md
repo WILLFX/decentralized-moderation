@@ -13,6 +13,17 @@ freeze risk. That asymmetry is the design's own claim about motives.
 honest turnout at every fee tested, and an attacker who beat their population share
 by up to 90%. Both are gone.
 
+> **Provenance warning — §A and §D are produced by risk units.** The senior reviewer
+> has since ruled per-case reservation out. Sections **A** (the `F / D_case = 1.4`
+> ratio, and the viability map that follows from it) and **D** (the flood ceiling of
+> 3,000 concurrent attacker votes) are *caused* by the unit mechanism: A by per-unit
+> freezing, D by the `n_att × K` ceiling. Neither result survives its removal, and
+> **neither may be cited as evidence for an unlimited-concurrency design.** Sections
+> B and C do survive — they follow from one-final-draw and `MAX_ROUNDS` 2, which are
+> independent of units. An unlimited-concurrency variant needs a fresh run covering
+> identity-wide penalty economics, pre-settlement attack waves, mass selective
+> reveal and withdrawal liabilities. That run does not exist yet.
+
 ---
 
 ## What changed, measured

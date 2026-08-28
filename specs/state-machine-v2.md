@@ -11,6 +11,20 @@ derivation this document takes as given.
 **Scope:** the on-chain moderation contract (README §5, component 1). Everything
 else is a client of this specification.
 
+> **Risk units are contested and this document is not authoritative on them.** The
+> senior reviewer has ruled per-case reservation out, which reopens P0-1, P0-4,
+> P0-6 and §4.10 — every finding v2.1 closed with units. Affected here: §2.1
+> (`units`/`unitsReserved`/`RiskUnit`), §2.3, §3.3b, §5.1. Two consequences are
+> not yet reconciled and are recorded rather than papered over: (a) §2.1 states
+> there is no `suspendedUntil` on the identity while §2.3's transition table still
+> uses `SUSPENDED` and `now ≥ suspendedUntil`, which is what the pre-unit rule
+> needed; (b) without per-unit expiry, the freeze/reward ratio reverts from
+> `F / D_case` to `freeze_days × concurrent_cases`, which is *unbounded* under
+> unlimited concurrency and produced zero honest turnout at every fee tested. Any
+> replacement must preserve the property, not the mechanism: **penalties must
+> commute.** A quantity debited from a balance does; an interval added to a
+> deadline does not. See README's divergence note and `v2-audit-checklist.md`.
+
 This document defines the contract as typed state, two interacting state machines
 (per-**moderator** and per-**case**), the transitions between their states, the
 settlement arithmetic, and the invariants that must hold at every block. Parameters
@@ -18,9 +32,9 @@ marked *(working)* are simulation inputs, not final values.
 
 > **Decisions taken here, not in the design document.** Four rules follow from the
 > design but are not stated by it, and each is consequential enough to be visible:
-> §3.4 one vote per moderator per case; §4.6 the verdict is redrawn from the pool at
-> every round close and only the last draw binds; §4.4 a round without quorum
-> extends rather than proceeding; §4.8 a case nobody votes in voids and refunds.
+> §3.4 one vote per moderator per case; §4.6 exactly one draw is taken, after the
+> last round closes; §4.4 a round without quorum extends rather than proceeding;
+> §4.8 a case nobody votes in voids and refunds.
 > Each carries its reasoning inline.
 
 ---
@@ -50,7 +64,7 @@ marked *(working)* are simulation inputs, not final values.
 | `EXIT_COOLDOWN` | 7 days | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 32 | Expected eligible moderators per round. |
 | `MIN_REVEALS` | 5 | Pooled reveals required before a verdict may be drawn. |
-| `MIN_NEW_REVEALS` | 3 | Fresh reveals a challenge round must add before it redraws (§4.7). |
+| `MIN_NEW_REVEALS` | 3 | Fresh reveals a challenge round must add before the case may proceed to the draw (§4.7). |
 | `COMMIT_WINDOW` | 24 h | Commit phase duration. |
 | `REVEAL_WINDOW` | 24 h | Reveal phase duration. |
 | `CHALLENGE_WINDOW` | 3 d (first: 4 d) | Window in which a verdict may be challenged. |
@@ -279,7 +293,7 @@ struct Case {
     uint32  pooledApprove;    // POOLED across all rounds
     uint32  pooledReject;
     uint32  committedThisRound;
-    Outcome provisional;      // verdict of the most recent draw
+    Outcome verdict;          // unset until DRAW; written exactly once (§4.6)
     uint40  finalizedAt;      // pinned penalty start (§5.1)
     // content, metadata, topics, ruleset/guidelines versions: as v1
 }
@@ -316,10 +330,11 @@ never a verdict.
 | `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` and `committedThisRound > 0` | `phaseDeadline = now + REVEAL_WINDOW` |
 | `COMMIT` | `COMMIT` | `now ≥ phaseDeadline` and `committedThisRound == 0` and `extensions < MAX_EXTENSIONS` | `extensions++`; re-arm seed; `phaseDeadline = now + COMMIT_WINDOW`. Threshold grows (§3.3). |
 | `COMMIT` | `VOID` | `now ≥ phaseDeadline` and `committedThisRound == 0` and `extensions == MAX_EXTENSIONS` | §4.8 |
-| `REVEAL` | `DRAW` | `now ≥ phaseDeadline` or all committers revealed | Pool this round's reveals into `pooledApprove`/`pooledReject`. If `pooled < MIN_REVEALS` → §4.4 instead. The outcome seed block was fixed from the **scheduled reveal deadline** when the round opened (M2.5-F10) — closing early does not move it. |
-| `DRAW` | `CHALLENGE` | outcome seed available | Draw `provisional` from the pool (§4.5); **arm the seed for round `r+1`** (M2.5-F7 — it must exist before any challenge can be checked against it); `phaseDeadline = now + CHALLENGE_WINDOW` |
+| `REVEAL` | `TALLY` | `now ≥ phaseDeadline` or all committers revealed | Pool this round's reveals into `pooledApprove`/`pooledReject`. If `pooled < MIN_REVEALS` → §4.4 instead. Publish the running plurality — **a fact, not a verdict** (§4.2) |
+| `TALLY` | `CHALLENGE` | — | **Arm the eligibility seed for round `r+1`** (M2.5-F7 — it must exist before any challenge can be checked against it); `phaseDeadline = now + CHALLENGE_WINDOW` |
 | `CHALLENGE` | `COMMIT` | a challenge is opened (§4.7) and `round + 1 < MAX_ROUNDS` | `round++`; pin the round snapshot (§3.3); pool the challenger's vote (§4.7); `phaseDeadline = now + COMMIT_WINDOW`. The seed was armed on entering `CHALLENGE`, not here |
-| `CHALLENGE` | `FINALIZED` | `now ≥ phaseDeadline` with no challenge, **or** `round + 1 == MAX_ROUNDS` | `finalizedAt = now` — the single pinned penalty start (§5.1) |
+| `CHALLENGE` | `DRAW` | `now ≥ phaseDeadline` with no challenge, **or** `round + 1 == MAX_ROUNDS` | Fix the outcome seed block from the **scheduled challenge-window close** (M2.5-F10) — closing early does not move it, and it is the first moment an outcome seed exists for this case at all |
+| `DRAW` | `FINALIZED` | outcome seed available | Draw `verdict` from the pooled tally (§4.5), **once** (§4.6, I19); `finalizedAt = now` — the single pinned penalty start (§5.1) |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 
 Every transition is permissionless. `DRAW` and `FINALIZED` are reached by anyone
@@ -341,29 +356,39 @@ carried forward.
 
 ```
 N = pooledApprove + pooledReject
-provisional = (outcomeSeed mod N) < pooledApprove ? Approve : Reject
+verdict = (outcomeSeed mod N) < pooledApprove ? Approve : Reject
 ```
 
 Equivalently: **the verdict is one pooled vote, selected uniformly at random.**
 `P(Approve) = pooledApprove / N` exactly.
 
+There is no provisional verdict at any point. The draw is taken once, after the
+last round closes (§4.6).
+
 The lottery is linear in the vote counts, and design-v2 §4.3 proves that linearity
 is forced: no other exponent admits both payout neutrality and a constant pot.
 
-### 4.6 The verdict is redrawn every round; only the last draw binds
+### 4.6 Exactly one draw, after the last round (v2.1)
 
-At each `DRAW` the verdict is drawn afresh from the *whole* pooled tally, replacing
-the previous provisional. The verdict that stands when the case reaches `FINALIZED`
-is the one that settles.
+The draw of §4.5 is taken **once**, against the pooled tally of every round, after
+the final round has closed. No verdict — provisional or otherwise — exists before
+that moment. `outcomeSeed` does not exist before that moment either (§7).
 
-This is what makes a challenge meaningful. The alternative — draw once and let later
-rounds adjust — leaves nothing for a challenger to overturn.
+**Why one draw and not one per round.** A draw at every round close lets a party who
+dislikes the result challenge and one who likes it stop, so `R` rounds approach
+`1 − (1−q)^R`: at `q = 0.3` that is 30%, 51%, 65.7%, 76% over four rounds. The
+attacker converts a minority share into a near-certainty by paying for retries. The
+simulation measured the effect directly — `simulation/v2/FINDINGS-v2.md` §B, where
+the attacker's verdict rate over their population share fell from 1.48 to 1.13 at
+`q = 0.3` once per-round draws were removed.
 
-It does not reopen retry. An attacker must win the **final** draw, and that draw is
-taken at their share of the pool. Winning an intermediate draw achieves nothing if
-anyone challenges it, and any moderator holding the majority of the pool is
-motivated to: their expected payout from challenging is positive precisely when the
-pool favours them.
+**What a challenge means under this rule.** Not *"I saw the outcome and want another
+one."* A challenge is a claim that the pool is not yet good enough to draw from, and
+it is settled by adding evidence to that pool — never by re-rolling a result. The
+earlier framing, that redrawing is what gives a challenger something to overturn,
+had the mechanism backwards: it gave them something to *re-roll*.
+
+**I19** (§9) states this normatively: no final outcome is drawn more than once.
 
 ### 4.7 Challenge
 
@@ -374,7 +399,8 @@ During `CHALLENGE`, a moderator may open a challenge iff:
 3. they are `ACTIVE`;
 4. `round + 1 < MAX_ROUNDS`.
 
-Opening a challenge **is** casting a vote against `provisional`, in public and
+Opening a challenge **is** casting a vote against the **running plurality** — not
+against a verdict, because no verdict exists yet (§4.6) — in public and
 immediately pooled. No bond is posted and no fee is charged: the challenger's stake
 carries the risk through the ordinary freeze, and if the verdict survives to
 `FINALIZED` they are incoherent and suspended like any other losing voter.
@@ -402,10 +428,10 @@ commitment. It therefore:
 - does **not** by itself satisfy the round's participation requirement.
 
 A challenge round needs **both** `pooledApprove + pooledReject ≥ MIN_REVEALS`
-(already true, since a verdict was drawn) **and** `newRevealsThisRound ≥
-MIN_NEW_REVEALS`. Without the second condition a single public challenge vote would
-trigger a fresh verdict against an otherwise unchanged pool — one moderator
-re-rolling a case on their own. `MIN_NEW_REVEALS` is a working value of 3.
+(already true, since the previous round reached quorum) **and**
+`newRevealsThisRound ≥ MIN_NEW_REVEALS`. Without the second condition a single
+public challenge vote would carry an otherwise unchanged pool into the draw — one
+moderator moving a case on their own. `MIN_NEW_REVEALS` is a working value of 3.
 
 ### 4.8 VOID
 
@@ -424,12 +450,12 @@ Triggered by `claim()`, batched, permissionless, bounty to whoever completes it.
 
 ```
 P = fee − CLAIM_BOUNTY
-W = (provisional == Approve) ? pooledApprove : pooledReject
+W = (verdict == Approve) ? pooledApprove : pooledReject
 share = P / W                       // floor division
 remainder = P − W × share           // credited to feePayer, never to voters
 ```
 
-Every voter coherent with `provisional` receives `share`, **whether they voted in
+Every voter coherent with `verdict` receives `share`, **whether they voted in
 round 0 or round 3**. Every incoherent voter is suspended (§5.1).
 
 Equal shares across rounds are deliberate: paying early voters more would price the
@@ -569,7 +595,7 @@ bounds — see README §3.7.
 
 Unchanged from the first architecture except where flat voting simplifies it.
 
-On `SETTLED` with `provisional == Approve`: write one entry per topic, carrying
+On `SETTLED` with `verdict == Approve`: write one entry per topic, carrying
 content hash, metadata hash, approval time, `uncontested`, `fullQuorum`, and the
 pinned ruleset/guidelines versions. On `Reject` for a removal case: delete the
 target and release its reservation.

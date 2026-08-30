@@ -55,7 +55,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `BOND_MIN` | *(open — §10)* | Solvency floor. A moderator with less may not commit. |
 | `PENALTY_DEBIT` `d` | `1.4 × E[P/N]` | Debited from bond for a vote incoherent with the final verdict (design-v3 §6). |
 | `LAMBDA` `λ` | **`= d`** | Bond required per open vote. Derived, not chosen — §2.4. |
-| `REVEAL_BOND` | *(open — §10)* | Refundable per-commit; forfeit on non-reveal (§5.2). |
+| `REVEAL_BOND` | *(open — §10)* | Refundable per-commit; forfeit on non-reveal (§5.2). **Constrained: `REVEAL_BOND ≤ d`** — §2.4. |
 | `CHALLENGE_BOND` | *(open — §10)* | Posted to open round 1. Forfeit per §4.6. |
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
@@ -162,9 +162,30 @@ than bought (design-v3 §6).
 
 > **No moderator can ever owe more than they have posted.**
 
-Every open vote may lose simultaneously, so the bond must cover
-`d · openVoteCount` on top of the floor. Hence `LAMBDA = d`. Any smaller value
-admits insolvency; any larger value rations capacity for no safety gain.
+Every open vote may resolve against the moderator simultaneously, so the bond must
+cover the worst case of every open vote at once. **`LAMBDA` must therefore be at
+least the largest debit a single open vote can produce**, whatever the set of
+debits the specification defines:
+
+```
+LAMBDA ≥ maxDebitPerOpenVote = max(d, REVEAL_BOND)
+```
+
+The two debits an open vote can produce are mutually exclusive: a vote either
+reveals — risking `d` if incoherent, with `REVEAL_BOND` returned — or fails to
+reveal, forfeiting `REVEAL_BOND` and risking no `d`. So the maximum is the larger
+of the two, not their sum.
+
+**Working choice: `LAMBDA = d`, which is correct only under `REVEAL_BOND ≤ d`.**
+That constraint is recorded in §1 and must be re-checked whenever either parameter
+moves. A smaller `LAMBDA` admits insolvency; a larger one rations capacity for no
+safety gain.
+
+**Stated as a property rather than as the value, deliberately.** Any future debit
+this specification adds — a penalty for a new failure mode, a fee charged at
+settlement — enters `maxDebitPerOpenVote` and may raise `LAMBDA`. Writing
+`LAMBDA = d` alone would leave that dependency invisible, which is how a bound
+gets broken by a change somewhere else.
 
 ---
 
@@ -645,7 +666,7 @@ the original draw.
 
 | # | Invariant |
 |---|---|
-| **I1** | No moderator's `bond` can go negative. `λ = d` makes this structural (§2.4, §5.4) |
+| **I1** | No moderator's `bond` can go negative. Structural, given `λ ≥ max(d, REVEAL_BOND)` (§2.4, §5.4). Any new per-vote debit must be added to that maximum |
 | **I2** | Submitting a case reserves, assigns, locks or obligates nothing for any moderator |
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
@@ -675,7 +696,7 @@ the two this design is least free to relax.
 | Item | Note |
 |---|---|
 | `d`, `BOND_MIN`, `LAMBDA` | `λ = d` is derived; `d` itself is not. It sets the confidence threshold at which honest voting is rational |
-| `REVEAL_BOND`, `CHALLENGE_BOND` | Must exceed the value of the option each prices, and stay far below principal |
+| `REVEAL_BOND`, `CHALLENGE_BOND` | Must exceed the value of the option each prices, and stay far below principal. `REVEAL_BOND` is additionally bounded above by `d` (§2.4), or `LAMBDA` must rise to match |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |

@@ -70,6 +70,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `SEED_LAG` | 2 blocks | Between arming and realizing a seed. |
 | `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger (§3.3). |
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
+| `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever triggers **either** draw (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). |
 | `CLAIM_BOUNTY` | 1 % of fee | Paid to whoever triggers finalization. |
 | `MAX_TOPICS` | 5 | Topics per submission. |
 | `FEE_BASE`, `FEE_PER_TOPIC` | *(open — §10)* | Must pay `TARGET_COHORT` voters above gas. |
@@ -131,8 +132,9 @@ open cases settle normally. Nothing removes past judgment.
 | `NONE` | `PENDING` | `stake(MIN_STAKE)` + `postBond(≥ BOND_MIN)` | transfer in; `maturesAt = now + MATURATION` |
 | `PENDING` | `ACTIVE` | `now ≥ maturesAt` | none (predicate) |
 | `ACTIVE` | `ACTIVE` | `postBond(x)` | `bond += x`. Permitted at any time, including to restore solvency |
+| `PENDING` | `EXITING` | `requestExit()` | `exitRequestedAt = now`. **`PENDING` must have an exit path** — without one, stake is locked for `MATURATION` with no way out |
 | `ACTIVE` | `EXITING` | `requestExit()` | `exitRequestedAt = now` |
-| `EXITING` | `NONE` | `withdraw()` | see below |
+| `EXITING` | `NONE` | `withdraw()` | see below; **clears `exitRequestedAt`** |
 
 ```
 withdraw allowed iff  now ≥ exitRequestedAt + EXIT_COOLDOWN
@@ -143,8 +145,11 @@ withdraw allowed iff  now ≥ exitRequestedAt + EXIT_COOLDOWN
 alone let a voter commit, request exit, and withdraw before the case that would
 debit them ever settled. `openVoteCount == 0` cannot be raced.
 
-Withdrawal returns `stake + bond`, less nothing. `track` is retained (§6) — that is
-what makes identity replacement expensive rather than the stake.
+Withdrawal returns `stake + bond`, less nothing, and **clears `exitRequestedAt`**.
+Leaving it set makes `NONE` (`stake == 0`) and `EXITING` (`exitRequestedAt != 0`)
+both hold at once, violating I16, and drops a re-staking identity straight back
+into `EXITING`. `track` is retained (§6) — that is what makes identity replacement
+expensive rather than the stake.
 
 ### 2.4 The solvency predicate, and why `λ = d`
 
@@ -238,6 +243,11 @@ The rule is per *claim*, not per round, because a moderator who could vote twice
 would be counted twice in a pooled tally, and the tally is what the verdict is
 drawn from.
 
+**A commit consumes the allowance, not a reveal.** Scoping it to reveals lets a
+moderator commit in round 0, abandon for the price of `REVEAL_BOND`, and commit
+again in round 1 with the round-0 tally in hand — the ballot secrecy of §4.7 buys
+nothing against someone who can wait and re-enter. I3 is therefore about commits.
+
 ### 3.5 A challenge is a bond, not a vote
 
 **Decision.** Opening round 1 requires posting `CHALLENGE_BOND` and being eligible
@@ -311,10 +321,14 @@ COMMIT ──▶ REVEAL ──▶ DRAW ──▶ PROVISIONAL ──▶ COMMIT₁
                        │            └── window closes, no challenge ───────────┤
                        │                                                       ▼
                        └── reveals < MIN_REVEALS ──▶ UNRESOLVED          FINALIZED
-                                                                               │
-                                                                               ▼
-                                                                            SETTLED
+                           or outcome seed expired      │                      │
+                                                        └──────┬───────────────┘
+                                                               ▼
+                                                            SETTLED
 ```
+
+**Both terminals discharge.** `UNRESOLVED` reaches `SETTLED` too — it releases
+escrows and liabilities without writing a verdict (§4.8). It is not a leaf.
 
 **Two draws exist and only one binds.** `DRAW` produces `provisional`. If a
 challenge opens, `provisional` is discarded and `DRAW_F` produces `verdict` from
@@ -331,17 +345,28 @@ applies no penalty, and moves no value.
 |---|---|---|---|
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; `round = 0`; arm both seeds (§7); `phaseDeadline = now + COMMIT_WINDOW`. **No moderator is selected, reserved, or notified on chain.** |
 | `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW` |
-| `REVEAL` | `DRAW` | `now ≥ phaseDeadline` | pool this round's reveals. If `pooled < MIN_REVEALS` → `UNRESOLVED(NO_QUORUM)` |
-| `DRAW` | `PROVISIONAL` | outcome seed available | draw `provisional` (§4.5); publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `PROVISIONAL` | `COMMIT` | `challenge()` (§3.5) and `now < phaseDeadline` | `round = 1`; `challenger = msg.sender`; escrow `CHALLENGE_BOND`; activate `challengeReserve` into `pot`; arm **both** round-1 seeds; `phaseDeadline = now + COMMIT_WINDOW` |
+| `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` | pool this round's reveals. If `pooled < MIN_REVEALS` → `UNRESOLVED(NO_QUORUM)` |
+| `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | draw `provisional` (§4.5); pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
+| `PROVISIONAL` | `COMMIT` | `challenge()` (§3.5) and `now < phaseDeadline` | `round = 1`; `challenger = msg.sender`; escrow `CHALLENGE_BOND`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm **both** round-1 seeds; `phaseDeadline = now + COMMIT_WINDOW` |
 | `PROVISIONAL` | `FINALIZED` | `now ≥ phaseDeadline`, no challenge | `verdict = provisional`; `finalizedAt = now` |
 | `REVEAL` (r=1) | `DRAW_F` | `now ≥ phaseDeadline` and `revealsThisRound ≥ MIN_CHALLENGE_REVEALS` | pool round-1 reveals |
 | `REVEAL` (r=1) | `FINALIZED` | `now ≥ phaseDeadline` and `revealsThisRound < MIN_CHALLENGE_REVEALS` | §4.6 — `verdict = provisional`; challenger's bond forfeit; round-1 reveals still pool and are still judged against `verdict` |
-| `DRAW_F` | `FINALIZED` | outcome seed available | draw `verdict` from the **pooled** tally; `finalizedAt = now` |
-| any `DRAW` | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS` |
+| `DRAW_F` | `FINALIZED` | outcome seed available | draw `verdict` from the **pooled** tally; pay `DRAW_BOUNTY`; `finalizedAt = now` |
+| any `DRAW` | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
+| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Return every `REVEAL_BOND`, decrement every `openVoteCount`, refund per §4.8. No verdict is written and no incoherence debit is applied** |
 
-Every transition is permissionless. `CLAIM_BOUNTY` pays for the last poke.
+Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
+transition with a hard expiry — and `CLAIM_BOUNTY` for finalization.
+
+**Guards must be pairwise disjoint** (§9 I18). Every row above is qualified by its
+round where the round matters; a state reachable by two rows with different effects
+is a defect, not an implementer's choice.
+
+**Every field in §4.1 must be written or provably preserved by every transition**
+(§9 I19). `revealsThisRound` is the field this rule exists for: without the reset
+above, the round-1 threshold reads round 0's count and §4.6 is unreachable for
+every `reveals₀ ≥ 12`.
 
 **No phase closes early.** Not when every committer has revealed, not when the
 challenge window is quiet, not when a cohort appears complete. §4.4 and §7.2 give
@@ -429,13 +454,32 @@ challenge overturns it.
 
 | Reason | Condition |
 |---|---|
-| `NO_QUORUM` | fewer than `MIN_REVEALS` pooled at a reveal close, after widening |
+| `NO_QUORUM` | fewer than `MIN_REVEALS` pooled at a reveal close |
 | `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) |
 
-In both cases: no verdict, no index entry, no incoherence debit for anyone, reveal
-bonds returned, `pot + challengeReserve` refunded to the submitter, `bounty` and
-`maintenance` retained. Revealers are paid nothing — there is no verdict to be
-coherent with — but they lose nothing either.
+In both cases: no verdict, no index entry, and no incoherence debit for anyone.
+Revealers are paid nothing — there is no verdict to be coherent with — but they
+lose nothing either.
+
+**`UNRESOLVED` discharges through `SETTLED`, like every other terminal.** It is not
+a leaf. An earlier revision made it one, which left `openVoteCount` permanently
+incremented for everyone who had committed — and since `withdraw` requires
+`openVoteCount == 0` (§2.3), their stake and bond were locked forever by the
+design's own intended failure mode. **Every terminal state must discharge every
+liability it created** (§9 I20).
+
+**Value flow, stated exactly** (`challengeReserve` is *moved into* `pot` on
+challenge, §4.3, so refunding both would pay it twice):
+
+```
+never challenged  ->  refund pot + challengeReserve
+challenged        ->  refund pot                      (the reserve is inside it)
+either way        ->  return every REVEAL_BOND
+                      return CHALLENGE_BOND to the challenger — §4.6's forfeit
+                      is for a round that ran and missed its floor, not for a
+                      case that could not resolve
+                      retain finalizationBounty and maintenance
+```
 
 They differ only in what they say about the failure, and that difference is worth
 storing: `NO_QUORUM` is a turnout problem and `NO_RANDOMNESS` is a keeper problem.
@@ -454,9 +498,15 @@ At `SETTLED`, for every revealed vote in either round:
 
 ```
 coherent with verdict    -> bond += share            (§5.3)
-incoherent with verdict  -> bond -= d
-committed, never revealed -> bond -= REVEAL_BOND      (§5.2)
+incoherent with verdict  -> bond -= d                 -> maintenance reserve
+committed, never revealed -> bond -= REVEAL_BOND      -> maintenance reserve (§5.2)
 ```
+
+**Every value removed from `bond` has a named destination, and it is never another
+moderator** (§9 I14, I21). `d`, `REVEAL_BOND` and `CHALLENGE_BOND` all go to the
+maintenance reserve. Routing any of them to the opposing side would create
+punishment farming — an incentive to provoke losses rather than to judge content —
+which design-v2 §5.5 forbids.
 
 **No moderator is suspended for any period.** This replaces v2's per-unit freezing
 and, before it, identity-wide suspension. Three properties follow, and each was a
@@ -512,8 +562,11 @@ correct as the statement of what was given up.
 
 ### 5.4 A debit can never exceed the bond
 
-By §2.4, `bond ≥ BOND_MIN + d · openVoteCount` held at every commit, so the total
-debit from simultaneous losses is covered by construction.
+By §2.4, `bond ≥ BOND_MIN + LAMBDA · openVoteCount` held at every commit, so the
+total debit from simultaneous losses is covered by construction. **Write `LAMBDA`,
+not `d`** — they are equal only under the working choice, and §2.4's own closing
+paragraph is about exactly this: recording the value rather than the property is
+how a bound gets broken by a change made somewhere else.
 
 **The implementation must not clamp.** A `bond -= d` that would underflow indicates
 a broken invariant, not a case to handle gracefully, and clamping would hide it.
@@ -588,8 +641,19 @@ selected.**
 Re-arming lets a party inspect whether a seed is favourable, use it when it is, and
 let it expire when it is not — a free option over outcomes. The one-hour round
 lifecycle makes expiry rare: `blockhash` is available for 256 blocks (~51 minutes)
-and the outcome block sits 10–15 minutes before the deadline. `CLAIM_BOUNTY` pays
-for the poke that reads it.
+and the outcome block sits `FINALIZATION_GRACE` before the hard deadline.
+
+**`DRAW_BOUNTY` pays for the poke that reads it** — not `CLAIM_BOUNTY`, which is
+paid at finalization, a different transition with no expiry. An earlier revision
+named the wrong payment here, leaving the one transition with a hard deadline
+unfunded.
+
+**This closes the option of a better seed; it does not close the option of no seed
+at all.** With `d > E[share]`, every voter on the losing side of a visible tally
+prefers `UNRESOLVED(NO_RANDOMNESS)` — which debits nobody (§4.8) — to a draw they
+expect to lose, and killing the case requires only that all of them do nothing.
+`DRAW_BOUNTY` must therefore exceed the gas of the poke by enough that *some*
+coherent voter calls it, which is a parameter question recorded in §10.
 
 ---
 
@@ -642,7 +706,7 @@ the content.
 ### 8.4 Claim keys and retry
 
 ```
-claimKey = H(actionType, contentHash, metadataHash, canonicalTopics, policyVersion)
+claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 ```
 
 | Terminal | Reservation | Retry |
@@ -651,10 +715,17 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics, policyVersi
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
 | `UNRESOLVED` | not reserved | freely — no draw occurred |
 
-**A policy-version bump must not reopen rejections.** Scoping the reservation to
-`policyVersion` alone makes every ruleset change a scheduled amnesty an attacker
-can wait for. The reservation persists across versions; only a re-review case,
-which is a new claim carrying evidence, reopens one.
+**`policyVersion` is deliberately *not* in the key.** A key containing the version
+cannot produce a reservation that survives a version bump, so the earlier
+definition made every ruleset change a scheduled amnesty an attacker could simply
+wait for — while the paragraph beside it forbade exactly that. **The reservation
+must be keyed on something invariant under a ruleset change**, so the key is the
+content and its claimed topics, nothing else.
+
+The version under which a case was decided is still recorded, on the *case* (§4.1)
+and on the index entry (§8.2), because a reader needs to know which rules produced
+a verdict. It just cannot be part of the identity of the claim. Only a re-review
+case — a new claim carrying evidence — reopens a rejection.
 
 **Correction is a separate claim.** A removal case runs the same engine — commit,
 reveal, three tickets — producing `REMOVED` or `RETAINED`. It is not an appeal of
@@ -666,7 +737,7 @@ the original draw.
 
 | # | Invariant |
 |---|---|
-| **I1** | No moderator's `bond` can go negative. Structural, given `λ ≥ max(d, REVEAL_BOND)` (§2.4, §5.4). Any new per-vote debit must be added to that maximum |
+| **I1** | No moderator's `bond` can go negative. Given `λ ≥ max(d, REVEAL_BOND)` (§2.4, §5.4), this holds for **per-vote** debits. **It does not yet hold for `CHALLENGE_BOND`**, which is per-moderator and has no `λ` behind it — open, §10. The extension rule is "any new debit **against `bond`**", not "any new per-vote debit": the narrower wording is what let `CHALLENGE_BOND` through |
 | **I2** | Submitting a case reserves, assigns, locks or obligates nothing for any moderator |
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
@@ -683,9 +754,21 @@ the original draw.
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists per claim |
+| **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
+| **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
+| **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
+| **I21** | Every value removed from `bond` has a named destination, and that destination is never another moderator |
 
 I2 and I12 are inherited verbatim from v2 (I12 and the no-certainty rule) and are
 the two this design is least free to relax.
+
+**I18–I21 are generalizations, not additions.** Each was written because a specific
+defect of this document was an instance of it: a duplicated `REVEAL` guard (I18), a
+per-round counter never reset (I19), a terminal state with no discharge path that
+locked stake permanently (I20), and a debit with no stated destination (I21).
+Stating the class rather than the instance is the difference between a fix and a
+property — the same lesson as the freeze bound, which was clamped at two call sites
+while a third existed.
 
 ---
 
@@ -700,6 +783,10 @@ the two this design is least free to relax.
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
+| `CHALLENGE_BOND` vs `BOND_MIN` | **Unresolved and it breaks I1.** `CHALLENGE_BOND` is debited from `bond` without a `λ` behind it, so `CHALLENGE_BOND > BOND_MIN` drives `bond` negative — and §5.4 mandates a revert, which would brick settlement for every other voter in that case. Needs either a relation between the two parameters or a separate escrow |
+| `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which is a function of the active-moderator count — the quantity §3.6 says cannot be maintained on chain. Either `T` is static and cohort size grows with the registry, or P0-9 returns. `TARGET_COHORT`, `MIN_REVEALS` and `MIN_CHALLENGE_REVEALS` are all calibrated against it |
+| Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |
+| Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |
 
 **Inherited code (§Scope):**
 

@@ -380,7 +380,7 @@ consequence cannot coexist without some per-case price.
 ```
 commit:     require(bond >= MIN + λ · openVoteCount);  openVoteCount++
 lost vote:  bond -= d
-non-reveal: bond -= d
+non-reveal: bond -= REVEAL_BOND        // not d — state-machine-v3 §5.2
 settle:     openVoteCount--
 withdraw:   require(openVoteCount == 0)
 ```

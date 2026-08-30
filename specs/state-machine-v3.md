@@ -32,7 +32,11 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > - §4.6 — `MIN_CHALLENGE_REVEALS` is removed; `CHALLENGE_BOND` settles on
 >   whether the verdict moved, not on turnout.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
->   `NO_QUORUM` and `VOID` states.
+>   `NO_QUORUM` and `VOID` states. §4.8 later split the reason codes, because
+>   they carry different debits and different retry rules.
+> - §4.8 / §5.2 — **the quorum gate is on commits, not reveals**, and
+>   `REVEAL_BOND = d` makes revealing weakly dominant. Together these remove the
+>   marginal revealer's choice between two terminal classes.
 > - §5.1 — **penalties are balance debits, never time.** No moderator is ever
 >   suspended; there is no `SUSPENDED` state anywhere in this document.
 > - §5.4 — a debit that would exceed the posted bond is impossible by
@@ -63,14 +67,16 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `BOND_MIN` | *(open — §10)* | Solvency floor. A moderator with less may not commit. |
 | `PENALTY_DEBIT` `d` | `1.4 × E[P/N]` | Debited from bond for a vote incoherent with the final verdict (design-v3 §6). |
 | `LAMBDA` `λ` | **`= d`** | Bond required per open vote. Derived, not chosen — §2.4. |
-| `REVEAL_BOND` | *(open — §10)* | Refundable per-commit; forfeit on non-reveal (§5.2). **Constrained: `REVEAL_BOND ≤ d`** — §2.4. |
+| `REVEAL_BOND` | **`= d`** | Covered at commit, debited on non-reveal (§5.2). **Not a free parameter** — §2.4 caps it at `d`, §5.2's dominance argument floors it at `d`. The two meet at one point. |
 | `CHALLENGE_BOND` | *(open — §10)* | Posted to register a challenge. Returned if the final verdict differs from the provisional, forfeit otherwise (§4.6). |
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 40 | Expected eligible moderators per round. |
-| `MIN_REVEALS` | 16 | Pooled reveals required before any verdict may be drawn. |
+| `MIN_COMMITS` | 16 | Commits required at commit close, or the case ends `UNRESOLVED(NO_TURNOUT)` (§4.8). **This is the quorum gate** — decided before anyone can see a tally. |
+| `MIN_REVEALS` | 16 | Pooled reveals required before any verdict may be drawn. A shortfall here is a *withholding* event, not a turnout event (§4.8). |
 | ~~`MIN_CHALLENGE_REVEALS`~~ | — | **Removed, §4.6.** §4.5's single-randomness rule makes an unchanged tally yield an identical verdict, so the floor has no job. |
 | `SUPER_QUORUM` | *(open)* | Reveals required for the strict assurance class (§8.3). |
+| `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(WITHHELD)` may be resubmitted (§8.4). |
 | `COMMIT_WINDOW` | 20 min | Per round. |
 | `REVEAL_WINDOW` | 20 min | Per round. |
 | `FINALIZATION_GRACE` | 10 min | Between outcome block and hard deadline. |
@@ -393,7 +399,7 @@ struct Case {
     uint8   phase;
     uint8   round;             // 0 or 1
     uint8   terminal;          // APPROVED | REJECTED | UNRESOLVED | none
-    uint8   unresolvedReason;  // NO_QUORUM | NO_RANDOMNESS
+    uint8   unresolvedReason;  // NO_TURNOUT | WITHHELD | NO_RANDOMNESS
     uint128 pot;               // initial pot; grows by the reserve on challenge
     uint128 challengeReserve;  // escrowed; refunded or activated
     uint40  phaseDeadline;
@@ -401,6 +407,7 @@ struct Case {
     uint40  outcomeSeedBlock;  // armed at round open, from the SCHEDULED deadline
     uint32  pooledApprove;     // POOLED across rounds, never reset
     uint32  pooledReject;
+    uint32  commitsThisRound;
     uint32  revealsThisRound;
     uint32  reveals0;          // round-0 reveal count, recorded for §8.3
     uint128 u0; uint128 u1;    // the claim's three uniforms (§4.5), realized
@@ -449,8 +456,10 @@ applies no penalty, and moves no value.
 | From | To | Trigger | Effect |
 |---|---|---|---|
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; `round = 0`; arm both seeds (§7); `phaseDeadline = now + COMMIT_WINDOW`. **No moderator is selected, reserved, or notified on chain.** |
-| `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW` |
-| `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` | pool this round's reveals. If `pooled < MIN_REVEALS` → `UNRESOLVED(NO_QUORUM)` |
+| `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = now + REVEAL_WINDOW` |
+| `COMMIT` | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
+| `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` and `pooled ≥ MIN_REVEALS` | pool this round's reveals |
+| `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled < MIN_REVEALS` | `unresolvedReason = WITHHELD` — commits cleared `MIN_COMMITS` and reveals did not (§4.8) |
 | `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | **realize and store `u[0..2]`** (§4.5); evaluate `provisional`; pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
 | `PROVISIONAL` | `PROVISIONAL` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `PROVISIONAL` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm both round-1 seeds **from this scheduled close** (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
@@ -648,16 +657,39 @@ challenge overturns it.
 ### 4.8 `UNRESOLVED`
 
 **Decision.** One terminal state with a reason code, rather than separate
-`NO_QUORUM` and `VOID` states as in v2.
+`NO_QUORUM` and `VOID` states as in v2. The code is not a label: it determines the
+debits and the retry rule.
 
-| Reason | Condition |
-|---|---|
-| `NO_QUORUM` | fewer than `MIN_REVEALS` pooled at a reveal close |
-| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) |
+| Reason | Condition | Steerable? | Retry |
+|---|---|---|---|
+| `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** | free, full refund |
+| `WITHHELD` | commits cleared the gate, `pooled < MIN_REVEALS` at reveal close | yes | claim reserved for `RETRY_COOLDOWN`; a fresh nonrecoverable fee |
+| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | partly (§10, F16) | see §8.4 |
 
-In both cases: no verdict, no index entry, and no incoherence debit for anyone.
-Revealers are paid nothing — there is no verdict to be coherent with — but they
-lose nothing either.
+**The quorum gate is on commits, not reveals, and that is the whole fix for the
+marginal-revealer problem.** Commits are made blind — the tally does not exist yet
+— so no committer can steer the gate toward a result they cannot see. Reveals are
+plaintext and the running tally is public, so a gate on reveals handed the
+`MIN_REVEALS − 1`-th revealer a free choice between two different terminal
+processes: reveal and take a draw at a computable `f(a)`, or withhold and get a
+result-free, freely-retryable `UNRESOLVED`. The price of converting an unfavourable
+draw into a fresh attempt was one `REVEAL_BOND`.
+
+Splitting the failure by cause removes that. A genuine turnout failure is decided
+before anyone knows anything, and is free to retry because nobody could have caused
+it. A reveal-stage shortfall is by construction a *withholding* event — enough
+people committed — so it costs the withholders (below) and it does not hand the
+submitter's claim back for free.
+
+In every case: no verdict, no index entry, and no *incoherence* debit for anyone —
+there is no verdict to be incoherent with. Revealers are paid nothing and lose
+nothing.
+
+**Non-revealers are debited anyway.** `REVEAL_BOND` is charged whenever a commit
+is not opened, in every terminal state including this one. Failing to complete a
+voluntary commitment is not contingent on whether the case reached a verdict, and
+an earlier revision that waived it here made withholding free in exactly the state
+withholding produces.
 
 **`UNRESOLVED` discharges through `SETTLED`, like every other terminal.** It is not
 a leaf. An earlier revision made it one, which left `openVoteCount` permanently
@@ -679,9 +711,9 @@ either way        ->  return every REVEAL_BOND
                       retain finalizationBounty and maintenance
 ```
 
-They differ only in what they say about the failure, and that difference is worth
-storing: `NO_QUORUM` is a turnout problem and `NO_RANDOMNESS` is a keeper problem.
-`NO_QUORUM` is freely retryable (design-v3 §8) precisely because no draw occurred.
+The reason code is load-bearing rather than diagnostic: it decides the debits and
+the retry rule. `NO_TURNOUT` is a market problem, `WITHHELD` is an attack surface,
+`NO_RANDOMNESS` is a keeper problem, and they cannot share a treatment.
 
 **`UNRESOLVED` must never be reachable from an under-quorum pool by approving it.**
 A bounded failure is correct; an unsafe success is not.
@@ -747,6 +779,37 @@ has ever permitted.
 This is a *price* on the free option that commit–reveal creates, not a
 reservation: it debits nothing at commit, caps nothing, and enters §2.4 only
 through `LAMBDA`'s `max(d, REVEAL_BOND)` term.
+
+**`REVEAL_BOND = d` is derived, not chosen — and it is forced from both sides.**
+
+A committer holding belief `p` that they are coherent with the eventual verdict
+compares:
+
+```
+reveal    ->  p · share − (1 − p) · d
+withhold  ->  − REVEAL_BOND
+
+reveal is at least as good  iff  p · share − (1 − p) · d + REVEAL_BOND ≥ 0
+```
+
+At `REVEAL_BOND = d` the left side collapses to `p · (share + d)`, which is
+non-negative for every `p`. **Revealing weakly dominates withholding at every
+belief, every tally and every turnout** — no computation of `f(a)`, no view of the
+running count, and no assumption about anyone else's behaviour. Verified across
+`share`/`d` combinations: the minimum of `reveal − withhold` over `p ∈ [0,1]` is
+exactly 0 at `REVEAL_BOND = d`, and strictly negative for any smaller value.
+
+So `REVEAL_BOND ≥ d` is required for dominance, and §2.4 requires `REVEAL_BOND ≤ d`
+or `LAMBDA` must rise above `d`. **The two constraints meet at one point.**
+`REVEAL_BOND` is not a free parameter and should not appear in a simulation sweep.
+
+**What this closes and what it does not.** It closes selective reveal for anyone
+optimizing *inside* the protocol's payoffs — the ordinary case, and the one O5 and
+§11's "strategic commitment" were about. It does not close it for an attacker whose
+prize is a listing, which is external and cannot be priced against. Against those,
+the defence is §4.8's `WITHHELD` treatment: the debit still lands, the claim is not
+handed back, and dragging reveals below `MIN_REVEALS` costs `d` per identity
+withheld.
 
 ### 5.3 Payment
 
@@ -936,7 +999,9 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 |---|---|---|
 | `APPROVED` | reserved while listed | — |
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
-| `UNRESOLVED` | not reserved | freely — no draw occurred |
+| `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no draw occurred and nobody could have caused it |
+| `UNRESOLVED(WITHHELD)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, at a fresh nonrecoverable fee |
+| `UNRESOLVED(NO_RANDOMNESS)` | see §10 (F8) | open |
 
 **`policyVersion` is deliberately *not* in the key.** A key containing the version
 cannot produce a reservation that survives a version bump, so the earlier
@@ -979,6 +1044,8 @@ the original draw.
 | **I17** | At most one challenge round exists per claim |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `liabilities()` is the single point of truth for claims on `bond`. Adding any debit to this specification means adding a term to it; no test may use a narrower expression |
+| **I24** | No single revealer's decision changes the terminal *class* of a case. Every gate that selects between terminal classes is evaluated against values fixed before the tally is observable |
+| **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
@@ -1004,7 +1071,8 @@ while a third existed.
 | Item | Note |
 |---|---|
 | `d`, `BOND_MIN`, `LAMBDA` | `λ = d` is derived; `d` itself is not. It sets the confidence threshold at which honest voting is rational |
-| `REVEAL_BOND`, `CHALLENGE_BOND` | Must exceed the value of the option each prices, and stay far below principal. `REVEAL_BOND` is additionally bounded above by `d` (§2.4), or `LAMBDA` must rise to match |
+| ~~`REVEAL_BOND`~~ | **Closed.** `= d`, forced from above by §2.4 and from below by §5.2's dominance argument. Not a sweep parameter |
+| `RETRY_COOLDOWN` | New, §8.4. Must exceed the time an attacker gains from forcing `WITHHELD`, without stranding an honest submitter whose case simply had bad luck |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |

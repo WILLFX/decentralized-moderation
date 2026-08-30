@@ -395,7 +395,9 @@ consequence cannot coexist without some per-case price.
 **The proposal that satisfies all three: balance debits against a posted bond.**
 
 ```
-commit:     require(bond >= MIN + λ · openVoteCount);  openVoteCount++
+commit:     require(bond >= MIN + liabilities(m) + λ);  openVoteCount++
+            // liabilities(m) covers EVERY claim on bond, not just open votes
+            // — state-machine-v3 §2.4, I23
 lost vote:  bond -= d
 non-reveal: bond -= REVEAL_BOND        // not d — state-machine-v3 §5.2
 settle:     openVoteCount--

@@ -103,6 +103,7 @@ struct Moderator {
     uint128 stake;           // 0 or MIN_STAKE
     uint128 bond;            // posted, at risk, debited by penalties
     uint32  openVoteCount;   // committed votes whose case has not settled
+    uint32  openChallenges;  // registered challenges not yet resolved (§2.4)
     uint40  maturesAt;
     uint40  exitRequestedAt;
     uint32  trackEpoch;
@@ -146,12 +147,14 @@ open cases settle normally. Nothing removes past judgment.
 
 ```
 withdraw allowed iff  now ≥ exitRequestedAt + EXIT_COOLDOWN
-                 and  openVoteCount == 0
+                 and  liabilities(m) == 0                   (§2.4)
 ```
 
 **The liability count is exact where a duration guess is not** (P0-5). A cooldown
 alone let a voter commit, request exit, and withdraw before the case that would
-debit them ever settled. `openVoteCount == 0` cannot be raced.
+debit them ever settled. It is `liabilities(m)`, not `openVoteCount`, because a
+registered challenge is a claim on `bond` that no vote counter sees — the same
+omission that broke I1 (§2.4).
 
 Withdrawal returns `stake + bond`, less nothing, and **clears `exitRequestedAt`**.
 Leaving it set makes `NONE` (`stake == 0`) and `EXITING` (`exitRequestedAt != 0`)
@@ -159,46 +162,64 @@ both hold at once, violating I16, and drops a re-staking identity straight back
 into `EXITING`. `track` is retained (§6) — that is what makes identity replacement
 expensive rather than the stake.
 
-### 2.4 The solvency predicate, and why `λ = d`
+### 2.4 Solvency: one liability function, used in three places
+
+**Decision.** Every claim on `bond` is a term in a single function, and that
+function appears in every test that creates or releases a claim.
 
 ```
-mayCommit(m)  iff  m is ACTIVE
-                and  m.bond ≥ BOND_MIN + LAMBDA · m.openVoteCount
+liabilities(m) = LAMBDA · m.openVoteCount            (§5.1 — d or REVEAL_BOND)
+               + CHALLENGE_BOND · m.openChallenges   (§4.6)
+
+mayCommit(m)     iff  ACTIVE and bond ≥ BOND_MIN + liabilities(m) + LAMBDA
+mayChallenge(m)  iff  ACTIVE and bond ≥ BOND_MIN + liabilities(m) + CHALLENGE_BOND
+withdraw(m)      iff  cooldown elapsed and liabilities(m) == 0
 ```
 
-**This is a price, not a reservation.** No case reserves anything from any
-moderator; committing debits nothing; a moderator with more bond may vote in more
-cases with no ceiling; and bond grows from rewards, so capacity is *earned* rather
-than bought (design-v3 §6).
+**Nothing is transferred by any of these.** `liabilities()` is a *covered amount*,
+not an escrow: no value leaves `bond` at commit or at challenge registration, and a
+moderator who posts more bond can do more of both with no ceiling. What the tests
+guarantee is that the balance can absorb every outstanding claim at once.
 
-`LAMBDA` is derived, not chosen. Require the property:
+**The single-function form is the point, not the arithmetic.** An earlier revision
+wrote the commit test against `openVoteCount` alone, and the withdrawal test
+against `openVoteCount == 0` alone. `CHALLENGE_BOND` is not attached to a vote, so
+it appeared in neither: a moderator with `bond = BOND_MIN + 3λ` and three open
+votes could register a challenge, then lose all three, and land at
+`BOND_MIN − CHALLENGE_BOND` — negative whenever `CHALLENGE_BOND > BOND_MIN`. §5.4
+mandates a revert rather than a clamp, so **that moderator's presence would brick
+the settlement batch for every other voter in the case**, and by §4.8's discharge
+path pin their `openVoteCount` too. One moderator, one challenge, one case frozen
+for everybody in it.
 
-> **No moderator can ever owe more than they have posted.**
+I1's extension clause had been written as *"any new **per-vote** debit"*, which is
+exactly the wording that let a per-moderator debit through. The rule is now: **any
+value the specification can remove from `bond` is a term in `liabilities()`**, and
+`liabilities()` is used unchanged in all three tests above (I1, I13, I23).
 
-Every open vote may resolve against the moderator simultaneously, so the bond must
-cover the worst case of every open vote at once. **`LAMBDA` must therefore be at
-least the largest debit a single open vote can produce**, whatever the set of
-debits the specification defines:
+**Why `λ = d` is the working value.** A single open vote can produce two debits and
+they are mutually exclusive — a vote either reveals, risking `d` if incoherent, or
+fails to reveal, forfeiting `REVEAL_BOND` and risking no `d`. So its coefficient is
+the larger, not the sum:
 
 ```
 LAMBDA ≥ maxDebitPerOpenVote = max(d, REVEAL_BOND)
 ```
 
-The two debits an open vote can produce are mutually exclusive: a vote either
-reveals — risking `d` if incoherent, with `REVEAL_BOND` returned — or fails to
-reveal, forfeiting `REVEAL_BOND` and risking no `d`. So the maximum is the larger
-of the two, not their sum.
+`LAMBDA = d` therefore holds only under **`REVEAL_BOND ≤ d`**, recorded in §1 and
+to be re-checked whenever either parameter moves. A smaller `LAMBDA` admits
+insolvency; a larger one rations capacity for no safety gain.
 
-**Working choice: `LAMBDA = d`, which is correct only under `REVEAL_BOND ≤ d`.**
-That constraint is recorded in §1 and must be re-checked whenever either parameter
-moves. A smaller `LAMBDA` admits insolvency; a larger one rations capacity for no
-safety gain.
+**This is a price, not a reservation** — the distinction that separates it from the
+withdrawn risk units. Risk units rationed a fixed allowance `K` that no amount of
+capital could extend, and a *case* consumed one from a moderator. Here nothing is
+consumed by a case, only by a moderator's own voluntary act, and the limit moves
+with the bond. I2 forbids the protocol reserving from a moderator; it does not
+forbid a moderator covering their own commitment.
 
-**Stated as a property rather than as the value, deliberately.** Any future debit
-this specification adds — a penalty for a new failure mode, a fee charged at
-settlement — enters `maxDebitPerOpenVote` and may raise `LAMBDA`. Writing
-`LAMBDA = d` alone would leave that dependency invisible, which is how a bound
-gets broken by a change somewhere else.
+**`CHALLENGE_BOND` needs no relation to `BOND_MIN`.** Requiring it to be *covered*
+at registration is strictly better than constraining its size, because the coverage
+test scales with whatever the parameter turns out to be.
 
 ---
 
@@ -431,11 +452,11 @@ applies no penalty, and moves no value.
 | `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW` |
 | `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` | pool this round's reveals. If `pooled < MIN_REVEALS` → `UNRESOLVED(NO_QUORUM)` |
 | `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | **realize and store `u[0..2]`** (§4.5); evaluate `provisional`; pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `PROVISIONAL` | `PROVISIONAL` | `challenge()` (§3.5): caller is `ACTIVE`, `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; escrow `CHALLENGE_BOND`. No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
+| `PROVISIONAL` | `PROVISIONAL` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `PROVISIONAL` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm both round-1 seeds **from this scheduled close** (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
 | `PROVISIONAL` | `FINALIZED` | `now ≥ phaseDeadline` and `challenger == 0` | `verdict = provisional`; `finalizedAt = now` |
 | `REVEAL` **(r=1)** | `DRAW_F` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6) |
-| `DRAW_F` | `FINALIZED` | — | evaluate the stored `u` against the **pooled** tally (§4.5); settle `CHALLENGE_BOND` per §4.6; `finalizedAt = now`. **No seed is read here** — the claim's randomness was realized at the round-0 draw |
+| `DRAW_F` | `FINALIZED` | — | evaluate the stored `u` against the **pooled** tally (§4.5); `finalizedAt = now`. **No seed is read here** — the claim's randomness was realized at the round-0 draw. `CHALLENGE_BOND` settles at `SETTLED` with every other liability (§4.6) |
 | `DRAW` **(r=0)** | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **Reachable at the round-0 draw only** — `DRAW_F` reads no seed |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 | **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Return every `REVEAL_BOND`, decrement every `openVoteCount`, refund per §4.8. No verdict is written and no incoherence debit is applied** |
@@ -596,9 +617,14 @@ three defects of its own:
 **`CHALLENGE_BOND` is now settled on the outcome, not on turnout:**
 
 ```
-final verdict != provisional  ->  bond returned to the challenger
-final verdict == provisional  ->  bond forfeit to the maintenance reserve
+final verdict != provisional  ->  no debit
+final verdict == provisional  ->  bond -= CHALLENGE_BOND, to the maintenance reserve
+either way                    ->  openChallenges--          (§2.4)
 ```
+
+Nothing was transferred at registration, so "returned" means only that the
+liability clears. Both branches run at `SETTLED` alongside every other debit, so
+they inherit §5.1's commutativity and §4.8's discharge guarantee.
 
 The challenger bet that the pool would move. It is a bet on evidence, which is what
 they are being asked to supply, and it prices a frivolous challenge without making
@@ -702,8 +728,16 @@ must be written, read and expired. A debit is done when it is applied.
 
 ### 5.2 Non-reveal
 
-`REVEAL_BOND` is posted at commit and returned on a valid reveal. A committer who
-never reveals forfeits it **to the maintenance reserve**.
+`REVEAL_BOND` is **covered** at commit, not posted. Nothing is transferred: §2.4's
+`mayCommit` test requires the balance to be able to absorb it, and a committer who
+never reveals is then debited it **to the maintenance reserve**. A committer who
+reveals is debited nothing — there is no return, because there was no transfer.
+
+An earlier revision said "posted at commit" two sentences before "debits nothing at
+commit". Those cannot both be true of one balance, and the ambiguity decided
+whether `max(d, REVEAL_BOND)` was the right coefficient or whether committing
+carried an unstated liquid-capital requirement outside `bond`. It is covered, not
+moved, so the coefficient stands and committing is free.
 
 It must not go to the opposing voters. Transferring a penalty to the other side
 creates punishment farming — an incentive to provoke non-reveals rather than to
@@ -711,8 +745,8 @@ judge content — which design-v2 §5.5 forbids and which no version of this des
 has ever permitted.
 
 This is a *price* on the free option that commit–reveal creates, not a
-reservation: it debits nothing at commit, caps nothing, and does not appear in
-`openVoteCount`'s solvency test beyond the vote itself.
+reservation: it debits nothing at commit, caps nothing, and enters §2.4 only
+through `LAMBDA`'s `max(d, REVEAL_BOND)` term.
 
 ### 5.3 Payment
 
@@ -734,11 +768,15 @@ correct as the statement of what was given up.
 
 ### 5.4 A debit can never exceed the bond
 
-By §2.4, `bond ≥ BOND_MIN + LAMBDA · openVoteCount` held at every commit, so the
-total debit from simultaneous losses is covered by construction. **Write `LAMBDA`,
-not `d`** — they are equal only under the working choice, and §2.4's own closing
-paragraph is about exactly this: recording the value rather than the property is
-how a bound gets broken by a change made somewhere else.
+By §2.4, `bond ≥ BOND_MIN + liabilities(m)` held after every operation that added
+a claim, so the total debit from every outstanding claim resolving against the
+moderator at once is covered by construction. **Write `liabilities(m)`, not
+`LAMBDA · openVoteCount` and certainly not `d · openVoteCount`** — the narrower
+forms are equal only under today's parameter choices and today's set of debits, and
+recording the value rather than the property is how a bound gets broken by a change
+made somewhere else. It already happened twice here: once when `REVEAL_BOND` was
+omitted from `LAMBDA`, and once when `CHALLENGE_BOND` was omitted from the
+liability function entirely.
 
 **The implementation must not clamp.** A `bond -= d` that would underflow indicates
 a broken invariant, not a case to handle gracefully, and clamping would hide it.
@@ -922,7 +960,7 @@ the original draw.
 
 | # | Invariant |
 |---|---|
-| **I1** | No moderator's `bond` can go negative. Given `λ ≥ max(d, REVEAL_BOND)` (§2.4, §5.4), this holds for **per-vote** debits. **It does not yet hold for `CHALLENGE_BOND`**, which is per-moderator and has no `λ` behind it — open, §10. The extension rule is "any new debit **against `bond`**", not "any new per-vote debit": the narrower wording is what let `CHALLENGE_BOND` through |
+| **I1** | No moderator's `bond` can go negative. Structural: every value the specification can remove from `bond` is a term in `liabilities()` (§2.4), and every operation that adds a claim tests `bond ≥ BOND_MIN + liabilities(m)` after the addition |
 | **I2** | Submitting a case reserves, assigns, locks or obligates nothing for any moderator |
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
@@ -934,12 +972,13 @@ the original draw.
 | **I10** | No phase closes before its `phaseDeadline` |
 | **I11** | Under-quorum can produce `UNRESOLVED` but never `APPROVED` |
 | **I12** | No tally admits a risk-free outcome: every side with ≥ 1 revealed vote has non-zero probability. **Every revealed vote in either round is counted in the tally the binding verdict is evaluated against** — no vote is judged against a tally it was excluded from |
-| **I13** | `withdraw` implies `openVoteCount == 0` |
+| **I13** | `withdraw` implies `liabilities(m) == 0` — *every* outstanding claim discharged, not only open votes |
 | **I14** | A forfeited bond or debit is never credited to another moderator |
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists per claim |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
+| **I23** | `liabilities()` is the single point of truth for claims on `bond`. Adding any debit to this specification means adding a term to it; no test may use a narrower expression |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
@@ -969,7 +1008,7 @@ while a third existed.
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
-| `CHALLENGE_BOND` vs `BOND_MIN` | **Unresolved and it breaks I1.** Now the only constraint on who may register a challenge (§3.5), so it prices spam as well as backing the round. `CHALLENGE_BOND` is debited from `bond` without a `λ` behind it, so `CHALLENGE_BOND > BOND_MIN` drives `bond` negative — and §5.4 mandates a revert, which would brick settlement for every other voter in that case. Needs either a relation between the two parameters or a separate escrow |
+| `CHALLENGE_BOND` | Sizing only. §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and I1 is structural again. It is the only constraint on who may register a challenge (§3.5), so it must price a frivolous challenge while staying low enough that a single-identity dissenter can afford one |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which is a function of the active-moderator count — the quantity §3.6 says cannot be maintained on chain. Either `T` is static and cohort size grows with the registry, or P0-9 returns. `TARGET_COHORT` and `MIN_REVEALS` are both calibrated against it |
 | Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |

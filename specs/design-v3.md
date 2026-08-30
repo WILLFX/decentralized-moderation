@@ -2,11 +2,14 @@
 
 **Status:** Design. Not specified in `state-machine-*`, not implemented.
 **Supersedes:** the challenge architecture of `design-v2.md` §2.4 and §4.6, and the
-risk units of revision v2.1. Everything in `design-v2.md` §4 (the payout
-derivation) survives and is load-bearing here.
+risk units of revision v2.1. `design-v2.md` §4.2's neutrality theorem is
+**no longer a design requirement** (§5); it remains correct and is now the
+statement of what this design gives up.
+**Revision:** v3.1 — three tickets and a 2-of-3 majority replace two tickets and a
+terminal `CONTESTED`; exact cash neutrality is deliberately abandoned (§5).
 **Provenance:** the confirmation rule and the challenge-free lifecycle are the
-senior reviewer's proposal. The costs in §4 and §6, and the decisions in §7 and §8,
-are this project's. §10 attributes each.
+senior reviewer's proposal. The costs in §4 and §5, and the decisions in §7 and §8,
+are this project's. §11 attributes each.
 
 ---
 
@@ -19,7 +22,7 @@ content was expensive to inspect.
 
 The replacement is **positive assurance**: a case finalizes because enough
 independently sampled reviewers explicitly reviewed it, committed before seeing any
-tally, and the sample was then asked twice.
+tally, and the sample was then interrogated three times.
 
 The four days were never cryptographic. They were a notification budget, and
 notification is cheaper bought directly.
@@ -35,19 +38,34 @@ Correction moves to §8.
 ## 2. Mechanism
 
 One notified cohort. One commit–reveal round. One hard quorum. One fixed outcome
-seed. **Two ballots drawn from the revealed tally, without replacement.**
+seed. **Three ballot-side draws from the revealed tally, with replacement; the
+side on two of three is the verdict.**
 
 ```
 SUBMIT -> COMMIT -> REVEAL -> FINALIZABLE -> one of:
 
-    both tickets Approve   ->  APPROVED
-    both tickets Reject    ->  REJECTED
-    tickets disagree       ->  CONTESTED
-    reveals < MIN_REVEALS  ->  NO_QUORUM
+    two or three tickets Approve  ->  APPROVED
+    two or three tickets Reject   ->  REJECTED
+    reveals < MIN_REVEALS         ->  NO_QUORUM
 ```
 
-All four are terminal. There is no challenge state, no round counter, no
-provisional verdict, and no post-draw appeal of the same claim.
+All three are terminal. There is no challenge state, no round counter, no
+provisional verdict, no `CONTESTED` state, and no post-draw appeal of the same
+claim.
+
+> **Revision note.** An earlier draft of this document used *two* tickets without
+> replacement, with disagreement producing a terminal `CONTESTED`. That is
+> withdrawn. §5 explains why: the contested branch could not carry a penalty
+> without breaking payout neutrality, which made forcing disagreement a censor's
+> cheapest attack. Three tickets remove the branch by always producing a verdict.
+> The cost is recorded in §4 and §5 rather than absorbed silently.
+
+**Sampling is with replacement, and that is load-bearing.** Drawn without
+replacement, a side holding one revealed vote can never occupy two tickets, so a
+31–1 tally would decide with *certainty* — violating the rule that no stake
+majority buys a risk-free outcome. With replacement the one-vote side still wins
+0.287% of the time. Tickets carry no payout entitlement of their own (§5), so
+sampling the same ballot twice creates no windfall.
 
 Eligibility is unchanged from v2: passive, hash-based, `H(m, c, r, seed) <
 threshold`, evaluated off-chain by each moderator. **Submitting a case still
@@ -57,139 +75,179 @@ was abandoned and it is not negotiable here.
 
 ## 3. The confirmation rule
 
-Let `A` be revealed Approve votes, `R` revealed Reject, `N = A + R`. Two distinct
-ballots are sampled uniformly without replacement:
+Let `A` be revealed Approve votes, `R` revealed Reject, `N = A + R`, `a = A/N`.
+Three ticket sides are drawn independently, each Approve with probability `a`. The
+side appearing on at least two becomes the verdict:
 
 ```
-P(APPROVED)  = A(A-1) / (N(N-1))
-P(REJECTED)  = R(R-1) / (N(N-1))
-P(CONTESTED) = 2AR    / (N(N-1))
+f(a) = P(APPROVED) = 3a² − 2a³          P(REJECTED) = 1 − f(a)
 ```
 
-These sum to 1: `A² − A + R² − R + 2AR = (A+R)² − (A+R) = N(N−1)`.
-
-For large `N` with `a = A/N`, they approach `a²`, `(1−a)²` and `2a(1−a)`.
-
-**Implementation needs only the counts**, not the ballots:
+**Implementation needs only the counts:**
 
 ```
-firstApprove  = H(outcomeSeed, 0) mod N < approve
-secondApprove = firstApprove ? H(outcomeSeed, 1) mod (N-1) < (approve - 1)
-                             : H(outcomeSeed, 1) mod (N-1) <  approve
+for i in 0..2:  ticket[i] = H(outcomeSeed, i) mod N < approve
+verdict = (ticket[0] + ticket[1] + ticket[2] >= 2) ? Approve : Reject
 ```
 
-`MIN_REVEALS ≥ 12` guarantees `N ≥ 2`; the `mod (N−1)` divisor must still be
-guarded explicitly, because a revert here leaves a case permanently unfinalizable.
+Three hashes and a comparison. No ballot array, no without-replacement bookkeeping,
+and no division by `N−1` — the divide-by-zero guard the two-ticket rule needed is
+gone with it.
 
-**Why two and not three.** Three-ticket unanimity gives `x³`, but the contested
-rate rises to `1 − a³ − (1−a)³`: at `a = 0.95` that is 14.3%, and at `a = 0.70`
-it is 63%. The third ticket buys safety the design does not need at a liveness
-price it cannot pay.
+**`f` is a majority amplifier, and that is the whole of what it buys and costs.**
 
-**Why disagreement must be terminal.** Every way of resolving it destroys the gain:
+```
+tally share a    0.51    0.60    0.70    0.80    0.90    0.95
+f(a)            0.515   0.648   0.784   0.896   0.972   0.9928
+```
 
-| Resolution | Hostile result probability |
-|---|---|
-| Fair coin | `x² + x(1−x) = x` — the entire improvement is gone |
-| Another proportional draw | `3x² − 2x³` — majority-of-three; amplifies coalitions |
-| Deterministic tally majority | restores the majority control the lottery exists to prevent |
+A 51% side wins 51.5% of the time; a 90% side wins 97.2%. **No outcome is certain
+— but a large coalition approaches certainty faster than under a linear lottery.**
+That is a real weakening of "no outcome can be engineered with certainty," and it
+is accepted deliberately (§5). With replacement, even a 31–1 tally leaves the
+one-vote side 0.287%.
 
-A terminal non-binary outcome is the resource that lets the system cut both false
-approval and false rejection without handing certainty to either side.
+**Why three and not two, and not five.** Two tickets require a rule for
+disagreement, and §5 shows every such rule either destroys the safety gain or
+creates a penalty-free branch. Five tickets amplify harder — `f₅(0.90) = 99.1%` —
+for a marginal gain over three, and each extra ticket steepens the minority
+penalty §5 already flags as this design's main risk. Three is the smallest odd
+number that always decides.
 
 ## 4. What the rule costs, stated with the benefit
 
-The headline gain is real: a hostile share `x` of the revealed tally certifies a
-wrong result with probability `x²` instead of `x`.
+Two attacks matter and they pull in opposite directions. `x` is the hostile share
+**of revealed votes**.
 
-**The same rule roughly doubles the censorship attack**, because an attacker who
-only wants to keep content *out* is served equally well by CONTESTED. Their success
-probability is `1 − (1−x)²`:
-
-| hostile share of reveals | one ticket | two tickets |
+| | false approval, `x = 0.30` | censorship of good content, `a = 0.95` |
 |---|---|---|
-| 5% | 5% | **9.75%** |
-| 10% | 10% | **19%** |
-| 30% | 30% | **51%** |
+| one ticket (linear, v2) | 30% | 5% |
+| two tickets + `CONTESTED` (withdrawn) | 9% | 9.75% |
+| **three tickets, 2-of-3** | **21.6%** | **0.725%** |
 
-And the same doubling appears with no attacker at all. At `a = 0.95` — ordinary
-content, one reviewer in twenty dissenting:
+**Against censorship this is the strongest rule available** — 0.725% where the
+withdrawn two-ticket rule gave 9.75% and a linear draw gave 5%. Amplification
+works for the honest majority whenever the honest side *is* the majority.
 
-```
-one ticket:   APPROVED 95%      REJECTED 5%
-two tickets:  APPROVED 90.25%   REJECTED 0.25%   CONTESTED 9.5%
-```
+**Against false approval it is the weakest of the three**, at 21.6% versus 9%. A
+hostile 30% of reveals certifies bad content roughly one time in five. That is the
+price of removing the abstention branch, and it must be quoted wherever the
+censorship number is quoted.
 
-False rejections fall twentyfold. **Non-certification rises from 5% to 9.75%**, and
-for a search index "not certified" and "rejected" are the same outcome to a reader.
+> **The honest statement of the mechanism: it suppresses minorities in both
+> directions.** Good when the minority is an attacker, bad when the minority is
+> right. It is one property seen twice, not two properties.
 
-> **The honest statement of the mechanism: it converts wrong answers into no
-> answer, at roughly two for one.** That is a good trade only if abstention is
-> cheap, which is why §8 makes CONTESTED retryable and REJECTED not.
+**Everything above is a function of turnout, not of registered stake.** A 30%
+registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 21.6%. §9.
 
-Both numbers belong together wherever either is quoted. `x²` alone overstates the
-result.
+**What is no longer a cost.** The withdrawn rule contested 9.5% of ordinary content
+at `a = 0.95`, rising to 16.7% at a bare quorum of 12 — one case in six failing to
+certify on a single dissenting reveal. That is gone. False rejection of ordinary
+content is now 0.725%, and the finite-`N` correction that made the two-ticket rule
+worse at small cohorts does not apply: `f(a)` is exact at every `N`, because the
+tickets are drawn with replacement from the tally shares rather than from distinct
+ballots.
 
-**At the quorum sizes actually proposed, one dissenter is expensive.** The `a²`
-approximation assumes large `N`; `MIN_REVEALS` is 12–16. Exactly:
+## 5. Payout: exact cash neutrality is deliberately abandoned
 
-```
-turnout   a single dissenting reveal -> CONTESTED
-   N=12                         16.7%
-   N=16                         12.5%
-   N=20                         10.0%
-   N=32                          6.2%
-```
-
-So a case that scrapes quorum and draws one dissenter is contested one time in six.
-This argues for setting the **expected cohort** well above `MIN_REVEALS` — not for
-the safety reasons in §9, but because the contested rate is a function of realized
-turnout, and thin turnout makes abstention likely rather than merely possible.
-
-**The cost is a function of the disagreement distribution, which nobody has
-measured.** `2a(1−a)` is 9.5% at `a = 0.95` and 2% at `a = 0.99`. The realized
-distribution of `a` on ordinary content is the single most valuable measurement a
-testnet can produce, and it decides whether this rule is cheap or expensive.
-
-## 5. Payout neutrality survives, exactly
-
-Split the pot into two equal ticket pots, `P/2` each. Each ticket's pot is divided
-among the voters coherent with *that ticket*.
-
-The subtlety is that the second ticket is drawn without replacement, so its
-direction is not obviously independent of the first. It is, marginally:
+**The rule.** The whole pot goes to voters coherent with the verdict, divided
+equally. Tickets select the truth; they do not select who is paid.
 
 ```
-P(ticket 2 = Approve) = (A/N)·(A-1)/(N-1) + (R/N)·A/(N-1)
-                      = A(A-1+R) / (N(N-1))
-                      = A(N-1)   / (N(N-1))
-                      = A/N
+W = votes matching the verdict
+rewardPerWinner = floor(P / W)
+remainder = P − rewardPerWinner · W     -> maintenance reserve, never to moderators
 ```
 
-So each ticket independently pays an Approve voter `(A/N)·(P/2)/A = P/(2N)`, and a
-Reject voter `(R/N)·(P/2)/R = P/(2N)`. Across both tickets every revealer expects
-`P/N` whichever way they voted. **The neutrality theorem of design-v2 §4.2 carries
-over unchanged**, and with it the linearity corollary of §4.3.
+Voters against the verdict receive nothing and take the incoherence penalty (§6).
+Whether a moderator's own ballot happened to be sampled as a ticket is irrelevant
+to both.
 
-**A consequence that is forced, not chosen.** On CONTESTED, both sides are paid and
-neither is penalised — there is no coherent side to penalise. Every alternative
-breaks neutrality: withholding pay from the minority makes an Approve voter expect
-`AP/N²` and a Reject voter `RP/N²`, which differ unless `A = R`.
+### 5.1 What this costs
 
-Now combine that with §4. A censor voting Reject on good content at `a = 0.95`:
+`design-v2.md` §4.2 proves that for a fixed tally, equal division among the
+coherent side gives every voter `P/N` in expectation **iff** `P(verdict = Approve)
+= a`. With `f(a) = 3a² − 2a³ ≠ a`, that fails:
 
 ```
-APPROVED   90.25%  ->  loses, penalised
-REJECTED    0.25%  ->  wins, paid
-CONTESTED   9.50%  ->  wins, paid, NOT penalised
+E[majority voter] = (P/N)·f(a)/a          E[minority voter] = (P/N)·(1−f(a))/(1−a)
+
+  a      majority pay     minority pay
+ 0.51      1.010            0.990
+ 0.60      1.080            0.880
+ 0.70      1.120            0.720
+ 0.80      1.120            0.520
+ 0.90      1.080            0.280
+ 0.95      1.045            0.145
 ```
 
-**97% of a censor's successes arrive through the penalty-free branch.** Censorship
-is structurally cheaper than false approval, and the asymmetry is created by
-payout neutrality rather than by an oversight. This is the same shape as the
-trilemma in design-v2 §4.6: *payout neutrality and a penalty-bearing abstention
-state cannot coexist.* §8's retry rule is the mitigation, and it is a mitigation,
-not a closure.
+The majority premium peaks at **1.125 × P/N** at `a = 0.75`. The minority's fall is
+far steeper than the majority's rise.
+
+**Four properties, at most three.** A three-ticket majority verdict; the whole
+constant pot distributed every time; only coherent voters paid; exact
+direction-neutral expected cash. `f(a) = a` is required by the fourth and denied by
+the first. This design relaxes the fourth.
+
+*A recorded alternative, not adopted.* Relaxing the **third** instead also works:
+three ticket pots of `P/3`, each paid to the side its own ticket selected, gives
+`E = a·(P/3)/A = P/(3N)` per ticket for an Approve voter and `(1−a)·(P/3)/R =
+P/(3N)` for a Reject voter — exact neutrality under an unchanged 2-of-3 verdict,
+verified by simulation at 400k trials. It was rejected on the grounds that tickets
+should not determine payment, and because the majority premium below is *wanted*.
+It is recorded because it is the only known construction combining a majority
+verdict with exact neutrality, and because the choice between them was a judgement
+about incentives rather than a forced move.
+
+### 5.2 Why the trade is judged worth it
+
+**It makes reading pay.** Under exact neutrality an always-approve bot earned the
+same cash as a moderator who read the content; only the penalty separated them.
+With a base rate of 90% legitimate submissions:
+
+```
+always-approve bot :  0.955 × P/N,  penalised on 9.9% of cases
+honest reader      :  1.045 × P/N,  penalised on 0.7% of cases
+edge to reading    :  +9.4%          (under exact neutrality: 0.0%)
+```
+
+**It removes the safe minority.** Under the withdrawn rule a censor forcing
+disagreement was paid half the pot and penalised not at all, because there was no
+verdict to be incoherent with — 97% of a censor's successes arrived through that
+branch. With a verdict always produced, there is always a penalised side.
+
+**It sharpens the Schelling point.** A moderator is paid for reporting what other
+competent moderators converge on, not merely for avoiding obvious error.
+
+### 5.3 The risk this creates, recorded
+
+**The mechanism cannot distinguish deliberate dissent from correct dissent against
+a correlated majority.** At `a = 0.95` a dissenter earns `0.145 × P/N` against a
+majority voter's `1.045` — 7.2× — *on top of* the incoherence penalty. Where 32
+addresses run one model on similar prompts, they are one opinion sampled 32 times,
+and the reviewer who spots that model's blind spot is the one paying 7.2×. This
+converts O4 from a statistical concern into an economic one. Mitigations already in
+this design: the random full-audit floor (§9) and cohort diversity. Neither is
+measured. **This is the largest known cost of the payout decision and it should be
+the first thing a testnet looks at.**
+
+### 5.4 Consequences elsewhere
+
+- **README principle 4 must be rewritten, not deleted.** Its letter — "a moderator
+  is paid the same whichever way the case goes" — is now false. Its *purpose*
+  survives: the premium attaches to the **majority**, not to Approve, so no
+  rule-level bias toward listing exists. What is new is a **conformity premium**,
+  which via base rates leans approve-ward in practice because most submissions are
+  legitimate.
+- **`design-v2.md` §4.3 stops constraining the design.** Its corollary — that the
+  lottery must be linear, `α = 1` being the unique exponent admitting neutrality
+  with a constant pot — was binding only while neutrality was required. The design
+  is now free to choose any `f`; `3a² − 2a³` is one point in a space that used to
+  contain exactly one. Nobody should treat 2-of-3 as forced.
+- **The trilemma of `design-v2` §4.6 changes shape.** Neutral payouts forced
+  `f(W) = c/W` and a constant total paid. Without neutrality that constraint lifts,
+  which reopens challenger-funded rounds as an option (triage D2).
 
 ## 6. Penalties must commute
 
@@ -276,8 +334,8 @@ reveal set is known on chain, so whoever holds the last reveal chooses between
 closing now and letting the deadline close it — a free binary choice over seeds:
 
 ```
-x = 0.30   single fixed seed:  x²          =  9.0%
-           choice of two:      1 − (1−x²)² = 17.2%
+x = 0.30   single fixed seed:  f(x)          = 21.6%
+           choice of two:      1 − (1−f(x))² = 38.5%
 ```
 
 *Detecting that every eligible moderator has voted* is not computable under passive
@@ -313,29 +371,25 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics, policyVersi
 | Result | Claim reservation | Retry |
 |---|---|---|
 | `APPROVED` | reserved while listed | — |
-| `REJECTED` | **permanently reserved** | none under this policy version |
-| `CONTESTED` | **not reserved** | after a cooldown, at an escalating nonrecoverable fee |
+| `REJECTED` | **permanently reserved** | none; only an explicit re-review case reopens it |
 | `NO_QUORUM` | not reserved | freely — no probabilistic result occurred |
 
-**Why CONTESTED is retryable and REJECTED is not.** CONTESTED is not a finding
-against the content; it is the protocol declining to decide. Permanently excluding
-content on that basis is the wrong default, and §4 shows it happens to 9.5% of
-ordinary content at `a = 0.95`. But retry is exactly the optional-stopping risk the
-one-draw rule exists to close, so it must be **priced, not permitted**.
+**Retry is closed by construction here, not priced.** The two-ticket rule needed a
+priced retry because it abstained on 9.5% of ordinary content and permanently
+excluding that content would have been wrong. Three tickets reject ordinary content
+0.725% of the time, so a permanent reservation is defensible without an escape
+hatch, and the optional-stopping surface closes with it.
 
-The price discriminates by itself, because the two parties have very different
-per-attempt odds:
+The residual case is the honest publisher unlucky enough to land in that 0.725%.
+They are not left without recourse: `REJECTED` is reopened by an explicit re-review
+case (below), which is a new claim carrying evidence rather than a repurchase of
+the same draw. **`NO_QUORUM` is the only free retry**, and it is free precisely
+because no draw occurred.
 
-```
-honest publisher, a = 0.95:  P(approve) = 0.9025  ->  1.11 attempts expected
-attacker,         x = 0.30:  P(approve) = 0.09    ->  11.1 attempts expected
-```
-
-With a fee that escalates geometrically per attempt on the same claim, the honest
-publisher pays approximately one fee and the attacker pays a geometric series out
-to eleven attempts. **No judgement about whether evidence is "materially new" is
-required** — which matters, because that judgement is not mechanizable and a
-contract cannot distinguish new evidence from a rephrased loss.
+**A policy-version bump must not reopen rejections.** Scoping the reservation to
+`policyVersion` as written would make every ruleset change a scheduled amnesty that
+an attacker can simply wait for. Rejections persist across versions; only an
+explicit re-review case reopens one.
 
 **A policy-version bump must not reopen rejections.** Scoping the reservation to
 `policyVersion` as written would make every ruleset change a scheduled amnesty that
@@ -343,25 +397,54 @@ an attacker can simply wait for. Rejections persist across versions; only an
 explicit re-review case reopens one.
 
 **Correction is a separate claim, not an appeal.** An approved entry may face a
-removal case that runs the same engine — commit, reveal, two tickets — producing
-`REMOVED`, `RETAINED` or `CONTESTED`. This is a new claim about the current index
+removal case that runs the same engine — commit, reveal, three tickets — producing
+`REMOVED` or `RETAINED`. This is a new claim about the current index
 entry, not a retry of the original draw. Approvals also carry `validUntil`, after
 which cautious clients stop treating them as certified unless renewed.
 
 ## 9. Turnout is the variable everything is priced on
 
 `x` is the hostile share **of revealed votes**, not of registered stake. A 30%
-registered attacker who is 50% of reveals gets `x² = 25%`, not 9%. Every number in
-§3 and §4 is a function of honest turnout inside a short window, and the design
-must fail closed: **insufficient participation produces `NO_QUORUM`, never
-approval.**
+registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 21.6% — and the
+amplifier that protects an honest majority works just as hard for a hostile one.
+Every number in §3 and §4 is a function of honest turnout inside a short window,
+and the design must fail closed: **insufficient participation produces
+`NO_QUORUM`, never approval.**
 
 `MIN_REVEALS` rises from 5 to **12–16**. Five reveals were thin while a four-day
 challenge window backed them; without one they are indefensible.
 
-Larger cohorts do not reduce the expected hostile share — that is the neutrality
-result, and it holds here. They reduce sample variance, reduce whole-cohort capture
-probability, and supply enough ballots for two distinct tickets.
+Larger cohorts do not reduce the expected hostile share. They reduce sample
+variance and whole-cohort capture probability. Under three tickets they no longer
+need to supply *distinct* ballots — sampling is with replacement — so the ballot
+-count argument for a large cohort disappears and only the variance argument
+remains.
+
+### 9.1 Assurance is a property of the tally, not of the draw
+
+A 3–0 ticket draw is stronger evidence than 2–1, but it is still three samples of
+the same tally. `P(3/3 Approve) = a³`:
+
+```
+a          0.60    0.70    0.80    0.90    0.95
+P(3/3)     21.6%   34.3%   51.2%   72.9%   85.7%
+```
+
+A case with 30% Reject votes still draws 3/3 Approve more than a third of the time.
+So `unanimousTicketDraw` is stored as evidence but **must not by itself carry a
+high-assurance label.** The strict class requires the tally to participate:
+
+```
+SUPER_SAFE  =  verdict == Approve
+           AND ticket draw was 3/3 Approve
+           AND revealCount >= SUPER_QUORUM
+           AND rejectVotes == 0
+           AND no removal or re-review case is open
+```
+
+This replaces the "unopposed subset" language of the README, which inherited the
+same defect from the other direction: **the lottery selects truth; it does not
+manufacture certainty.**
 
 **Eligibility widening replaces multi-day extension.** Inside the commit window,
 on a schedule fixed when the case opens, the threshold widens monotonically
@@ -375,12 +458,14 @@ conditional on live commitment counts, which would introduce a race.
 | # | Question | Owner |
 |---|---|---|
 | O1 | Portfolio attacks — byte-different substitutes defeat exact claim keys | nobody; deepest open finding (D1) |
-| O2 | The censorship asymmetry of §5 — mitigated by §8, not closed | this project |
+| O2 | The minority-dissent premium of §5.3 — 7.2× against a correlated majority | this project; the largest cost of the payout decision |
 | O3 | The distribution of `a` on ordinary content — decides §4's cost | testnet |
 | O4 | Correlated AI error — `x` counts addresses, not independent judgments (P1-4) | open |
 | O5 | Selective reveal under batched commitments — a Merkle root hides its leaf count, so withholding is undetectable | open; §6's debit prices it only if the commit is visible |
 | O6 | `d` flat or reputation-scaled (D4) | this project |
-| O7 | Guidelines as the Schelling point — one line carries the whole mechanism (5.3) | open |
+| O7 | Guidelines as the Schelling point — one line carries the whole mechanism | open; now load-bearing twice, since §5 pays for convergence |
+| O8 | **Undecided:** a 12-hour challenge round with a provisional index write, proposed alongside the three-ticket rule. It reverses the challenge-free premise of §1–§2, restores a second draw, and returns finality to 12 hours. Recorded as proposed, **not adopted** | the project owner |
+| O9 | The false-approval regression of §4 — 21.6% at `x = 0.30` against the withdrawn rule's 9% | open; the price of removing abstention |
 
 **The standing constraint is unchanged and this design does not relax it.** No
 deployment with material funds, and the index is not presented as reliable
@@ -390,14 +475,20 @@ covers; the four-contract audit does not carry over.
 
 ## 11. Attribution
 
-- **Negative → positive assurance, the challenge-free lifecycle, two-ticket
-  confirmation, terminal CONTESTED, the three refutations in §3, fixed
-  `outcomeBlock`, no lazy re-arming, eligibility widening, claim keys, approval
-  expiry, `MIN_REVEALS` 12–16** — the senior reviewer.
-- **The cost accounting in §4, the neutrality-forces-penalty-free-CONTESTED result
-  in §5, the commuting-penalty properties and bond construction in §6, the
-  adaptive-window findings in §7, the retry pricing and policy-version amnesty in
-  §8** — this project.
+- **Negative → positive assurance, the challenge-free lifecycle, ticket
+  confirmation, the three-ticket majority rule and its `f(a)` arithmetic,
+  with-replacement sampling, winner-only payout, the assurance definition in §9.1,
+  fixed `outcomeBlock`, no lazy re-arming, eligibility widening, claim keys,
+  approval expiry, `MIN_REVEALS` 12–16** — the senior reviewer.
+- **The cost accounting in §4, the result that neutrality forces a penalty-free
+  contested branch (which is what withdrew the two-ticket rule), the ticket-pot
+  construction recorded in §5.1, the reading-pays argument and dissent risk in
+  §5.2–5.3, the commuting-penalty properties and bond construction in §6, the
+  adaptive-window findings in §7, and the policy-version amnesty in §8** — this
+  project.
+- **The decision to relax exact cash neutrality** rather than the
+  only-winners-paid rule — the project owner, deliberately, on the grounds that a
+  conformity premium is wanted. §5.1 records the alternative that was available.
 - **Per-unit freezing**, which §6 generalizes into P1, and the risk-unit proposal
   it came from — the external v2 review. The mechanism is withdrawn; the insight
   that penalties must be order-independent is what survives it.

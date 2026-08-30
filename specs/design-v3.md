@@ -1,6 +1,8 @@
 # Design v3 — One-Hour Provisional, One Challenge Round
 
-**Status:** Design. Not specified in `state-machine-*`, not implemented.
+**Status:** Design. Specified normatively in `specs/state-machine-v3.md`; not
+implemented. Where the two disagree, the state machine is normative and this
+document should be corrected.
 **Supersedes:** the challenge architecture of `design-v2.md` §2.4 and §4.6, and the
 risk units of revision v2.1. `design-v2.md` §4.2's neutrality theorem is
 **no longer a design requirement** (§5); it remains correct and is now the
@@ -52,11 +54,11 @@ seed. **Three ballot-side draws from the revealed tally, with replacement; the
 side on two of three is the verdict.**
 
 ```
-SUBMIT -> COMMIT -> REVEAL -> FINALIZABLE -> one of:
+SUBMIT -> COMMIT -> REVEAL -> DRAW -> PROVISIONAL -> (§2.1) -> one of:
 
     two or three tickets Approve  ->  APPROVED
     two or three tickets Reject   ->  REJECTED
-    reveals < MIN_REVEALS         ->  NO_QUORUM
+    reveals < MIN_REVEALS         ->  UNRESOLVED
 ```
 
 There is no `CONTESTED` state and no post-draw appeal of a *final* claim. The
@@ -98,7 +100,7 @@ hour 1-13   challenge window
 
   challenge, threshold met
             -> UNDER_CHALLENGE; a second commit-reveal round opens, admitting
-               only eligible moderators who did not vote in round 1
+               only eligible moderators who did not vote in round 0
             -> tallies POOL: A = A0 + A1, R = R0 + R1
             -> three FINAL tickets drawn from the pooled tally
             -> one pot to every voter from either round matching the final
@@ -142,7 +144,7 @@ remove. The loser of the provisional draw is the party who challenges, so a
 motivated attacker always buys the second draw while an honest side buys it only
 when someone notices, is eligible, and pays.
 
-With 32 round-1 reveals at 30% hostile (`a = 0.3125`, provisional APPROVED 23.2%),
+With 32 round-0 reveals at 30% hostile (`a = 0.3125`, provisional APPROVED 23.2%),
 and `h` the probability the honest side challenges a loss:
 
 ```

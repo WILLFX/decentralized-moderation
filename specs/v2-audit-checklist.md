@@ -25,9 +25,11 @@ revision this file scores (parallel audit cohort; two-ticket confirmation with a
 terminal `CONTESTED`; adaptive phase windows). `specs/design-v3.md` now carries the
 adopted direction — three tickets, 2-of-3 majority, no abstention state, exact
 cash neutrality deliberately abandoned, a one-hour provisional result and one
-12-hour challenge round — but no
-state machine specifies it and nothing is implemented, so the tables below score
-`main` **as written**, not the design under discussion. Where a proposal names a replacement for something units used to close,
+12-hour challenge round — and
+`specs/state-machine-v3.md` now specifies it normatively. **Nothing is
+implemented.** The tables below score the *v2* architecture, which the code and
+this review were both written against; they are the record of that review, not a
+score of v3. A fresh audit of `state-machine-v3.md` has not been run. Where a proposal names a replacement for something units used to close,
 it is noted as *shape agreed* — which means an answer exists and is not yet written
 down, not that the finding is closed.
 

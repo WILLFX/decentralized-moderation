@@ -1,14 +1,17 @@
-# Design v3 — Challenge-Free Moderation
+# Design v3 — One-Hour Provisional, One Challenge Round
 
 **Status:** Design. Not specified in `state-machine-*`, not implemented.
 **Supersedes:** the challenge architecture of `design-v2.md` §2.4 and §4.6, and the
 risk units of revision v2.1. `design-v2.md` §4.2's neutrality theorem is
 **no longer a design requirement** (§5); it remains correct and is now the
 statement of what this design gives up.
-**Revision:** v3.1 — three tickets and a 2-of-3 majority replace two tickets and a
-terminal `CONTESTED`; exact cash neutrality is deliberately abandoned (§5).
-**Provenance:** the confirmation rule and the challenge-free lifecycle are the
-senior reviewer's proposal. The costs in §4 and §5, and the decisions in §7 and §8,
+**Revision:** v3.2 — a 12-hour challenge round is reinstated (§2.1) and the
+architecture is no longer challenge-free; the one-hour result becomes
+**provisional**. v3.1 replaced two tickets and a terminal `CONTESTED` with three
+tickets and a 2-of-3 majority, and deliberately abandoned exact cash neutrality
+(§5).
+**Provenance:** the confirmation rule and the lifecycle are the senior reviewer's
+proposal. The costs in §4 and §5, and the decisions in §7 and §8,
 are this project's. §11 attributes each.
 
 ---
@@ -28,12 +31,19 @@ The four days were never cryptographic. They were a notification budget, and
 notification is cheaper bought directly.
 
 ```
-was:  commit 24h -> reveal 24h -> challenge 4d (-> more rounds)  ~6 days
-now:  commit    -> reveal    -> one draw at a fixed block        ~1 hour
+was:  commit 24h -> reveal 24h -> challenge 4d (-> more rounds)      ~6 days
+now:  commit -> reveal -> draw -> PROVISIONAL                        ~1 hour
+      -> 12h challenge window -> (one challenge round -> final draw) ~12-13 h
 ```
 
-Nothing here makes the system faster to **correct** — only faster to **decide**.
-Correction moves to §8.
+**The result is not challenge-free.** An earlier revision of this document was, and
+§2.1 records why the window came back: a 2-of-3 majority certifies bad content
+21.6% of the time at a hostile 30% of reveals, and a single sealed round has no
+mechanism to correct that. The challenge round is the correction, and §2.1 states
+exactly what it costs.
+
+What is bought is **speed of decision**, not speed of correction: a usable
+provisional answer in an hour where the old design gave nothing for six days.
 
 ## 2. Mechanism
 
@@ -49,9 +59,9 @@ SUBMIT -> COMMIT -> REVEAL -> FINALIZABLE -> one of:
     reveals < MIN_REVEALS         ->  NO_QUORUM
 ```
 
-All three are terminal. There is no challenge state, no round counter, no
-provisional verdict, no `CONTESTED` state, and no post-draw appeal of the same
-claim.
+There is no `CONTESTED` state and no post-draw appeal of a *final* claim. The
+verdict of the first round is **provisional** and may be challenged exactly once
+(§2.1).
 
 > **Revision note.** An earlier draft of this document used *two* tickets without
 > replacement, with disagreement producing a terminal `CONTESTED`. That is
@@ -72,6 +82,88 @@ threshold`, evaluated off-chain by each moderator. **Submitting a case still
 reserves no moderator, locks no stake, and creates no obligation on anyone**
 (design-v2 §1, invariant I12). That property is the reason the first architecture
 was abandoned and it is not negotiable here.
+
+### 2.1 The challenge round
+
+```
+hour 0-1    commit, reveal, three tickets, draw
+            -> index writes PROVISIONAL_APPROVED / PROVISIONAL_REJECTED
+            -> NOTHING is paid, nobody is penalised, the pot stays escrowed
+
+hour 1-13   challenge window
+
+  no challenge, or MIN_CHALLENGE_REVEALS not met
+            -> provisional verdict becomes final
+            -> winners paid, losers penalised
+
+  challenge, threshold met
+            -> UNDER_CHALLENGE; a second commit-reveal round opens, admitting
+               only eligible moderators who did not vote in round 1
+            -> tallies POOL: A = A0 + A1, R = R0 + R1
+            -> three FINAL tickets drawn from the pooled tally
+            -> one pot to every voter from either round matching the final
+               verdict; everyone against it is penalised
+```
+
+**Exactly one challenge round.** The provisional draw is discarded when a challenge
+succeeds in opening; it never binds and never pays.
+
+**A challenge must earn its round.** `MIN_CHALLENGE_REVEALS = max(12,
+initialReveals / 2)`. Without a fresh-evidence floor, one challenger plus two or
+three votes buys a second draw against a nearly unchanged tally, which is a
+repurchase of the same lottery rather than an addition of evidence.
+
+**Funding: a prefunded, refundable challenge reserve.**
+
+```
+submission payment = initial pot + challenge reserve + finalization bounty
+                   + nonrecoverable maintenance component
+
+no challenge -> reserve refunded
+challenge    -> reserve joins the single final pot
+```
+
+The activated reserve goes to *all* final-verdict voters from both rounds, not to
+challenge voters as a class. Without it, opening a challenge raises turnout while
+shrinking the per-winner share, which taxes exactly the honest participation the
+round exists to attract. A failed challenger's bond is burned or retained as
+maintenance funding and is **never** transferred to the winners — that is
+punishment farming, forbidden since design-v2 §5.5.
+
+**Payment for round-1 voters does not depend on which round they voted in**, on
+whether their ballot was sampled, or on whether the challenge reversed the result.
+A round-1 Reject voter who is vindicated by a reversal is paid identically to a
+challenge-round Reject voter.
+
+#### What the challenge round costs
+
+It reintroduces optional stopping, which the challenge-free revision existed to
+remove. The loser of the provisional draw is the party who challenges, so a
+motivated attacker always buys the second draw while an honest side buys it only
+when someone notices, is eligible, and pays.
+
+With 32 round-1 reveals at 30% hostile (`a = 0.3125`, provisional APPROVED 23.2%),
+and `h` the probability the honest side challenges a loss:
+
+```
+fresh challenge cohort      pooled a    p₂       h=1.0    h=0.5     h=0
+  same composition            0.3125   0.2319   0.2319   0.3210   0.4101
+  attacker identity-limited   0.2500   0.1562   0.1562   0.2541   0.3519
+  attacker exhausted          0.2083   0.1121   0.0260   0.1290   0.2319
+```
+
+**The round answers §4's false-approval number only under two conditions**: the
+honest side challenges reliably (`h → 1`), *and* the attacker cannot refill the
+challenge cohort with fresh identities. When both hold, false approval falls from
+23.2% to **2.6%** — the best number this design has produced. When neither holds it
+rises to **41%**, nearly double the single-round figure.
+
+**So the challenge round widens the range rather than lowering the number**, and
+where it lands is decided by honest challenge reliability — which is the *negative
+assurance* dependence §1 set out to eliminate. That is not an argument against the
+round; it is the statement of what the round is buying with, and it makes `h` a
+first-class quantity that the client, the notification path and the fee must all be
+designed to raise.
 
 ## 3. The confirmation rule
 
@@ -132,7 +224,9 @@ works for the honest majority whenever the honest side *is* the majority.
 **Against false approval it is the weakest of the three**, at 21.6% versus 9%. A
 hostile 30% of reveals certifies bad content roughly one time in five. That is the
 price of removing the abstention branch, and it must be quoted wherever the
-censorship number is quoted.
+censorship number is quoted. **This is the number the challenge round of §2.1
+exists to correct**, and it moves to anywhere between 2.6% and 41% depending on how
+reliably the honest side challenges.
 
 > **The honest statement of the mechanism: it suppresses minorities in both
 > directions.** Good when the minority is an attacker, bad when the minority is
@@ -151,18 +245,25 @@ ballots.
 
 ## 5. Payout: exact cash neutrality is deliberately abandoned
 
-**The rule.** The whole pot goes to voters coherent with the verdict, divided
-equally. Tickets select the truth; they do not select who is paid.
+**The rule.** The whole pot goes to voters coherent with the **final** verdict,
+divided equally, pooled across both rounds. Tickets select the truth; they do not
+select who is paid.
 
 ```
-W = votes matching the verdict
+P = initial pot + activated challenge reserve      (§2.1)
+W = votes matching the final verdict, from either round
 rewardPerWinner = floor(P / W)
 remainder = P − rewardPerWinner · W     -> maintenance reserve, never to moderators
 ```
 
-Voters against the verdict receive nothing and take the incoherence penalty (§6).
-Whether a moderator's own ballot happened to be sampled as a ticket is irrelevant
-to both.
+Voters against the final verdict receive nothing and take the incoherence penalty
+(§6). Four things are irrelevant to both payment and penalty: which round a
+moderator voted in, whether their ballot was sampled as a ticket, whether their
+side won the provisional draw, and whether the challenge reversed the result.
+
+**Nothing is paid and nobody is penalised at the provisional draw.** The pot stays
+escrowed through the challenge window (§2.1), so no coherence is credited against a
+verdict that a challenge may replace.
 
 ### 5.1 What this costs
 
@@ -317,7 +418,11 @@ This closes selective realization (P1-2, §4.11) and the last-revealer timing is
 VOID. It is never replaced with a fresh future block, which would let a party
 inspect a seed and discard it.
 
-The one-hour lifecycle makes this comfortable where the multi-day one did not:
+**Each round carries its own outcome block**, both fixed when the round opens and
+neither dependent on when its last reveal lands. The challenge window's close is
+likewise a fixed timestamp, not a function of when the challenge arrived.
+
+The short round lifecycle makes this comfortable where the multi-day one did not:
 `blockhash` is available for 256 blocks (~51 minutes), and the outcome block sits
 well inside that.
 
@@ -435,7 +540,8 @@ So `unanimousTicketDraw` is stored as evidence but **must not by itself carry a
 high-assurance label.** The strict class requires the tally to participate:
 
 ```
-SUPER_SAFE  =  verdict == Approve
+SUPER_SAFE  =  final verdict == Approve
+           AND no challenge was opened
            AND ticket draw was 3/3 Approve
            AND revealCount >= SUPER_QUORUM
            AND rejectVotes == 0
@@ -464,8 +570,10 @@ conditional on live commitment counts, which would introduce a race.
 | O5 | Selective reveal under batched commitments — a Merkle root hides its leaf count, so withholding is undetectable | open; §6's debit prices it only if the commit is visible |
 | O6 | `d` flat or reputation-scaled (D4) | this project |
 | O7 | Guidelines as the Schelling point — one line carries the whole mechanism | open; now load-bearing twice, since §5 pays for convergence |
-| O8 | **Undecided:** a 12-hour challenge round with a provisional index write, proposed alongside the three-ticket rule. It reverses the challenge-free premise of §1–§2, restores a second draw, and returns finality to 12 hours. Recorded as proposed, **not adopted** | the project owner |
-| O9 | The false-approval regression of §4 — 21.6% at `x = 0.30` against the withdrawn rule's 9% | open; the price of removing abstention |
+| O8 | **Resolved — adopted (§2.1).** The 12-hour challenge round and provisional index write. Decision by the project owner. Finality is 12–13 hours; only the *provisional* answer arrives in one | closed |
+| O9 | **Resolved — the answer is O8, conditionally (§2.1).** False approval moves from 23.2% to between 2.6% and 41%, decided by `h`, the probability the honest side challenges a loss | closed as a decision; `h` becomes O10 |
+| O10 | **`h` — honest challenge reliability.** The single quantity that decides whether §2.1 halves the false-approval rate or nearly doubles it. Unmeasured, and it depends on notification, client design and fee, not on the contract | this project; testnet |
+| O11 | The provisional index write is visible for 12 hours. `PROVISIONAL_REJECTED` is a censorship surface with a guaranteed half-day of effect even when the challenge overturns it | open |
 
 **The standing constraint is unchanged and this design does not relax it.** No
 deployment with material funds, and the index is not presented as reliable
@@ -475,11 +583,12 @@ covers; the four-contract audit does not carry over.
 
 ## 11. Attribution
 
-- **Negative → positive assurance, the challenge-free lifecycle, ticket
-  confirmation, the three-ticket majority rule and its `f(a)` arithmetic,
-  with-replacement sampling, winner-only payout, the assurance definition in §9.1,
-  fixed `outcomeBlock`, no lazy re-arming, eligibility widening, claim keys,
-  approval expiry, `MIN_REVEALS` 12–16** — the senior reviewer.
+- **Negative → positive assurance, ticket confirmation, the three-ticket majority
+  rule and its `f(a)` arithmetic, with-replacement sampling, winner-only payout,
+  the hybrid provisional/challenge lifecycle and its challenge reserve (§2.1),
+  `MIN_CHALLENGE_REVEALS`, the assurance definition in §9.1, fixed `outcomeBlock`,
+  no lazy re-arming, eligibility widening, claim keys, approval expiry,
+  `MIN_REVEALS` 12–16** — the senior reviewer.
 - **The cost accounting in §4, the result that neutrality forces a penalty-free
   contested branch (which is what withdrew the two-ticket rule), the ticket-pot
   construction recorded in §5.1, the reading-pays argument and dissent risk in
@@ -489,6 +598,11 @@ covers; the four-contract audit does not carry over.
 - **The decision to relax exact cash neutrality** rather than the
   only-winners-paid rule — the project owner, deliberately, on the grounds that a
   conformity premium is wanted. §5.1 records the alternative that was available.
+- **The decision to reinstate the challenge round** after a revision that removed
+  it — the project owner. §2.1 records both what it buys and that it reintroduces
+  the optional stopping the removal was for.
+- **The `h`-dependence of §2.1**, which shows the round's value ranging from 2.6%
+  to 41% on a quantity outside the contract — this project.
 - **Per-unit freezing**, which §6 generalizes into P1, and the risk-unit proposal
   it came from — the external v2 review. The mechanism is withdrawn; the insight
   that penalties must be order-independent is what survives it.

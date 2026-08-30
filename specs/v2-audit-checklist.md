@@ -23,8 +23,9 @@ Nothing here is **implemented**. No Solidity exists for any of v2.
 **Read this before the tables.** Three external proposals have landed since the
 revision this file scores (parallel audit cohort; two-ticket confirmation with a
 terminal `CONTESTED`; adaptive phase windows). `specs/design-v3.md` now carries the
-adopted direction — challenge-free, three tickets, 2-of-3 majority, no abstention
-state, exact cash neutrality deliberately abandoned — but no
+adopted direction — three tickets, 2-of-3 majority, no abstention state, exact
+cash neutrality deliberately abandoned, a one-hour provisional result and one
+12-hour challenge round — but no
 state machine specifies it and nothing is implemented, so the tables below score
 `main` **as written**, not the design under discussion. Where a proposal names a replacement for something units used to close,
 it is noted as *shape agreed* — which means an answer exists and is not yet written

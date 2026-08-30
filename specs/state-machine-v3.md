@@ -19,8 +19,13 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > design but are not stated by it. Each is consequential enough to be visible, and
 > each carries its reasoning inline.
 >
-> - §3.5 — **a challenge is a bond, not a vote.** This removes the forced
->   disclosure that v2 §4.7 accepted as unavoidable.
+> - §3.5 — **a challenge is a bond, not a vote**, and carries no eligibility
+>   test. This removes the forced disclosure v2 §4.7 accepted as unavoidable, and
+>   returns the challenge to the round-0 dissenters, who are the population `h`
+>   depends on.
+> - §3.5b — **round 1 opens on the schedule, not on the challenge.** Filing early
+>   does not start the round early, so no seed depends on the challenger's chosen
+>   block.
 > - §4.6 — a challenge round that misses `MIN_CHALLENGE_REVEALS` forfeits the
 >   challenger's bond and lets the provisional stand.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
@@ -250,8 +255,10 @@ nothing against someone who can wait and re-enter. I3 is therefore about commits
 
 ### 3.5 A challenge is a bond, not a vote
 
-**Decision.** Opening round 1 requires posting `CHALLENGE_BOND` and being eligible
-for round 1. It does **not** cast a vote and does not disclose a direction.
+**Decision.** Registering a challenge requires being `ACTIVE` and posting
+`CHALLENGE_BOND`. **No eligibility test, for any round.** It does not cast a vote
+and does not disclose a direction. Round 1 opens at the scheduled close of the
+challenge window, never at the moment the challenge lands (§3.5b).
 
 v2 §4.7 made the challenge itself a public vote against the standing verdict, and
 accepted the resulting disclosure as unavoidable: concealing the challenger's
@@ -261,12 +268,83 @@ Under v3 the constraint dissolves, because a challenge no longer needs to *be* t
 objection. Round 1 is a full commit–reveal round; the challenger commits inside it
 like everyone else, hidden. What the bond buys is the round, not a position in it.
 
+**Why there is no eligibility test — three reasons, in order of weight.**
+
+*It was circular and could not be implemented.* An earlier revision required the
+challenger to be eligible for round 1, and §3.1 evaluates eligibility against
+`roundSeed(c, 1)` — a seed the same transaction armed. The `require` would have had
+to read a value from the future. This is P0-7, "next-round challenge seed is
+circular", closed in v2 at `a4ac471` and reintroduced here by the new lifecycle.
+
+*It excluded exactly the people the mechanism depends on.* §3.4 makes round-0
+voters ineligible for round 1, so the eligibility test barred **the round-0
+dissenting minority** — the only people who have read the content and know the draw
+went against their reading. `h`, the probability the honest side challenges a loss,
+is the single quantity deciding whether the challenge round halves the
+false-approval rate or nearly doubles it (design-v3 O10), and the test removed its
+best-informed contributors.
+
+*A probabilistic filter on who may pay is regressive.* Eligibility admits about
+`TARGET_COHORT / registry` of identities per round. Someone holding hundreds of
+identities always has one that passes; a legitimate single-identity dissenter is
+blocked with probability `1 − 40/|registry|`, which approaches certainty as the
+registry grows. The filter inconvenienced attackers not at all and honest
+challengers almost always.
+
+**What still constrains a challenge**, now that eligibility does not:
+
+- `CHALLENGE_BOND`, forfeit if the round fails its floor (§4.6).
+- `MIN_CHALLENGE_REVEALS` — a challenge summons a cohort; it cannot supply one.
+- One challenge per claim (I17). The first valid registration wins; later ones
+  revert rather than queue.
+
+**Round-0 voters may register a challenge. They still may not vote in round 1.**
+§3.4 is about the tally and is unchanged — a moderator counted twice would corrupt
+the pooled tally the verdict is drawn from. Registering is not voting. A round-0
+dissenter who challenges is staking `CHALLENGE_BOND` *and* their existing exposure
+to `d` on the pooled tally moving their way, which is the tightest alignment
+between information and incentive anywhere in this design.
+
 Two consequences worth stating:
 
 - The challenger's direction is secret, so round-1 voters cannot herd behind it.
-- A challenger who opens the round and then reveals *in agreement* with the
-  provisional has wasted a bond and gained nothing. No rule is needed to prevent
-  it.
+- A challenger who registers and then reveals *in agreement* with the provisional
+  has wasted a bond and gained nothing. No rule is needed to prevent it.
+
+### 3.5b Round 1 opens on the schedule, not on the challenge
+
+**Decision.** A challenge *registers* at any point inside the challenge window.
+Round 1's commit phase opens at the window's **scheduled close**, the same instant
+at which an unchallenged case would have finalized.
+
+Without this, round 1's seeds are functions of the block the challenger chose:
+
+```
+        rejected:  eligSeedBlock₁    = blockAt(challengeTx) + SEED_LAG
+                   outcomeSeedBlock₁ = blockAt(challengeTx + windows) + SEED_LAG
+
+        adopted:   eligSeedBlock₁    = blockAt(scheduledWindowClose) + SEED_LAG
+                   outcomeSeedBlock₁ = blockAt(scheduledWindowClose
+                                               + COMMIT_WINDOW + REVEAL_WINDOW)
+                                       + SEED_LAG
+```
+
+The challenger has twelve hours of discretion over *when* to file. Under the
+rejected form that is twelve hours of discretion over **which cohort is drawn and
+which entropy decides the case** — the same free option §4.4 refuses to grant the
+last revealer, handed to a party who gets to look at the provisional verdict first.
+Both seeds are now fixed at the provisional draw, which is itself fixed at
+submission, so I7 holds for round 1 as it does for round 0.
+
+It also removes a targeting advantage the rejected form created: with round-1
+eligibility derived from the challenge block, an attacker could search block
+heights for one that makes their own identities eligible, then file there.
+
+**The cost, stated.** A challenge no longer resolves a case sooner than leaving it
+alone. Finality is `CHALLENGE_WINDOW + COMMIT_WINDOW + REVEAL_WINDOW + grace`
+whether or not anyone challenges, so the challenge buys a second round rather than
+an earlier answer. Uniform latency is the better property: it means the observable
+timing of a case leaks nothing about whether it was contested.
 
 ### 3.6 What the contract may not compute
 
@@ -347,8 +425,9 @@ applies no penalty, and moves no value.
 | `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW` |
 | `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` | pool this round's reveals. If `pooled < MIN_REVEALS` → `UNRESOLVED(NO_QUORUM)` |
 | `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | draw `provisional` (§4.5); pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `PROVISIONAL` | `COMMIT` | `challenge()` (§3.5) and `now < phaseDeadline` | `round = 1`; `challenger = msg.sender`; escrow `CHALLENGE_BOND`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm **both** round-1 seeds; `phaseDeadline = now + COMMIT_WINDOW` |
-| `PROVISIONAL` | `FINALIZED` | `now ≥ phaseDeadline`, no challenge | `verdict = provisional`; `finalizedAt = now` |
+| `PROVISIONAL` | `PROVISIONAL` | `challenge()` (§3.5): caller is `ACTIVE`, `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; escrow `CHALLENGE_BOND`. No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
+| `PROVISIONAL` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm both round-1 seeds **from this scheduled close** (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
+| `PROVISIONAL` | `FINALIZED` | `now ≥ phaseDeadline` and `challenger == 0` | `verdict = provisional`; `finalizedAt = now` |
 | `REVEAL` (r=1) | `DRAW_F` | `now ≥ phaseDeadline` and `revealsThisRound ≥ MIN_CHALLENGE_REVEALS` | pool round-1 reveals |
 | `REVEAL` (r=1) | `FINALIZED` | `now ≥ phaseDeadline` and `revealsThisRound < MIN_CHALLENGE_REVEALS` | §4.6 — `verdict = provisional`; challenger's bond forfeit; round-1 reveals still pool and are still judged against `verdict` |
 | `DRAW_F` | `FINALIZED` | outcome seed available | draw `verdict` from the **pooled** tally; pay `DRAW_BOUNTY`; `finalizedAt = now` |
@@ -613,12 +692,20 @@ open. The update must be order-independent whatever is decided.
 
 ### 7.1 Two seeds per round
 
-| Seed | Armed | Used for |
+| Seed | Derived from | Used for |
 |---|---|---|
-| `eligSeedBlock` | round open + `SEED_LAG` | §3.1 eligibility |
-| `outcomeSeedBlock` | round open, computed from the **scheduled** phase deadline | §4.5 the draw |
+| `eligSeedBlock` | the round's **scheduled** open + `SEED_LAG` | §3.1 eligibility |
+| `outcomeSeedBlock` | the round's **scheduled** reveal close + `SEED_LAG` | §4.5 the draw |
 
-Both are fixed when the round opens. Neither depends on when any transaction lands.
+Every schedule is fixed at submission. Round 0's open is the submission block;
+round 1's scheduled open is the close of the challenge window, which §3.5b makes
+independent of when a challenge was filed. So **no seed in this specification is a
+function of any transaction's timing**, which is what I7 asserts.
+
+An earlier revision armed round 1's seeds in the `challenge()` transaction. That
+gave the challenger twelve hours of discretion over both the round-1 cohort and the
+entropy that would decide the case, after seeing the provisional verdict — and made
+the challenger's own eligibility check circular. §3.5 and §3.5b close both.
 
 ### 7.2 The outcome block is fixed from the schedule, never from the transaction
 
@@ -627,8 +714,8 @@ outcomeSeedBlock = blockAt(scheduledRevealClose) + SEED_LAG
 ```
 
 It must **not** depend on when the final reveal arrives, whether the case was
-challenged, who called the transition, whether everyone revealed early, or whether
-round 1 opened. This is what makes §4.4's "no early closure" rule enforceable
+challenged, **when it was challenged**, who called the transition, whether everyone
+revealed early, or when round 1 opened. This is what makes §4.4's "no early closure" rule enforceable
 rather than advisory, and it closes both M2.5-F10 and the selective-realization
 surface (P1-2).
 
@@ -743,7 +830,7 @@ the original draw.
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
 | **I5** | Exactly one **binding** verdict exists per claim. `provisional` is written once and binds nothing |
 | **I6** | No payment, debit or reputation credit occurs before `FINALIZED` |
-| **I7** | Both seeds of a round are fixed at round open and are independent of every transaction's timing |
+| **I7** | Both seeds of every round derive from schedules fixed at submission, and are independent of every transaction's timing — including the timing of `challenge()` (§3.5b) |
 | **I8** | Penalties are invariant under settlement permutation |
 | **I9** | The cost of one incoherent vote is independent of `openVoteCount` |
 | **I10** | No phase closes before its `phaseDeadline` |
@@ -783,7 +870,7 @@ while a third existed.
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
-| `CHALLENGE_BOND` vs `BOND_MIN` | **Unresolved and it breaks I1.** `CHALLENGE_BOND` is debited from `bond` without a `λ` behind it, so `CHALLENGE_BOND > BOND_MIN` drives `bond` negative — and §5.4 mandates a revert, which would brick settlement for every other voter in that case. Needs either a relation between the two parameters or a separate escrow |
+| `CHALLENGE_BOND` vs `BOND_MIN` | **Unresolved and it breaks I1.** Now the only constraint on who may register a challenge (§3.5), so it prices spam as well as backing the round. `CHALLENGE_BOND` is debited from `bond` without a `λ` behind it, so `CHALLENGE_BOND > BOND_MIN` drives `bond` negative — and §5.4 mandates a revert, which would brick settlement for every other voter in that case. Needs either a relation between the two parameters or a separate escrow |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which is a function of the active-moderator count — the quantity §3.6 says cannot be maintained on chain. Either `T` is static and cohort size grows with the registry, or P0-9 returns. `TARGET_COHORT`, `MIN_REVEALS` and `MIN_CHALLENGE_REVEALS` are all calibrated against it |
 | Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |

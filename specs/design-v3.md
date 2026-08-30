@@ -98,9 +98,11 @@ hour 1-13   challenge window
             -> provisional verdict becomes final
             -> winners paid, losers penalised
 
-  challenge, threshold met
-            -> UNDER_CHALLENGE; a second commit-reveal round opens, admitting
-               only eligible moderators who did not vote in round 0
+  challenge registered (any ACTIVE moderator + CHALLENGE_BOND; no eligibility
+  test - state-machine-v3 §3.5), threshold later met
+            -> at the window's SCHEDULED close, not when the challenge landed,
+               a second commit-reveal round opens, admitting only eligible
+               moderators who did not vote in round 0
             -> tallies POOL: A = A0 + A1, R = R0 + R1
             -> three FINAL tickets drawn from the pooled tally
             -> one pot to every voter from either round matching the final

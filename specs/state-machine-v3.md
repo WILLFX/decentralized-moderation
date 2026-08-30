@@ -26,8 +26,11 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > - §3.5b — **round 1 opens on the schedule, not on the challenge.** Filing early
 >   does not start the round early, so no seed depends on the challenger's chosen
 >   block.
-> - §4.6 — a challenge round that misses `MIN_CHALLENGE_REVEALS` forfeits the
->   challenger's bond and lets the provisional stand.
+> - §4.5 — **one randomness per claim**, evaluated against both tallies. The
+>   verdict is monotone in the tally, so a challenge that adds no votes changes
+>   nothing and there is no second roll to buy.
+> - §4.6 — `MIN_CHALLENGE_REVEALS` is removed; `CHALLENGE_BOND` settles on
+>   whether the verdict moved, not on turnout.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
 >   `NO_QUORUM` and `VOID` states.
 > - §5.1 — **penalties are balance debits, never time.** No moderator is ever
@@ -61,12 +64,12 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `PENALTY_DEBIT` `d` | `1.4 × E[P/N]` | Debited from bond for a vote incoherent with the final verdict (design-v3 §6). |
 | `LAMBDA` `λ` | **`= d`** | Bond required per open vote. Derived, not chosen — §2.4. |
 | `REVEAL_BOND` | *(open — §10)* | Refundable per-commit; forfeit on non-reveal (§5.2). **Constrained: `REVEAL_BOND ≤ d`** — §2.4. |
-| `CHALLENGE_BOND` | *(open — §10)* | Posted to open round 1. Forfeit per §4.6. |
+| `CHALLENGE_BOND` | *(open — §10)* | Posted to register a challenge. Returned if the final verdict differs from the provisional, forfeit otherwise (§4.6). |
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 40 | Expected eligible moderators per round. |
 | `MIN_REVEALS` | 16 | Pooled reveals required before any verdict may be drawn. |
-| `MIN_CHALLENGE_REVEALS` | `max(12, reveals₀ / 2)` | Fresh reveals round 1 must add (design-v3 §2.1). |
+| ~~`MIN_CHALLENGE_REVEALS`~~ | — | **Removed, §4.6.** §4.5's single-randomness rule makes an unchanged tally yield an identical verdict, so the floor has no job. |
 | `SUPER_QUORUM` | *(open)* | Reveals required for the strict assurance class (§8.3). |
 | `COMMIT_WINDOW` | 20 min | Per round. |
 | `REVEAL_WINDOW` | 20 min | Per round. |
@@ -294,7 +297,8 @@ challengers almost always.
 **What still constrains a challenge**, now that eligibility does not:
 
 - `CHALLENGE_BOND`, forfeit if the round fails its floor (§4.6).
-- `MIN_CHALLENGE_REVEALS` — a challenge summons a cohort; it cannot supply one.
+- §4.5's monotonicity — a challenge that adds no votes returns the same verdict,
+  so registering one buys nothing on its own.
 - One challenge per claim (I17). The first valid registration wins; later ones
   revert rather than queue.
 
@@ -377,7 +381,9 @@ struct Case {
     uint32  pooledApprove;     // POOLED across rounds, never reset
     uint32  pooledReject;
     uint32  revealsThisRound;
-    uint32  reveals0;          // round-0 reveal count, for MIN_CHALLENGE_REVEALS
+    uint32  reveals0;          // round-0 reveal count, recorded for §8.3
+    uint128 u0; uint128 u1;    // the claim's three uniforms (§4.5), realized
+    uint128 u2;                //   at the round-0 draw and reused at DRAW_F
     Outcome provisional;       // written once, at DRAW_0; binds nothing
     Outcome verdict;           // written once, at the binding draw
     address challenger;
@@ -424,14 +430,13 @@ applies no penalty, and moves no value.
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; `round = 0`; arm both seeds (§7); `phaseDeadline = now + COMMIT_WINDOW`. **No moderator is selected, reserved, or notified on chain.** |
 | `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW` |
 | `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` | pool this round's reveals. If `pooled < MIN_REVEALS` → `UNRESOLVED(NO_QUORUM)` |
-| `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | draw `provisional` (§4.5); pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
+| `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | **realize and store `u[0..2]`** (§4.5); evaluate `provisional`; pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
 | `PROVISIONAL` | `PROVISIONAL` | `challenge()` (§3.5): caller is `ACTIVE`, `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; escrow `CHALLENGE_BOND`. No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `PROVISIONAL` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm both round-1 seeds **from this scheduled close** (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
 | `PROVISIONAL` | `FINALIZED` | `now ≥ phaseDeadline` and `challenger == 0` | `verdict = provisional`; `finalizedAt = now` |
-| `REVEAL` (r=1) | `DRAW_F` | `now ≥ phaseDeadline` and `revealsThisRound ≥ MIN_CHALLENGE_REVEALS` | pool round-1 reveals |
-| `REVEAL` (r=1) | `FINALIZED` | `now ≥ phaseDeadline` and `revealsThisRound < MIN_CHALLENGE_REVEALS` | §4.6 — `verdict = provisional`; challenger's bond forfeit; round-1 reveals still pool and are still judged against `verdict` |
-| `DRAW_F` | `FINALIZED` | outcome seed available | draw `verdict` from the **pooled** tally; pay `DRAW_BOUNTY`; `finalizedAt = now` |
-| any `DRAW` | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
+| `REVEAL` **(r=1)** | `DRAW_F` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6) |
+| `DRAW_F` | `FINALIZED` | — | evaluate the stored `u` against the **pooled** tally (§4.5); settle `CHALLENGE_BOND` per §4.6; `finalizedAt = now`. **No seed is read here** — the claim's randomness was realized at the round-0 draw |
+| `DRAW` **(r=0)** | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **Reachable at the round-0 draw only** — `DRAW_F` reads no seed |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 | **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Return every `REVEAL_BOND`, decrement every `openVoteCount`, refund per §4.8. No verdict is written and no incoherence debit is applied** |
 
@@ -477,43 +482,131 @@ What *is* permitted, and should be implemented: **permissionless immediate
 finalization.** Once the outcome block exists, anyone may finalize in that block.
 That removes the grace period from the common path without moving a deadline.
 
-### 4.5 The draw
+### 4.5 The draw — one randomness per claim, evaluated twice
+
+**Decision.** Three uniforms are fixed **once per claim**. Both the provisional and
+the final evaluation use the *same* three values against different tallies.
 
 ```
+u[i] = uint128( H(OUTCOME_DOMAIN, chainId, contract, caseId, i,
+                  blockhash(outcomeSeedBlock)) )          i = 0,1,2
+       -- realized once, at the round-0 draw, and STORED on the case (§4.1)
+
 N = pooledApprove + pooledReject
-for i in 0..2:  ticket[i] = H(OUTCOME_DOMAIN, chainId, contract, caseId, round,
-                              blockhash(outcomeSeedBlock), i) mod N < pooledApprove
-result = (ticket[0] + ticket[1] + ticket[2] ≥ 2) ? Approve : Reject
+ticket[i] = ( u[i] · N  <  pooledApprove · 2^128 )        -- i.e. u[i]/2^128 < a
+verdict   = (ticket[0] + ticket[1] + ticket[2] ≥ 2) ? Approve : Reject
 ```
 
-Three independent draws **with replacement**, majority of three. `P(Approve) =
-3a² − 2a³` where `a = pooledApprove / N`.
+`u[i]/2^128` is uniform on [0,1), so `P(ticket = Approve) = a` and
+`P(verdict = Approve) = 3a² − 2a³ = f(a)` exactly as before. Verified by simulation
+at 400k draws: 0.2146 / 0.4998 / 0.7833 / 0.9925 against `f` = 0.2160 / 0.5000 /
+0.7840 / 0.9927.
 
-With replacement is required, not incidental: without it a side holding one revealed
-vote could never occupy two tickets, and a 31–1 tally would decide with certainty
-— which contradicts I12. With replacement that side retains 0.287%.
+**Note the comparison form.** `u · N < approve · 2^128`, *not* `u mod N < approve`.
+Both are uniform, but only the first is **monotone in `a`**: with `u` fixed, adding
+Reject votes lowers `a`, which can flip tickets from Approve to Reject and never
+the reverse. The modulo form reshuffles on every change of `N`, so a single added
+vote acts as a fresh re-roll. Simulated over 20,000 fixed-`u` draws sweeping `a`
+across [0,1]: zero monotonicity violations.
 
-`N ≥ MIN_REVEALS ≥ 16` at every draw, so `N` is never 0. The implementation must
-still guard it explicitly: a revert inside the draw leaves a case permanently
-unfinalizable.
+**Why this is the whole answer to challenge-round optional stopping.**
 
-### 4.6 A challenge round that fails its threshold
+A challenger who adds no votes changes nothing — the tally is identical, so the
+tickets are identical, so `verdict == provisional`. A challenger who adds votes
+moves `a`, and can only move the verdict *toward the side they added*. **There is
+no second roll to buy.** The only way to change the answer is to change the
+evidence, which is what the round is for.
 
-**Decision.** If round 1 closes with `revealsThisRound < MIN_CHALLENGE_REVEALS`:
+What that costs an attacker who lost round 0 at `a₀ = 0.3125` (10 Approve, 22
+Reject), measured over 20,000 draws:
 
-- `verdict = provisional` — the provisional stands, unredrawn;
-- the challenger's `CHALLENGE_BOND` is **forfeit** to the maintenance reserve;
-- round-1 reveals still pool and are still judged coherent or incoherent against
-  `verdict`, so voters who turned up are paid or debited normally;
-- the activated `challengeReserve` stays in the pot and is distributed.
+```
+Approve votes needed to flip the verdict
+    median  21        10th pct  3        90th pct  98
+    47.1% of the time they need more than 22 — parity in the pooled tally or worse
+    6.9%  of the time two votes suffice
 
-The bond is forfeit rather than refunded because the challenger can observe round-0
-turnout before deciding, so a round nobody attends is a bet they chose to place.
-Refunding it would make challenging free, and a free challenge imposes a 12-hour
-delay on any case at the price of gas.
+under a fresh round-1 draw they need ZERO extra votes for a 23.2% chance
+```
 
-The reserve is *not* returned to the submitter, because the round-1 voters who did
-turn up performed real work and are paid from the same pot as everyone else.
+So the rule converts *buy another lottery ticket* into *buy a majority of the
+pool*. Priced deterrence is replaced by a structural one, which matters because the
+prize — the listing — is external and cannot be priced.
+
+**It also removes most of the design's exposure to `h`.** design-v3 O10 named
+honest challenge reliability as the single quantity deciding whether the challenge
+round helps or hurts. Simulated at 30% hostile, `TARGET_COHORT` 40, honest turnout
+0.8:
+
+```
+                     h=0      h=0.25    h=0.5     h=1.0
+fresh round-1 draw   0.483    0.434     0.383     0.285
+same u (adopted)     0.316    0.309     0.300     0.284
+```
+
+A fresh draw makes the challenge round a 20-point gift to an attacker when the
+honest side is unreliable. The same-`u` rule flattens that to 3 points — the design
+stops depending on a quantity that lives outside the contract.
+
+**Consequences elsewhere:**
+
+- **One outcome seed per claim, not per round** (§7.1). Round 1 needs an
+  *eligibility* seed only. `NO_RANDOMNESS` is therefore reachable at the round-0
+  draw and nowhere else, and the 256-block `blockhash` horizon never has to span
+  the 12-hour challenge window.
+- **`u` must be stored** at the round-0 draw (§4.1). It is not recoverable from
+  `blockhash` twelve hours later.
+- **Round-1 pivotality is visible.** `u` is public after the provisional, so a
+  round-1 voter can compute the exact `a` that flips the verdict and whether their
+  own vote is pivotal. This is recorded, not fixed: it sharpens F7's marginal-
+  revealer problem in round 1 while removing the threshold cliff that was F7's
+  other half. F7 remains open (§10).
+
+**With replacement is still required**, and now trivially: `u[0..2]` are
+independent, so a side holding one revealed vote keeps `f(1/32) = 0.287%`. Without
+independence a 31–1 tally would decide with certainty, contradicting I12.
+
+The implementation must guard `N > 0` explicitly even though `N ≥ MIN_REVEALS`
+holds: a revert inside the draw leaves a case permanently unfinalizable.
+
+### 4.6 A challenge that does not move the tally
+
+**Decision.** `MIN_CHALLENGE_REVEALS` is **removed.** There is no threshold, no
+sub-threshold branch, and no second verdict rule.
+
+The floor existed to stop a challenger buying a second draw against a nearly
+unchanged tally. §4.5 makes that impossible by construction — an unchanged tally
+yields an identical verdict — so the floor has no remaining job, and it carried
+three defects of its own:
+
+- **It judged voters against a tally they were excluded from.** A sub-threshold
+  round-1 Reject vote was debited against a verdict drawn from the round-0 tally
+  alone. Eleven dissenters against a 20–0 provisional had *zero* probability and
+  were all penalised. That violated I12, the invariant §9 names as one of the two
+  this design is least free to relax, and I11.
+- **It was unsatisfiable exactly when it mattered.** `max(12, reveals₀/2)` scales
+  with round-0 turnout while round-1 supply is capped near `TARGET_COHORT` and then
+  reduced by §3.4. For `reveals₀ > 2 · TARGET_COHORT` the challenge round is
+  unreachable by construction — so flooding round 0 both won the provisional draw
+  *and* disabled the mechanism that exists to correct it.
+- **It was a coordination trap.** Round-1 voters could see the commit count against
+  the floor. Below it, revealing was pointless, so nobody revealed, so the floor was
+  missed. Failure was self-fulfilling.
+
+**`CHALLENGE_BOND` is now settled on the outcome, not on turnout:**
+
+```
+final verdict != provisional  ->  bond returned to the challenger
+final verdict == provisional  ->  bond forfeit to the maintenance reserve
+```
+
+The challenger bet that the pool would move. It is a bet on evidence, which is what
+they are being asked to supply, and it prices a frivolous challenge without making
+anyone's participation conditional on anyone else's.
+
+Round-1 reveals **always** pool and are **always** judged against the final verdict.
+The activated `challengeReserve` stays in the pot and is distributed, because the
+round-1 voters who turned up performed real work.
 
 ### 4.7 What may be published between rounds
 
@@ -692,10 +785,15 @@ open. The update must be order-independent whatever is decided.
 
 ### 7.1 Two seeds per round
 
-| Seed | Derived from | Used for |
-|---|---|---|
-| `eligSeedBlock` | the round's **scheduled** open + `SEED_LAG` | §3.1 eligibility |
-| `outcomeSeedBlock` | the round's **scheduled** reveal close + `SEED_LAG` | §4.5 the draw |
+| Seed | Scope | Derived from | Used for |
+|---|---|---|---|
+| `eligSeedBlock` | **per round** | that round's **scheduled** open + `SEED_LAG` | §3.1 eligibility |
+| `outcomeSeedBlock` | **per claim** | round 0's **scheduled** reveal close + `SEED_LAG` | §4.5 — realized once into `u[0..2]` |
+
+**There is one outcome seed per claim, not per round** (§4.5). Round 1 has an
+eligibility seed and no outcome seed: the final evaluation reuses the stored `u`.
+Two things follow. The `blockhash` horizon never has to span the 12-hour challenge
+window, and `NO_RANDOMNESS` is reachable at the round-0 draw and nowhere else.
 
 Every schedule is fixed at submission. Round 0's open is the submission block;
 round 1's scheduled open is the close of the challenge window, which §3.5b makes
@@ -828,19 +926,20 @@ the original draw.
 | **I2** | Submitting a case reserves, assigns, locks or obligates nothing for any moderator |
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
-| **I5** | Exactly one **binding** verdict exists per claim. `provisional` is written once and binds nothing |
+| **I5** | **Exactly one randomness draw exists per claim.** `u[0..2]` is realized once and reused; `provisional` and `verdict` are two evaluations of it against different tallies. `provisional` binds nothing |
 | **I6** | No payment, debit or reputation credit occurs before `FINALIZED` |
 | **I7** | Both seeds of every round derive from schedules fixed at submission, and are independent of every transaction's timing — including the timing of `challenge()` (§3.5b) |
 | **I8** | Penalties are invariant under settlement permutation |
 | **I9** | The cost of one incoherent vote is independent of `openVoteCount` |
 | **I10** | No phase closes before its `phaseDeadline` |
 | **I11** | Under-quorum can produce `UNRESOLVED` but never `APPROVED` |
-| **I12** | No tally admits a risk-free outcome: every side with ≥ 1 revealed vote has non-zero probability |
+| **I12** | No tally admits a risk-free outcome: every side with ≥ 1 revealed vote has non-zero probability. **Every revealed vote in either round is counted in the tally the binding verdict is evaluated against** — no vote is judged against a tally it was excluded from |
 | **I13** | `withdraw` implies `openVoteCount == 0` |
 | **I14** | A forfeited bond or debit is never credited to another moderator |
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists per claim |
+| **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
@@ -871,7 +970,7 @@ while a third existed.
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
 | `CHALLENGE_BOND` vs `BOND_MIN` | **Unresolved and it breaks I1.** Now the only constraint on who may register a challenge (§3.5), so it prices spam as well as backing the round. `CHALLENGE_BOND` is debited from `bond` without a `λ` behind it, so `CHALLENGE_BOND > BOND_MIN` drives `bond` negative — and §5.4 mandates a revert, which would brick settlement for every other voter in that case. Needs either a relation between the two parameters or a separate escrow |
-| `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which is a function of the active-moderator count — the quantity §3.6 says cannot be maintained on chain. Either `T` is static and cohort size grows with the registry, or P0-9 returns. `TARGET_COHORT`, `MIN_REVEALS` and `MIN_CHALLENGE_REVEALS` are all calibrated against it |
+| `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which is a function of the active-moderator count — the quantity §3.6 says cannot be maintained on chain. Either `T` is static and cohort size grows with the registry, or P0-9 returns. `TARGET_COHORT` and `MIN_REVEALS` are both calibrated against it |
 | Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |
 

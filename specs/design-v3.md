@@ -112,10 +112,16 @@ hour 1-13   challenge window
 **Exactly one challenge round.** The provisional draw is discarded when a challenge
 succeeds in opening; it never binds and never pays.
 
-**A challenge must earn its round.** `MIN_CHALLENGE_REVEALS = max(12,
-initialReveals / 2)`. Without a fresh-evidence floor, one challenger plus two or
-three votes buys a second draw against a nearly unchanged tally, which is a
-repurchase of the same lottery rather than an addition of evidence.
+**A challenge must earn its round — and the floor that was meant to enforce this
+is withdrawn.** `MIN_CHALLENGE_REVEALS` is removed (state-machine-v3 §4.6). It was
+unsatisfiable exactly when it mattered, judged voters against a tally they were
+excluded from, and was a coordination trap. The job is done structurally instead:
+**one randomness per claim, evaluated against both tallies** (state-machine-v3
+§4.5). An unchanged tally yields an identical verdict, so there is no second draw
+to buy, and the verdict is monotone in the tally — adding votes can move it only
+toward the side that was added. An attacker who lost round 0 at `a₀ = 0.3125` needs
+a median of **21** Approve votes to flip it, against **zero** for a 23.2% chance
+under a fresh draw.
 
 **Funding: a prefunded, refundable challenge reserve.**
 
@@ -156,9 +162,18 @@ fresh challenge cohort      pooled a    p₂       h=1.0    h=0.5     h=0
   attacker exhausted          0.2083   0.1121   0.0260   0.1290   0.2319
 ```
 
-**The round answers §4's false-approval number only under two conditions**: the
-honest side challenges reliably (`h → 1`), *and* the attacker cannot refill the
-challenge cohort with fresh identities. When both hold, false approval falls from
+> **Superseded by state-machine-v3 §4.5.** The table above assumes a *fresh* draw
+> in round 1. Under the adopted single-randomness rule the `h`-dependence largely
+> disappears — simulated at 30% hostile, `TARGET_COHORT` 40, honest turnout 0.8:
+> false approval runs 0.316 / 0.309 / 0.300 / 0.284 at `h` = 0 / 0.25 / 0.5 / 1.0,
+> against 0.483 / 0.434 / 0.383 / 0.285 with a fresh draw. A fresh draw makes the
+> challenge round a 20-point gift to an attacker when the honest side is
+> unreliable; the same-`u` rule flattens that to 3 points. **O10 is substantially
+> defused** — the design no longer hinges on a quantity outside the contract.
+
+**Under a fresh round-1 draw, the round answered §4's false-approval number only
+under two conditions**: the honest side challenges reliably (`h → 1`), *and* the
+attacker cannot refill the challenge cohort with fresh identities. When both hold, false approval falls from
 23.2% to **2.6%** — the best number this design has produced. When neither holds it
 rises to **41%**, nearly double the single-round figure.
 

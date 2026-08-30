@@ -37,6 +37,9 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > - §4.8 / §5.2 — **the quorum gate is on commits, not reveals**, and
 >   `REVEAL_BOND = d` makes revealing weakly dominant. Together these remove the
 >   marginal revealer's choice between two terminal classes.
+> - §4.9 — **round 1 has no quorum gate.** §4.5's monotonicity makes an empty
+>   challenge round self-healing, and a gate there would let a rejected submitter
+>   escape their rejection by challenging and staying quiet.
 > - §5.1 — **penalties are balance debits, never time.** No moderator is ever
 >   suspended; there is no `SUSPENDED` state anywhere in this document.
 > - §5.4 — a debit that would exceed the posted bond is impossible by
@@ -456,15 +459,16 @@ applies no penalty, and moves no value.
 | From | To | Trigger | Effect |
 |---|---|---|---|
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; `round = 0`; arm both seeds (§7); `phaseDeadline = now + COMMIT_WINDOW`. **No moderator is selected, reserved, or notified on chain.** |
-| `COMMIT` | `REVEAL` | `now ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = now + REVEAL_WINDOW` |
-| `COMMIT` | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
+| `COMMIT` **(r=0)** | `REVEAL` | `now ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = now + REVEAL_WINDOW` |
+| `COMMIT` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
+| `COMMIT` **(r=1)** | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW`. **No quorum gate in round 1** — §4.9 |
 | `REVEAL` **(r=0)** | `DRAW` | `now ≥ phaseDeadline` and `pooled ≥ MIN_REVEALS` | pool this round's reveals |
 | `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled < MIN_REVEALS` | `unresolvedReason = WITHHELD` — commits cleared `MIN_COMMITS` and reveals did not (§4.8) |
 | `DRAW` **(r=0)** | `PROVISIONAL` | outcome seed available | **realize and store `u[0..2]`** (§4.5); evaluate `provisional`; pay `DRAW_BOUNTY`; publish (§8.2); `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
 | `PROVISIONAL` | `PROVISIONAL` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `PROVISIONAL` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`**; arm both round-1 seeds **from this scheduled close** (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
 | `PROVISIONAL` | `FINALIZED` | `now ≥ phaseDeadline` and `challenger == 0` | `verdict = provisional`; `finalizedAt = now` |
-| `REVEAL` **(r=1)** | `DRAW_F` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6) |
+| `REVEAL` **(r=1)** | `DRAW_F` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
 | `DRAW_F` | `FINALIZED` | — | evaluate the stored `u` against the **pooled** tally (§4.5); `finalizedAt = now`. **No seed is read here** — the claim's randomness was realized at the round-0 draw. `CHALLENGE_BOND` settles at `SETTLED` with every other liability (§4.6) |
 | `DRAW` **(r=0)** | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **Reachable at the round-0 draw only** — `DRAW_F` reads no seed |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
@@ -717,6 +721,39 @@ the retry rule. `NO_TURNOUT` is a market problem, `WITHHELD` is an attack surfac
 
 **`UNRESOLVED` must never be reachable from an under-quorum pool by approving it.**
 A bounded failure is correct; an unsafe success is not.
+
+### 4.9 Round 1 has no quorum gate, and needs none
+
+**Decision.** `MIN_COMMITS` and `MIN_REVEALS` are tested at round 0 only. Round 1
+always proceeds to its reveal phase and always proceeds to `DRAW_F`, whatever
+turnout it attracts — including none.
+
+**Why no gate is needed.** By §4.5 the verdict is `u` evaluated against the pooled
+tally, and `u` is fixed for the claim. A round 1 that adds no votes leaves the
+pooled tally identical to round 0's, so `verdict == provisional` *by arithmetic*.
+An empty challenge round is self-healing; it does not need a rule.
+
+**Why a gate is actively harmful here.** An earlier revision applied the
+`MIN_COMMITS` gate to both rounds, and that recreated the defect F8 named — with a
+cheaper trigger than the one F8 described. A submitter whose content was
+provisionally `REJECTED` could register a challenge, let round 1 go quiet, and take
+`UNRESOLVED(NO_TURNOUT)`: claim released, pot refunded, resubmit freely (§8.4). A
+permanent rejection escaped for the price of `CHALLENGE_BOND`, using nothing but
+*inaction* — no seed expiry, no coordination, no votes.
+
+The general rule this is an instance of, stated so the next revision cannot
+reintroduce it a third time:
+
+> **I26 — once `provisional` is written for a claim, no reachable terminal may
+> release that claim's key.** The reservation set is monotone in "a draw has
+> occurred."
+
+**`CHALLENGE_BOND` on an empty round 1.** §4.6 settles it on whether the verdict
+moved. An empty round leaves the verdict unmoved, so the bond is forfeit — which is
+correct: the challenger bet the pool would move, and it did not. The activated
+`challengeReserve` still joins the pot and is distributed to the round-0 coherent
+side. That is a windfall funded by the challenger's failed bet, and it is the right
+place for it to land.
 
 ---
 
@@ -1001,7 +1038,7 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
 | `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no draw occurred and nobody could have caused it |
 | `UNRESOLVED(WITHHELD)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, at a fresh nonrecoverable fee |
-| `UNRESOLVED(NO_RANDOMNESS)` | see §10 (F8) | open |
+| `UNRESOLVED(NO_RANDOMNESS)` | not reserved | freely — reachable at the round-0 draw only (§4.3, §7.1), so no `provisional` exists and the "no draw occurred" premise is true |
 
 **`policyVersion` is deliberately *not* in the key.** A key containing the version
 cannot produce a reservation that survives a version bump, so the earlier
@@ -1046,6 +1083,7 @@ the original draw.
 | **I23** | `liabilities()` is the single point of truth for claims on `bond`. Adding any debit to this specification means adding a term to it; no test may use a narrower expression |
 | **I24** | No single revealer's decision changes the terminal *class* of a case. Every gate that selects between terminal classes is evaluated against values fixed before the tally is observable |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
+| **I26** | Once `provisional` is written for a claim, no reachable terminal releases that claim's key. The reservation set is monotone in "a draw has occurred" |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |

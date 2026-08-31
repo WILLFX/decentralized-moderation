@@ -44,6 +44,10 @@ Parameters marked *(working)* are simulation inputs, not final values.
 >   suspended; there is no `SUSPENDED` state anywhere in this document.
 > - §5.4 — a debit that would exceed the posted bond is impossible by
 >   construction, not clamped after the fact.
+> - §2.4 — **liabilities are accrued, not recomputed**, and every case pins the
+>   parameters its debits will use. A complete liability function evaluated
+>   against a coefficient governance changed mid-flight is just as broken as an
+>   incomplete one.
 > - §8.2 — the index carries the round-0 **plurality** as a distinct value rather
 >   than withholding the entry until final.
 > - §4.2 / §4.5 — **the interim result is a plurality, not a draw, and the single
@@ -73,8 +77,9 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `MIN_STAKE` | 10 xBZZ | Floor to hold an identity. Flat; more buys no voting power. |
 | `BOND_MIN` | *(open — §10)* | Solvency floor. A moderator with less may not commit. |
 | `PENALTY_DEBIT` `d` | `1.4 × E[P/N]` | Debited from bond for a vote incoherent with the final verdict (design-v3 §6). |
-| `LAMBDA` `λ` | **`= d`** | Bond required per open vote. Derived, not chosen — §2.4. |
-| `REVEAL_BOND` | **`= d`** | Covered at commit, debited on non-reveal (§5.2). **Not a free parameter** — §2.4 caps it at `d`, §5.2's dominance argument floors it at `d`. The two meet at one point. |
+| `GAS_ALLOWANCE` `G` | *(open — §10)* | Conservative upper bound on the gas cost of one reveal, in xBZZ. Governance-set; enters `REVEAL_BOND` (§5.2). |
+| `REVEAL_BOND` | **`= d + G`** | Covered at commit, debited on non-reveal (§5.2). Derived: §5.2's dominance argument floors it at `d + G`, because a reveal costs gas and withholding does not. |
+| `LAMBDA` `λ` | **`= d + G`** | Bond required per open vote — `max(d, REVEAL_BOND)` per §2.4, which `REVEAL_BOND` now sets. |
 | `CHALLENGE_BOND` | *(open — §10)* | Covered to register a challenge. Cleared if round 1 **moved the plurality**, forfeit otherwise (§4.6). |
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
@@ -116,7 +121,10 @@ struct Moderator {
     uint128 stake;           // 0 or MIN_STAKE
     uint128 bond;            // posted, at risk, debited by penalties
     uint32  openVoteCount;   // committed votes whose case has not settled
-    uint32  openChallenges;  // registered challenges not yet resolved (§2.4)
+    uint32  openChallenges;  // registered challenges not yet resolved
+    uint128 liabilities;     // ACCRUED, not recomputed — §2.4. Incremented by the
+                             //   case's own coefficients at commit/challenge and
+                             //   decremented by the same amounts at settlement
     uint40  maturesAt;
     uint40  exitRequestedAt;
     uint32  trackEpoch;
@@ -181,20 +189,40 @@ expensive rather than the stake.
 function appears in every test that creates or releases a claim.
 
 ```
-liabilities(m) = LAMBDA · m.openVoteCount            (§5.1 — d or REVEAL_BOND)
-               + CHALLENGE_BOND · m.openChallenges   (§4.6)
+commit    on case c:  m.liabilities += LAMBDA(c)         ; openVoteCount++
+challenge on case c:  m.liabilities += CHALLENGE_BOND(c) ; openChallenges++
+settle    on case c:  m.liabilities -= the amount that case added
 
-mayCommit(m)     iff  ACTIVE and bond ≥ BOND_MIN + liabilities(m) + LAMBDA
-mayChallenge(m)  iff  ACTIVE and bond ≥ BOND_MIN + liabilities(m) + CHALLENGE_BOND
-withdraw(m)      iff  cooldown elapsed and liabilities(m) == 0
+mayCommit(m)     iff  ACTIVE and bond ≥ BOND_MIN + m.liabilities + LAMBDA(c)
+mayChallenge(m)  iff  ACTIVE and bond ≥ BOND_MIN + m.liabilities + CHALLENGE_BOND(c)
+withdraw(m)      iff  cooldown elapsed and m.liabilities == 0
 ```
+
+**`liabilities` is accrued, never recomputed, and the coefficients are the
+*case's*.** `LAMBDA(c)` and `CHALLENGE_BOND(c)` are the values pinned into case `c`
+at submission (§4.1, I27), not the values in force at settlement.
+
+**Why accrual rather than `λ · openVoteCount`.** The product form is correct only
+while `λ` is the same number at commit and at settlement, and no earlier revision
+said it was. A moderator covering three votes at `λ = 100` holds `BOND_MIN + 300`;
+governance raises `d` to 150; all three settle incoherent and debit 450 against
+`BOND_MIN + 300`. Negative whenever `BOND_MIN < 150` — and §5.4 mandates
+revert-not-clamp, so that moderator's presence bricks the settlement batch for
+everyone else in the case. That is the failure mode `6de7284` fixed, reached
+through a parameter change instead of through a missing term.
+
+Storing the amount closes it by construction: **what was added is what is removed,
+and no coefficient is read at settlement at all.** Both previous breaks of this
+bound were *enumerative* — a missing term. This one was *temporal*, and a complete
+function evaluated against a stale coefficient is just as broken as an incomplete
+one.
 
 **Nothing is transferred by any of these.** `liabilities()` is a *covered amount*,
 not an escrow: no value leaves `bond` at commit or at challenge registration, and a
 moderator who posts more bond can do more of both with no ceiling. What the tests
 guarantee is that the balance can absorb every outstanding claim at once.
 
-**The single-function form is the point, not the arithmetic.** An earlier revision
+**The single-accumulator form is the point, not the arithmetic.** An earlier revision
 wrote the commit test against `openVoteCount` alone, and the withdrawal test
 against `openVoteCount == 0` alone. `CHALLENGE_BOND` is not attached to a vote, so
 it appeared in neither: a moderator with `bond = BOND_MIN + 3λ` and three open
@@ -408,6 +436,9 @@ struct Case {
     uint8   round;             // 0 or 1
     uint8   terminal;          // APPROVED | REJECTED | UNRESOLVED | none
     uint8   unresolvedReason;  // NO_TURNOUT | WITHHELD | NO_RANDOMNESS
+    uint32  paramsVersion;     // I27 — the immutable parameter block in force at
+                               //   submission. Every debit this case produces is
+                               //   computed from it, never from the live values
     uint128 pot;               // initial pot; grows by the reserve on challenge
     uint128 challengeReserve;  // escrowed; refunded or activated
     uint40  phaseDeadline;
@@ -861,16 +892,42 @@ withhold  ->  − REVEAL_BOND
 reveal is at least as good  iff  p · share − (1 − p) · d + REVEAL_BOND ≥ 0
 ```
 
-At `REVEAL_BOND = d` the left side collapses to `p · (share + d)`, which is
-non-negative for every `p`. **Revealing weakly dominates withholding at every
-belief, every tally and every turnout** — no computation of `f(a)`, no view of the
-running count, and no assumption about anyone else's behaviour. Verified across
-`share`/`d` combinations: the minimum of `reveal − withhold` over `p ∈ [0,1]` is
-exactly 0 at `REVEAL_BOND = d`, and strictly negative for any smaller value.
+**Revealing costs gas and withholding does not**, and an earlier revision of this
+comparison had no term for it. With `g` the gas cost of a reveal:
 
-So `REVEAL_BOND ≥ d` is required for dominance, and §2.4 requires `REVEAL_BOND ≤ d`
-or `LAMBDA` must rise above `d`. **The two constraints meet at one point.**
-`REVEAL_BOND` is not a free parameter and should not appear in a simulation sweep.
+```
+reveal    ->  p · share − (1 − p) · d − g
+withhold  ->  − REVEAL_BOND
+```
+
+At `REVEAL_BOND = d` the difference reduces to `p · (share + d) − g`, so
+**withholding strictly wins below `p = g / (share + d)`** — and §10 calls the
+fee-over-gas margin the binding constraint in every simulation so far, which is
+exactly the regime where that band is wide:
+
+```
+ gas / share      withholding wins for p <
+        0.10                        0.042
+        0.25                        0.104
+        0.50                        0.208
+        1.00                        0.417
+```
+
+**Dominance therefore requires `REVEAL_BOND ≥ d + G`**, with `G` a conservative
+bound on `g`. At that value the minimum of `reveal − withhold` over `p ∈ [0,1]` is
+exactly 0 for every `g ≤ G`, and §2.4's `LAMBDA ≥ max(d, REVEAL_BOND)` then gives
+`LAMBDA = d + G`.
+
+So `REVEAL_BOND` is **not** closed, and removing it from §10's sweep list was
+wrong: it is floored by a quantity that moves with gas price, and bounded above
+only by the capacity cost of a larger `LAMBDA`. The "two constraints meet at one
+point" result was an artefact of the missing term.
+
+**What the deferred draw already closed.** The sharper half of this was that `p` is
+not a *belief* in round 1: with `u` published, a round-1 voter could compute that a
+flip was out of reach, sit at `p = 0` exactly, and be pushed the wrong way by any
+positive gas. §4.2 now realizes `u` after all voting, so nobody can compute `p`
+while it still matters. What remains is the ordinary band above, which `G` closes.
 
 **What this closes and what it does not.** It closes selective reveal for anyone
 optimizing *inside* the protocol's payoffs — the ordinary case, and the one O5 and
@@ -914,7 +971,7 @@ liability function entirely.
 a broken invariant, not a case to handle gracefully, and clamping would hide it.
 Revert, and treat it as I1 having failed.
 
-A moderator whose bond falls below `BOND_MIN + λ · openVoteCount` after debits is
+A moderator whose bond falls below `BOND_MIN + m.liabilities` after debits is
 not penalised further and is not suspended. They simply cannot commit to anything
 new until they post more bond or their open votes settle. This is the whole of what
 "insolvency" means here.
@@ -1059,6 +1116,7 @@ SUPER_SAFE  =  verdict == Approve
            AND the ticket draw was 3/3 Approve
            AND revealCount ≥ SUPER_QUORUM
            AND pooledReject == 0
+           AND reveals == commits          -- nobody withheld
            AND no removal or re-review case is open
 ```
 
@@ -1125,7 +1183,8 @@ the original draw.
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists per claim |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
-| **I23** | `liabilities()` is the single point of truth for claims on `bond`. Adding any debit to this specification means adding a term to it; no test may use a narrower expression |
+| **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
+| **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
 | **I24** | No single revealer's decision changes the terminal *class* of a case. Every gate that selects between terminal classes is evaluated against values fixed before the tally is observable |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
@@ -1154,7 +1213,7 @@ while a third existed.
 | Item | Note |
 |---|---|
 | `d`, `BOND_MIN`, `LAMBDA` | `λ = d` is derived; `d` itself is not. It sets the confidence threshold at which honest voting is rational |
-| ~~`REVEAL_BOND`~~ | **Closed.** `= d`, forced from above by §2.4 and from below by §5.2's dominance argument. Not a sweep parameter |
+| `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
 | `RETRY_COOLDOWN` | New, §8.4. Must exceed the time an attacker gains from forcing `WITHHELD`, without stranding an honest submitter whose case simply had bad luck |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |

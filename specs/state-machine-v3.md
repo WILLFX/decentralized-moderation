@@ -87,6 +87,13 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §5.5 — **settlement is pulled per moderator, not swept per case** (I20).
+>   The committer count has no ceiling, so a sweep funded by a fixed fraction of a
+>   fixed fee is unbounded on one side and a case can become unprofitable to
+>   settle — locking every participant's bond through economics rather than
+>   through a missing discharge path. A cap would have been worse: entry is
+>   passively eligible, so a ceiling is a gas auction the always-on attacker wins,
+>   turning a liveness attack into a composition one.
 > - §8.5 — **a re-review reopens a claim; it does not create one.** Three rules
 >   rested on it and none defined it, and the default an implementer would have
 >   reached for — a new `actionType` — has a different `claimKey`, so the permanent
@@ -685,15 +692,24 @@ are never reset. The binding draw is taken against the pooled tally.
                               │                                          │
 COMMIT ──▶ REVEAL ──▶ TALLY ──┤                                          ▼
                        │      └── window closes, no challenge ──▶ … ──▶ DRAW ──▶ FINALIZED
-                       │                     COMMIT₁ ──▶ REVEAL₁ ──▶ ┘             │
-                       │                                                           │
-                       └── no commits / no reveals ──▶ UNRESOLVED ─────┬───────────┘
-                           or outcome seed expired                     ▼
-                                                                    SETTLED
+                       │                     COMMIT₁ ──▶ REVEAL₁ ──▶ ┘
+                       │
+                       └── no commits / no reveals ──▶ UNRESOLVED
+                           or outcome seed expired
+
+both terminals are LEAVES. Settlement is not a phase: claim(c, m) runs once
+per participant, whenever they choose, and changes nothing about the case
+(§5.5). A re-review reopens a FINALIZED claim at COMMIT (§8.5).
 ```
 
-**Both terminals discharge.** `UNRESOLVED` reaches `SETTLED` too — it releases
-escrows and liabilities without writing a verdict (§4.8). It is not a leaf.
+**Both terminals discharge, and neither has a successor.** `UNRESOLVED` releases
+escrows and liabilities without writing a verdict (§4.8), exactly as `FINALIZED`
+does with one. **There is no case-level `SETTLED` state**, because §5.5 pulls
+settlement per moderator: a case whose participants have all claimed is
+indistinguishable from one where a single moderator has not yet bothered, and a
+state the machine can be permanently unable to enter is not a state. `SETTLED` is a
+fact about a *(moderator, case)* pair, and it is the claim record's absence
+(§2.1).
 
 **There is exactly one draw, and it is the last thing that happens.** `TALLY`
 publishes the round-0 **plurality** — which side leads, a *fact* about the votes.
@@ -753,10 +769,10 @@ role, and only in the one terminal that has a tally and no verdict.
 | `TALLY` | `COMMIT` | `block.number ≥ phaseDeadline` and `challenger != 0` | `round = 1`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = block.number + commitBlocks(c)`. **`challengeReserve` is not touched** — it activates at settlement, in proportion to round-1 reveals (§5.3), so opening a round moves no value |
 | `TALLY` | `DRAW` | `block.number ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `block.number ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
-| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | **store `outcomeEntropy = blockhash(outcomeSeedBlock)`**, then derive `u[0..2]` from it and evaluate `verdict` against the **pooled** tally (§4.5) — **the only randomness in the claim's life**, re-derived unchanged at any later re-review (§8.5); **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` and the reserve activation both settle at `SETTLED`, with every other liability (§4.6, §5.3) |
+| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | **store `outcomeEntropy = blockhash(outcomeSeedBlock)`**, then derive `u[0..2]` from it and evaluate `verdict` against the **pooled** tally (§4.5) — **the only randomness in the claim's life**, re-derived unchanged at any later re-review (§8.5); **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` settles at the challenger's `claim()`; the reserve activation is O(1) and is computed here, at `FINALIZED`, because `share` depends on it (§4.6, §5.3, §5.5) |
 | `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
-| `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
-| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Fire exactly the obligations whose requirement this terminal meets (§4.8's table, I30): no verdict was drawn, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate; `CHALLENGE_BOND(c)` is debited wherever one was registered; the non-reveal debit applies wherever a reveal phase opened, which is every reason except `NO_TURNOUT`; the incoherence debit applies wherever a settled side exists, which is `NO_RANDOMNESS` alone. Decrement `openVoteCount`, `openChallenges` and `m.liabilities` per §2.4; refund per §4.8. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
+| `FINALIZED` | — | `claim(c, m)` | **per moderator, not per case** (§5.5). Settles one participant's claim: pay `share` if coherent, debit otherwise, discharge their claim record and decrement `openVoteCount` / `openChallenges` / `m.liabilities` (§2.4, I32). Permissionless, self-funded, order-independent. **There is no case-level `SETTLED`** — see below |
+| **`UNRESOLVED`** | — | **`claim(c, m)`** | **§4.8 — per-moderator discharge, same shape. Fire exactly the obligations whose requirement this terminal meets (§4.8's table, I30): no verdict was drawn, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate; `CHALLENGE_BOND(c)` is debited wherever one was registered; the non-reveal debit applies wherever a reveal phase opened, which is every reason except `NO_TURNOUT`; the incoherence debit applies wherever a settled side exists, which is `NO_RANDOMNESS` alone. Decrement `openVoteCount`, `openChallenges` and `m.liabilities` per §2.4; refund per §4.8. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
 Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
 transition with a hard expiry — and `CLAIM_BOUNTY` for finalization. **Neither
@@ -1102,7 +1118,8 @@ over-provision to extract. Fixing the source lets the compensating rule be delet
 rather than kept and qualified.
 
 Nothing was transferred at registration, so the debit is the first movement of the
-bond. It runs at `SETTLED` alongside every other debit, so it inherits §5.1's
+bond. It runs at the challenger's own `claim()` alongside every other debit of
+theirs, so it inherits §5.1's
 commutativity and §4.8's discharge guarantee, and it goes to maintenance and never
 to another moderator (I14, I21).
 
@@ -1273,8 +1290,8 @@ are blind and the only way to force it is to not commit, which is free regardles
 So the debit deters nothing and prices a market failure to the people who showed
 up for it.
 
-**`UNRESOLVED` discharges through `SETTLED`, like every other terminal.** It is not
-a leaf. An earlier revision made it one, which left `openVoteCount` permanently
+**`UNRESOLVED` discharges, like every other terminal.** An earlier revision made it
+a leaf with no discharge path at all, which left `openVoteCount` permanently
 incremented for everyone who had committed — and since `withdraw` requires
 `openVoteCount == 0` (§2.3), their stake and bond were locked forever by the
 design's own intended failure mode. **Every terminal state must discharge every
@@ -1455,7 +1472,8 @@ what the reserve exists to prevent.
 
 ### 5.1 Penalties are balance debits, never time
 
-At `SETTLED`, for every revealed vote in either round:
+At `claim(c, m)`, for that moderator's revealed vote (§5.5 — per moderator, not a
+sweep over the case):
 
 ```
 coherent with verdict     -> bond += share           (§5.3)
@@ -1712,14 +1730,70 @@ not penalised further and is not suspended. They simply cannot commit to anythin
 new until they post more bond or their open votes settle. This is the whole of what
 "insolvency" means here.
 
-### 5.5 Settlement may be batched, and order does not matter
+### 5.5 Settlement is pulled per moderator, not swept per case
 
-`claim()` may settle a case in batches across transactions. Because debits commute
-(§5.1) and `verdict` is fixed at `FINALIZED`, no partial settlement can produce a
-different result from any other interleaving.
+**Decision.** `claim(caseId)` settles **one moderator's** claim on one case. There
+is no sweep, no batch cursor, and nothing that has to walk the committer list. Each
+call is permissionless and each is paid for by the party it settles.
 
-A finalized losing vote still counts against `openVoteCount` until its case is
-fully settled, so it cannot be reused before its debit lands.
+Order-independence is unchanged and is what makes this safe: debits commute (§5.1)
+and `verdict` is fixed at `FINALIZED`, so no interleaving of claims produces a
+different result from any other. `share` is `floor(P / W)` with `W` maintained as
+`pooledApprove` or `pooledReject` — **O(1) at `FINALIZED`, not a pass over
+ballots** — so a claimer needs no aggregate to be computed before they can be paid.
+
+**Why the sweep had to go: `bounded` was load-bearing and was not true.** I20
+requires every terminal to discharge every liability *within a bounded number of
+permissionless calls*, and an earlier revision funded that with `CLAIM_BOUNTY`, a
+fixed fraction of a fixed fee. The committer count is not bounded: eligibility is
+`H(...) < T` with `T` calibrated so the **expected** cohort is `TARGET_COHORT`, and
+the realized cohort is `Binomial(registry, T/2^32)` with no ceiling. Sweep cost is
+linear in committers; the funding is constant. Past the crossover **nobody settles
+the case, and by §2.4 every moderator in it has `liabilities != 0` and cannot
+withdraw** — the permanent lock §4.8 was written to prevent, reached through
+economics instead of through a missing discharge path.
+
+That is reachable two ways and only one of them is an attack. `simulation/v3/FINDINGS-v3.md`
+§D already measures the other: with `T` calibrated for a registry of 1,000, a
+registry of 10,000 gives an expected cohort of 400. **F9's "too large is an
+economic failure" and this are the same finding from two sides**, and the design
+had a cap for it once — v1's `MAX_PANEL = 128`, which the governor validated,
+because `drawPanel` at 128 seats measured 1.83M gas. v3 replaced a validated cap
+with an expectation.
+
+**A cap is the wrong fix here, and it is worth saying why so it is not
+reintroduced.** Eligibility is passive and evaluated off-chain by each moderator
+independently. A ceiling on commits makes entry first-come-first-served, which is a
+gas auction — and the party who wins a gas auction against a human with a push
+notification is the always-on attacker the cap was meant to stop. **A cap converts a
+liveness attack into a composition attack**, which is strictly worse: instead of
+locking the case it hands them the tally.
+
+**Pull removes the aggregate cost rather than bounding it.** There is no sum that a
+fixed bounty has to cover, because there is no sum: `n` participants make `n`
+independent calls, each paying their own gas for their own settlement.
+
+**Winners claim because they are owed. Losers claim because not claiming costs
+more.** That asymmetry is what makes the rule need no bounty at all:
+
+```
+settle a losing vote   ->  bond -= d(c), and LAMBDA(c) of capacity is released
+leave it unsettled     ->  LAMBDA(c) = d + G stays encumbered, forever
+```
+
+`LAMBDA(c) > d(c)` by §2.4, so **abandoning a loss locks strictly more than paying
+it costs**, and the encumbrance is permanent: §2.4's `mayCommit` charges it against
+every future commit and I13 blocks withdrawal outright. A moderator who walks away
+from a debit has paid more than the debit to avoid it. Nobody needs to chase them,
+which is the same dominance shape as §5.2's reveal argument and §7.3's poke.
+
+**`CLAIM_BOUNTY` survives, scoped to what is actually unbounded-in-nothing:**
+finalization, which is one `O(MAX_TOPICS)` transaction (§8.1) that must happen for
+readers even if no moderator ever claims. It is no longer trying to fund a sweep
+whose size an attacker chooses.
+
+A finalized losing vote still counts against `openVoteCount` until **that
+moderator's** claim settles, so it cannot be reused before its debit lands.
 
 ---
 
@@ -2008,12 +2082,14 @@ difference between this rule and the one it replaced.
 
 ### 8.1 Finality is independent of payout
 
-At `FINALIZED` — **not** at `SETTLED` — the index is written in bounded
+At `FINALIZED` — **not** when moderators are paid — the index is written in bounded
 `O(MAX_TOPICS)` work, and `share` is fixed.
 
 Moderator accounting (`claim()`, reputation, debits) happens afterwards and may be
 batched. **A reader must never wait for moderator payouts to see a result.** v2
-wrote the index at `SETTLED` and so coupled the two.
+wrote the index at the end of settlement and so coupled the two. v3 goes further
+than decoupling them: §5.5 removed the case-level settled state entirely, so there
+is no later moment for a reader to be waiting on.
 
 ### 8.2 Interim status is a value, not an absence
 
@@ -2274,7 +2350,7 @@ the strength of a pending question.
 | **I17** | At most one challenge round exists **per opening** of a claim. A re-review is a second opening (§8.5) and carries its own single challenge round; what it may never do is produce a second *randomness*, which is I5 and is the property this one was standing in for. Stated per claim, it would have forbidden the recourse §8.4's permanence depends on |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
-| **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
+| **I20** | Every terminal state discharges every liability it created — `openVoteCount` returns to its pre-commit value and every escrow is released — in **one permissionless call per liability, funded by the party that liability belongs to** (§5.5). Not "within a bounded number of calls": the committer count has no ceiling, so any rule whose cost is aggregate and whose funding is a fixed fraction of a fixed fee is unbounded on one side, and the word `bounded` was carrying an assumption the eligibility rule does not supply |
 | **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`, and equals the sum of that moderator's open claim records (§2.1) — an identity a view can assert, not an accounting convention. Adding any debit to this specification means creating a claim for it; no test may use a narrower expression |
@@ -2359,7 +2435,7 @@ property.
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | `d`, and the two upper bounds nobody had written next to each other | §5.1, §7.3. `d` has an upper bound from **viability** — honest voting is rational only while `d/share < prior/(1−prior)`, which is 1.99 at `prior = 0.665` and 19 at `prior = 0.95` — and a second from **poke dominance** at a unanimous tally, `d/share < f(â)/(1−f(â))`, which is 2.86 at `N = 1` and rises steeply with `N`. The two come from unrelated arguments in different sections and are within 45% of each other at the borderline prior. **Which one binds depends on the unmeasured quantity:** they cross at `prior = f(2/3) = 0.741`, below which viability is tighter and above which poke dominance is. Neither is load-bearing for I24 — §7.3's Claim is carried by the submitter, who has no `d` — but a sweep of `d` should see both, and FINDINGS §E currently sweeps to 10.0 without either |
 | Logic lifecycle and the force-discharge hammer | §2.4, I32. Two capabilities per authorized logic: `MAY_CREATE` and `MAY_DISCHARGE`. Revoking the first retires a contract; revoking the second while it holds an open claim strands every moderator who voted under it, so the registry refuses it — a comparison against a per-logic open-claim count, not a governance discipline. The residual is a logic that *cannot* discharge, which is a bug and not an attacker, and whose only recovery is a **timelocked per-logic force-discharge that simultaneously bars that logic from debiting** — release-then-take is the obvious abuse and the two must move together. Open: whether the timelock is `RulesetGovernor`'s existing one, and what a moderator can do during it |
-| Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call. **Two things tighten this and they are recorded here rather than left to be found:** eligibility is `H(...) < T` with no ceiling on the realized cohort, so the committer count an attacker can add is bounded only by their identity budget — v1 capped it at `MAX_PANEL = 128` and had the governor *validate* the cap, and v3 replaced a validated cap with an expectation. And I32's per-claim record adds a cold storage write per commit and a clear per settlement, which moves the crossover in the wrong direction. The cap and the record are separate decisions; the crossover is one number and both feed it |
+| Cohort size and the dilution of `share` | **The settlement-cost half of this is closed** — §5.5 pulls settlement per moderator, so there is no aggregate a fixed bounty must cover and I32's per-claim record is paid for by the claimant it belongs to. What survives is payment adequacy. `d(c)` is pinned at submission (I27) while `share = P/W` falls with realized turnout, so a party who inflates the cohort worsens **everyone's** `d/share` ex post — and commits are blind, so nobody who committed can respond. FINDINGS §D measures the organic version (a registry of 10,000 against a `T` calibrated for 1,000 gives an expected cohort of 400 and a fortieth of the per-voter pay); the adversarial version costs the attacker `LAMBDA` in locked capital per identity and puts their own identities on the same bad ratio. **Open, and it is a `FEE_BASE` question, not an I20 one** |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |
 
 **Inherited code (§Scope):**

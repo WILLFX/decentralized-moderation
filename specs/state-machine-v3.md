@@ -707,7 +707,7 @@ three defects of its own:
 
 ```
 round 1 moved the plurality  ->  no debit; challenger paid like any voter
-round 1 did not move it      ->  bond -= CHALLENGE_BOND, to maintenance, AND
+round 1 did not move it      ->  bond -= CHALLENGE_BOND(c), to maintenance, AND
                                  the challenger forfeits their share of this
                                  case's pot (§4.9 — closes the extraction
                                  channel the reserve activation would otherwise
@@ -817,7 +817,9 @@ challenge, §4.3, so refunding both would pay it twice):
 ```
 never challenged  ->  refund pot + challengeReserve
 challenged        ->  refund pot                      (the reserve is inside it)
-either way        ->  return every REVEAL_BOND
+either way        ->  debit every non-revealer REVEAL_BOND(c)  (I25)
+                      nothing is RETURNED — the bond was covered, never
+                      escrowed (§5.2), so there is nothing to give back
                       clear CHALLENGE_BOND without debit — §4.6's forfeit is
                       for a round that ran and did not move the plurality, not
                       for a case that could not resolve at all
@@ -879,11 +881,27 @@ extraction channel, because §3.5 removed the eligibility test and a round-0 *wi
 may therefore register a challenge purely to activate a pot they will share in.
 
 **So a failed challenger forfeits their share of that case's pot**, on top of
-`CHALLENGE_BOND`. They asserted the pool was not good enough to draw from; it was;
-they do not get paid for the round they caused. That makes the extraction strictly
-loss-making — the gain becomes zero and the cost is `CHALLENGE_BOND` plus their own
-forgone share — and it needs no relation between `CHALLENGE_BOND` and the reserve,
-which §10 could not have supplied anyway.
+`CHALLENGE_BOND(c)`. They asserted the pool was not good enough to draw from; it
+was; they do not get paid for the round they caused. That makes the extraction
+strictly loss-making — the gain becomes zero and the cost is `CHALLENGE_BOND(c)`
+plus their own forgone share — and it needs no relation between `CHALLENGE_BOND`
+and the reserve, which §10 could not have supplied anyway.
+
+**Where the forfeited share goes, and why the challenger stays in `W`.**
+
+```
+W  includes the failed challenger, as any other coherent voter
+share = floor(P / W)                                      -- unchanged for everyone
+the challenger's `share` is paid to the maintenance reserve, not to them
+```
+
+Both halves matter. **Routing it to maintenance** keeps the rule §5.1 has held
+since design-v2 §5.5: no moderator's loss is ever another moderator's gain, because
+that pays people to provoke losses instead of to judge content. **Keeping them in
+`W`** is what makes that true in practice — removing them would shrink the divisor
+and hand every remaining winner a larger `share`, which is the same forbidden
+transfer wearing different clothing. A failed challenge must cost the challenger
+and cost everyone else nothing.
 
 The reserve still activates on *turnout*, not on success: round-1 voters who showed
 up did real work, and paying them out of a pot the extra turnout also dilutes is
@@ -899,13 +917,23 @@ At `SETTLED`, for every revealed vote in either round:
 
 ```
 coherent with verdict    -> bond += share            (§5.3)
-incoherent with verdict  -> bond -= d                 -> maintenance reserve
-committed, never revealed -> bond -= REVEAL_BOND      -> maintenance reserve (§5.2)
+incoherent with verdict   -> bond -= d(c)            -> maintenance reserve
+committed, never revealed -> bond -= REVEAL_BOND(c)  -> maintenance reserve (§5.2)
 ```
 
+**Every debit carries `(c)` — the case's pinned parameters, never the live ones**
+(§2.4, I27). §2.4 says "no coefficient is read at settlement at all", and that is
+only true if the debit sites say so too: an earlier revision pinned the
+*accumulator* and left all three debits written as bare `d`, `REVEAL_BOND`,
+`CHALLENGE_BOND`. A case pinned at `LAMBDA(c) = 100` whose settlement debits a
+governance-raised 150 drives `bond` negative, and §5.4 mandates revert-not-clamp,
+so **that one moderator's presence reverts the settlement batch for every other
+voter in the case** — and by §4.3's discharge path pins their liabilities, which by
+I13 blocks their withdrawal.
+
 **Every value removed from `bond` has a named destination, and it is never another
-moderator** (§9 I14, I21). `d`, `REVEAL_BOND` and `CHALLENGE_BOND` all go to the
-maintenance reserve. Routing any of them to the opposing side would create
+moderator** (§9 I14, I21). `d(c)`, `REVEAL_BOND(c)` and `CHALLENGE_BOND(c)` all go
+to the maintenance reserve. Routing any of them to the opposing side would create
 punishment farming — an incentive to provoke losses rather than to judge content —
 which design-v2 §5.5 forbids.
 
@@ -1019,9 +1047,18 @@ share = floor(P / W)
 remainder = P − share · W   -> maintenance reserve, never to moderators
 ```
 
-Four things are irrelevant to both payment and penalty: which round a moderator
-voted in, whether their own ballot was sampled as a ticket, whether their side won
-the round-0 plurality, and whether the challenge reversed it.
+Four things are irrelevant to both payment and penalty **for an ordinary voter**:
+which round they voted in, whether their own ballot was sampled as a ticket,
+whether their side won the round-0 plurality, and whether the challenge reversed
+it.
+
+**The challenger is the one exception, and it is deliberate.** §4.6 makes their
+payment depend on exactly one thing this list says is irrelevant — whether round 1
+moved the plurality. A challenger whose round did not move it forfeits their share
+of `P` as well as `CHALLENGE_BOND(c)`, which is what closes the extraction channel
+§4.9 describes. The list above is written unconditionally in an earlier revision;
+it is scoped here rather than deleted, because for everyone who did not register a
+challenge it is exactly right.
 
 **Expected cash is not direction-neutral, deliberately** (design-v3 §5). A majority
 voter expects `(P/N)·f(a)/a`, a minority voter `(P/N)·(1−f(a))/(1−a)`. `design-v2`
@@ -1040,7 +1077,7 @@ made somewhere else. It already happened twice here: once when `REVEAL_BOND` was
 omitted from `LAMBDA`, and once when `CHALLENGE_BOND` was omitted from the
 liability function entirely.
 
-**The implementation must not clamp.** A `bond -= d` that would underflow indicates
+**The implementation must not clamp.** A `bond -= d(c)` that would underflow indicates
 a broken invariant, not a case to handle gracefully, and clamping would hide it.
 Revert, and treat it as I1 having failed.
 
@@ -1266,7 +1303,7 @@ the original draw.
 | **I11** | Under-quorum can produce `UNRESOLVED` but never `APPROVED` |
 | **I12** | No tally admits a risk-free outcome: every side with ≥ 1 revealed vote has non-zero probability **at the moment every party's last decision is made**. Every revealed vote in either round is counted in the tally the verdict is evaluated against, and no randomness is public before the last vote is cast — a published `u` makes the outcome a step function of the tally and this invariant false for round 1 |
 | **I13** | `withdraw` implies `liabilities(m) == 0` — *every* outstanding claim discharged, not only open votes |
-| **I14** | A forfeited bond or debit is never credited to another moderator |
+| **I14** | No moderator's loss is another moderator's gain. This covers value **removed from `bond`**, value **withheld from a payment**, and any change to a divisor that raises someone else's share — the three are the same transfer written three ways |
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists per claim |
@@ -1281,7 +1318,7 @@ the original draw.
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
-| **I21** | Every value removed from `bond` has a named destination, and that destination is never another moderator |
+| **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
 
 I2 and I12 are inherited verbatim from v2 (I12 and the no-certainty rule) and are
 the two this design is least free to relax.

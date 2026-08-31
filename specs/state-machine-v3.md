@@ -16,10 +16,17 @@ classified, because a partial list is how a file ends up unowned:
 
 ```
 deleted outright     SortitionTree, FreezeMath                       ~210 lines
-rewritten            Moderation, Settlement                        ~2,690 lines
-survives with edits  StakeRegistry, IndexRegistry, RulesetGovernor,
-                     ProtocolLimits                                ~2,400 lines
+rewritten            Moderation, Settlement, StakeRegistry,
+                     RulesetGovernor                               ~4,070 lines
+survives with edits  IndexRegistry, ProtocolLimits                   ~650 lines
 ```
+
+**Corrected from M2.6's port assessment against this commit's predecessor.** The
+earlier grouping put `StakeRegistry` and `RulesetGovernor` under "survives with
+edits", which invites editing them in place; measured, 47% of the first is gone and
+the second retains its governance *pattern* and almost none of its content. The
+port order is `StakeRegistry` first — it is what everything else is written
+against, and getting it second means writing `Moderation` twice.
 
 §10 carries the per-file edits. **No Solidity has changed since the pivot** — the
 diff against `contracts/` is empty, and this document describes what must replace
@@ -80,6 +87,12 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §2.4 — **a claim on a bond is a record, not a subtraction** (I32). Only the case
+>   that created it may discharge it, and only the logic that created that case may
+>   act on it. I1's "structural" covered the arithmetic and not the authorization:
+>   with `liabilities` a bare scalar the release amount had to come from the caller,
+>   and any authorized contract could zero any moderator's liabilities. Obligation
+>   handles were deleted as panel machinery when their job was custody.
 > - §0 / §7.2 — **the schedule is denominated in block heights** (I31). The
 >   previous revision compared a wall-clock deadline against a block-indexed
 >   `blockhash` horizon via a `blockAt()` the EVM does not have, and the two sides
@@ -182,15 +195,32 @@ struct Moderator {
     uint128 bond;            // posted, at risk, debited by penalties
     uint32  openVoteCount;   // committed votes whose case has not settled
     uint32  openChallenges;  // registered challenges not yet resolved
-    uint128 liabilities;     // ACCRUED, not recomputed — §2.4. Incremented by the
-                             //   case's own coefficients at commit/challenge and
-                             //   decremented by the same amounts at settlement
+    uint128 liabilities;     // ACCRUED, not recomputed — §2.4. The SUM of this
+                             //   moderator's open claims, and equal to it by
+                             //   construction rather than by discipline (I23)
     uint40  maturesAt;
     uint40  exitRequestedAt;
     uint32  trackEpoch;
     uint128 track;           // reputation, WAD-scaled (§6)
 }
 ```
+
+Every claim on a bond is itself a record, because a scalar cannot say who is owed:
+
+```
+struct Claim {
+    uint96  amount;          // what this claim covers — LAMBDA(c) or
+                             //   CHALLENGE_BOND(c), PINNED at creation (I27)
+    address logic;           // the contract that created it, and the only one
+                             //   that may discharge or draw against it
+}
+
+claims :  keccak(moderator, caseId, kind)  ->  Claim      kind ∈ {VOTE, CHALLENGE}
+```
+
+The two fields are 96 + 160 bits, so a claim is **one storage slot**, written when
+the claim is created and cleared when it is discharged. §2.4 explains why the
+record has to exist and what it costs.
 
 **There is no `suspendedUntil`, no `units`, no `unitsReserved`, and no `RiskUnit`.**
 Nothing in this specification freezes a moderator for a period of time. §5.1
@@ -249,14 +279,88 @@ expensive rather than the stake.
 function appears in every test that creates or releases a claim.
 
 ```
-commit    on case c:  m.liabilities += LAMBDA(c)         ; openVoteCount++
-challenge on case c:  m.liabilities += CHALLENGE_BOND(c) ; openChallenges++
-settle    on case c:  m.liabilities -= the amount that case added
+commit    on case c:  claims[m,c,VOTE]      = Claim(LAMBDA(c), msg.sender)
+                      m.liabilities += LAMBDA(c)         ; openVoteCount++
+challenge on case c:  claims[m,c,CHALLENGE] = Claim(CHALLENGE_BOND(c), msg.sender)
+                      m.liabilities += CHALLENGE_BOND(c) ; openChallenges++
+
+debit     on (m,c,k):  require msg.sender == claims[m,c,k].logic
+                       require amount     ≤ claims[m,c,k].amount
+                       bond -= amount                     -> maintenance (§5.1)
+discharge on (m,c,k):  require msg.sender == claims[m,c,k].logic
+                       m.liabilities -= claims[m,c,k].amount ; delete the claim
 
 mayCommit(m)     iff  ACTIVE and bond ≥ BOND_MIN + m.liabilities + LAMBDA(c)
 mayChallenge(m)  iff  ACTIVE and bond ≥ BOND_MIN + m.liabilities + CHALLENGE_BOND(c)
 withdraw(m)      iff  cooldown elapsed and m.liabilities == 0
 ```
+
+**The amount is looked up, never supplied.** An earlier revision wrote the release
+as *"`m.liabilities -= the amount that case added"*, with `liabilities` a bare
+scalar and no per-case record anywhere in §2. There is only one way to implement
+that: the caller passes the amount, and the registry takes its word. Every
+guarantee in this section then holds only of the arithmetic and none of it holds of
+the **authorization**.
+
+**Failure, and it does not need a second contract to bite.** Within one logic, a
+bug that releases the wrong amount silently corrupts `liabilities` and nothing
+catches it, because conservation still balances — which is exactly how v1's P0-2
+drained escrow across cases inside a single contract, with a per-moderator pool
+where a per-case one was needed. Across two, it is a complete break: governance
+authorizes logic B while logic A still has open cases — which any workable
+migration must permit, or every in-flight case strands at the cutover — and B calls
+`discharge(alice, anyCase)` for `alice.liabilities`. Alice's liabilities reach zero
+with three votes open under A, she withdraws stake and bond (I13 false), and A's
+settlement then debits a moderator who has left. Or B debits her bond for a case
+she never voted in (I1 false).
+
+**I1's word "structural" was doing work it had not earned.** *"Every value the
+specification can remove from `bond` is a term in `liabilities()`"* is a statement
+about arithmetic. The property custody actually needs is different:
+
+> **Only the case that created a claim may discharge it, and only the logic that
+> created that case may act on it.**
+
+That is what an obligation handle *was*. §10 deleted obligation handles as panel
+machinery, and the deletion was right about the noun and wrong about the function:
+v1's handle was attached to an assigned duty, which v3 does not have, but its job
+was custody, which v3 does. **The handle was categorised by what it hung from
+rather than by what it did** — the same error that lost `MIN_REVEALS`'s second job
+(§4.8) and that I29 and I30 were both written about.
+
+**Three properties fall out, and each replaces an argument with a construction:**
+
+- **The release amount cannot be wrong**, because no caller states it.
+- **A foreign logic cannot touch a claim**, so a migration settles A's cases under
+  A and B's under B, and a moderator's `liabilities` is the correct sum throughout.
+- **A debit cannot exceed what was covered.** §5.4 wants exactly this and currently
+  argues it from `liabilities()` being complete. It is now enforced at the call
+  site: you may draw against the claim you hold and nothing else.
+
+And **I23 becomes checkable.** *"`m.liabilities` is the single point of truth for
+claims on `bond`"* was an accounting convention; `liabilities == Σ claims` is now an
+identity a view function can assert.
+
+**What it costs, stated plainly.** One cold storage write per commit and per
+challenge, cleared at settlement — roughly 20k gas in, some of it refunded out.
+That is the price of custody and there is no cheaper encoding: the registry cannot
+recompute `LAMBDA(c)` because it does not hold the case's pinned parameters, and
+the whole point is that it must not have to ask. **It tightens §10's settlement-cost
+crossover**, which is already the binding economic constraint, and the two rows are
+cross-referenced there rather than left to be discovered.
+
+**Discharge capability must outlive creation capability.** A logic barred from
+creating new claims must still be able to discharge the ones it holds, or
+deauthorizing it strands every moderator who voted under it — I13 and I20 broken by
+the act of retiring a contract. So the two are separate capabilities, and
+**`MAY_DISCHARGE` cannot be revoked from a logic that holds an open claim.** The
+registry knows the count; the rule is a comparison, not a governance discipline.
+
+The residual is a logic that *will not* discharge — a bug, not an attacker. The
+only recovery is a governance action, and it should be named as the hammer it is:
+a **timelocked, per-logic force-discharge that simultaneously bars that logic from
+debiting**, so it cannot release liabilities and then take bond against them. It is
+in §10 with the rest of the open work, unhidden.
 
 **`liabilities` is accrued, never recomputed, and the coefficients are the
 *case's*.** `LAMBDA(c)` and `CHALLENGE_BOND(c)` are the values pinned into case `c`
@@ -1425,6 +1529,13 @@ made somewhere else. It already happened twice here: once when `REVEAL_BOND` was
 omitted from `LAMBDA`, and once when `CHALLENGE_BOND` was omitted from the
 liability function entirely.
 
+**Two bounds, and only one of them was ever stated.** The paragraph above bounds
+the debit by what the *moderator* covered. §2.4 now also bounds it by what the
+*claim* covered — `amount ≤ claims[m,c,k].amount`, enforced at the call rather than
+argued from completeness. The second is the stronger of the two and it is the one
+that survives a second logic contract: a caller with no claim on a moderator can
+debit them nothing at all, whatever their bond says.
+
 **The implementation must not clamp.** A `bond -= d(c)` that would underflow indicates
 a broken invariant, not a case to handle gracefully, and clamping would hide it.
 Revert, and treat it as I1 having failed.
@@ -1834,7 +1945,7 @@ the original draw.
 
 | # | Invariant |
 |---|---|
-| **I1** | No moderator's `bond` can go negative. Structural: every value the specification can remove from `bond` is a term in `liabilities()` (§2.4), and every operation that adds a claim tests `bond ≥ BOND_MIN + liabilities(m)` after the addition |
+| **I1** | No moderator's `bond` can go negative. Structural in **two** independent ways, which is what it takes: every value the specification can remove from `bond` is a term in `liabilities()` (§2.4) and every operation that adds a claim tests `bond ≥ BOND_MIN + liabilities(m)` after the addition — *and* no debit may exceed the claim it is drawn against (I32). The first is a statement about arithmetic and holds only within one honest logic contract; the second is a statement about authorization and is the one that survives a migration |
 | **I2** | Submitting a case reserves, assigns, locks or obligates nothing for any moderator |
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
@@ -1856,7 +1967,7 @@ the original draw.
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
 | **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
-| **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
+| **I23** | `m.liabilities` is the single point of truth for claims on `bond`, and equals the sum of that moderator's open claim records (§2.1) — an identity a view can assert, not an accounting convention. Adding any debit to this specification means creating a claim for it; no test may use a narrower expression |
 | **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
@@ -1865,6 +1976,7 @@ the original draw.
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
 | **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. `CHALLENGE_BOND` reads **nothing** and settles everywhere past `TALLY`; the non-reveal debit, the incoherence debit and the reserve activation read the **tally**; payment, the listing status and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first two groups and not the third. I25 is this rule's instance for the non-reveal debit; §4.8's `NO_RANDOMNESS` row is what forced the general statement. **An obligation's group is a design choice, not a discovery** — H7 moved `CHALLENGE_BOND` from the tally group to the empty one, because every tally-derived test available to it was one the challenger could evaluate before registering |
 | **I31** | **No comparison in this specification spans two units of time.** A deadline is denominated in blocks iff a block-denominated chain constant can expire inside it; wall-clock quantities are records or lifecycle delays that no block constant runs inside. The single wall-clock→block conversion happens once, at case creation, from a pinned parameter (§1 `BLOCK_TIME`, §4.3), and no rule reads it afterwards. **A conversion inside a comparison is a defect even when its constant is correct**, because correctness of the constant is a property of the chain on the day and not of the specification |
+| **I32** | **Only the case that created a claim on a bond may discharge it, and only the logic that created that case may act on it.** `liabilities` is a sum of records, never a figure a caller states. A property about *authorization*, not about arithmetic: conservation can balance while attribution is wrong, which is how v1's P0-2 drained escrow inside a single contract. Discharge capability is separable from creation capability and cannot be revoked from a logic holding an open claim, or retiring a contract would strand every moderator who voted under it |
 
 I2 is inherited verbatim from v2. **I12 is not, any more** — its v2 phrasing is the
 one quoted above as wrong, and it was carried across three architectures without
@@ -1921,7 +2033,8 @@ property.
 | Eligibility seed vs commit window | The 14-block margin above. It is now an arithmetic relation between two block counts rather than a hidden dependence on an assumed block time, which is what makes it statable at all. §3.1 has no equivalent of §7.3's "unavailable is not a test", so what happens when `blockhash(eligSeedBlock)` expires mid-window is unspecified: `H(..., 0, m)` is a perfectly good hash, so the eligible set would silently change to a publicly precomputable one at a known height. **Open, and tracked separately from this row because widening the margin and guarding the expiry are different fixes** |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
-| Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |
+| Logic lifecycle and the force-discharge hammer | §2.4, I32. Two capabilities per authorized logic: `MAY_CREATE` and `MAY_DISCHARGE`. Revoking the first retires a contract; revoking the second while it holds an open claim strands every moderator who voted under it, so the registry refuses it — a comparison against a per-logic open-claim count, not a governance discipline. The residual is a logic that *cannot* discharge, which is a bug and not an attacker, and whose only recovery is a **timelocked per-logic force-discharge that simultaneously bars that logic from debiting** — release-then-take is the obvious abuse and the two must move together. Open: whether the timelock is `RulesetGovernor`'s existing one, and what a moderator can do during it |
+| Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call. **Two things tighten this and they are recorded here rather than left to be found:** eligibility is `H(...) < T` with no ceiling on the realized cohort, so the committer count an attacker can add is bounded only by their identity budget — v1 capped it at `MAX_PANEL = 128` and had the governor *validate* the cap, and v3 replaced a validated cap with an expectation. And I32's per-claim record adds a cold storage write per commit and a clear per settlement, which moves the crossover in the wrong direction. The cap and the record are separate decisions; the crossover is one number and both feed it |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |
 
 **Inherited code (§Scope):**
@@ -1929,12 +2042,29 @@ property.
 - `StakeRegistry` — survives; loses the sortition tree and gains `bond` and
   `openVoteCount`.
 - `IndexRegistry` — survives; gains the plurality statuses of §8.2.
-- `RulesetGovernor` — survives unchanged, with §8.4's rule that a version bump does
-  not reopen rejections.
+- `RulesetGovernor` — **"survives unchanged" is false, and measurably so.** M2.6
+  stubbed `_validateParams` at 1,371 B of 4,565, and that undercounts: of v3's
+  parameter set exactly two — `revealWindow` and `seedLag` — appear in v1's `Params`
+  at all, while `PendingParams` stores a v1-shaped struct and `applyRuleset` carries
+  a v1 signature. What survives is the *pattern*: propose/execute/cancel, the
+  timelock, two-step governance, and `bindModeration`'s reciprocity check
+  (M2.6-F3). The content is a rewrite, and it now has more to validate — §10's
+  `BLOCK_TIME` bound (I31) and I32's discharge-capability rule. §8.4's rule that a
+  version bump does not reopen rejections carries over unchanged.
 - `SortitionTree` — **deleted.** Passive eligibility walks no tree.
 - `FreezeMath` — **deleted.** There are no freezes.
-- `Moderation`, `Settlement` — rewritten. Panels, duty pools, obligation handles
-  and duty settlement have no counterpart here.
+- `Moderation`, `Settlement` — rewritten. Panels, duty pools and duty settlement
+  have no counterpart here. **Obligation handles do**, and this line used to say
+  otherwise: what v1 hung from an assigned duty, §2.4 hangs from a voluntary
+  commit, and the record is the same record because its job was never the panel —
+  it was knowing which case may release which claim (I32).
+- `StakeRegistry` — and the surviving list above understates this. M2.6's port
+  assessment measured 18 of its 30 external functions deleted and 10 new, taking it
+  from 12,761 B to 6,774 B. **It is a rewrite around a surviving skeleton, not an
+  edit**, and the whole eligibility-epoch subsystem (P0-3, P0-3c, P0-3d) exists
+  solely to stop a *sortition tree* mutating mid-draw — with no tree it is not
+  simplifiable but meaningless, and leaving it in leaves live code whose
+  justification has evaporated.
 
 **The standing constraint is unchanged.** No deployment with material funds, and
 the index is not presented as reliable safe-search certification, until the P0 set

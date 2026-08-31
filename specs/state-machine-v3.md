@@ -1,9 +1,9 @@
 # Moderation Contract v3 — Formal State-Machine Specification
 
 **Milestone:** M3.0
-**Status:** Specification, revision **v3.4**. Not implemented.
+**Status:** Specification, revision **v3.5**. Not implemented.
 Revision history is the commit log; the marker exists so a reader can tell which
-`design-v3` revision this file was last reconciled against (v3.3).
+`design-v3` revision this file was last reconciled against (v3.4).
 **Design:** `specs/design-v3.md` — mechanism, arithmetic, and the costs this
 document takes as decided. Where the two disagree, the design document is wrong and
 should be corrected; this file is normative.

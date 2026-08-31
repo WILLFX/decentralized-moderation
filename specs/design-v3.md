@@ -7,8 +7,11 @@ document should be corrected.
 risk units of revision v2.1. `design-v2.md` §4.2's neutrality theorem is
 **no longer a design requirement** (§5); it remains correct and is now the
 statement of what this design gives up.
-**Revision:** v3.3 — the draw is taken against `â = (A+1)/(N+2)` rather than the
-sample proportion (§3), which moved every figure in §4 and §8; `CHALLENGE_BOND` is
+**Revision:** v3.4 — the schedule is denominated in block heights, with the one
+wall-clock conversion pinned per case at submission (§7); the previous form
+compared a wall-clock deadline against a block-indexed `blockhash` horizon and
+drifted apart at 2.7% of block time. v3.3 took the draw against `â = (A+1)/(N+2)`
+rather than the sample proportion (§3), which moved every figure in §4 and §8; `CHALLENGE_BOND` is
 unconditional and the challenge reserve activates in proportion to round-1 turnout
 (§2.1, §5). v3.2 reinstated a 12-hour challenge round (§2.1) so the architecture is
 no longer challenge-free, and **the one-hour result is a plurality — a fact about
@@ -41,11 +44,11 @@ notification is cheaper bought directly.
 was:  commit 24h -> reveal 24h -> challenge 4d (-> more rounds)      ~6 days
 now:  commit -> reveal -> TALLY, plurality published                ~1 hour
       -> 12h challenge window -> (one challenge round) -> ONE draw   ~12-13 h
-
-(Every duration here is the human-facing intent. The contract schedules in block
-heights — 240 / 240 / 8,640 blocks at a 5 s `BLOCK_TIME` — so the wall-clock
-figures track the chain rather than binding it. §7 and `state-machine-v3` §0.)
 ```
+
+Every duration above is the human-facing **intent**. The contract schedules in
+block heights — 240 / 240 / 8,640 blocks at a 5 s `BLOCK_TIME` — so these figures
+track the chain rather than binding it (§7, `state-machine-v3` §0).
 
 **The result is not challenge-free.** An earlier revision of this document was, and
 §2.1 records why the window came back: a 2-of-3 majority certifies bad content

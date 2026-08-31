@@ -91,7 +91,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(NO_RANDOMNESS)` may be resubmitted (§8.4). |
 | `COMMIT_WINDOW` | 20 min | Per round. |
 | `REVEAL_WINDOW` | 20 min | Per round. |
-| `FINALIZATION_GRACE` | 10 min | Between outcome block and hard deadline. |
+| ~~`FINALIZATION_GRACE`~~ | — | **Removed.** It named a deadline no transition established. The real one is `outcomeSeedBlock + BLOCKHASH_HORIZON` (§4.4), which `BLOCKHASH_HORIZON` already gives. |
 | `CHALLENGE_WINDOW` | 12 h | From publication of the round-0 plurality (`TALLY`). |
 | `SEED_LAG` | 2 blocks | Between arming and realizing a seed. |
 | `BLOCKHASH_HORIZON` | 256 blocks | How long `blockhash` remains readable. **Chain-dependent in blocks and in wall time** — 256 blocks is ~51 min at 12 s and ~21 min at 5 s. §7.3's rarity argument scales with it, so it is named rather than assumed. |
@@ -443,7 +443,7 @@ struct Case {
     uint8   phase;
     uint8   round;             // 0 or 1
     uint8   terminal;          // APPROVED | REJECTED | UNRESOLVED | none
-    uint8   unresolvedReason;  // NO_TURNOUT | NO_RANDOMNESS
+    uint8   unresolvedReason;  // NO_TURNOUT | NO_REVEALS | NO_RANDOMNESS
     uint32  paramsVersion;     // I27 — the immutable parameter block in force at
                                //   submission. Every debit this case produces is
                                //   computed from it, never from the live values
@@ -457,8 +457,9 @@ struct Case {
     uint32  commitsThisRound;
     uint32  revealsThisRound;
     uint32  reveals0;          // round-0 reveal count, recorded for §8.3
-    uint128 u0; uint128 u1;    // the claim's three uniforms (§4.5), realized
-    uint128 u2;                //   at DRAW — the only draw in the claim's life
+    bool    unanimousDraw;     // were all three tickets the same side? §8.3
+                               //   reads this; nothing reads `u` back, because
+                               //   §4.5 realizes and uses it in one transaction
     Outcome plurality;         // which side led at round-0 close; a FACT, and
                                //   no randomness has been realized when it is set
     Outcome verdict;           // written once, at the binding draw
@@ -518,16 +519,16 @@ moves no value.
 |---|---|---|---|
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; `round = 0`; arm both seeds (§7); `phaseDeadline = now + COMMIT_WINDOW`. **No moderator is selected, reserved, or notified on chain.** |
 | `COMMIT` **(r=0)** | `REVEAL` | `now ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = now + REVEAL_WINDOW` |
-| `COMMIT` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
+| `COMMIT` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
 | `COMMIT` **(r=1)** | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW`. **No quorum gate in round 1** — §4.9 |
 | `REVEAL` **(r=0)** | `TALLY` | `now ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled == 0` | `unresolvedReason = NO_TURNOUT`. Not a policy gate — there is no tally to draw from |
+| `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`. Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
 | `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `TALLY` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
 | `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
-| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND` settles at `SETTLED` with every other liability (§4.6) |
-| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
+| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` settles at `SETTLED` with every other liability (§4.6) |
+| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 | **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written and no *incoherence* debit is applied. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
@@ -551,6 +552,11 @@ that write them, and gave I3 no row to live in:
 | `postBond`, `requestExit`, `withdraw` | §2.3 | as §2.3 |
 
 `commit` consumes the one-vote-per-claim allowance, not `reveal` (§3.4).
+
+**`terminal` is written by every row that reaches a terminal state**, and by no
+other row. §8.2 and §8.4 both key on it, and an earlier revision left it unwritten
+by the whole table — an I19 counterexample inside the invariant written to catch
+exactly that.
 
 **Every field in §4.1 must be written or provably preserved by every transition**
 (§9 I19). `revealsThisRound` is the field this rule exists for: without the reset
@@ -596,7 +602,7 @@ evaluation to reuse them for.
 ```
 u[i] = uint128( H(OUTCOME_DOMAIN, chainId, contract, caseId, i,
                   blockhash(outcomeSeedBlock)) )          i = 0,1,2
-       -- realized once, at the round-0 draw, and STORED on the case (§4.1)
+       -- realized and used in the SAME transaction (§4.3's DRAW row)
 
 N = pooledApprove + pooledReject
 ticket[i] = ( u[i] · N  <  pooledApprove · 2^128 )        -- i.e. u[i]/2^128 < a
@@ -661,8 +667,10 @@ stops depending on a quantity that lives outside the contract.
   *eligibility* seed only. `NO_RANDOMNESS` is therefore reachable at the round-0
   draw and nowhere else, and the 256-block `blockhash` horizon never has to span
   the 12-hour challenge window.
-- **`u` must be stored** at the round-0 draw (§4.1). It is not recoverable from
-  `blockhash` twelve hours later.
+- **`u` need not be stored.** An earlier revision realized it at round-0 close and
+  had to keep it for twelve hours; with the draw last, realization and use are one
+  transaction. Only §8.3's `unanimousDraw` flag survives into storage, because that
+  is the one thing read back.
 - **Nothing about `u` is knowable while anyone is still voting.** `u` is realized
   at `DRAW`, after every reveal in both rounds. An earlier revision realized it at
   round-0 close and published it, which reduced the whole mechanism to one public
@@ -755,7 +763,8 @@ debits and the retry rule.
 
 | Reason | Condition | Steerable? | Retry |
 |---|---|---|---|
-| `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close, or nobody revealed at all | **no** | free, full refund |
+| `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** — commits are blind | free, full refund |
+| `NO_REVEALS` | commits cleared the gate and `pooled == 0` at reveal close | **yes**, but only by holding *every* commit | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
 | `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **yes**, by inaction | claim reserved for `RETRY_COOLDOWN`, **pot carried forward** — no fresh fee |
 
 **There is exactly one quorum gate and it is on commits.** Commits are made blind —
@@ -828,8 +837,17 @@ either way        ->  debit every non-revealer REVEAL_BOND(c)  (I25)
 ```
 
 The reason code is load-bearing rather than diagnostic: it decides the retry rule.
-`NO_TURNOUT` is a market problem nobody can cause; `NO_RANDOMNESS` is steerable by
-inaction (§7.3) and so cannot take the free-retry treatment.
+`NO_TURNOUT` is a market problem nobody can cause, because commits are blind.
+`NO_REVEALS` and `NO_RANDOMNESS` are both steerable, so neither can take the
+free-retry treatment.
+
+**Why `NO_REVEALS` is separated from `NO_TURNOUT`.** An earlier revision folded
+"nobody revealed" into `NO_TURNOUT` and marked the whole row unsteerable. It is
+not: a party holding *every* commit on a case can withhold all of them and reach a
+terminal that, under the free-retry treatment, hands the claim back. The bar is
+high — they must be the entire committing cohort — which is why this is a
+reservation rather than a redesign. But I28 does not cover them, and §4.8's own
+steerability column is what decides the retry rule, so the row has to be honest.
 
 **`NO_RANDOMNESS` reserves the claim but carries the pot forward.** Reserving alone
 would repeat the mistake the `WITHHELD` treatment made: the party who benefits from
@@ -1125,12 +1143,21 @@ open. The update must be order-independent whatever is decided.
 | Seed | Scope | Derived from | Used for |
 |---|---|---|---|
 | `eligSeedBlock` | **per round** | that round's **scheduled** open + `SEED_LAG` | §3.1 eligibility |
-| `outcomeSeedBlock` | **per claim** | round 0's **scheduled** reveal close + `SEED_LAG` | §4.5 — realized once into `u[0..2]` |
+| `outcomeSeedBlock` | **per claim** | the schedule in §7.2 — submission plus **all four** windows | §4.5 — realized once at `DRAW` |
 
-**There is one outcome seed per claim, not per round** (§4.5). Round 1 has an
-eligibility seed and no outcome seed: the final evaluation reuses the stored `u`.
-Two things follow. The `blockhash` horizon never has to span the 12-hour challenge
-window, and `NO_RANDOMNESS` is reachable at the round-0 draw and nowhere else.
+**There is one outcome seed per claim, not per round** (§4.5), and it sits after
+every window whether or not round 1 runs. Round 1 has an eligibility seed and no
+outcome seed of its own.
+
+Two consequences, both corrected from an earlier revision that left this table
+deriving the seed from round 0's reveal close:
+
+- **`NO_RANDOMNESS` is reachable at `DRAW` and nowhere else** — which is one place,
+  not "the round-0 draw", because since `78bf686` there is only one draw and it
+  serves the challenged path too.
+- **The `blockhash` horizon never spans the challenge window.** The seed block sits
+  *after* it, so the readable interval runs from a point every case has already
+  reached rather than racing twelve hours.
 
 Every schedule is fixed at submission. Round 0's open is the submission block;
 round 1's scheduled open is the close of the challenge window, which §3.5b makes
@@ -1190,7 +1217,8 @@ describe.
 Re-arming lets a party inspect whether a seed is favourable, use it when it is, and
 let it expire when it is not — a free option over outcomes. The one-hour round
 lifecycle makes expiry rare: `blockhash` is available for 256 blocks (~51 minutes)
-and the outcome block sits `FINALIZATION_GRACE` before the hard deadline.
+and the case's hard deadline is `outcomeSeedBlock + BLOCKHASH_HORIZON` — the last
+block at which the seed can still be read (§4.4).
 
 **`DRAW_BOUNTY` pays for the poke that reads it** — not `CLAIM_BOUNTY`, which is
 paid at finalization, a different transition with no expiry. An earlier revision
@@ -1312,7 +1340,7 @@ the original draw.
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
 | **I24** | No party can change a case's terminal *class* in a direction favourable to them by an action taken after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
-| **I28** | Withholding a reveal is never favourable: it forfeits `REVEAL_BOND` and strictly lowers the probability of the withholder's own side |
+| **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |

@@ -34,9 +34,9 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
 >   `NO_QUORUM` and `VOID` states. §4.8 later split the reason codes, because
 >   they carry different debits and different retry rules.
-> - §4.8 / §5.2 — **the quorum gate is on commits, not reveals**, and
->   `REVEAL_BOND = d` makes revealing weakly dominant. Together these remove the
->   marginal revealer's choice between two terminal classes.
+> - §4.8 / §5.2 — **there is exactly one quorum gate and it is on commits.**
+>   `MIN_REVEALS` is removed rather than relocated: it was a terminal-class gate on
+>   observable state, and the only thing that ever made withholding attractive.
 > - §4.9 — **round 1 has no quorum gate.** §4.5's monotonicity makes an empty
 >   challenge round self-healing, and a gate there would let a rejected submitter
 >   escape their rejection by challenging and staying quiet.
@@ -85,10 +85,10 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 40 | Expected eligible moderators per round. |
 | `MIN_COMMITS` | 16 | Commits required at commit close, or the case ends `UNRESOLVED(NO_TURNOUT)` (§4.8). **This is the quorum gate** — decided before anyone can see a tally. |
-| `MIN_REVEALS` | 16 | Pooled reveals required before any verdict may be drawn. A shortfall here is a *withholding* event, not a turnout event (§4.8). |
+| ~~`MIN_REVEALS`~~ | — | **Removed, §4.8.** It was a terminal-class gate on observable state, and it was the only thing that ever made withholding attractive. The draw needs `N ≥ 1`, which is arithmetic, not policy. |
 | ~~`MIN_CHALLENGE_REVEALS`~~ | — | **Removed, §4.6.** §4.5's single-randomness rule makes an unchanged tally yield an identical verdict, so the floor has no job. |
 | `SUPER_QUORUM` | *(open)* | Reveals required for the strict assurance class (§8.3). |
-| `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(WITHHELD)` may be resubmitted (§8.4). |
+| `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(NO_RANDOMNESS)` may be resubmitted (§8.4). |
 | `COMMIT_WINDOW` | 20 min | Per round. |
 | `REVEAL_WINDOW` | 20 min | Per round. |
 | `FINALIZATION_GRACE` | 10 min | Between outcome block and hard deadline. |
@@ -435,7 +435,7 @@ struct Case {
     uint8   phase;
     uint8   round;             // 0 or 1
     uint8   terminal;          // APPROVED | REJECTED | UNRESOLVED | none
-    uint8   unresolvedReason;  // NO_TURNOUT | WITHHELD | NO_RANDOMNESS
+    uint8   unresolvedReason;  // NO_TURNOUT | NO_RANDOMNESS
     uint32  paramsVersion;     // I27 — the immutable parameter block in force at
                                //   submission. Every debit this case produces is
                                //   computed from it, never from the live values
@@ -472,7 +472,7 @@ COMMIT ──▶ REVEAL ──▶ TALLY ──┤                               
                        │      └── window closes, no challenge ──▶ … ──▶ DRAW ──▶ FINALIZED
                        │                     COMMIT₁ ──▶ REVEAL₁ ──▶ ┘             │
                        │                                                           │
-                       └── reveals < MIN_REVEALS ──▶ UNRESOLVED ───────┬───────────┘
+                       └── no commits / no reveals ──▶ UNRESOLVED ─────┬───────────┘
                            or outcome seed expired                     ▼
                                                                     SETTLED
 ```
@@ -512,8 +512,8 @@ moves no value.
 | `COMMIT` **(r=0)** | `REVEAL` | `now ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = now + REVEAL_WINDOW` |
 | `COMMIT` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
 | `COMMIT` **(r=1)** | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW`. **No quorum gate in round 1** — §4.9 |
-| `REVEAL` **(r=0)** | `TALLY` | `now ≥ phaseDeadline` and `pooled ≥ MIN_REVEALS` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled < MIN_REVEALS` | `unresolvedReason = WITHHELD` — commits cleared `MIN_COMMITS` and reveals did not (§4.8) |
+| `REVEAL` **(r=0)** | `TALLY` | `now ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
+| `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled == 0` | `unresolvedReason = NO_TURNOUT`. Not a policy gate — there is no tally to draw from |
 | `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `TALLY` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
 | `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | wait for `outcomeSeedBlock` (§7.2), which is the same block whether or not a challenge occurred |
@@ -653,8 +653,9 @@ stops depending on a quantity that lives outside the contract.
 independent, so a side holding one revealed vote keeps `f(1/32) = 0.287%`. Without
 independence a 31–1 tally would decide with certainty, contradicting I12.
 
-The implementation must guard `N > 0` explicitly even though `N ≥ MIN_REVEALS`
-holds: a revert inside the draw leaves a case permanently unfinalizable.
+The implementation must guard `N > 0` explicitly: `MIN_REVEALS` is gone (§4.8), so
+`N ≥ 1` is now the only thing standing between the draw and a division by zero, and
+a revert inside the draw leaves a case permanently unfinalizable.
 
 ### 4.6 A challenge that does not move the tally
 
@@ -727,24 +728,44 @@ debits and the retry rule.
 
 | Reason | Condition | Steerable? | Retry |
 |---|---|---|---|
-| `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** | free, full refund |
-| `WITHHELD` | commits cleared the gate, `pooled < MIN_REVEALS` at reveal close | yes | claim reserved for `RETRY_COOLDOWN`; a fresh nonrecoverable fee |
-| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **yes**, by inaction (§7.3) | as `WITHHELD` — claim reserved for `RETRY_COOLDOWN` |
+| `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close, or nobody revealed at all | **no** | free, full refund |
+| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **yes**, by inaction | claim reserved for `RETRY_COOLDOWN`, **pot carried forward** — no fresh fee |
 
-**The quorum gate is on commits, not reveals, and that is the whole fix for the
-marginal-revealer problem.** Commits are made blind — the tally does not exist yet
-— so no committer can steer the gate toward a result they cannot see. Reveals are
-plaintext and the running tally is public, so a gate on reveals handed the
-`MIN_REVEALS − 1`-th revealer a free choice between two different terminal
-processes: reveal and take a draw at a computable `f(a)`, or withhold and get a
-result-free, freely-retryable `UNRESOLVED`. The price of converting an unfavourable
-draw into a fresh attempt was one `REVEAL_BOND`.
+**There is exactly one quorum gate and it is on commits.** Commits are made blind —
+the tally does not exist yet — so no committer can steer it toward a result they
+cannot see.
 
-Splitting the failure by cause removes that. A genuine turnout failure is decided
-before anyone knows anything, and is free to retry because nobody could have caused
-it. A reveal-stage shortfall is by construction a *withholding* event — enough
-people committed — so it costs the withholders (below) and it does not hand the
-submitter's claim back for free.
+**The reveal-stage gate is removed, not relocated.** An earlier revision added the
+commit gate and *kept* `MIN_REVEALS`, which left a second gate selecting between
+terminal classes on state every revealer can watch. That gate was the only thing
+that ever made withholding attractive, and it created two problems at once:
+
+- **It was steerable, so I24 was false.** The `MIN_REVEALS − 1`-th revealer chose
+  between a draw and a result-free `UNRESOLVED`, on observable state, for the price
+  of one `REVEAL_BOND`.
+- **Its treatment served the wrong attacker.** Reserving the claim and charging a
+  fresh fee is right against a submitter converting a bad tally into a retry. It is
+  a *payload* for a censor, whose prize is that the content stays unlisted: they
+  paid `d` per withheld identity and received a lockout plus a levy on their
+  victim. `RETRY_COOLDOWN` was one knob pulled in opposite directions by the two,
+  and no value defeats both.
+
+**Removing the gate makes withholding dominated twice over.** Your vote is on some
+side; withholding removes it, which strictly lowers that side's probability —
+
+```
+tally     P(your side) if you reveal    if you withhold
+13A/7R                        0.7183             0.6928
+10A/10R                       0.5000             0.4606
+ 6A/14R                       0.2160             0.1713
+```
+
+— *and* forfeits `REVEAL_BOND` (§5.2). A censor who withholds now removes their own
+Reject votes, moving the tally toward Approve. The lever is not priced; it points
+the wrong way.
+
+`N ≥ 1` remains, because a draw needs a tally. That is arithmetic, and no party can
+force it without withdrawing every one of their own votes.
 
 In every case: no verdict, no index entry, and no *incoherence* debit for anyone —
 there is no verdict to be incoherent with. Revealers are paid nothing and lose
@@ -776,16 +797,22 @@ either way        ->  return every REVEAL_BOND
                       retain finalizationBounty and maintenance
 ```
 
-The reason code is load-bearing rather than diagnostic: it decides the debits and
-the retry rule. `NO_TURNOUT` is a market problem, `WITHHELD` is an attack surface,
-`NO_RANDOMNESS` is a keeper problem, and they cannot share a treatment.
+The reason code is load-bearing rather than diagnostic: it decides the retry rule.
+`NO_TURNOUT` is a market problem nobody can cause; `NO_RANDOMNESS` is steerable by
+inaction (§7.3) and so cannot take the free-retry treatment.
+
+**`NO_RANDOMNESS` reserves the claim but carries the pot forward.** Reserving alone
+would repeat the mistake the `WITHHELD` treatment made: the party who benefits from
+the case dying is not the submitter, so a rule that locks *and levies* the submitter
+pays the attacker twice. Reserving stops the free re-roll; carrying the pot means
+the victim is not charged for someone else's inaction.
 
 **`UNRESOLVED` must never be reachable from an under-quorum pool by approving it.**
 A bounded failure is correct; an unsafe success is not.
 
 ### 4.9 Round 1 has no quorum gate, and needs none
 
-**Decision.** `MIN_COMMITS` and `MIN_REVEALS` are tested at round 0 only. Round 1
+**Decision.** `MIN_COMMITS` is tested at round 0 only. Round 1
 always proceeds to its reveal phase and always proceeds to `DRAW`, whatever
 turnout it attracts — including none.
 
@@ -933,9 +960,10 @@ while it still matters. What remains is the ordinary band above, which `G` close
 optimizing *inside* the protocol's payoffs — the ordinary case, and the one O5 and
 §11's "strategic commitment" were about. It does not close it for an attacker whose
 prize is a listing, which is external and cannot be priced against. Against those,
-the defence is §4.8's `WITHHELD` treatment: the debit still lands, the claim is not
-handed back, and dragging reveals below `MIN_REVEALS` costs `d` per identity
-withheld.
+the second reason of I28: withholding removes the withholder's *own* votes, so it
+strictly lowers the probability of the side they were pushing. §4.8 removed the
+`MIN_REVEALS` gate that was the only way to convert withholding into a result, so
+there is nothing left for an external prize to buy here.
 
 ### 5.3 Payment
 
@@ -1140,8 +1168,7 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 | `APPROVED` | reserved while listed | — |
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
 | `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no draw occurred and nobody could have caused it |
-| `UNRESOLVED(WITHHELD)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, at a fresh nonrecoverable fee |
-| `UNRESOLVED(NO_RANDOMNESS)` | **reserved for `RETRY_COOLDOWN`** | as `WITHHELD`. §7.3 concedes the losing side prefers this terminal and can reach it by inaction, so it is steerable and must not take the treatment reserved for failures nobody could cause |
+| `UNRESOLVED(NO_RANDOMNESS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. §7.3 concedes the losing side prefers this terminal and reaches it by inaction, so it is steerable and cannot take the free-retry treatment — but the submitter is not the party who caused it, so it must not levy them either |
 
 **`policyVersion` is deliberately *not* in the key.** A key containing the version
 cannot produce a reservation that survives a version bump, so the earlier
@@ -1185,8 +1212,9 @@ the original draw.
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
-| **I24** | No single revealer's decision changes the terminal *class* of a case. Every gate that selects between terminal classes is evaluated against values fixed before the tally is observable |
+| **I24** | No party can change a case's terminal *class* in a direction favourable to them by an action taken after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
+| **I28** | Withholding a reveal is never favourable: it forfeits `REVEAL_BOND` and strictly lowers the probability of the withholder's own side |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
@@ -1214,7 +1242,7 @@ while a third existed.
 |---|---|
 | `d`, `BOND_MIN`, `LAMBDA` | `λ = d` is derived; `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
-| `RETRY_COOLDOWN` | New, §8.4. Must exceed the time an attacker gains from forcing `WITHHELD`, without stranding an honest submitter whose case simply had bad luck |
+| `RETRY_COOLDOWN` | §8.4, now for `NO_RANDOMNESS` alone. The two-attackers-one-knob contradiction is gone with `WITHHELD`; what remains is a delay long enough to make repeated poke-refusal unattractive, and the pot carries forward so the submitter is not levied for it |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |

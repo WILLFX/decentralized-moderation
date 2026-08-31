@@ -262,7 +262,15 @@ verdict (`state-machine-v3` §4.5, I22).
 from `N` observations — at a unanimous tally, exactly: `f(1) = 1`, and one revealed
 vote is a unanimous tally. `â` is the posterior mean under a uniform prior, it is
 symmetric and parameter-free, and it lies strictly inside `(0,1)` for every finite
-`N`. **This paragraph replaces a claim that ran the other way**: an earlier revision
+`N`.
+
+**`f(â)` is an approximation and this document does not pretend otherwise.** `f` is
+non-linear, so `f(E[θ]) ≠ E[f(θ)]`; the exact posterior predictive is
+`(A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))`, and `f(â)` sits above it everywhere but
+the tie — 4.1 points at `N = 1`, 0.15 at `N = 34`. The plug-in is what three
+independent ticket comparisons compute, which is the rule §11 attributes and the
+shape §7's argument is written in, so it is kept and the residual is recorded
+rather than absorbed. `state-machine-v3` §4.5 has the table and §10 the decision. **This paragraph replaces a claim that ran the other way**: an earlier revision
 said the finite-`N` correction "does not apply, because the tickets are drawn with
 replacement." The *sampling* is exact at every `N`. The *tally* is not, and that is
 the quantity the sampling is parameterised by.
@@ -300,9 +308,16 @@ Two attacks matter and they pull in opposite directions. `x` is the hostile shar
 | two tickets + `CONTESTED` (withdrawn) | 9% | 9.75% |
 | **three tickets, 2-of-3** | **22.3%** | **1.97%** |
 
-Both figures are at `N = 34` and both moved when the draw moved to `â`: they were
-21.6% and 0.725% computed against `A/N`. **The censorship number nearly tripled**,
-and it is the one §8 leans on hardest.
+Both figures are at `N = 34`, and both are computed as `f(â)` — the plug-in
+estimator of §3, not the exact posterior predictive. **That is part of their
+source, not a footnote** (`state-machine-v3` I33): under `E[f(θ)]` the same tallies
+give **22.95%** and **2.47%**. The plug-in is kept deliberately and
+`state-machine-v3` §4.5 and §10 record why; what must not happen is a later
+revision quoting these as exact.
+
+Both also moved when the draw moved to `â` at all: they were 21.6% and 0.725%
+against `A/N`. **The censorship number nearly tripled**, and it is the one §8 leans
+on hardest — 3.4× under the exact rule.
 
 **Against censorship this is still the strongest rule available** — 1.97% where the
 withdrawn two-ticket rule gave 9.75% and a linear draw gave 5%. Amplification

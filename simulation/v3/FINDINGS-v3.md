@@ -287,12 +287,21 @@ distortion is bounded — at `N = 34` the two rules differ by at most 1.4 points
 symmetrically about `â = 0.5` — and it is largest exactly where the evidence is
 thinnest, which is the point rather than the cost.
 
-**It also revived a dead clause.** §8.3's `SUPER_SAFE` requires both
+**Every number in this file is computed under the plug-in `f(â)`, not the exact
+posterior predictive.** `f` is non-linear, so `f(E[θ]) ≠ E[f(θ)]`, and the plug-in
+over-claims by 4.1 points at `N = 1` falling to 0.15 at `N = 40`. The engine
+implements what the spec specifies (`state-machine-v3` §4.5), and the spec keeps
+the plug-in deliberately — but the estimator is part of these numbers' provenance
+and is stated here rather than assumed.
+
+**It also revived a clause that turns out to be arbitrary.** §8.3's `SUPER_SAFE` requires both
 `pooledReject == 0` and a 3/3 Approve draw. Under `A/N` the first forces the
 second, so the conjunct was redundant and the paragraph justifying it reasoned
 about a case the conjunction had excluded. Under `â` a unanimous tally gives
-`P(3/3) = â³` — 93.0% at `N = 40` — so the clause now separates a unanimous cohort
-the draw confirmed from one it merely did not overrule.
+`P(3/3) = â³` — 93.0% at `N = 40`. But live is not meaningful: under a unanimous
+tally the tickets are iid, so 3/3 versus 2/1 is a coin flip carrying no information
+the tally does not already give, and the clause excludes a random 7% of qualifying
+content. `state-machine-v3` §10 carries the question of dropping it.
 
 ---
 

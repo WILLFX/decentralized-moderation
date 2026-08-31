@@ -852,8 +852,54 @@ verdict   = (ticket[0] + ticket[1] + ticket[2] ≥ 2) ? Approve : Reject
 `A/N` is a sample proportion of `N` votes, and `f` consumes it as though it were
 the population's Approve rate. At `N = 1` that is a claim of certainty from one
 observation, and the mechanism acts on it: `f(1) = 1`. `â` is the posterior mean of
-that rate under a uniform prior — the add-one estimator — which is the quantity `f`
-was always meant to receive. Three things follow.
+that rate under a uniform prior — the add-one estimator. Three things follow.
+
+**`f(â)` is an approximation, and an earlier revision of this paragraph claimed it
+was not.** It said `â` is *"the quantity `f` was always meant to receive"*. That
+does not follow, because `f` is not linear: `f(E[θ]) ≠ E[f(θ)]`. The exact
+posterior predictive of the same three-ticket rule under the same uniform prior is
+
+```
+θ ~ Beta(A+1, N−A+1)
+
+E[f(θ)] = 3·E[θ²] − 2·E[θ³]
+        = (A+1)(A+2)·(3N − 2A + 6) / ((N+2)(N+3)(N+4))
+```
+
+— exact integer arithmetic, monotone in both directions (verified over `N < 120`),
+and in `(0,1)` at every tally. **`f(â)` sits above it everywhere except the exact
+tie**, in both directions, and the gap is largest where the estimator matters most:
+
+```
+unanimous tally     N=1     N=3     N=8    N=16    N=40
+f(â)             0.7407  0.8960  0.9720  0.9911  0.9983
+E[f(θ)]          0.7000  0.8571  0.9545  0.9842  0.9968
+overruled: f(â)   25.9%   10.4%    2.8%   0.89%   0.17%
+           exact  30.0%   14.3%    4.6%   1.58%   0.32%
+```
+
+**Decision: the plug-in is kept, and this document says why rather than implying
+there is nothing to keep.** `f(â)` is what three independent ticket comparisons
+compute, and the three tickets are the senior reviewer's rule (design-v3 §11) and
+the shape the whole of §4.5's optional-stopping argument is written in. The exact
+rule is one uniform against a rational and would be marginally cheaper, but it is a
+third change to the core verdict arithmetic in one revision, and the residual it
+removes is **0.15 points at the working cohort size**. The judgement is that churn
+in this particular expression costs more than the residual does.
+
+**What that decision buys and what it costs, stated so a later revision can
+re-open it on evidence.** It buys stability in the one expression every other
+section quotes. It costs a known over-claim, and *every figure in this document and
+in design-v3 derived from `f` inherits it* — 1.97% censorship at `a = 0.95, N = 34`
+is `1 − f(â)`; under `E[f(θ)]` it is 2.47%. Those figures are labelled with the
+estimator they were computed under, per I33, so nothing here reads as exact that is
+not.
+
+**Shrinkage and plug-in error run in opposite directions**, which is why the
+residual is easy to miss: `â` moved the small-`N` numbers a long way toward the
+right answer and stopped short. At `N = 3` a unanimous cohort is overruled 10.4%
+under `f(â)`, 14.3% exactly, and **100% of the way wrong under `A/N`, which said
+0%.** The estimator change was the large correction; this is the tail of it.
 
 **`â ∈ (0, 1)` for every finite `N`, so neither outcome is ever certain.** That is
 what I12 asserts, and under `A/N` it was false at every unanimous tally — which is
@@ -2009,8 +2055,26 @@ selects truth; it does not manufacture certainty.**
 conjunct above it made this one redundant, and the paragraph justifying it reasoned
 about a case the conjunction had already excluded. Under `â` a unanimous tally
 gives `â = (N+1)/(N+2)`, so `P(3/3) = â³` is 93.0% at `N = 40` and 84.2% at
-`N = 16`. The clause now does what it says: it separates a unanimous cohort that
-the draw confirmed from one it merely did not overrule.
+`N = 16`. The clause is live.
+
+**Live is not the same as meaningful, and the sentence that used to stand here said
+it was.** It claimed the clause "separates a unanimous cohort that the draw
+confirmed from one it merely did not overrule". There is no such distinction. Under
+a unanimous tally the three tickets are iid Bernoulli(`â`), so 3/3 versus 2/1 is a
+coin flip carrying **no information about the content** beyond what `â` already
+says — and `â` is a function of the tally, which the conjunction above already
+tests. Since `pooledReject == 0` is required anyway, the clause only ever bites
+unanimous tallies, where it removes a random 7% of otherwise-qualifying content at
+`N = 40` and 16% at `N = 16`.
+
+That is worse than the redundancy it replaced. **A redundant clause is harmless; an
+arbitrary one excludes real content for no reason**, and a client filtering on
+`SUPER_SAFE` gets a random subsample of the cases meeting the real criteria rather
+than all of them. Rarity without selectivity is noise, and §8.3's own headline —
+*assurance comes from the tally, not from the draw* — is the argument against its
+own conjunct. **Whether to drop it is open (§10);** it stands here because removing
+a published assurance condition changes what the index promises readers, which is a
+decision and not a correction.
 
 This replaces both v2's "unopposed subset" and the original "supersafe after 96
 hours of silence" (P0-10), which inherited the same defect from the other
@@ -2273,6 +2337,8 @@ property.
 |---|---|
 | `d`, `BOND_MIN` | `λ = d + G` is derived (§2.4); `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
+| §8.3's 3/3 conjunct | Live since the estimator changed, and **arbitrary rather than meaningful**: under a unanimous tally the tickets are iid, so 3/3 versus 2/1 is a coin flip that excludes a random 7% of qualifying content at `N = 40` and 16% at `N = 16`. §8.3 argues against it in its own headline. Dropping it makes `SUPER_SAFE` a function of the tally alone, which is what that section says assurance should be — but it changes what a published assurance label promises, so it is a decision rather than a correction. **Open, and cheap to close either way** |
+| The plug-in residual in `f(â)` | §4.5. `f(â)` sits above the exact posterior predictive `E[f(θ)] = (A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))` at every tally but the tie — 4.1 points at `N = 1`, 0.15 at `N = 40`. Kept deliberately: three ticket comparisons are the senior reviewer's rule and the shape §4.5's argument is written in, and the exact form would be a third change to the core verdict arithmetic in one revision. **Every figure derived from `f` in either document inherits the over-claim** and is labelled with the estimator per I33. Re-openable on evidence, and the closed form is recorded in §4.5 so nobody derives it twice |
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document** |
 | Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's false-rejection figure, which was **0.725% and is now 1.97%** — §4.5's estimator nearly tripled it from arithmetic alone, before any assumption is questioned. `simulation/v3/FINDINGS-v3.md` §F then locates even that as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously**, measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |

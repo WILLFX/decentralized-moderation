@@ -41,6 +41,10 @@ notification is cheaper bought directly.
 was:  commit 24h -> reveal 24h -> challenge 4d (-> more rounds)      ~6 days
 now:  commit -> reveal -> TALLY, plurality published                ~1 hour
       -> 12h challenge window -> (one challenge round) -> ONE draw   ~12-13 h
+
+(Every duration here is the human-facing intent. The contract schedules in block
+heights — 240 / 240 / 8,640 blocks at a 5 s `BLOCK_TIME` — so the wall-clock
+figures track the chain rather than binding it. §7 and `state-machine-v3` §0.)
 ```
 
 **The result is not challenge-free.** An earlier revision of this document was, and
@@ -503,6 +507,19 @@ outcomeBlock = submissionBlock + FIXED_OFFSET
 
 Fixed at submission, and independent of when the last reveal lands, whether the
 case was contested, who called the transition, and whether everyone revealed early.
+
+**`FIXED_OFFSET` is a block count, and so is every phase deadline it is compared
+against** (`state-machine-v3` §0, I31). This line was always right; the normative
+elaboration was not. `state-machine-v3` §7.2 spelled the offset out as
+`blockAt(submitTime + windows)` — a wall-clock schedule feeding a block-indexed
+`blockhash` — and the two sides then drifted apart at 2.7% of block time, killing
+every challenged case. The offset is now derived from the window lengths converted
+to blocks **once, at submission**, from a pinned `BLOCK_TIME`.
+
+Worth noting which document was wrong, because the front matter says the state
+machine wins where they disagree: here the state machine was the one that broke a
+property this document had stated correctly, and it broke it in the act of making
+it precise.
 This closes selective realization (P1-2, `v2-audit-checklist.md` §4.11) and the last-revealer timing issue
 (M2.5-F10). **Lazy re-arming is removed**: if the fixed seed is missed, the case is
 VOID. It is never replaced with a fresh future block, which would let a party

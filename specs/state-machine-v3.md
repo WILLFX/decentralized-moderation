@@ -80,6 +80,12 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §0 / §7.2 — **the schedule is denominated in block heights** (I31). The
+>   previous revision compared a wall-clock deadline against a block-indexed
+>   `blockhash` horizon via a `blockAt()` the EVM does not have, and the two sides
+>   drifted apart at 2.7% of block time — killing every *challenged* case and
+>   debiting its plurality-losing revealers for a clock mismatch nobody could have
+>   prevented. One conversion survives, at case creation, from a pinned parameter.
 > - §4.5 — **the draw is taken against `â = (A+1)/(N+2)`, not `A/N`.** A sample
 >   proportion is not a population rate, and `f(1) = 1` let one revealed vote decide
 >   a case with certainty. I11 and I12 both read true over that configuration and
@@ -95,7 +101,17 @@ are listed there with what would decide them.
 ## 0. Conventions
 
 - **xBZZ** amounts are integers in base units. No floating point anywhere.
-- **Time** is block timestamps (seconds).
+- **Schedule is in block heights. Wall-clock time is a record, never a
+  comparison.** A deadline is denominated in blocks **iff a block-denominated
+  chain constant can expire inside it**. `BLOCKHASH_HORIZON` runs inside every
+  case-phase deadline, so those are heights; it runs inside no moderator-lifecycle
+  delay, so `MATURATION` and `EXIT_COOLDOWN` stay in seconds. `finalizedAt` is a
+  timestamp because nothing is compared to it.
+- **There is exactly one conversion between the two units in this specification**,
+  and it happens once, at case creation, from a parameter pinned into the case
+  (§1 `BLOCK_TIME`, §4.3). After submission no rule reads it. An earlier revision
+  put the conversion *inside* the comparison — §7.2 called a `blockAt()` the EVM
+  does not have — and §7.2 records what that cost.
 - **Randomness** is `blockhash(eligSeedBlock)` per round and
   `blockhash(outcomeSeedBlock)` once per claim, domain-separated per case, round
   and purpose (§7). Never re-armed after expiry (§7.3). There is no
@@ -124,19 +140,20 @@ are listed there with what would decide them.
 | `LAMBDA` `λ` | **`= d + G`** | Bond required per open vote — `max(d, REVEAL_BOND)` per §2.4, which `REVEAL_BOND` now sets. |
 | `CHALLENGE_BOND` | *(open — §10)* | Covered to register a challenge, **debited unconditionally** at settlement to the maintenance reserve (§4.6). A price for summoning a round, not a bet on its result. |
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
-| `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
+| `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. **Stays in seconds** — no block-denominated constant expires inside it, so converting it would buy nothing and cost the wall-clock predictability the conversion exists to preserve (§0). Same for `MATURATION` and `RETRY_COOLDOWN`. |
 | `TARGET_COHORT` | 40 | Expected eligible moderators per round. |
 | `MIN_COMMITS` | 16 | Commits required at commit close, or the case ends `UNRESOLVED(NO_TURNOUT)` (§4.8). **This is the quorum gate** — decided before anyone can see a tally. |
 | ~~`MIN_REVEALS`~~ | — | **Removed, §4.8.** It was a terminal-class gate on observable state, and it was the only thing that ever made withholding attractive. The draw needs `N ≥ 1`, which is arithmetic, not policy. |
 | ~~`MIN_CHALLENGE_REVEALS`~~ | — | **Removed, §4.6.** §4.5's single-randomness rule makes an unchanged tally yield an identical verdict, so the floor has no job. |
 | `SUPER_QUORUM` | *(open)* | Reveals required for the strict assurance class (§8.3). |
 | `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(NO_REVEALS)` may be resubmitted (§8.4). **`NO_RANDOMNESS` no longer uses it** — that row does not retry at all (I26). |
-| `COMMIT_WINDOW` | 20 min | Per round. |
-| `REVEAL_WINDOW` | 20 min | Per round. |
+| `BLOCK_TIME` | 5 s | **The one wall-clock→block conversion in this document.** Governance-set, pinned per case at submission (I27), read exactly once (§4.3) and never again. It is a *scheduling* parameter, not a safety one: wrong by 50% and windows are 50% off in wall-clock terms; nothing terminates that would not have. It does carry one hard bound — see §10. |
+| `COMMIT_WINDOW` | 20 min → **`ceil(1200 / BLOCK_TIME)` = 240 blocks** | Per round. The minutes are the human-facing intent; the blocks are what the contract compares. |
+| `REVEAL_WINDOW` | 20 min → **240 blocks** | Per round. |
 | ~~`FINALIZATION_GRACE`~~ | — | **Removed.** It named a deadline no transition established. The real one is `outcomeSeedBlock + BLOCKHASH_HORIZON` (§4.4), which `BLOCKHASH_HORIZON` already gives. |
-| `CHALLENGE_WINDOW` | 12 h | From publication of the round-0 plurality (`TALLY`). |
+| `CHALLENGE_WINDOW` | 12 h → **8,640 blocks** | From publication of the round-0 plurality (`TALLY`). |
 | `SEED_LAG` | 2 blocks | Between arming and realizing a seed. |
-| `BLOCKHASH_HORIZON` | 256 blocks | How long `blockhash` remains readable. **Chain-dependent in blocks and in wall time** — 256 blocks is ~51 min at 12 s and ~21 min at 5 s. §7.3's rarity argument scales with it, so it is named rather than assumed. |
+| `BLOCKHASH_HORIZON` | 256 blocks | How long `blockhash` remains readable. A property of the EVM, not a choice. **Every deadline it can expire inside is denominated in the same unit** (§0), which is what makes §7.3's rarity argument checkable rather than dependent on an assumed block time. |
 | `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger (§3.3). |
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
 | `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever pokes the draw, or its expiry (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). **It is a convenience, not the reason the poke happens** — §7.3 makes poking dominant for the plurality-losing side at any bounty, including zero. |
@@ -445,14 +462,16 @@ at which an unchallenged case would have finalized.
 Without this, round 1's seeds are functions of the block the challenger chose:
 
 ```
-        rejected:  eligSeedBlock₁    = blockAt(challengeTx) + SEED_LAG
-                   outcomeSeedBlock₁ = blockAt(challengeTx + windows) + SEED_LAG
+        rejected:  eligSeedBlock₁ = challengeTxBlock + SEED_LAG
+                                    -- the block the challenger chose
 
-        adopted:   eligSeedBlock₁    = blockAt(scheduledWindowClose) + SEED_LAG
-                   outcomeSeedBlock₁ = blockAt(scheduledWindowClose
-                                               + COMMIT_WINDOW + REVEAL_WINDOW)
-                                       + SEED_LAG
+        adopted:   eligSeedBlock₁ = scheduledRound1OpenBlock + SEED_LAG
+                                    -- submitBlock + commitBlocks + revealBlocks
+                                       + challengeBlocks, fixed at submission
 ```
+
+(There is no separate round-1 outcome seed: §4.5 realizes one randomness per claim
+and §7.2 schedules its block from the submission height, unconditionally.)
 
 The challenger has twelve hours of discretion over *when* to file. Under the
 rejected form that is twelve hours of discretion over **which cohort is drawn and
@@ -500,9 +519,12 @@ struct Case {
                                //   computed from it, never from the live values
     uint128 pot;               // initial pot; grows by the reserve on challenge
     uint128 challengeReserve;  // escrowed; refunded or activated
-    uint40  phaseDeadline;
+    uint40  phaseDeadline;     // a BLOCK HEIGHT, not a timestamp (§0)
     uint40  eligSeedBlock;     // armed at round open
-    uint40  outcomeSeedBlock;  // armed at round open, from the SCHEDULED deadline
+    uint40  outcomeSeedBlock;  // armed at submission, from the SCHEDULED heights
+    uint32  commitBlocks;      // the three window lengths in blocks, converted
+    uint32  revealBlocks;      //   ONCE at submission from BLOCK_TIME(c) and
+    uint32  challengeBlocks;   //   pinned with every other parameter (I27)
     uint32  pooledApprove;     // POOLED across rounds, never reset
     uint32  pooledReject;
     uint32  commitsThisRound;
@@ -516,7 +538,7 @@ struct Case {
                                //   Total on any tally, ties included — §4.2
     Outcome verdict;           // written once, at the binding draw
     address challenger;
-    uint40  finalizedAt;
+    uint40  finalizedAt;       // a TIMESTAMP — a record, never compared (§0)
     // content, metadata, topics, ruleset/guidelines versions: as v2
 }
 ```
@@ -589,16 +611,16 @@ role, and only in the one terminal that has a tally and no verdict.
 
 | From | To | Trigger | Effect |
 |---|---|---|---|
-| — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; `round = 0`; arm both seeds (§7); `phaseDeadline = now + COMMIT_WINDOW`. **No moderator is selected, reserved, or notified on chain.** |
-| `COMMIT` **(r=0)** | `REVEAL` | `now ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = now + REVEAL_WINDOW` |
-| `COMMIT` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
-| `COMMIT` **(r=1)** | `REVEAL` | `now ≥ phaseDeadline` | `phaseDeadline = now + REVEAL_WINDOW`. **No quorum gate in round 1** — §4.9 |
-| `REVEAL` **(r=0)** | `TALLY` | `now ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
-| `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`. Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
-| `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
-| `TALLY` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW`. **`challengeReserve` is not touched** — it activates at settlement, in proportion to round-1 reveals (§5.3), so opening a round moves no value |
-| `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
-| `REVEAL` **(r=1)** | `DRAW` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
+| — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; **convert the three windows to block counts from `BLOCK_TIME(c)` and pin them — the only wall-clock→block conversion in the specification (§0, §7.2)**; `round = 0`; arm both seeds (§7); `phaseDeadline = block.number + commitBlocks(c)`. **No moderator is selected, reserved, or notified on chain.** |
+| `COMMIT` **(r=0)** | `REVEAL` | `block.number ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = block.number + revealBlocks(c)` |
+| `COMMIT` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
+| `COMMIT` **(r=1)** | `REVEAL` | `block.number ≥ phaseDeadline` | `phaseDeadline = block.number + revealBlocks(c)`. **No quorum gate in round 1** — §4.9 |
+| `REVEAL` **(r=0)** | `TALLY` | `block.number ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = block.number + challengeBlocks(c)` |
+| `REVEAL` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`. Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
+| `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `block.number < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
+| `TALLY` | `COMMIT` | `block.number ≥ phaseDeadline` and `challenger != 0` | `round = 1`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = block.number + commitBlocks(c)`. **`challengeReserve` is not touched** — it activates at settlement, in proportion to round-1 reveals (§5.3), so opening a round moves no value |
+| `TALLY` | `DRAW` | `block.number ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
+| `REVEAL` **(r=1)** | `DRAW` | `block.number ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
 | `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` and the reserve activation both settle at `SETTLED`, with every other liability (§4.6, §5.3) |
 | `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
@@ -620,8 +642,8 @@ that write them, and gave I3 no row to live in:
 
 | Call | Precondition | Effect |
 |---|---|---|
-| `commit(c, h)` | phase is `COMMIT`; `now < phaseDeadline`; caller eligible (§3.1); **caller has not committed to `c` in any round** (§3.4, I3); `mayCommit` (§2.4) | store `h`; `commitsThisRound++`; `openVoteCount++`; `m.liabilities += LAMBDA(c)` |
-| `reveal(c, v, salt)` | phase is `REVEAL`; `now < phaseDeadline`; `h == H(…, v, salt)` binding chainId, contract, `c`, round, `paramsVersion` and the caller | pool `v`; `revealsThisRound++` |
+| `commit(c, h)` | phase is `COMMIT`; `block.number < phaseDeadline`; caller eligible (§3.1); **caller has not committed to `c` in any round** (§3.4, I3); `mayCommit` (§2.4) | store `h`; `commitsThisRound++`; `openVoteCount++`; `m.liabilities += LAMBDA(c)` |
+| `reveal(c, v, salt)` | phase is `REVEAL`; `block.number < phaseDeadline`; `h == H(…, v, salt)` binding chainId, contract, `c`, round, `paramsVersion` and the caller | pool `v`; `revealsThisRound++` |
 | `challenge(c)` | §4.3's `TALLY → TALLY` row | as that row |
 | `postBond`, `requestExit`, `withdraw` | §2.3 | as §2.3 |
 
@@ -643,7 +665,10 @@ the two independent reasons.
 
 ### 4.4 Deadlines are fixed and closure is never conditional
 
-Each phase ends at `phaseDeadline`, a timestamp fixed when the phase opened.
+Each phase ends at `phaseDeadline`, **a block height** fixed when the phase opened
+(§0). Every guard that reads it compares against `block.number`, and the seed
+schedule of §7.2 is built from the same counter, so no comparison in this document
+spans two units.
 
 **Early closure on "everyone revealed" hands the last actor the entropy.** The
 reveal set is on-chain, so whoever holds the last reveal would choose between
@@ -1447,8 +1472,12 @@ open. The update must be order-independent whatever is decided.
 
 | Seed | Scope | Derived from | Used for |
 |---|---|---|---|
-| `eligSeedBlock` | **per round** | that round's **scheduled** open + `SEED_LAG` | §3.1 eligibility |
-| `outcomeSeedBlock` | **per claim** | the schedule in §7.2 — submission plus **all four** windows | §4.5 — realized once at `DRAW` |
+| `eligSeedBlock` | **per round** | that round's **scheduled** open height + `SEED_LAG` | §3.1 eligibility |
+| `outcomeSeedBlock` | **per claim** | the schedule in §7.2 — the submission height plus **all four** windows | §4.5 — realized once at `DRAW` |
+
+**Both are heights derived from heights** (§0). Neither is a prediction about when a
+wall-clock instant will arrive, which is what the previous revision's
+`blockAt()` was and why it drifted (§7.2).
 
 **There is one outcome seed per claim, not per round** (§4.5), and it sits after
 every window whether or not round 1 runs. Round 1 has an eligibility seed and no
@@ -1477,12 +1506,25 @@ the challenger's own eligibility check circular. §3.5 and §3.5b close both.
 ### 7.2 The outcome block is fixed from the schedule, never from the transaction
 
 ```
-outcomeSeedBlock = blockAt( submitTime
-                          + COMMIT_WINDOW + REVEAL_WINDOW      // round 0
-                          + CHALLENGE_WINDOW
-                          + COMMIT_WINDOW + REVEAL_WINDOW )    // round 1, always
-                   + SEED_LAG
+at submit, once, from the pinned BLOCK_TIME(c)  -- the only conversion (§0)
+    commitBlocks(c)    = ceil( COMMIT_WINDOW    / BLOCK_TIME(c) )
+    revealBlocks(c)    = ceil( REVEAL_WINDOW    / BLOCK_TIME(c) )
+    challengeBlocks(c) = ceil( CHALLENGE_WINDOW / BLOCK_TIME(c) )
+
+outcomeSeedBlock = block.number                                // submit height
+                 + commitBlocks + revealBlocks                 // round 0
+                 + challengeBlocks
+                 + commitBlocks + revealBlocks                 // round 1, always
+                 + SEED_LAG
 ```
+
+**Both sides of every comparison now come from `block.number`.** `phaseDeadline` is
+a height, `outcomeSeedBlock` is a height, `BLOCKHASH_HORIZON` is a block count, and
+the case reaches `DRAW` at exactly `outcomeSeedBlock − SEED_LAG` by construction.
+Drift is not tolerated; it is not expressible.
+
+**`ceil`, not floor** — rounding a window down shortens the notice a human
+moderator gets, and §1's minutes are the intent that the blocks approximate.
 
 **The round-1 windows are in the formula whether or not round 1 happens.** An
 unchallenged case waits for the same block a challenged one does, so the outcome
@@ -1496,6 +1538,38 @@ challenged ones ~40 minutes later, so the observable timing of a case leaked
 whether it was contested. This is what makes §4.4's "no early closure" rule enforceable
 rather than advisory, and it closes both M2.5-F10 and the selective-realization
 surface (P1-2).
+
+**The `blockAt()` this formula used to call does not exist.** An earlier revision
+wrote the schedule in wall-clock seconds and the seed as a block height, with no
+way to convert between them except `block.number + seconds / ASSUMED_BLOCK_TIME`.
+That put a conversion *inside* a comparison, and the two sides then drifted apart
+at the difference between assumed and actual block time. Measured at the §1 working
+values:
+
+```
+path            reaches DRAW at   needs actual block time ≥   fails if blocks run
+challenged           48,000 s              4.869 s                   2.7% fast
+unchallenged         45,600 s              4.626 s                   8.1% fast
+```
+
+Three things made it worse than a tolerance:
+
+- **Fast blocks were fatal and slow blocks were benign**, so the failure was
+  one-sided and the safe direction was the one nobody optimizes for.
+- **The challenged path was tighter**, so under drift contested cases died first —
+  the exact inversion of this section's uniform-finality goal.
+- **`NO_RANDOMNESS` became unreachable-by-anyone rather than chosen.** The horizon
+  burned while the case was still in `COMMIT₁`/`REVEAL₁`, so `draw()` reverted for
+  every party, and §4.8 then debited `d(c)` to every plurality-losing revealer for a
+  clock mismatch none of them could have prevented. §7.3's rarity argument — "256
+  blocks produced with nobody spending gas on a poke" — was false in exactly the
+  state that produced the terminal.
+
+That last one is I29's class in the section written to satisfy I29: a rule correct
+in isolation, firing in a state its own justification does not describe. The fix is
+not a wider tolerance or a guard on the `DRAW` row. **It is that a schedule
+compared against a block-denominated constant is denominated in blocks** (§0, I31),
+which is a property of the schedule and cannot be satisfied one row at a time.
 
 ### 7.3 No lazy re-arming — and "unavailable" is not a test
 
@@ -1525,10 +1599,19 @@ defect was one guard being true in a state its own justification does not
 describe.
 
 Re-arming lets a party inspect whether a seed is favourable, use it when it is, and
-let it expire when it is not — a free option over outcomes. The one-hour round
-lifecycle makes expiry rare: `blockhash` is available for 256 blocks (~51 minutes)
-and the case's hard deadline is `outcomeSeedBlock + BLOCKHASH_HORIZON` — the last
-block at which the seed can still be read (§4.4).
+let it expire when it is not — a free option over outcomes. Expiry is rare because
+the case is **drawable for the whole horizon**: `DRAW` opens at
+`outcomeSeedBlock − SEED_LAG` and the hard deadline is
+`outcomeSeedBlock + BLOCKHASH_HORIZON`, both heights on the same counter, so the
+256 blocks are 256 blocks in which somebody could have called and did not (§4.4).
+
+**That sentence was false until the schedule moved to block heights.** Under the
+wall-clock schedule the horizon could burn while the case was still in a voting
+phase, so `NO_RANDOMNESS` was reachable with *nobody able* to poke — and the
+argument below, which prices inaction, has nothing to say to a party that had no
+action available. §7.2 has the measurement. Every claim in this section is
+conditioned on the case having been drawable throughout, and that is now true by
+construction rather than by assumption.
 
 **`DRAW_BOUNTY` pays for the poke that reads it** — not `CLAIM_BOUNTY`, which is
 paid at finalization, a different transition with no expiry. An earlier revision
@@ -1781,6 +1864,7 @@ the original draw.
 | **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
 | **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. `CHALLENGE_BOND` reads **nothing** and settles everywhere past `TALLY`; the non-reveal debit, the incoherence debit and the reserve activation read the **tally**; payment, the listing status and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first two groups and not the third. I25 is this rule's instance for the non-reveal debit; §4.8's `NO_RANDOMNESS` row is what forced the general statement. **An obligation's group is a design choice, not a discovery** — H7 moved `CHALLENGE_BOND` from the tally group to the empty one, because every tally-derived test available to it was one the challenger could evaluate before registering |
+| **I31** | **No comparison in this specification spans two units of time.** A deadline is denominated in blocks iff a block-denominated chain constant can expire inside it; wall-clock quantities are records or lifecycle delays that no block constant runs inside. The single wall-clock→block conversion happens once, at case creation, from a pinned parameter (§1 `BLOCK_TIME`, §4.3), and no rule reads it afterwards. **A conversion inside a comparison is a defect even when its constant is correct**, because correctness of the constant is a property of the chain on the day and not of the specification |
 
 I2 is inherited verbatim from v2. **I12 is not, any more** — its v2 phrasing is the
 one quoted above as wrong, and it was carried across three architectures without
@@ -1833,6 +1917,8 @@ property.
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
 | `CHALLENGE_BOND` | Sizing only, and **one job now that §4.6 made it unconditional**. It used to have to price a frivolous challenge *and* stay affordable for a single-identity dissenter — two requirements pulling opposite ways on one knob, and the conditional forfeit made the effective price differ between the two parties in the wrong direction. Unconditional, both parties face the same number, so it is a single question: what are twelve hours of the submitter's latency and one round of cohort attention worth? §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and it needs none to the reserve either — §5.3 removed that coupling |
+| `BLOCK_TIME`, and the bound the hybrid creates | §1. Denominating the schedule in blocks removed a *safety* dependence on block time (§7.2) and left a *scheduling* one: `BLOCK_TIME` sets how long a window is in wall-clock terms for the human moderators §10's honest-accuracy row is about. Wrong by 50% and windows are 50% off; nothing terminates that would not have. **But it carries one hard bound, which the previous revision could not even express:** the eligibility seed must survive its own commit window, `SEED_LAG + commitBlocks ≤ BLOCKHASH_HORIZON`, i.e. `BLOCK_TIME ≥ COMMIT_WINDOW / (BLOCKHASH_HORIZON − SEED_LAG)` = **4.72 s** at a 20-minute window. At the working 5 s the margin is **14 blocks**, which is thin, and sizing it is open work — see the row below. `RulesetGovernor` must validate the bound; a governance change that violates it silently re-points every eligibility test at a zero seed |
+| Eligibility seed vs commit window | The 14-block margin above. It is now an arithmetic relation between two block counts rather than a hidden dependence on an assumed block time, which is what makes it statable at all. §3.1 has no equivalent of §7.3's "unavailable is not a test", so what happens when `blockhash(eligSeedBlock)` expires mid-window is unspecified: `H(..., 0, m)` is a perfectly good hash, so the eligible set would silently change to a publicly precomputable one at a known height. **Open, and tracked separately from this row because widening the margin and guarding the expiry are different fixes** |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |

@@ -87,6 +87,13 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §8.5 — **a re-review reopens a claim; it does not create one.** Three rules
+>   rested on it and none defined it, and the default an implementer would have
+>   reached for — a new `actionType` — has a different `claimKey`, so the permanent
+>   reservation would not have bound it and permanence would have been worth one
+>   byte. Reopening in place inherits the claim's `u` and its pooled tally, so
+>   §4.5's monotonicity applies unchanged: no re-roll, and a failed reopening makes
+>   the next one harder.
 > - §5.3 / §9 — **every quantity a rule reads is re-derivable at the site that uses
 >   it, and no number appears whose source is not named** (I33). `reveals1` was
 >   written as a bare name with no field behind it, and its only available binding
@@ -659,6 +666,10 @@ struct Case {
                                //   Total on any tally, ties included — §4.2
     Outcome verdict;           // written once, at the binding draw
     address challenger;
+    bytes32 outcomeEntropy;    // blockhash(outcomeSeedBlock), stored at the FIRST
+                               //   draw so u is re-derivable for the life of the
+                               //   claim (§4.5, §8.5). blockhash expires; this
+                               //   does not, and a re-review must not re-roll
     uint40  finalizedAt;       // a TIMESTAMP — a record, never compared (§0)
     // content, metadata, topics, ruleset/guidelines versions: as v2
 }
@@ -742,7 +753,7 @@ role, and only in the one terminal that has a tally and no verdict.
 | `TALLY` | `COMMIT` | `block.number ≥ phaseDeadline` and `challenger != 0` | `round = 1`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = block.number + commitBlocks(c)`. **`challengeReserve` is not touched** — it activates at settlement, in proportion to round-1 reveals (§5.3), so opening a round moves no value |
 | `TALLY` | `DRAW` | `block.number ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `block.number ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
-| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` and the reserve activation both settle at `SETTLED`, with every other liability (§4.6, §5.3) |
+| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | **store `outcomeEntropy = blockhash(outcomeSeedBlock)`**, then derive `u[0..2]` from it and evaluate `verdict` against the **pooled** tally (§4.5) — **the only randomness in the claim's life**, re-derived unchanged at any later re-review (§8.5); **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` and the reserve activation both settle at `SETTLED`, with every other liability (§4.6, §5.3) |
 | `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 | **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Fire exactly the obligations whose requirement this terminal meets (§4.8's table, I30): no verdict was drawn, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate; `CHALLENGE_BOND(c)` is debited wherever one was registered; the non-reveal debit applies wherever a reveal phase opened, which is every reason except `NO_TURNOUT`; the incoherence debit applies wherever a settled side exists, which is `NO_RANDOMNESS` alone. Decrement `openVoteCount`, `openChallenges` and `m.liabilities` per §2.4; refund per §4.8. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
@@ -946,9 +957,14 @@ stops depending on a quantity that lives outside the contract.
   nowhere else — one place, not "the round-0 draw", since there is only one draw
   (§7.1) — and the 256-block `blockhash` horizon never has to span the 12-hour
   challenge window.
-- **`u` need not be stored.** An earlier revision realized it at round-0 close and
-  had to keep it for twelve hours; with the draw last, realization and use are one
-  transaction. Only §8.3's `unanimousDraw` flag survives into storage, because that
+- **The entropy is stored; the three uniforms are not.** An earlier revision
+  realized `u` at round-0 close and had to keep all three for twelve hours. With
+  the draw last, realization and use are one transaction — but §8.5's re-review
+  reopens a claim after `blockhash` has expired, and it must return an identical
+  verdict on an unchanged tally. So one word is kept, `blockhash(outcomeSeedBlock)`,
+  from which all three tickets re-derive forever. One slot, not three, and it is
+  what makes "one randomness per claim" true for the *life* of the claim rather
+  than for one opening of it. §8.3's `unanimousDraw` flag also survives, because
   is the one thing read back.
 - **Nothing about `u` is knowable while anyone is still voting.** `u` is realized
   at `DRAW`, after every reveal in both rounds. An earlier revision realized it at
@@ -2079,9 +2095,88 @@ and on the index entry (§8.2), because a reader needs to know which rules produ
 a verdict. It just cannot be part of the identity of the claim. Only a re-review
 case — a new claim carrying evidence — reopens a rejection.
 
-**Correction is a separate claim.** A removal case runs the same engine — commit,
-reveal, three tickets — producing `REMOVED` or `RETAINED`. It is not an appeal of
-the original draw.
+**Correction is a separate claim. Re-review is not.** A *removal* case asks a
+different question about the same content — is a listed entry still fit to be
+listed — so it runs the same engine, produces `REMOVED` or `RETAINED`, and earns
+its own key through `actionType`. A *re-review* asks the **same** question again,
+and everything below follows from that.
+
+### 8.5 Re-review — reopening a claim, not creating one
+
+Three rules in this document rest on a re-review case and none of them defined it:
+§8.4 makes it the sole recourse from `REJECTED`, H5 made it the sole recourse from
+`UNRESOLVED(NO_RANDOMNESS)`, and §8.3 conditions `SUPER_SAFE` on none being open.
+The severity paragraph above — *a case that died at a 90/10 Approve tally is not
+listed and must bring a re-review* — was unfalsifiable while nobody could say what
+that costs.
+
+**And the missing definition had a default that voided the rule it was propping
+up.** `claimKey` includes `actionType`, so if a re-review is *an action type* it
+has a **different key** and the permanent reservation does not bind it at all.
+Permanence would be worth one byte — the same scheduled-amnesty defect §8.4 closed
+by taking `policyVersion` out of the key, walking back in through the field that
+stayed in it.
+
+```
+actionType ∈ { LIST, REMOVE }        -- what is being ASKED about the content
+```
+
+**A re-review is not an action type. It reopens the `LIST` claim in place**, under
+the same key, and inherits everything the claim already holds:
+
+```
+same claimKey            no new key, so the reservation is what admits it
+same u                   §4.5's randomness, re-derived from stored entropy
+pooled tally carries      pooledApprove / pooledReject are not reset
+prior voters are DONE     already settled; not re-judged, not re-paid
+fee                      as a submission — the new cohort's work is real
+```
+
+**Why the tally carries forward, and what it buys.** §4.5 already proved the
+shape: with `u` fixed, **an unchanged tally yields an identical verdict**, and
+adding votes moves the verdict only toward the side added. A re-review is therefore
+a challenge round arriving late, and it inherits all three of §4.5's consequences:
+
+- **There is no re-roll, ever, for the life of a claim.** A re-review that attracts
+  no votes returns the identical verdict. Repetition buys nothing by itself, which
+  is the property §4.5 spent the whole architecture on and which a fresh-cohort
+  retry would have handed back.
+- **Repetition is self-defeating.** A re-review that fails adds votes to the side
+  that already won, so the next one is harder. If the content is genuinely unsafe,
+  every attempt makes the tally more lopsided; if it is genuinely safe, new voters
+  flip it. **The mechanism converges rather than being replayed.**
+- **The bar scales with how wrong the first cohort would have to have been.** A
+  34–0 rejection needs 34-odd votes to move; an 18–16 rejection needs three. Recall
+  that false rejection lives at the near-ties (`f(â)` is a coin flip there), so
+  **the recourse is cheapest exactly where the original was least certain**. That
+  falls out of the arithmetic; it is not tuned.
+
+**The prior tally is evidence, not participation.** Voters from an earlier opening
+have settled — they were paid or debited against the verdict that stood then, and a
+later reopening does not revisit that. Their votes still count in the tally the
+draw reads, because the draw's question is *what did the cohort conclude*, and
+their conclusion is part of the record. Re-judging them would make settlement
+non-final and break I8's permutation-independence across openings.
+
+**`NO_RANDOMNESS` is the one case where a re-review draws for the first time.** No
+entropy was ever realized there, so there is nothing to reuse and the reopening
+gets the claim's *first* randomness. That is consistent with I5 rather than an
+exception to it — exactly one randomness per claim, arriving late. And it does not
+reopen the windfall H5 closed: the reopening inherits the tally that already leans
+against the submitter, so their odds are `f(â)` on the same evidence, less a fee
+and a delay. **Strictly worse than having poked**, which is what H5's argument
+needs.
+
+**Who may open one, and how often.** Anyone, on the same reasoning §3.5 gives for
+a challenge: the deterrence is structural — no re-roll, monotone, self-defeating —
+so an eligibility test would filter honest dissenters and not attackers. What is
+open is the cooldown between reopenings of one claim, because cohort attention is
+the scarce resource and FINDINGS §D shows a thin registry. §10 carries it.
+
+**While a re-review is open the index does not soften.** A `REJECTED` claim under
+re-review reads `REJECTED`, plus the fact that one is open — §8.3 already
+conditions `SUPER_SAFE` on that and needs it to be visible. Nothing is listed on
+the strength of a pending question.
 
 ---
 
@@ -2093,7 +2188,7 @@ the original draw.
 | **I2** | Submitting a case reserves, assigns, locks or obligates nothing for any moderator |
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
-| **I5** | **Exactly one randomness draw exists per claim, and it is the last transition before `FINALIZED`.** No randomness is realized or published while any vote can still be cast |
+| **I5** | **Exactly one randomness exists per claim, for the life of the claim**, and it is realized at the last transition before `FINALIZED`. Not one per *opening*: §8.5's re-review reopens a claim after `blockhash` has expired and re-derives the same three tickets from a stored word, so an unchanged tally returns an identical verdict however many times it is asked. `UNRESOLVED(NO_RANDOMNESS)` is the one claim whose single randomness arrives at a *re-review* rather than at its first draw, which is late but is still once. No randomness is realized or published while any vote can still be cast |
 | **I6** | No payment, debit or reputation credit occurs before a **terminal** state. Not "before `FINALIZED`" — `UNRESOLVED` never reaches `FINALIZED`, and I25 requires the non-reveal debit there |
 | **I7** | Both seeds of every round derive from schedules fixed at submission, and are independent of every transaction's timing — including the timing of `challenge()` (§3.5b) |
 | **I8** | Penalties are invariant under settlement permutation |
@@ -2105,7 +2200,7 @@ the original draw.
 | **I14** | No moderator's loss is another moderator's gain. This covers value **removed from `bond`**, value **withheld from a payment**, and any change to a divisor that raises someone else's share — the three are the same transfer written three ways |
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
-| **I17** | At most one challenge round exists per claim |
+| **I17** | At most one challenge round exists **per opening** of a claim. A re-review is a second opening (§8.5) and carries its own single challenge round; what it may never do is produce a second *randomness*, which is I5 and is the property this one was standing in for. Stated per claim, it would have forbidden the recourse §8.4's permanence depends on |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
@@ -2178,6 +2273,7 @@ property.
 |---|---|
 | `d`, `BOND_MIN` | `λ = d + G` is derived (§2.4); `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
+| Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document** |
 | Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's false-rejection figure, which was **0.725% and is now 1.97%** — §4.5's estimator nearly tripled it from arithmetic alone, before any assumption is questioned. `simulation/v3/FINDINGS-v3.md` §F then locates even that as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously**, measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |

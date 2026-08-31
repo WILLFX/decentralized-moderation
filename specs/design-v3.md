@@ -637,11 +637,25 @@ explicit re-review case reopens one.
 an attacker can simply wait for. Rejections persist across versions; only an
 explicit re-review case reopens one.
 
-**Correction is a separate claim, not an appeal.** An approved entry may face a
-removal case that runs the same engine — commit, reveal, three tickets — producing
-`REMOVED` or `RETAINED`. This is a new claim about the current index
-entry, not a retry of the original draw. Approvals also carry `validUntil`, after
-which cautious clients stop treating them as certified unless renewed.
+**Correction is a separate claim. Re-review is not.** An approved entry may face a
+*removal* case, which asks a different question — is a listed entry still fit to be
+listed — and so runs the same engine, produces `REMOVED` or `RETAINED`, and earns
+its own claim key. A **re-review** asks the same question again, and
+`state-machine-v3` §8.5 specifies it as a *reopening* of the existing claim rather
+than a new one: same key, same `u` re-derived from stored entropy, pooled tally
+carried forward, prior voters already settled and not re-judged.
+
+That is what makes permanence mean anything. Had a re-review been a new
+`actionType` it would have had a different key, the permanent reservation would not
+have bound it, and **`REJECTED` would have been worth one byte** — the
+scheduled-amnesty defect §8 closes by keeping `policyVersion` out of the key,
+returning through the field that stays in it. Reopening in place inherits §4.5's
+monotonicity instead: an unchanged tally returns an identical verdict, so
+repetition buys nothing, and a failed reopening adds votes to the side that won, so
+it makes the next attempt harder rather than easier.
+
+Approvals also carry `validUntil`, after which cautious clients stop treating them
+as certified unless renewed.
 
 ## 9. Turnout is the variable everything is priced on
 

@@ -184,15 +184,58 @@ read 70 and honest turnout was zero at every fee from 3 to 300.
 
 ---
 
+## F. Correlation matters most where there is no attacker
+
+`correlated.py` replaces the independent-error assumption with a per-item latent
+difficulty — `p ~ Beta` with mean `prior` and intra-class correlation `rho`, so
+`rho = 0` is independence and `rho = 1` is one opinion sampled `N` times.
+
+```
+P(unsafe approved) / P(safe rejected)
+
+no attacker           rho=0        rho=0.25      rho=0.5       rho=1.0
+    prior 0.665   0.274/0.274   0.294/0.309   0.333/0.335   0.345/0.339
+    prior 0.950   0.012/0.012   0.032/0.039   0.047/0.042   0.056/0.052
+    prior 0.990   0.002/0.001   0.005/0.004   0.009/0.008   0.011/0.008
+
+30% hostile           rho=0        rho=0.25      rho=0.5       rho=1.0
+    prior 0.950   0.329/0.329   0.340/0.333   0.337/0.313   0.312/0.325
+    prior 0.990   0.292/0.295   0.292/0.283   0.292/0.285   0.277/0.291
+```
+
+**Correlation costs the most in the clean case and almost nothing in the attacked
+one.** At `prior = 0.95` with no attacker, false rejection goes 1.2% → 5.2% as
+`rho` runs 0 → 1: more than fourfold. At 30% hostile the same sweep moves it by a
+point or two, and occasionally *helps*, because the attacker already dominates the
+tally and extra variance sometimes rescues a case.
+
+That inverts how P1-4 has been framed. Correlated AI error has been filed as an
+attack-adjacent concern; it is mostly a **quality** problem, and it bites hardest
+in the regime the index will actually spend its life in — ordinary content, no
+adversary, where the only thing standing between a publisher and permanent
+exclusion is whether thirty-two classifiers err together.
+
+**Where design-v3 §8's 0.725% lives.** That figure is `1 − f(0.95)`, and the table
+locates it exactly: it requires `prior ≈ 0.96+`, `rho ≈ 0`, **and** `q = 0`, all
+three at once. Two are unmeasured and the third is assumed away everywhere else in
+the document. It is the sole justification for making `REJECTED` permanent and
+irreversible.
+
+**And neither variable rescues the other.** At 30% hostile, even `prior = 0.99`
+approves 29% of unsafe content. Classifier quality does not buy safety against an
+attacker, and stake security does not buy accuracy without one. The design needs
+both to be true and has measured neither.
+
+---
+
 ## What this engine does not model
 
 - **Bond dynamics across cases.** Debits and rewards accumulate; capacity is meant
   to be earned. One-case-at-a-time cannot see that, and it is where `BOND_MIN` and
   `CHALLENGE_BOND` have to be set.
-- **Correlated error.** `honest_prior` is drawn independently per moderator, which
-  is exactly the assumption O4 says is wrong. §Headline shows the design is steep
-  in `prior`; correlation makes `prior` a distribution rather than a constant, and
-  that is untested.
+- ~~**Correlated error.**~~ Now modelled — §F. Still *unmeasured*:
+  `measurement/prior/` is the harness, and it needs model access this repository
+  does not have.
 - **Withholding to force `WITHHELD`.** §5.2's dominance argument says nobody
   optimizing inside the protocol withholds; an attacker with an external prize
   might. Not measured.

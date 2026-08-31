@@ -141,16 +141,28 @@ under a fresh draw.
 submission payment = initial pot + challenge reserve + finalization bounty
                    + nonrecoverable maintenance component
 
-no challenge -> reserve refunded
-challenge    -> reserve joins the single final pot
+reserve activates in proportion to round-1 turnout, at settlement:
+    activated = min( reserve , floor(pot · reveals1 / reveals0) )
+    the rest is refunded to the submitter
 ```
+
+**Not a boolean on "was there a challenge".** `state-machine-v3` §5.3 replaced that:
+registering a challenge moved the whole reserve into the pot before anyone had
+voted, so a round-0 winner could register purely to enlarge a pot they would share
+in, and an empty round paid out a reserve nobody had earned. The reserve exists to
+offset the dilution round-1 voters cause, so it pays for the dilution that actually
+occurred.
 
 The activated reserve goes to *all* final-verdict voters from both rounds, not to
 challenge voters as a class. Without it, opening a challenge raises turnout while
 shrinking the per-winner share, which taxes exactly the honest participation the
-round exists to attract. A failed challenger's bond is burned or retained as
-maintenance funding and is **never** transferred to the winners — that is
-punishment farming, forbidden since design-v2 §5.5.
+round exists to attract. The challenger's bond is retained as maintenance funding
+and is **never** transferred to the winners — that is punishment farming, forbidden
+since design-v2 §5.5. It is debited unconditionally rather than on a "did the
+challenge succeed" test: `state-machine-v3` §4.6 records why, and the short version
+is that every such test is one the challenger can evaluate before registering, so
+it prices the dissenter who cannot predict turnout and exempts the identity-holder
+who supplies it.
 
 **Payment for round-1 voters does not depend on which round they voted in**, on
 whether their ballot was sampled, or on whether the challenge reversed the result.

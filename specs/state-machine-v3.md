@@ -29,9 +29,12 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > - §4.5 — **one randomness per claim**, evaluated against both tallies. The
 >   verdict is monotone in the tally, so a challenge that adds no votes changes
 >   nothing and there is no second roll to buy.
-> - §4.6 — `MIN_CHALLENGE_REVEALS` is removed; `CHALLENGE_BOND` settles on
->   whether the **plurality** moved — a fact about the tally — not on turnout and
->   not on the verdict, which is a draw the challenger did not bet on.
+> - §4.6 / §5.3 — `MIN_CHALLENGE_REVEALS` is removed and `CHALLENGE_BOND` settles
+>   on **nothing**: it is debited unconditionally. Every conditional available was
+>   one the challenger could evaluate before registering, so the bond bit whoever
+>   could least predict it. The extraction channel the old forfeit guarded is
+>   closed at its source instead — the challenge reserve activates in proportion
+>   to round-1 reveals, so registering a round moves no value.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
 >   `NO_QUORUM` and `VOID` states. §4.8 later split the reason codes, because
 >   they carry different debits and different retry rules.
@@ -95,7 +98,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `GAS_ALLOWANCE` `G` | *(open — §10)* | Conservative upper bound on the gas cost of one reveal, in xBZZ. Governance-set; enters `REVEAL_BOND` (§5.2). |
 | `REVEAL_BOND` | **`= d + G`** | Covered at commit, debited on non-reveal (§5.2). Derived: §5.2's dominance argument floors it at `d + G`, because a reveal costs gas and withholding does not. |
 | `LAMBDA` `λ` | **`= d + G`** | Bond required per open vote — `max(d, REVEAL_BOND)` per §2.4, which `REVEAL_BOND` now sets. |
-| `CHALLENGE_BOND` | *(open — §10)* | Covered to register a challenge. Cleared if round 1 **moved the plurality**, forfeit otherwise (§4.6). |
+| `CHALLENGE_BOND` | *(open — §10)* | Covered to register a challenge, **debited unconditionally** at settlement to the maintenance reserve (§4.6). A price for summoning a round, not a bet on its result. |
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. |
 | `TARGET_COHORT` | 40 | Expected eligible moderators per round. |
@@ -387,7 +390,9 @@ challengers almost always.
 
 **What still constrains a challenge**, now that eligibility does not:
 
-- `CHALLENGE_BOND`, forfeit if the round fails its floor (§4.6).
+- `CHALLENGE_BOND`, debited unconditionally (§4.6). Not forfeit *on a condition* —
+  there is no condition, because every condition available was one the challenger
+  could evaluate before registering.
 - §4.5's monotonicity — a challenge that adds no votes returns the same verdict,
   so registering one buys nothing on its own.
 - One challenge per claim (I17). The first valid registration wins; later ones
@@ -396,9 +401,10 @@ challengers almost always.
 **Round-0 voters may register a challenge. They still may not vote in round 1.**
 §3.4 is about the tally and is unchanged — a moderator counted twice would corrupt
 the pooled tally the verdict is drawn from. Registering is not voting. A round-0
-dissenter who challenges is staking `CHALLENGE_BOND` *and* their existing exposure
-to `d` on the pooled tally moving their way, which is the tightest alignment
-between information and incentive anywhere in this design.
+dissenter who challenges spends `CHALLENGE_BOND` and keeps their existing exposure
+to `d` on the pooled tally. The bond is a price, not a stake: they are buying a
+second round, and what they win or lose by it is the verdict, on the same terms as
+every other voter (§4.6).
 
 Two consequences worth stating:
 
@@ -538,11 +544,12 @@ plurality(A, R)  =  Approve   iff  A > R
                     Reject    otherwise          <- a tie is a Reject plurality
 ```
 
-It has to be total, because two rules take it as an input and neither has a
-sub-case for "undefined": §4.6 settles `CHALLENGE_BOND` on whether round 1 *moved*
-it, and §7.3 debits against it when the seed expires. A partial function would
-leave both silent at exactly the tally where the two sides are hardest to separate,
-which is where a party would steer to reach the silence. Ties break to Reject by
+It has to be total, because §7.3 debits against it when the seed expires and §8.2
+publishes it to readers, and neither has a sub-case for "undefined". A partial
+function would go silent at exactly the tally where the two sides are hardest to
+separate, which is where a party would steer to reach the silence. (A third rule
+used to read it — §4.6's forfeit, on whether round 1 *moved* it — and H7 removed
+that one for reading it at all.) Ties break to Reject by
 §4.8's rule that a bounded failure is correct and an unsafe success is not.
 
 **This is not a tie-break in the verdict.** The verdict is drawn, and at `A = R`
@@ -565,13 +572,13 @@ role, and only in the one terminal that has a tally and no verdict.
 | `REVEAL` **(r=0)** | `TALLY` | `now ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = now + CHALLENGE_WINDOW` |
 | `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`. Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
 | `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
-| `TALLY` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
+| `TALLY` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW`. **`challengeReserve` is not touched** — it activates at settlement, in proportion to round-1 reveals (§5.3), so opening a round moves no value |
 | `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
-| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` settles at `SETTLED` with every other liability (§4.6) |
+| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` and the reserve activation both settle at `SETTLED`, with every other liability (§4.6, §5.3) |
 | `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
-| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written, so nothing is paid, no index entry appears and no reputation is credited. The *tally*-derived debits — incoherence and `CHALLENGE_BOND` — are applied iff a tally exists, which is `NO_RANDOMNESS` and nothing else (§4.8, I30). Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
+| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate — all four read the verdict. `CHALLENGE_BOND(c)` is debited wherever one was registered, on no condition. The *tally*-derived incoherence debit applies iff a tally exists, which is `NO_RANDOMNESS` and nothing else (§4.8, I30). Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
 Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
 transition with a hard expiry — and `CLAIM_BOUNTY` for finalization. **Neither
@@ -813,39 +820,67 @@ three defects of its own:
   the floor. Below it, revealing was pointless, so nobody revealed, so the floor was
   missed. Failure was self-fulfilling.
 
-**`CHALLENGE_BOND` is now settled on the outcome, not on turnout:**
+**`CHALLENGE_BOND` is settled on nothing. It is debited unconditionally:**
 
 ```
-round 1 moved the plurality  ->  no debit; challenger paid like any voter
-round 1 did not move it      ->  bond -= CHALLENGE_BOND(c), to maintenance, AND
-                                 the challenger forfeits their share of this
-                                 case's pot (§4.9 — closes the extraction
-                                 channel the reserve activation would otherwise
-                                 open)
-either way                   ->  openChallenges--, m.liabilities -= what this
-                                 case added                          (§2.4)
+every terminal reachable from TALLY  ->  bond -= CHALLENGE_BOND(c), to the
+                                         maintenance reserve
+                                         openChallenges--, m.liabilities -= what
+                                         this case added              (§2.4)
 ```
 
-**Settled on the tally, not on the verdict.** The challenger's claim is that the
-pool is not yet good enough to draw from, and whether the pooled plurality differs
-from round 0's is exactly whether they were right. Settling on the *verdict*
-instead would make the bond a lottery ticket, and would have been unknowable at
-registration under the deferred draw anyway.
+There is no branch, so there is no test, so there is nothing for a challenger to
+steer. An earlier revision settled the bond on **whether round 1 moved the
+plurality**, and that had two defects that are really one defect seen from either
+end.
 
-Nothing was transferred at registration, so "returned" means only that the
-liability clears. Both branches run at `SETTLED` alongside every other debit, so
-they inherit §5.1's commutativity and §4.8's discharge guarantee.
+**The test is passed by whoever can supply its answer.** The plurality is published
+with its tally at `TALLY` (§4.7), twelve hours before the challenge decision, so a
+challenger reads the exact margin round 1 must swing. A party holding many
+identities knows how many of them round 1 will admit, compares the two numbers, and
+registers only when they already win — the bond never bites them. A legitimate
+single-identity dissenter cannot know whether strangers will turn up, so the bond
+bites *only* them. **The difficulty of the test is inversely proportional to how
+much of the round-1 cohort you own**, which is the exact opposite of what a bond
+against frivolity is for, and §10 names the single-identity dissenter as the party
+it most wants to protect.
 
-The challenger bet that the pool would move. It is a bet on evidence, which is what
-they are being asked to supply, and it prices a frivolous challenge without making
-anyone's participation conditional on anyone else's.
+**And the test asked the wrong question.** The protocol does not want the challenger
+to be *right*; it wants them to supply evidence, and evidence that confirms is as
+informative as evidence that overturns. A challenge that draws twenty new voters
+who uphold the round-0 plurality has told the system something real. The old rule
+took that challenger's bond *and* their share of the pot. Paying only for
+overturning makes the challenge a bet on the outcome — and a bet is precisely what
+a party who can supply the outcome should never be offered.
+
+**What the forfeit branch was actually holding up.** §4.9 identifies an extraction
+channel: `challengeReserve` moved into the pot on registration, so a round-0
+*winner* could register purely to enlarge a pot they would share in. The forfeit
+closed that by taking the loser's share. It is closed at its source instead — §5.3
+now activates the reserve **in proportion to the round-1 turnout it exists to pay
+for**, so a challenge that attracts nobody activates nothing and there is no
+over-provision to extract. Fixing the source lets the compensating rule be deleted
+rather than kept and qualified.
+
+Nothing was transferred at registration, so the debit is the first movement of the
+bond. It runs at `SETTLED` alongside every other debit, so it inherits §5.1's
+commutativity and §4.8's discharge guarantee, and it goes to maintenance and never
+to another moderator (I14, I21).
+
+**The challenger is paid for their vote, if they cast one, on exactly the terms
+everyone else is.** They have no special case in §5.3 any more. Their motive for
+challenging is the verdict, which is what it should have been: the bond was a
+second prize sitting beside the first, and it muddied which one they were playing
+for.
+
+The activated portion of `challengeReserve` stays in the pot and is distributed,
+because the round-1 voters who turned up performed real work — and §5.3 activates
+exactly the portion their turnout accounts for.
 
 Round-1 reveals **always** pool and are **always** judged against the same fact
 every other reveal is judged against — the final verdict where one is drawn, the
 pooled plurality in the one terminal that has no verdict (§4.8). There is no round
 whose votes are scored on a different basis from the rest of the claim's.
-The activated `challengeReserve` stays in the pot and is distributed, because the
-round-1 voters who turned up performed real work.
 
 ### 4.7 What may be published between rounds
 
@@ -927,9 +962,12 @@ do not leave the same facts behind.
 Sort this specification's obligations by what they read:
 
 ```
+from NOTHING       CHALLENGE_BOND       debited on every terminal reachable
+                                        from TALLY, on no condition   (§4.6)
+
 from the TALLY     non-reveal debit     a commit that was never opened
                    incoherence debit    a vote against the leading side
-                   CHALLENGE_BOND       did round 1 move the plurality (§4.6)
+                   reserve activation   reveals1 / reveals0           (§5.3)
                    the claim key        has this content been judged  (§8.4, I26)
 
 from the VERDICT   payment (§5.3)       who was coherent with the drawn outcome
@@ -962,12 +1000,12 @@ incremented for everyone who had committed — and since `withdraw` requires
 design's own intended failure mode. **Every terminal state must discharge every
 liability it created** (§9 I20).
 
-**Value flow, stated exactly** (`challengeReserve` is *moved into* `pot` on
-challenge, §4.3, so refunding both would pay it twice):
+**Value flow, stated exactly.** `challengeReserve` is escrowed throughout and
+activates only at settlement, in proportion to round-1 reveals (§5.3). No terminal
+here draws a verdict, so nothing is paid, so nothing activates:
 
 ```
-never challenged  ->  refund pot + challengeReserve
-challenged        ->  refund pot                      (the reserve is inside it)
+every reason      ->  refund pot + challengeReserve in full
 
 every reason      ->  debit every non-revealer REVEAL_BOND(c)  (I25)
                       nothing is RETURNED — the bond was covered, never
@@ -978,15 +1016,15 @@ every reason      ->  debit every non-revealer REVEAL_BOND(c)  (I25)
                       m.liabilities by what this case added   (§2.4, I20)
                       retain finalizationBounty and maintenance
 
-NO_TURNOUT,       ->  no incoherence debit, and CHALLENGE_BOND clears without
-NO_REVEALS            debit: there is no tally, so neither test has an input.
-                      (NO_TURNOUT is round-0 only — §4.9 gives round 1 no gate —
-                      so no challenge can be outstanding in that row at all)
+NO_TURNOUT,       ->  no incoherence debit: there is no tally to be incoherent
+NO_REVEALS            with. No challenge can be outstanding in either row either
+                      — both are reached before TALLY, which is where the
+                      challenge window opens (§4.3)
 
 NO_RANDOMNESS     ->  debit d(c) to every revealer on the losing side of the
-                      POOLED plurality (§4.2), and settle CHALLENGE_BOND(c)
-                      exactly as §4.6 would — on whether round 1 moved the
-                      plurality, which is a fact about the tally and needs no u
+                      POOLED plurality (§4.2), and debit CHALLENGE_BOND(c) as
+                      every terminal past TALLY does — it reads nothing, so
+                      there is nothing here it cannot read (§4.6)
                       hold the claim key on REJECTED's terms (§8.4, I26); the
                       index entry retains the published plurality beside the
                       UNRESOLVED status, since that is what was established
@@ -1085,40 +1123,41 @@ reintroduce it a third time:
 > the draw is now the last transition, so keying the rule to it would leave every
 > pre-draw terminal outside it."
 
-**`CHALLENGE_BOND` on an empty round 1.** §4.6 settles it on whether the verdict
-moved. An empty round leaves the verdict unmoved, so the bond is forfeit — which is
-correct: the challenger bet the pool would move, and it did not. The activated
-`challengeReserve` still joins the pot and is distributed to the round-0 coherent
-side.
+**`CHALLENGE_BOND` on an empty round 1.** It is debited, as it is on every round 1
+(§4.6). There is no condition, so an empty round is not a special case of anything
+— the challenger paid to summon a round and one was held; nobody came.
 
-**Who funds that, stated correctly.** The reserve is prepaid by the *submitter*
-(§1); the challenger's failed bet funds the maintenance reserve (§4.6). So a
-registration moves the submitter's money to the round-0 coherent side — which is an
-extraction channel, because §3.5 removed the eligibility test and a round-0 *winner*
-may therefore register a challenge purely to activate a pot they will share in.
+**Who funds what, stated correctly.** The reserve is prepaid by the *submitter*
+(§1) and the bond is paid by the challenger to maintenance. An earlier revision
+moved the whole reserve into the pot the moment a round opened, which meant a
+registration moved the **submitter's** money to the round-0 coherent side — an
+extraction channel, because §3.5 removed the eligibility test and a round-0
+*winner* may therefore register purely to enlarge a pot they will share in. §5.3
+closes it by activating the reserve in proportion to round-1 *reveals*: an empty
+round activates nothing, the submitter's money comes back, and registering moves no
+value at all.
 
-**So a failed challenger forfeits their share of that case's pot**, on top of
-`CHALLENGE_BOND(c)`. They asserted the pool was not good enough to draw from; it
-was; they do not get paid for the round they caused. That makes the extraction
-strictly loss-making — the gain becomes zero and the cost is `CHALLENGE_BOND(c)`
-plus their own forgone share — and it needs no relation between `CHALLENGE_BOND`
-and the reserve, which §10 could not have supplied anyway.
+**An earlier revision closed it by forfeiting the failed challenger's share** of
+the pot on top of `CHALLENGE_BOND(c)` — they asserted the pool was not good enough
+to draw from, it was, so they were not paid for the round they caused. That made
+the extraction loss-making without needing any relation between `CHALLENGE_BOND`
+and the reserve, which §10 could not have supplied anyway. It is withdrawn: H7
+showed "the pool moved" is a test the well-resourced challenger passes by
+construction and the single-identity dissenter fails by circumstance, so the
+forfeit landed on whichever party could least predict it (§4.6).
 
-**Where the forfeited share goes, and why the challenger stays in `W`.**
+**What that revision got right, and what carries forward.** Its reasoning about
+*where* a forfeited share goes was correct and is worth keeping as a general rule
+even though nothing is forfeited any more:
 
-```
-W  includes the failed challenger, as any other coherent voter
-share = floor(P / W)                                      -- unchanged for everyone
-the challenger's `share` is paid to the maintenance reserve, not to them
-```
+> A share removed from one moderator must go to the maintenance reserve, and the
+> moderator must **stay in the divisor `W`**. Removing them instead would shrink
+> `W` and hand every remaining winner a larger `share` — the same forbidden
+> transfer wearing different clothing (I14). A penalty must cost the party it
+> falls on and cost everyone else nothing.
 
-Both halves matter. **Routing it to maintenance** keeps the rule §5.1 has held
-since design-v2 §5.5: no moderator's loss is ever another moderator's gain, because
-that pays people to provoke losses instead of to judge content. **Keeping them in
-`W`** is what makes that true in practice — removing them would shrink the divisor
-and hand every remaining winner a larger `share`, which is the same forbidden
-transfer wearing different clothing. A failed challenge must cost the challenger
-and cost everyone else nothing.
+That is now a statement about any future penalty rather than about this one, which
+is the difference between a fix and a property (§9).
 
 The reserve still activates on *turnout*, not on success: round-1 voters who showed
 up did real work, and paying them out of a pot the extra turnout also dilutes is
@@ -1272,25 +1311,53 @@ there is nothing left for an external prize to buy here.
 ### 5.3 Payment
 
 ```
-P = pot            // the reserve is MOVED INTO pot on challenge (§4.3);
-                   // adding it again here pays it twice
-W = votes matching `verdict`, from either round
-share = floor(P / W)
-remainder = P − share · W   -> maintenance reserve, never to moderators
+activated = min( challengeReserve , floor(pot · reveals1 / reveals0) )
+P         = pot + activated
+W         = votes matching `verdict`, from either round
+share     = floor(P / W)
+remainder = P − share · W                 -> maintenance reserve, never to moderators
+challengeReserve − activated              -> refunded to the submitter
 ```
 
-Four things are irrelevant to both payment and penalty **for an ordinary voter**:
-which round they voted in, whether their own ballot was sampled as a ticket,
-whether their side won the round-0 plurality, and whether the challenge reversed
-it.
+`reveals0 ≥ 1` is guaranteed by the `REVEAL(r=0) → TALLY` guard, so the division is
+total. Both counts are **tally facts, fixed at reveal close and independent of the
+verdict** — the reserve must not become a second quantity a party can steer by
+choosing an outcome (I30).
 
-**The challenger is the one exception, and it is deliberate.** §4.6 makes their
-payment depend on exactly one thing this list says is irrelevant — whether round 1
-moved the plurality. A challenger whose round did not move it forfeits their share
-of `P` as well as `CHALLENGE_BOND(c)`, which is what closes the extraction channel
-§4.9 describes. The list above is written unconditionally in an earlier revision;
-it is scoped here rather than deleted, because for everyone who did not register a
-challenge it is exactly right.
+**The reserve activates in proportion to the dilution it exists to offset.** Its
+job (design-v3 §2.1) is that opening a challenge must not tax the round-0 voters by
+splitting one pot more ways. Holding their share roughly constant needs
+`pot · reveals1 / reveals0`, which is what the formula pays, capped at what the
+submitter prepaid. Beyond the cap the reserve is exhausted and dilution resumes,
+which is honest and bounded. Below it, the unspent remainder goes back to the
+submitter, who prepaid for a round that did not happen at the size it was priced
+for.
+
+**This is what closes §4.9's extraction channel, and it closes it at the source.**
+An earlier revision moved the whole reserve into the pot at round-1 open, on a
+boolean — so a challenge that attracted nobody still enlarged the pot for the
+round-0 coherent side by the full reserve, and a round-0 *winner* could register
+purely to collect that. §4.6's forfeit existed to take it back, and H7 showed the
+forfeit fired on the wrong party.
+
+**Registration now activates nothing; reveals do.** That is the whole of the fix:
+the challenger's lever is decoupled from the money. What remains is that a marginal
+reveal marginally enlarges the pot and its caster shares in it — but that is the
+general property that turnout is subsidised, it applies to every voter equally, and
+one extra reveal is worth `pot / reveals0` split `W` ways, which is under a
+thousandth of the pot at working sizes. It is not a channel a challenger has
+privileged access to, which is what the old rule's `challengeReserve`-for-one-bond
+was.
+
+It also moves the reserve's activation to **settlement**, where every other value
+movement in this document lives. Activating at round-1 open changed what §4.8 would
+refund before any terminal was reached.
+
+Four things are irrelevant to both payment and penalty, **for every voter including
+the challenger**: which round they voted in, whether their own ballot was sampled as
+a ticket, whether their side won the round-0 plurality, and whether the challenge
+reversed it. The exception a previous revision carved out for the challenger is
+gone with §4.6's forfeit.
 
 **Expected cash is not direction-neutral, deliberately** (design-v3 §5). A majority
 voter expects `(P/N)·f(a)/a`, a minority voter `(P/N)·(1−f(a))/(1−a)`. `design-v2`
@@ -1682,7 +1749,7 @@ the original draw.
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
 | **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
-| **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. The non-reveal debit, the incoherence debit and `CHALLENGE_BOND` read the **tally**; payment, the index entry and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first group and not the second. I25 is this rule's instance for the non-reveal debit and §4.6's tally-settled `CHALLENGE_BOND` is its instance for the challenge; §4.8's `NO_RANDOMNESS` row is what forced the general statement |
+| **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. `CHALLENGE_BOND` reads **nothing** and settles everywhere past `TALLY`; the non-reveal debit, the incoherence debit and the reserve activation read the **tally**; payment, the listing status and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first two groups and not the third. I25 is this rule's instance for the non-reveal debit; §4.8's `NO_RANDOMNESS` row is what forced the general statement. **An obligation's group is a design choice, not a discovery** — H7 moved `CHALLENGE_BOND` from the tally group to the empty one, because every tally-derived test available to it was one the challenger could evaluate before registering |
 | **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
@@ -1735,7 +1802,7 @@ property.
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
-| `CHALLENGE_BOND` | Sizing only. §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and I1 is structural again. It is the only constraint on who may register a challenge (§3.5), so it must price a frivolous challenge while staying low enough that a single-identity dissenter can afford one |
+| `CHALLENGE_BOND` | Sizing only, and **one job now that §4.6 made it unconditional**. It used to have to price a frivolous challenge *and* stay affordable for a single-identity dissenter — two requirements pulling opposite ways on one knob, and the conditional forfeit made the effective price differ between the two parties in the wrong direction. Unconditional, both parties face the same number, so it is a single question: what are twelve hours of the submitter's latency and one round of cohort attention worth? §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and it needs none to the reserve either — §5.3 removed that coupling |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call |

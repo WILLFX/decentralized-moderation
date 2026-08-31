@@ -87,6 +87,12 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §4.8 — **every obligation names the condition under which it fires** (I30), and
+>   there are no groups. Sorting them into *reads nothing / tally / verdict* put the
+>   challenge reserve in two places at once — it is sized by the tally and triggered
+>   by the verdict — and the two rules paid the same twenty units out twice. A
+>   condition is a property of the obligation; a group is a property of the
+>   partition, and only one of those a new rule can be mis-filed into.
 > - §2.4 — **a claim on a bond is a record, not a subtraction** (I32). Only the case
 >   that created it may discharge it, and only the logic that created that case may
 >   act on it. I1's "structural" covered the arithmetic and not the authorization:
@@ -728,7 +734,7 @@ role, and only in the one terminal that has a tally and no verdict.
 | `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` and the reserve activation both settle at `SETTLED`, with every other liability (§4.6, §5.3) |
 | `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
-| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate — all four read the verdict. `CHALLENGE_BOND(c)` is debited wherever one was registered, on no condition. The *tally*-derived incoherence debit applies iff a tally exists, which is `NO_RANDOMNESS` and nothing else (§4.8, I30). Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
+| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Fire exactly the obligations whose requirement this terminal meets (§4.8's table, I30): no verdict was drawn, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate; `CHALLENGE_BOND(c)` is debited wherever one was registered; the non-reveal debit applies wherever a reveal phase opened, which is every reason except `NO_TURNOUT`; the incoherence debit applies wherever a settled side exists, which is `NO_RANDOMNESS` alone. Decrement `openVoteCount`, `openChallenges` and `m.liabilities` per §2.4; refund per §4.8. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
 Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
 transition with a hard expiry — and `CLAIM_BOUNTY` for finalization. **Neither
@@ -1111,40 +1117,81 @@ In every case: no verdict, and no listing, because both need a draw. **The debit
 and the claim key are not uniform across the three rows**, because the three rows
 do not leave the same facts behind.
 
-**A terminal settles every obligation whose input it has, and only those** (I30).
-Sort this specification's obligations by what they read:
+**Every obligation names its own requirement, and a terminal fires exactly those
+whose requirement it meets** (I30). Not three groups — the previous revision sorted
+obligations into *reads nothing / reads the tally / reads the verdict*, and the
+partition did not fit its own members:
 
 ```
-from NOTHING       CHALLENGE_BOND       debited on every terminal reachable
-                                        from TALLY, on no condition   (§4.6)
+obligation            fires iff                          NT  NR  NRand  A/R
+------------------------------------------------------------------------------
+CHALLENGE_BOND        a challenge was registered          -   -    y     y
+non-reveal debit      a reveal phase OPENED               -   y    y     y
+incoherence debit     a settled side exists               -   -    y     y
+claim key held        a settled side exists               -   -    y     y
+reserve activation    a verdict was drawn                 -   -    -     y
+payment (§5.3)        a verdict was drawn                 -   -    -     y
+listing status (§8.2) a verdict was drawn                 -   -    -     y
+reputation (§6)       a verdict was drawn                 -   -    -     y
 
-from the TALLY     non-reveal debit     a commit that was never opened
-                   incoherence debit    a vote against the leading side
-                   reserve activation   reveals1 / reveals0           (§5.3)
-                   the claim key        has this content been judged  (§8.4, I26)
-
-from the VERDICT   payment (§5.3)       who was coherent with the drawn outcome
-                   listing status       APPROVED / REJECTED           (§8.2)
-                   reputation (§6)
+NT = NO_TURNOUT   NR = NO_REVEALS   NRand = NO_RANDOMNESS   A/R = APPROVED|REJECTED
 ```
 
-`NO_TURNOUT` and `NO_REVEALS` have no tally — one never opened a reveal phase, the
-other closed with `pooled == 0` — so only the first group applies, minus the key,
-which I26 attaches to having been tallied. `NO_RANDOMNESS` has a **complete pooled
-tally and is missing nothing but `u`**, so every tally-derived obligation settles
-there exactly as it would have on the finalized path, the claim key included.
+**The settled side** is the verdict where one was drawn and the pooled plurality
+(§4.2) where one was not. It is total wherever `pooled ≥ 1`, which is what lets the
+incoherence debit name *one* input instead of an input and a fallback. §5.1 uses it
+at the debit site.
 
-The verdict-derived column stays empty in all three. **The index still gets an
-entry** — §8.2's `UNRESOLVED` is a status value, not an absence, and a reader must
-be able to tell "judged, undrawn" from "never submitted"; what none of the three
-writes is a *listing*. Revealers are paid nothing in any `UNRESOLVED`; what changed
-is that in `NO_RANDOMNESS` they no longer *lose* nothing either.
+**Why the groups had to go.** They partitioned obligations by what each *reads*,
+assuming every obligation reads exactly one of the three. The reserve activation
+reads two: the **tally** for its size (`reveals1 / reveals0`) and the **verdict**
+for whether it happens at all — it offsets the dilution of a payment, and with no
+payment there is nothing to offset. The previous revision filed it under the tally,
+while §4.3 and §4.8 both filed it under the verdict. Those are not two readings of
+one rule; they are two rules, and the money does not balance between them.
 
-**Non-revealers are debited anyway.** `REVEAL_BOND` is charged whenever a commit
-is not opened, in every terminal state including this one. Failing to complete a
-voluntary commitment is not contingent on whether the case reached a verdict, and
-an earlier revision that waived it here made withholding free in exactly the state
-withholding produces.
+**The failure, with numbers.** A challenged case reaches `NO_RANDOMNESS` with
+`reveals0 = 30`, `reveals1 = 20`, `pot = 80`, `challengeReserve = 20`. Under the
+grouping, the activation fires: `min(20, floor(80·20/30)) = 20` moves into `pot`.
+The value-flow block below then refunds `pot + challengeReserve` in full. **Twenty
+is paid out twice against an escrow that holds it once.** That is an insolvency,
+not a bookkeeping quibble, and it exists because one obligation was asked which
+group it belonged to when the honest answer was "both".
+
+**A requirement is a property of the obligation; a group is a property of the
+partition.** Naming the requirement per obligation means a new rule cannot be
+mis-filed — there is no cell for it to land in wrongly, only a condition it must
+state. Magnitudes are unconstrained: an obligation may compute its size from
+anything the terminal holds. Only the requirement decides whether it fires.
+
+`NO_RANDOMNESS` has a **complete pooled tally and is missing nothing but `u`**, so
+every obligation short of the verdict fires there exactly as it would have on the
+finalized path, the claim key included. No verdict is drawn in any of the three, so
+none of them pays, lists, credits reputation or activates the reserve.
+
+**The index still gets an entry** — §8.2's `UNRESOLVED` is a status value, not an
+absence, and a reader must be able to tell "judged, undrawn" from "never
+submitted"; what none of the three writes is a *listing*. Revealers are paid
+nothing in any `UNRESOLVED`; what changed at H4 is that in `NO_RANDOMNESS` they no
+longer *lose* nothing either.
+
+**Non-revealers are debited wherever a reveal phase opened — and in `NO_TURNOUT`
+none did.** `REVEAL_BOND` is charged for failing to complete a voluntary
+commitment, which is not contingent on the case reaching a verdict; an earlier
+revision waived it across all of `UNRESOLVED` and so made withholding free in
+exactly the state withholding produces. But it over-corrected to *every terminal
+state*, and `NO_TURNOUT` closes at commit close with the reveal phase never opened.
+**Every committer is vacuously a non-revealer there, and all of them are debited
+for a quorum failure the same table calls unsteerable and refunds in full.** A
+debit for something nobody could have done is the shape item 1 removed from the
+schedule; it is I29's class, and the requirement table above is what makes it
+visible — the non-reveal debit's requirement is *a reveal phase that opened*, not
+*a terminal state*.
+
+Nothing is bought back by charging it there. `NO_TURNOUT` cannot be caused: commits
+are blind and the only way to force it is to not commit, which is free regardless.
+So the debit deters nothing and prices a market failure to the people who showed
+up for it.
 
 **`UNRESOLVED` discharges through `SETTLED`, like every other terminal.** It is not
 a leaf. An earlier revision made it one, which left `openVoteCount` permanently
@@ -1158,16 +1205,22 @@ activates only at settlement, in proportion to round-1 reveals (§5.3). No termi
 here draws a verdict, so nothing is paid, so nothing activates:
 
 ```
-every reason      ->  refund pot + challengeReserve in full
-
-every reason      ->  debit every non-revealer REVEAL_BOND(c)  (I25)
-                      nothing is RETURNED — the bond was covered, never
-                      escrowed (§5.2), so there is nothing to give back
-                      pay nobody, list nothing, credit no reputation; the
-                      index entry is written as UNRESOLVED (§8.2)
+every reason      ->  refund pot + challengeReserve IN FULL — the reserve
+                      never activates here, because activation requires a
+                      verdict and none was drawn (§5.3)
+                      pay nobody, list nothing, credit no reputation
+                      index entry written as UNRESOLVED (§8.2)
                       decrement openVoteCount, openChallenges and
                       m.liabilities by what this case added   (§2.4, I20)
                       retain finalizationBounty and maintenance
+
+NO_REVEALS,       ->  debit every non-revealer REVEAL_BOND(c)  (I25)
+NO_RANDOMNESS,        nothing is RETURNED — the bond was covered, never
+APPROVED/REJECTED     escrowed (§5.2), so there is nothing to give back
+
+NO_TURNOUT        ->  no non-reveal debit. The reveal phase never opened, so
+                      nobody failed to open a commit; the requirement is a
+                      reveal phase, not a terminal (I25)
 
 NO_TURNOUT,       ->  no incoherence debit: there is no tally to be incoherent
 NO_REVEALS            with. No challenge can be outstanding in either row either
@@ -1330,20 +1383,31 @@ incoherent with verdict   -> bond -= d(c)            -> maintenance reserve
 committed, never revealed -> bond -= REVEAL_BOND(c)  -> maintenance reserve (§5.2)
 ```
 
-**Where there is no verdict, the coherence test reads the pooled plurality
-instead** — `UNRESOLVED(NO_RANDOMNESS)` and nowhere else, because it is the only
-terminal that holds a complete tally and never drew from it (§4.8, I30):
+**"Coherent with the verdict" is shorthand for coherent with the *settled side*,
+which §4.8 defines once so this site does not need a fallback:**
 
 ```
-on the plurality's winning side  -> nothing; no payment exists to earn
-on the losing side               -> bond -= d(c)     -> maintenance reserve
+settled side  =  the verdict, where one was drawn
+                 the pooled plurality (§4.2), where one was not
 ```
 
-The substitution is confined to that one terminal by construction: everywhere else
-either a verdict exists, in which case it is the input, or no tally exists, in
-which case neither test has one. **`d(c)` is the same coefficient either way** —
-this is not a second penalty with its own parameter, it is the same penalty reading
-the best fact the terminal has.
+It is total wherever `pooled ≥ 1`, so the incoherence debit names **one** input
+rather than an input and an exception, and §4.8's table can state its condition —
+*a settled side exists* — in the same form as every other obligation's. In
+practice the substitution reaches exactly one terminal, `UNRESOLVED(NO_RANDOMNESS)`,
+because it is the only one holding a complete tally it never drew from:
+
+```
+on the settled side       -> bond += share, but ONLY where a verdict was drawn;
+                             payment has its own condition and no terminal
+                             without a verdict pays anything (§4.8)
+against the settled side  -> bond -= d(c)     -> maintenance reserve
+```
+
+**`d(c)` is the same coefficient either way** — not a second penalty with its own
+parameter, but the same penalty reading the best fact the terminal has. And note
+the asymmetry, which is deliberate and is what H4's dominance argument runs on:
+the debit fires on the plurality, the payment does not.
 
 **Every debit carries `(c)` — the case's pinned parameters, never the live ones**
 (§2.4, I27). §2.4 says "no coefficient is read at settlement at all", and that is
@@ -1969,12 +2033,12 @@ the original draw.
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`, and equals the sum of that moderator's open claim records (§2.1) — an identity a view can assert, not an accounting convention. Adding any debit to this specification means creating a claim for it; no test may use a narrower expression |
 | **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
-| **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
+| **I25** | The non-reveal debit fires wherever **a reveal phase opened**, including terminals in which no verdict was drawn — and *not* in `NO_TURNOUT`, where it never did. It was stated as "every terminal state", which over-corrected a revision that had waived it across all of `UNRESOLVED`: the requirement is the phase, not the terminal, and quantifying over terminals debited every committer in the one row the same section calls unsteerable |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
 | **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
-| **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. `CHALLENGE_BOND` reads **nothing** and settles everywhere past `TALLY`; the non-reveal debit, the incoherence debit and the reserve activation read the **tally**; payment, the listing status and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first two groups and not the third. I25 is this rule's instance for the non-reveal debit; §4.8's `NO_RANDOMNESS` row is what forced the general statement. **An obligation's group is a design choice, not a discovery** — H7 moved `CHALLENGE_BOND` from the tally group to the empty one, because every tally-derived test available to it was one the challenger could evaluate before registering |
+| **I30** | **Every obligation names the condition under which it fires, and a terminal fires exactly those whose condition it meets** (§4.8's table). Magnitudes are unconstrained — an obligation may compute its size from anything the terminal holds; only the condition decides *whether*. An earlier form sorted obligations into three groups by what they read, and the partition did not fit its members: the reserve activation reads the tally for its size and the verdict for whether it happens at all, so it was filed under the tally by §9 and under the verdict by §4.3 and §4.8, and twenty units of reserve were paid out twice. **A condition is a property of the obligation; a group is a property of the partition** — and a new rule can be mis-filed into a group, where it can only fail to state a condition, which is visible |
 | **I31** | **No comparison in this specification spans two units of time.** A deadline is denominated in blocks iff a block-denominated chain constant can expire inside it; wall-clock quantities are records or lifecycle delays that no block constant runs inside. The single wall-clock→block conversion happens once, at case creation, from a pinned parameter (§1 `BLOCK_TIME`, §4.3), and no rule reads it afterwards. **A conversion inside a comparison is a defect even when its constant is correct**, because correctness of the constant is a property of the chain on the day and not of the specification |
 | **I32** | **Only the case that created a claim on a bond may discharge it, and only the logic that created that case may act on it.** `liabilities` is a sum of records, never a figure a caller states. A property about *authorization*, not about arithmetic: conservation can balance while attribution is wrong, which is how v1's P0-2 drained escrow inside a single contract. Discharge capability is separable from creation capability and cannot be revoked from a logic holding an open claim, or retiring a contract would strand every moderator who voted under it |
 

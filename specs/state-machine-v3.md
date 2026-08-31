@@ -94,6 +94,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `FINALIZATION_GRACE` | 10 min | Between outcome block and hard deadline. |
 | `CHALLENGE_WINDOW` | 12 h | From publication of the round-0 plurality (`TALLY`). |
 | `SEED_LAG` | 2 blocks | Between arming and realizing a seed. |
+| `BLOCKHASH_HORIZON` | 256 blocks | How long `blockhash` remains readable. **Chain-dependent in blocks and in wall time** — 256 blocks is ~51 min at 12 s and ~21 min at 5 s. §7.3's rarity argument scales with it, so it is named rather than assumed. |
 | `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger (§3.3). |
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
 | `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever triggers **either** draw (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). |
@@ -238,18 +239,25 @@ exactly the wording that let a per-moderator debit through. The rule is now: **a
 value the specification can remove from `bond` is a term in `liabilities()`**, and
 `liabilities()` is used unchanged in all three tests above (I1, I13, I23).
 
-**Why `λ = d` is the working value.** A single open vote can produce two debits and
-they are mutually exclusive — a vote either reveals, risking `d` if incoherent, or
-fails to reveal, forfeiting `REVEAL_BOND` and risking no `d`. So its coefficient is
-the larger, not the sum:
+**Why `λ = d + G`.** A single open vote can produce two debits and they are
+mutually exclusive — a vote either reveals, risking `d` if incoherent, or fails to
+reveal, forfeiting `REVEAL_BOND` and risking no `d`. So its coefficient is the
+larger, not the sum:
 
 ```
-LAMBDA ≥ maxDebitPerOpenVote = max(d, REVEAL_BOND)
+LAMBDA ≥ maxDebitPerOpenVote = max(d, REVEAL_BOND) = REVEAL_BOND = d + G
 ```
 
-`LAMBDA = d` therefore holds only under **`REVEAL_BOND ≤ d`**, recorded in §1 and
-to be re-checked whenever either parameter moves. A smaller `LAMBDA` admits
-insolvency; a larger one rations capacity for no safety gain.
+`REVEAL_BOND` is the larger because §5.2 floors it at `d + G` — revealing costs
+gas and withholding does not, so a bond of exactly `d` leaves a band of beliefs in
+which withholding wins. A smaller `LAMBDA` admits insolvency; a larger one rations
+capacity for no safety gain.
+
+**No value appears twice in this document.** An earlier revision derived
+`LAMBDA = d` here, kept that after §1 moved to `d + G`, and instructed the reader
+to "re-check whenever either parameter moves" — an instruction that was not
+executed when the parameter moved. §1 is the only place a parameter's value is
+written; everywhere else refers to it by name (I29).
 
 **This is a price, not a reservation** — the distinction that separates it from the
 withdrawn risk units. Risk units rationed a fixed allowance `K` that no amount of
@@ -516,10 +524,10 @@ moves no value.
 | `REVEAL` **(r=0)** | `UNRESOLVED` | `now ≥ phaseDeadline` and `pooled == 0` | `unresolvedReason = NO_TURNOUT`. Not a policy gate — there is no tally to draw from |
 | `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `now < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `TALLY` | `COMMIT` | `now ≥ phaseDeadline` and `challenger != 0` | `round = 1`; activate `challengeReserve` into `pot`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = now + COMMIT_WINDOW` |
-| `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | wait for `outcomeSeedBlock` (§7.2), which is the same block whether or not a challenge occurred |
+| `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
-| `DRAW` | `FINALIZED` | `outcomeSeedBlock` available | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND` settles at `SETTLED` with every other liability (§4.6) |
-| `DRAW` | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
+| `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND` settles at `SETTLED` with every other liability (§4.6) |
+| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
 | **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written and no *incoherence* debit is applied. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
@@ -943,7 +951,7 @@ This is a *price* on the free option that commit–reveal creates, not a
 reservation: it debits nothing at commit, caps nothing, and enters §2.4 only
 through `LAMBDA`'s `max(d, REVEAL_BOND)` term.
 
-**`REVEAL_BOND = d` is derived, not chosen — and it is forced from both sides.**
+**`REVEAL_BOND = d + G` is derived, not chosen.**
 
 A committer holding belief `p` that they are coherent with the eventual verdict
 compares:
@@ -1120,11 +1128,27 @@ whether it was contested. This is what makes §4.4's "no early closure" rule enf
 rather than advisory, and it closes both M2.5-F10 and the selective-realization
 surface (P1-2).
 
-### 7.3 No lazy re-arming
+### 7.3 No lazy re-arming — and "unavailable" is not a test
 
-If `blockhash(outcomeSeedBlock)` is unavailable when the draw is attempted, the
-case terminates `UNRESOLVED(NO_RANDOMNESS)`. **A fresh future block is never
-selected.**
+If the seed block has **passed out of reach** — `block.number > outcomeSeedBlock +
+BLOCKHASH_HORIZON` — the case terminates `UNRESOLVED(NO_RANDOMNESS)`. **A fresh
+future block is never selected.**
+
+**The condition is a block-height comparison, never an observation of the returned
+hash.** `blockhash` returns zero both for a block that has expired and for a block
+that has not happened yet, so a guard phrased as "the seed is unavailable" is true
+in two states the rule is meant to distinguish. That matters because `DRAW` is
+entered up to 40 minutes before `outcomeSeedBlock` on the unchallenged path (§7.2
+puts the round-1 windows in the formula unconditionally), and an implementation
+testing the hash would let any party terminate a live case during that window —
+avoiding their own incoherence debit, collecting `DRAW_BOUNTY`, and taking
+`UNRESOLVED`'s no-debit-for-anyone rule with them (§4.8).
+
+Generalized as **I29**: no guard may be expressed as an observation whose value is
+the same in states the guard is meant to separate. Disjointness (I18) does not
+catch this — the two `DRAW` guards *are* disjoint under the correct reading; the
+defect was one guard being true in a state its own justification does not
+describe.
 
 Re-arming lets a party inspect whether a seed is favourable, use it when it is, and
 let it expire when it is not — a free option over outcomes. The one-hour round
@@ -1252,6 +1276,7 @@ the original draw.
 | **I24** | No party can change a case's terminal *class* in a direction favourable to them by an action taken after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
 | **I28** | Withholding a reveal is never favourable: it forfeits `REVEAL_BOND` and strictly lowers the probability of the withholder's own side |
+| **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
@@ -1277,7 +1302,7 @@ while a third existed.
 
 | Item | Note |
 |---|---|
-| `d`, `BOND_MIN`, `LAMBDA` | `λ = d` is derived; `d` itself is not. It sets the confidence threshold at which honest voting is rational |
+| `d`, `BOND_MIN` | `λ = d + G` is derived (§2.4); `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
 | `RETRY_COOLDOWN` | §8.4, now for `NO_RANDOMNESS` alone. The two-attackers-one-knob contradiction is gone with `WITHHELD`; what remains is a delay long enough to make repeated poke-refusal unattractive, and the pot carries forward so the submitter is not levied for it |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |

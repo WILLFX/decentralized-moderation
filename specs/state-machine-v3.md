@@ -1,7 +1,9 @@
 # Moderation Contract v3 — Formal State-Machine Specification
 
 **Milestone:** M3.0
-**Status:** Specification, revision **v3.0**. Not implemented.
+**Status:** Specification, revision **v3.4**. Not implemented.
+Revision history is the commit log; the marker exists so a reader can tell which
+`design-v3` revision this file was last reconciled against (v3.3).
 **Design:** `specs/design-v3.md` — mechanism, arithmetic, and the costs this
 document takes as decided. Where the two disagree, the design document is wrong and
 should be corrected; this file is normative.
@@ -9,15 +11,28 @@ should be corrected; this file is normative.
 challenge eligibility seeds, risk units, `MAX_ROUNDS` 2 and pooled tallies under a
 linear lottery, none of which survive. It is kept as the record of the architecture
 the external review was run against.
-**Scope:** the on-chain moderation contract. `StakeRegistry`, `IndexRegistry` and
-`RulesetGovernor` survive from the first architecture with the edits noted in §10;
-`SortitionTree` and `FreezeMath` do not survive at all.
+**Scope:** the on-chain moderation contract. All eight existing source files are
+classified, because a partial list is how a file ends up unowned:
 
-Parameters marked *(working)* are simulation inputs, not final values.
+```
+deleted outright     SortitionTree, FreezeMath                       ~210 lines
+rewritten            Moderation, Settlement                        ~2,690 lines
+survives with edits  StakeRegistry, IndexRegistry, RulesetGovernor,
+                     ProtocolLimits                                ~2,400 lines
+```
 
-> **Decisions taken here, not in the design document.** Six rules follow from the
-> design but are not stated by it. Each is consequential enough to be visible, and
-> each carries its reasoning inline.
+§10 carries the per-file edits. **No Solidity has changed since the pivot** — the
+diff against `contracts/` is empty, and this document describes what must replace
+it, not what is there.
+
+The **Working value** column in §1 gives simulation inputs, not final values; the
+parameters with no defensible working value at all are marked *(open — §10)* and
+are listed there with what would decide them.
+
+> **Decisions taken here, not in the design document.** The rules below follow from
+> the design but are not stated by it. Each is consequential enough to be visible,
+> and each carries its reasoning inline. The list is not numbered in the prose,
+> because every revision that added one left a stale count behind.
 >
 > - §3.5 — **a challenge is a bond, not a vote**, and carries no eligibility
 >   test. This removes the forced disclosure v2 §4.7 accepted as unavoidable, and
@@ -26,9 +41,11 @@ Parameters marked *(working)* are simulation inputs, not final values.
 > - §3.5b — **round 1 opens on the schedule, not on the challenge.** Filing early
 >   does not start the round early, so no seed depends on the challenger's chosen
 >   block.
-> - §4.5 — **one randomness per claim**, evaluated against both tallies. The
->   verdict is monotone in the tally, so a challenge that adds no votes changes
->   nothing and there is no second roll to buy.
+> - §4.5 — **one randomness per claim, realized once, at the last transition
+>   before `FINALIZED`.** Not "evaluated against both tallies": an earlier revision
+>   drew a provisional verdict at round-0 close and reused `u`, and §4.2 withdrew
+>   that draw entirely. The verdict is monotone in the tally, so a challenge that
+>   adds no votes changes nothing and there is no second roll to buy.
 > - §4.6 / §5.3 — `MIN_CHALLENGE_REVEALS` is removed and `CHALLENGE_BOND` settles
 >   on **nothing**: it is debited unconditionally. Every conditional available was
 >   one the challenger could evaluate before registering, so the bond bit whoever
@@ -79,12 +96,19 @@ Parameters marked *(working)* are simulation inputs, not final values.
 
 - **xBZZ** amounts are integers in base units. No floating point anywhere.
 - **Time** is block timestamps (seconds).
-- **Randomness** is `blockhash(snapshotBlock)`, domain-separated per case, round
-  and purpose (§7). Never re-armed after expiry (§7.3).
+- **Randomness** is `blockhash(eligSeedBlock)` per round and
+  `blockhash(outcomeSeedBlock)` once per claim, domain-separated per case, round
+  and purpose (§7). Never re-armed after expiry (§7.3). There is no
+  `snapshotBlock`; that name is from v2, where one seed served both jobs.
 - `H(...)` is `keccak256(abi.encode(...))` unless stated otherwise.
 - **Rounds** are numbered from 0. Round 0 is the initial vote; round 1 is the
   single challenge round. There is no round 2.
-- **Provisional** means: drawn, published, and binding on nothing.
+- **Plurality** means: which side leads the pooled tally — a *fact about the
+  votes*, carrying no randomness, published at `TALLY` and binding on nothing
+  (§4.2). **There is no "provisional verdict" in this document.** An earlier
+  revision drew one at round-0 close; publishing it published `u`, and with it the
+  exact number of votes needed to flip the case, twelve hours before anyone had to
+  decide whether to challenge.
 
 ---
 
@@ -1300,8 +1324,8 @@ positive gas. §4.2 now realizes `u` after all voting, so nobody can compute `p`
 while it still matters. What remains is the ordinary band above, which `G` closes.
 
 **What this closes and what it does not.** It closes selective reveal for anyone
-optimizing *inside* the protocol's payoffs — the ordinary case, and the one O5 and
-§11's "strategic commitment" were about. It does not close it for an attacker whose
+optimizing *inside* the protocol's payoffs — the ordinary case, and the one
+`design-v3` O5 is about. It does not close it for an attacker whose
 prize is a listing, which is external and cannot be priced against. Against those,
 the second reason of I28: withholding removes the withholder's *own* votes, so it
 strictly lowers the probability of the side they were pushing. §4.8 removed the
@@ -1584,7 +1608,7 @@ Moderator accounting (`claim()`, reputation, debits) happens afterwards and may 
 batched. **A reader must never wait for moderator payouts to see a result.** v2
 wrote the index at `SETTLED` and so coupled the two.
 
-### 8.2 Provisional status is a value, not an absence
+### 8.2 Interim status is a value, not an absence
 
 **Decision.** `IndexRegistry` carries status as a distinct value:
 
@@ -1744,19 +1768,19 @@ the original draw.
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists per claim |
-| **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
-| **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
-| **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
-| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
-| **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
-| **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. `CHALLENGE_BOND` reads **nothing** and settles everywhere past `TALLY`; the non-reveal debit, the incoherence debit and the reserve activation read the **tally**; payment, the listing status and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first two groups and not the third. I25 is this rule's instance for the non-reveal debit; §4.8's `NO_RANDOMNESS` row is what forced the general statement. **An obligation's group is a design choice, not a discovery** — H7 moved `CHALLENGE_BOND` from the tally group to the empty one, because every tally-derived test available to it was one the challenger could evaluate before registering |
-| **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
-| **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
-| **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
 | **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
+| **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
+| **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
+| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
+| **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
+| **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
+| **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
+| **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
+| **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
+| **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. `CHALLENGE_BOND` reads **nothing** and settles everywhere past `TALLY`; the non-reveal debit, the incoherence debit and the reserve activation read the **tally**; payment, the listing status and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first two groups and not the third. I25 is this rule's instance for the non-reveal debit; §4.8's `NO_RANDOMNESS` row is what forced the general statement. **An obligation's group is a design choice, not a discovery** — H7 moved `CHALLENGE_BOND` from the tally group to the empty one, because every tally-derived test available to it was one the challenger could evaluate before registering |
 
 I2 is inherited verbatim from v2. **I12 is not, any more** — its v2 phrasing is the
 one quoted above as wrong, and it was carried across three architectures without
@@ -1768,6 +1792,12 @@ That is worth separating from the other corrections in this section. I18–I21, 
 and I30 were *missing* — properties the document had not written down. I11 and I12
 were **present, prominent, and false**, and being prominent is what kept them from
 being read. An invariant nobody re-derives is a comment.
+
+**The table is in numeric order, which it was not.** I18–I21 sat at the bottom
+after I26, and I22–I30 ran I22, I23, I27, I24, I25, I30, I28, I29, I26 — each new
+invariant appended beside the one it was reasoning about rather than at its number.
+That is how I11 and I12 stayed unread through three architectures (H6): an
+invariant you cannot find by number is one nobody re-derives.
 
 **I18–I21 are generalizations, not additions.** Each was written because a specific
 defect of this document was an instance of it: a duplicated `REVEAL` guard (I18), a

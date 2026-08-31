@@ -1,4 +1,4 @@
-# Design v3 — One-Hour Provisional, One Challenge Round
+# Design v3 — One-Hour Plurality, One Challenge Round
 
 **Status:** Design. Specified normatively in `specs/state-machine-v3.md`; not
 implemented. Where the two disagree, the state machine is normative and this
@@ -7,9 +7,14 @@ document should be corrected.
 risk units of revision v2.1. `design-v2.md` §4.2's neutrality theorem is
 **no longer a design requirement** (§5); it remains correct and is now the
 statement of what this design gives up.
-**Revision:** v3.2 — a 12-hour challenge round is reinstated (§2.1) and the
-architecture is no longer challenge-free; the one-hour result becomes
-**provisional**. v3.1 replaced two tickets and a terminal `CONTESTED` with three
+**Revision:** v3.3 — the draw is taken against `â = (A+1)/(N+2)` rather than the
+sample proportion (§3), which moved every figure in §4 and §8; `CHALLENGE_BOND` is
+unconditional and the challenge reserve activates in proportion to round-1 turnout
+(§2.1, §5). v3.2 reinstated a 12-hour challenge round (§2.1) so the architecture is
+no longer challenge-free, and **the one-hour result is a plurality — a fact about
+the votes — not a provisional verdict**; `state-machine-v3` §4.2 withdrew the
+provisional draw, because publishing it published `u` and with it the exact cost of
+flipping the case. v3.1 replaced two tickets and a terminal `CONTESTED` with three
 tickets and a 2-of-3 majority, and deliberately abandoned exact cash neutrality
 (§5).
 **Provenance:** the confirmation rule and the lifecycle are the senior reviewer's
@@ -34,8 +39,8 @@ notification is cheaper bought directly.
 
 ```
 was:  commit 24h -> reveal 24h -> challenge 4d (-> more rounds)      ~6 days
-now:  commit -> reveal -> draw -> PROVISIONAL                        ~1 hour
-      -> 12h challenge window -> (one challenge round -> final draw) ~12-13 h
+now:  commit -> reveal -> TALLY, plurality published                ~1 hour
+      -> 12h challenge window -> (one challenge round) -> ONE draw   ~12-13 h
 ```
 
 **The result is not challenge-free.** An earlier revision of this document was, and
@@ -45,7 +50,7 @@ mechanism to correct that. The challenge round is the correction, and §2.1 stat
 exactly what it costs.
 
 What is bought is **speed of decision**, not speed of correction: a usable
-provisional answer in an hour where the old design gave nothing for six days.
+interim answer in an hour where the old design gave nothing for six days.
 
 ## 2. Mechanism
 
@@ -54,7 +59,7 @@ seed. **Three ballot-side draws from the revealed tally, with replacement; the
 side on two of three is the verdict.**
 
 ```
-SUBMIT -> COMMIT -> REVEAL -> DRAW -> PROVISIONAL -> (§2.1) -> one of:
+SUBMIT -> COMMIT -> REVEAL -> TALLY -> (§2.1) -> DRAW -> one of:
 
     two or three tickets Approve  ->  APPROVED
     two or three tickets Reject   ->  REJECTED
@@ -68,9 +73,10 @@ revealer can watch, which was the only thing that ever made withholding attracti
 The quorum gate is on *commits*, which are blind. What stops a thin tally from
 deciding a case outright is not a floor but the estimator of §3.
 
-There is no `CONTESTED` state and no post-draw appeal of a *final* claim. The
-verdict of the first round is **provisional** and may be challenged exactly once
-(§2.1).
+There is no `CONTESTED` state and no post-draw appeal. **The first round produces
+no verdict at all** — it produces a *plurality*, a fact about the votes, which may
+be challenged exactly once (§2.1). The single draw comes after the challenge window
+and after round 1 if there is one.
 
 > **Revision note.** An earlier draft of this document used *two* tickets without
 > replacement, with disagreement producing a terminal `CONTESTED`. That is
@@ -100,36 +106,45 @@ was abandoned and it is not negotiable here.
 ### 2.1 The challenge round
 
 ```
-hour 0-1    commit, reveal, three tickets, draw
-            -> index writes PROVISIONAL_APPROVED / PROVISIONAL_REJECTED
+hour 0-1    commit, reveal, tally
+            -> index writes PLURALITY_APPROVE / PLURALITY_REJECT — which side
+               LEADS, a fact about the votes. No randomness has been realized.
             -> NOTHING is paid, nobody is penalised, the pot stays escrowed
 
 hour 1-13   challenge window
 
-  no challenge, or MIN_CHALLENGE_REVEALS not met
-            -> provisional verdict becomes final
-            -> winners paid, losers penalised
+  no challenge
+            -> at the window's scheduled close the case waits for its outcome
+               block and is drawn ONCE (state-machine-v3 §7.2)
 
   challenge registered (any ACTIVE moderator + CHALLENGE_BOND; no eligibility
-  test - state-machine-v3 §3.5), threshold later met
+  test - state-machine-v3 §3.5)
             -> at the window's SCHEDULED close, not when the challenge landed,
                a second commit-reveal round opens, admitting only eligible
                moderators who did not vote in round 0
             -> tallies POOL: A = A0 + A1, R = R0 + R1
-            -> three FINAL tickets drawn from the pooled tally
-            -> one pot to every voter from either round matching the final
-               verdict; everyone against it is penalised
+            -> the SAME three tickets are drawn once, from the pooled tally,
+               after round 1 closes
+            -> one pot to every voter from either round matching the verdict;
+               everyone against it is penalised
 ```
 
-**Exactly one challenge round.** The provisional draw is discarded when a challenge
-succeeds in opening; it never binds and never pays.
+**Both paths reach the same block.** The outcome seed sits after all four windows
+whether or not round 1 runs, so an unchallenged case finalizes no earlier than a
+challenged one and the observable timing of a case leaks nothing about whether it
+was contested (`state-machine-v3` §7.2).
+
+**Exactly one challenge round, and nothing is discarded when it opens.** There is
+no round-0 draw to throw away: `state-machine-v3` §4.5 realizes the randomness once,
+after all voting. Round-0 votes pool forward; the challenge adds evidence to the
+tally the single draw will read.
 
 **A challenge must earn its round — and the floor that was meant to enforce this
 is withdrawn.** `MIN_CHALLENGE_REVEALS` is removed (state-machine-v3 §4.6). It was
 unsatisfiable exactly when it mattered, judged voters against a tally they were
 excluded from, and was a coordination trap. The job is done structurally instead:
-**one randomness per claim, evaluated against both tallies** (state-machine-v3
-§4.5). An unchanged tally yields an identical verdict, so there is no second draw
+**one randomness per claim, realized once after all voting closes**
+(`state-machine-v3` §4.5). An unchanged tally yields an identical verdict, so there is no second draw
 to buy, and the verdict is monotone in the tally — adding votes can move it only
 toward the side that was added. An attacker who lost round 0 at `a₀ = 0.3125` needs
 a median of **21** Approve votes to flip it, against **zero** for a 23.2% chance
@@ -172,12 +187,15 @@ challenge-round Reject voter.
 #### What the challenge round costs
 
 It reintroduces optional stopping, which the challenge-free revision existed to
-remove. The loser of the provisional draw is the party who challenges, so a
-motivated attacker always buys the second draw while an honest side buys it only
-when someone notices, is eligible, and pays.
+remove. The party trailing the published plurality is the party who challenges, so a
+motivated attacker always buys the second round while an honest side buys it only
+when someone notices and pays.
 
-With 32 round-0 reveals at 30% hostile (`a = 0.3125`, provisional APPROVED 23.2%),
-and `h` the probability the honest side challenges a loss:
+The table below is from the revision in which round 0 *drew* a provisional verdict;
+its row labels are that draw, and it is kept because the note under it is the
+argument for the rule that replaced it. With 32 round-0 reveals at 30% hostile
+(`a = 0.3125`, provisional APPROVED 23.2%), and `h` the probability the honest side
+challenges a loss:
 
 ```
 fresh challenge cohort      pooled a    p₂       h=1.0    h=0.5     h=0
@@ -329,9 +347,9 @@ remainder = P − rewardPerWinner · W     -> maintenance reserve, never to mode
 Voters against the final verdict receive nothing and take the incoherence penalty
 (§6). Four things are irrelevant to both payment and penalty: which round a
 moderator voted in, whether their ballot was sampled as a ticket, whether their
-side won the provisional draw, and whether the challenge reversed the result.
+side led the round-0 plurality, and whether the challenge reversed it.
 
-**Nothing is paid and nobody is penalised at the provisional draw.** The pot stays
+**Nothing is paid and nobody is penalised before a terminal state.** The pot stays
 escrowed through the challenge window (§2.1), so no coherence is credited against a
 verdict that a challenge may replace.
 
@@ -423,7 +441,7 @@ the first thing a testnet looks at.**
 ## 6. Penalties must commute
 
 Risk units are withdrawn (`v2-audit-checklist.md` §10.1). Removing them reopened
-P0-1, P0-4, P0-6 and §4.10 — everything v2.1 closed with per-unit freezing. This
+P0-1, P0-4, P0-6 and `v2-audit-checklist.md` §4.10 — everything v2.1 closed with per-unit freezing. This
 section states what any replacement must satisfy, as properties.
 
 **P1 — penalties commute.** Applying the penalties from a set of settled cases must
@@ -485,7 +503,7 @@ outcomeBlock = submissionBlock + FIXED_OFFSET
 
 Fixed at submission, and independent of when the last reveal lands, whether the
 case was contested, who called the transition, and whether everyone revealed early.
-This closes selective realization (P1-2, §4.11) and the last-revealer timing issue
+This closes selective realization (P1-2, `v2-audit-checklist.md` §4.11) and the last-revealer timing issue
 (M2.5-F10). **Lazy re-arming is removed**: if the fixed seed is missed, the case is
 VOID. It is never replaced with a fresh future block, which would let a party
 inspect a seed and discard it.
@@ -549,7 +567,16 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics, policyVersi
 |---|---|---|
 | `APPROVED` | reserved while listed | — |
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case reopens it |
-| `NO_QUORUM` | not reserved | freely — no probabilistic result occurred |
+| `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no tally existed and nobody could have caused it |
+| `UNRESOLVED(NO_REVEALS)` | reserved for a cooldown | pot carried forward; steerable only by a party holding every commit |
+| `UNRESOLVED(NO_RANDOMNESS)` | `REJECTED`'s reservation, by reference | none — the case *was* tallied, and I26 attaches to that |
+
+`state-machine-v3` §4.8 and §8.4 are normative here. This table read `NO_QUORUM`,
+one row, "free retry"; the reason code turned out to decide both the debits and the
+retry rule, so it is three rows with three treatments. The last one is the
+counter-intuitive member: a case whose seed expired has a *complete* tally and is
+missing only the coin, so releasing its key would hand a submitter facing rejection
+a free second attempt.
 
 **Retry is closed by construction here, not priced.** The two-ticket rule needed a
 priced retry because it abstained on 9.5% of ordinary content and permanently
@@ -574,8 +601,9 @@ under it since:
 The residual case is the honest publisher unlucky enough to land in that band.
 They are not left without recourse: `REJECTED` is reopened by an explicit re-review
 case (below), which is a new claim carrying evidence rather than a repurchase of
-the same draw. **`NO_QUORUM` is the only free retry**, and it is free precisely
-because no draw occurred. `state-machine-v3` §10 carries the permanence of
+the same draw. **`NO_TURNOUT` is the only free retry**, and it is free precisely
+because no tally existed — not merely because no draw occurred, which is also true
+of `NO_RANDOMNESS` and does not earn it one. `state-machine-v3` §10 carries the permanence of
 `REJECTED` as open work, blocked on the honest-accuracy measurement rather than on
 a parameter sweep.
 
@@ -602,10 +630,19 @@ registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 22.3% — and
 amplifier that protects an honest majority works just as hard for a hostile one.
 Every number in §3 and §4 is a function of honest turnout inside a short window,
 and the design must fail closed: **insufficient participation produces
-`NO_QUORUM`, never approval.**
+`UNRESOLVED`, never approval** (`state-machine-v3` I11; the state is one terminal
+with a reason code rather than v2's separate `NO_QUORUM`).
 
-`MIN_REVEALS` rises from 5 to **12–16**. Five reveals were thin while a four-day
-challenge window backed them; without one they are indefensible.
+**The quorum is on commits, at 16, and there is no reveal floor.** This paragraph
+used to raise `MIN_REVEALS` from 5 to 12–16, on the reasoning that five reveals
+were thin once the four-day challenge window went away. `state-machine-v3` §4.8
+removed the reveal floor instead of raising it: a gate at the reveal stage selects
+between terminal classes on state every revealer can watch, which was the only
+thing that ever made withholding attractive. The number moved to the commit gate,
+where it is decided blind. What stops a thin tally from deciding a case outright is
+not a floor but §3's estimator — at `N = 3` a unanimous cohort is overruled 10.4%
+of the time, and the confidence a verdict can express is bounded by the evidence
+behind it rather than by a threshold.
 
 Larger cohorts do not reduce the expected hostile share. They reduce sample
 variance and whole-cohort capture probability. Under three tickets they no longer
@@ -623,9 +660,10 @@ tally A/N    0.60    0.70    0.80    0.90    0.95    1.00
 P(3/3)      19.9%   33.5%   47.1%   70.2%   77.0%   85.0%
 ```
 
-A case with 30% Reject votes still draws 3/3 Approve a third of the time — and
-note the last column, which was 100% under `A/N` and is what made §8.3's 3/3
-conjunct redundant beside its `pooledReject == 0` conjunct.
+A case with 30% Reject votes still draws 3/3 Approve a third of the time — and note
+the last column, which was 100% under `A/N` and is what made `state-machine-v3`
+§8.3's 3/3 conjunct redundant beside its `pooledReject == 0` conjunct.
+
 So `unanimousTicketDraw` is stored as evidence but **must not by itself carry a
 high-assurance label.** The strict class requires the tally to participate:
 
@@ -660,10 +698,10 @@ conditional on live commitment counts, which would introduce a race.
 | O5 | Selective reveal under batched commitments — a Merkle root hides its leaf count, so withholding is undetectable | open; §6's debit prices it only if the commit is visible |
 | O6 | `d` flat or reputation-scaled (D4) | this project |
 | O7 | Guidelines as the Schelling point — one line carries the whole mechanism | open; now load-bearing twice, since §5 pays for convergence |
-| O8 | **Resolved — adopted (§2.1).** The 12-hour challenge round and provisional index write. Decision by the project owner. Finality is 12–13 hours; only the *provisional* answer arrives in one | closed |
+| O8 | **Resolved — adopted (§2.1).** The 12-hour challenge round and the one-hour index write. Decision by the project owner. Finality is 12–13 hours; what arrives in one is the *plurality*, not a verdict | closed |
 | O9 | **Resolved — the answer is O8, conditionally (§2.1).** False approval moves from 23.2% to between 2.6% and 41%, decided by `h`, the probability the honest side challenges a loss | closed as a decision; `h` becomes O10 |
 | O10 | **`h` — honest challenge reliability.** The single quantity that decides whether §2.1 halves the false-approval rate or nearly doubles it. Unmeasured, and it depends on notification, client design and fee, not on the contract | this project; testnet |
-| O11 | The provisional index write is visible for 12 hours. `PROVISIONAL_REJECTED` is a censorship surface with a guaranteed half-day of effect even when the challenge overturns it | open |
+| O11 | The plurality index write is visible for 12 hours. `PLURALITY_REJECT` is a censorship surface with a guaranteed half-day of effect even when the draw later goes the other way. Narrowed but not closed by `state-machine-v3` §4.2's withdrawal of the provisional draw: the plurality carries no randomness, so it leaks nothing about the outcome beyond what the votes already say | open |
 
 **The standing constraint is unchanged and this design does not relax it.** No
 deployment with material funds, and the index is not presented as reliable
@@ -675,10 +713,11 @@ covers; the four-contract audit does not carry over.
 
 - **Negative → positive assurance, ticket confirmation, the three-ticket majority
   rule and its `f(a)` arithmetic, with-replacement sampling, winner-only payout,
-  the hybrid provisional/challenge lifecycle and its challenge reserve (§2.1),
+  the hybrid one-hour/challenge lifecycle and its challenge reserve (§2.1),
   `MIN_CHALLENGE_REVEALS`, the assurance definition in §9.1, fixed `outcomeBlock`,
   no lazy re-arming, eligibility widening, claim keys, approval expiry,
-  `MIN_REVEALS` 12–16** — the senior reviewer.
+  a raised reveal quorum** — the senior reviewer. The last of these is adopted in
+  substance and not in form: the number moved to `MIN_COMMITS` (§9).
 - **The cost accounting in §4, the result that neutrality forces a penalty-free
   contested branch (which is what withdrew the two-ticket rule), the ticket-pot
   construction recorded in §5.1, the reading-pays argument and dissent risk in

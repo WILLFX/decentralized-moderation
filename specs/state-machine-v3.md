@@ -104,7 +104,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 **The submission payment has four components** (design-v3 §2.1):
 
 ```
-fee = initialPot + challengeReserve + finalizationBounty + maintenance
+fee = initialPot + challengeReserve + DRAW_BOUNTY + CLAIM_BOUNTY + maintenance
 ```
 
 `maintenance` is **nonrecoverable** — it is not refunded on `UNRESOLVED` and is not
@@ -521,7 +521,7 @@ moves no value.
 | `DRAW` | `FINALIZED` | `outcomeSeedBlock` available | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND` settles at `SETTLED` with every other liability (§4.6) |
 | `DRAW` | `UNRESOLVED` | outcome seed expired (§7.3) | `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
-| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Return every `REVEAL_BOND`, decrement every `openVoteCount`, refund per §4.8. No verdict is written and no incoherence debit is applied** |
+| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written and no *incoherence* debit is applied. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
 Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
 transition with a hard expiry — and `CLAIM_BOUNTY` for finalization.
@@ -529,6 +529,20 @@ transition with a hard expiry — and `CLAIM_BOUNTY` for finalization.
 **Guards must be pairwise disjoint** (§9 I18). Every row above is qualified by its
 round where the round matters; a state reachable by two rows with different effects
 is a defect, not an implementer's choice.
+
+**The table covers phase transitions. The operations below are the other writers,
+and I18–I19 quantify over these too.** Omitting them left the rules that police
+`commitsThisRound`, `revealsThisRound` and the pooled tally silent about the calls
+that write them, and gave I3 no row to live in:
+
+| Call | Precondition | Effect |
+|---|---|---|
+| `commit(c, h)` | phase is `COMMIT`; `now < phaseDeadline`; caller eligible (§3.1); **caller has not committed to `c` in any round** (§3.4, I3); `mayCommit` (§2.4) | store `h`; `commitsThisRound++`; `openVoteCount++`; `m.liabilities += LAMBDA(c)` |
+| `reveal(c, v, salt)` | phase is `REVEAL`; `now < phaseDeadline`; `h == H(…, v, salt)` binding chainId, contract, `c`, round, `paramsVersion` and the caller | pool `v`; `revealsThisRound++` |
+| `challenge(c)` | §4.3's `TALLY → TALLY` row | as that row |
+| `postBond`, `requestExit`, `withdraw` | §2.3 | as §2.3 |
+
+`commit` consumes the one-vote-per-claim allowance, not `reveal` (§3.4).
 
 **Every field in §4.1 must be written or provably preserved by every transition**
 (§9 I19). `revealsThisRound` is the field this rule exists for: without the reset
@@ -684,9 +698,14 @@ three defects of its own:
 **`CHALLENGE_BOND` is now settled on the outcome, not on turnout:**
 
 ```
-round 1 moved the plurality      ->  no debit
-round 1 did not move it          ->  bond -= CHALLENGE_BOND, to maintenance
-either way                       ->  openChallenges--       (§2.4)
+round 1 moved the plurality  ->  no debit; challenger paid like any voter
+round 1 did not move it      ->  bond -= CHALLENGE_BOND, to maintenance, AND
+                                 the challenger forfeits their share of this
+                                 case's pot (§4.9 — closes the extraction
+                                 channel the reserve activation would otherwise
+                                 open)
+either way                   ->  openChallenges--, m.liabilities -= what this
+                                 case added                          (§2.4)
 ```
 
 **Settled on the tally, not on the verdict.** The challenger's claim is that the
@@ -791,9 +810,10 @@ challenge, §4.3, so refunding both would pay it twice):
 never challenged  ->  refund pot + challengeReserve
 challenged        ->  refund pot                      (the reserve is inside it)
 either way        ->  return every REVEAL_BOND
-                      return CHALLENGE_BOND to the challenger — §4.6's forfeit
-                      is for a round that ran and missed its floor, not for a
-                      case that could not resolve
+                      clear CHALLENGE_BOND without debit — §4.6's forfeit is
+                      for a round that ran and did not move the plurality, not
+                      for a case that could not resolve at all
+                      decrement openChallenges and m.liabilities (§2.4)
                       retain finalizationBounty and maintenance
 ```
 
@@ -842,8 +862,24 @@ reintroduce it a third time:
 moved. An empty round leaves the verdict unmoved, so the bond is forfeit — which is
 correct: the challenger bet the pool would move, and it did not. The activated
 `challengeReserve` still joins the pot and is distributed to the round-0 coherent
-side. That is a windfall funded by the challenger's failed bet, and it is the right
-place for it to land.
+side.
+
+**Who funds that, stated correctly.** The reserve is prepaid by the *submitter*
+(§1); the challenger's failed bet funds the maintenance reserve (§4.6). So a
+registration moves the submitter's money to the round-0 coherent side — which is an
+extraction channel, because §3.5 removed the eligibility test and a round-0 *winner*
+may therefore register a challenge purely to activate a pot they will share in.
+
+**So a failed challenger forfeits their share of that case's pot**, on top of
+`CHALLENGE_BOND`. They asserted the pool was not good enough to draw from; it was;
+they do not get paid for the round they caused. That makes the extraction strictly
+loss-making — the gain becomes zero and the cost is `CHALLENGE_BOND` plus their own
+forgone share — and it needs no relation between `CHALLENGE_BOND` and the reserve,
+which §10 could not have supplied anyway.
+
+The reserve still activates on *turnout*, not on success: round-1 voters who showed
+up did real work, and paying them out of a pot the extra turnout also dilutes is
+what the reserve exists to prevent.
 
 ---
 
@@ -968,7 +1004,8 @@ there is nothing left for an external prize to buy here.
 ### 5.3 Payment
 
 ```
-P = pot + activatedChallengeReserve
+P = pot            // the reserve is MOVED INTO pot on challenge (§4.3);
+                   // adding it again here pays it twice
 W = votes matching `verdict`, from either round
 share = floor(P / W)
 remainder = P − share · W   -> maintenance reserve, never to moderators
@@ -1197,7 +1234,7 @@ the original draw.
 | **I3** | A moderator casts at most one vote per **claim**, across all rounds |
 | **I4** | Every counted vote was committed before any counted vote in its round was revealed |
 | **I5** | **Exactly one randomness draw exists per claim, and it is the last transition before `FINALIZED`.** No randomness is realized or published while any vote can still be cast |
-| **I6** | No payment, debit or reputation credit occurs before `FINALIZED` |
+| **I6** | No payment, debit or reputation credit occurs before a **terminal** state. Not "before `FINALIZED`" — `UNRESOLVED` never reaches `FINALIZED`, and I25 requires the non-reveal debit there |
 | **I7** | Both seeds of every round derive from schedules fixed at submission, and are independent of every transaction's timing — including the timing of `challenge()` (§3.5b) |
 | **I8** | Penalties are invariant under settlement permutation |
 | **I9** | The cost of one incoherent vote is independent of `openVoteCount` |
@@ -1216,7 +1253,7 @@ the original draw.
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
 | **I28** | Withholding a reveal is never favourable: it forfeits `REVEAL_BOND` and strictly lowers the probability of the withholder's own side |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
-| **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state exactly one row is enabled |
+| **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
 | **I21** | Every value removed from `bond` has a named destination, and that destination is never another moderator |

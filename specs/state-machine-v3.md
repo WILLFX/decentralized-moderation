@@ -30,7 +30,8 @@ Parameters marked *(working)* are simulation inputs, not final values.
 >   verdict is monotone in the tally, so a challenge that adds no votes changes
 >   nothing and there is no second roll to buy.
 > - §4.6 — `MIN_CHALLENGE_REVEALS` is removed; `CHALLENGE_BOND` settles on
->   whether the verdict moved, not on turnout.
+>   whether the **plurality** moved — a fact about the tally — not on turnout and
+>   not on the verdict, which is a draw the challenger did not bet on.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
 >   `NO_QUORUM` and `VOID` states. §4.8 later split the reason codes, because
 >   they carry different debits and different retry rules.
@@ -54,6 +55,11 @@ Parameters marked *(working)* are simulation inputs, not final values.
 >   draw happens last.** Publishing a drawn provisional published `u`, and the
 >   three tickets collapse to one number: it handed every party the exact flip
 >   cost twelve hours before the challenge decision.
+> - §4.8 / §7.3 — **a terminal settles every obligation whose input it has** (I30).
+>   `UNRESOLVED(NO_RANDOMNESS)` holds a full tally and no verdict, so it charges the
+>   tally-derived debits and pays nothing. That is what makes poking the draw
+>   dominant for the plurality-losing side and closes I24 against *inaction*, which
+>   the previous revision left to the size of `DRAW_BOUNTY`.
 
 ---
 
@@ -97,7 +103,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | `BLOCKHASH_HORIZON` | 256 blocks | How long `blockhash` remains readable. **Chain-dependent in blocks and in wall time** — 256 blocks is ~51 min at 12 s and ~21 min at 5 s. §7.3's rarity argument scales with it, so it is named rather than assumed. |
 | `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger (§3.3). |
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
-| `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever triggers **either** draw (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). |
+| `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever pokes the draw, or its expiry (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). **It is a convenience, not the reason the poke happens** — §7.3 makes poking dominant for the plurality-losing side at any bounty, including zero. |
 | `CLAIM_BOUNTY` | 1 % of fee | Paid to whoever triggers finalization. |
 | `MAX_TOPICS` | 5 | Topics per submission. |
 | `FEE_BASE`, `FEE_PER_TOPIC` | *(open — §10)* | Must pay `TARGET_COHORT` voters above gas. |
@@ -252,6 +258,12 @@ LAMBDA ≥ maxDebitPerOpenVote = max(d, REVEAL_BOND) = REVEAL_BOND = d + G
 gas and withholding does not, so a bond of exactly `d` leaves a band of beliefs in
 which withholding wins. A smaller `LAMBDA` admits insolvency; a larger one rations
 capacity for no safety gain.
+
+**The exclusivity survives §4.8's `NO_RANDOMNESS` debit.** That row charges `d(c)`
+to a revealer on the losing side of the plurality — the *revealed* branch of the
+same disjunction, at the same coefficient, in a terminal where no verdict was
+drawn. It is not a third debit and it does not raise `maxDebitPerOpenVote`, so
+`LAMBDA` is unchanged and I1 stays structural rather than needing a new term.
 
 **No value appears twice in this document.** An earlier revision derived
 `LAMBDA = d` here, kept that after §1 moved to `d + G`, and instructed the reader
@@ -461,7 +473,8 @@ struct Case {
                                //   reads this; nothing reads `u` back, because
                                //   §4.5 realizes and uses it in one transaction
     Outcome plurality;         // which side led at round-0 close; a FACT, and
-                               //   no randomness has been realized when it is set
+                               //   no randomness has been realized when it is set.
+                               //   Total on any tally, ties included — §4.2
     Outcome verdict;           // written once, at the binding draw
     address challenger;
     uint40  finalizedAt;
@@ -509,9 +522,28 @@ The challenge decision returns to what it should be — a judgement about whethe
 pool will move — and the deterrence figures §4.5 quotes become the unconditional
 statistics they were always computed as.
 
-**Nothing is paid and nobody is debited before `FINALIZED`.** The pot stays
+**The plurality is a total function of a tally, ties included.**
+
+```
+plurality(A, R)  =  Approve   iff  A > R
+                    Reject    otherwise          <- a tie is a Reject plurality
+```
+
+It has to be total, because two rules take it as an input and neither has a
+sub-case for "undefined": §4.6 settles `CHALLENGE_BOND` on whether round 1 *moved*
+it, and §7.3 debits against it when the seed expires. A partial function would
+leave both silent at exactly the tally where the two sides are hardest to separate,
+which is where a party would steer to reach the silence. Ties break to Reject by
+§4.8's rule that a bounded failure is correct and an unsafe success is not.
+
+**This is not a tie-break in the verdict.** The verdict is drawn, and at `A = R`
+the draw is `f(0.5) = 0.5` — unchanged, and I12 with it. The plurality decides who
+*owes*, never who wins.
+
+**Nothing is paid and nobody is debited before a terminal state.** The pot stays
 escrowed throughout. The plurality credits no coherence, applies no penalty, and
-moves no value.
+moves no value **while the case is live**; §4.8 is where it acquires a settlement
+role, and only in the one terminal that has a tally and no verdict.
 
 ### 4.3 Transition table
 
@@ -528,12 +560,14 @@ moves no value.
 | `TALLY` | `DRAW` | `now ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `now ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
 | `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | realize `u[0..2]` and evaluate `verdict` against the **pooled** tally (§4.5) — **the only draw in the claim's life**; **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` settles at `SETTLED` with every other liability (§4.6) |
-| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller |
+| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
 | `FINALIZED` | `SETTLED` | `claim()` batches complete | §5, §8 |
-| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written and no *incoherence* debit is applied. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
+| **`UNRESOLVED`** | **`SETTLED`** | **`claim()` batches complete** | **§4.8 — discharge. Debit every non-revealer `REVEAL_BOND` (I25); decrement `openVoteCount`, `openChallenges` and `m.liabilities` by what each case added (§2.4); refund per §4.8. No verdict is written, so nothing is paid, no index entry appears and no reputation is credited. The *tally*-derived debits — incoherence and `CHALLENGE_BOND` — are applied iff a tally exists, which is `NO_RANDOMNESS` and nothing else (§4.8, I30). Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
 Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
-transition with a hard expiry — and `CLAIM_BOUNTY` for finalization.
+transition with a hard expiry — and `CLAIM_BOUNTY` for finalization. **Neither
+bounty is what makes its transition happen**; §7.3 derives the draw poke from the
+plurality-losing side's own debit, and finalization has no deadline to miss.
 
 **Guards must be pairwise disjoint** (§9 I18). Every row above is qualified by its
 round where the round matters; a state reachable by two rows with different effects
@@ -664,9 +698,10 @@ stops depending on a quantity that lives outside the contract.
 **Consequences elsewhere:**
 
 - **One outcome seed per claim, not per round** (§7.1). Round 1 needs an
-  *eligibility* seed only. `NO_RANDOMNESS` is therefore reachable at the round-0
-  draw and nowhere else, and the 256-block `blockhash` horizon never has to span
-  the 12-hour challenge window.
+  *eligibility* seed only. `NO_RANDOMNESS` is therefore reachable at `DRAW` and
+  nowhere else — one place, not "the round-0 draw", since there is only one draw
+  (§7.1) — and the 256-block `blockhash` horizon never has to span the 12-hour
+  challenge window.
 - **`u` need not be stored.** An earlier revision realized it at round-0 close and
   had to keep it for twelve hours; with the draw last, realization and use are one
   transaction. Only §8.3's `unanimousDraw` flag survives into storage, because that
@@ -738,7 +773,10 @@ The challenger bet that the pool would move. It is a bet on evidence, which is w
 they are being asked to supply, and it prices a frivolous challenge without making
 anyone's participation conditional on anyone else's.
 
-Round-1 reveals **always** pool and are **always** judged against the final verdict.
+Round-1 reveals **always** pool and are **always** judged against the same fact
+every other reveal is judged against — the final verdict where one is drawn, the
+pooled plurality in the one terminal that has no verdict (§4.8). There is no round
+whose votes are scored on a different basis from the rest of the claim's.
 The activated `challengeReserve` stays in the pot and is distributed, because the
 round-1 voters who turned up performed real work.
 
@@ -765,7 +803,7 @@ debits and the retry rule.
 |---|---|---|---|
 | `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** — commits are blind | free, full refund |
 | `NO_REVEALS` | commits cleared the gate and `pooled == 0` at reveal close | **yes**, but only by holding *every* commit | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
-| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **yes**, by inaction | claim reserved for `RETRY_COOLDOWN`, **pot carried forward** — no fresh fee |
+| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **no** — not by any revealer: the debits below make poking dominant for the plurality-losing side (§7.3). A submitter facing rejection still *gains* from it, and cannot cause it | claim reserved for `RETRY_COOLDOWN`, **pot carried forward** — no fresh fee |
 
 **There is exactly one quorum gate and it is on commits.** Commits are made blind —
 the tally does not exist yet — so no committer can steer it toward a result they
@@ -803,9 +841,32 @@ the wrong way.
 `N ≥ 1` remains, because a draw needs a tally. That is arithmetic, and no party can
 force it without withdrawing every one of their own votes.
 
-In every case: no verdict, no index entry, and no *incoherence* debit for anyone —
-there is no verdict to be incoherent with. Revealers are paid nothing and lose
-nothing.
+In every case: no verdict and no index entry, because both need a draw. **The
+debits are not uniform across the three rows**, because the three rows do not leave
+the same facts behind.
+
+**A terminal settles every obligation whose input it has, and only those** (I30).
+Sort this specification's obligations by what they read:
+
+```
+from the TALLY    non-reveal debit      a commit that was never opened
+                  incoherence debit     a vote against the leading side
+                  CHALLENGE_BOND        did round 1 move the plurality (§4.6)
+
+from the VERDICT  payment (§5.3)        who was coherent with the drawn outcome
+                  index entry (§8)
+                  reputation (§6)
+```
+
+`NO_TURNOUT` and `NO_REVEALS` have no tally — one never opened a reveal phase, the
+other closed with `pooled == 0` — so only the first line applies and the rest have
+no input to read. `NO_RANDOMNESS` has a **complete pooled tally and is missing
+nothing but `u`**, so every tally-derived obligation settles there exactly as it
+would have on the finalized path.
+
+The verdict-derived column stays empty in all three. Revealers are paid nothing in
+any `UNRESOLVED`; what changed is that in `NO_RANDOMNESS` they no longer *lose*
+nothing either.
 
 **Non-revealers are debited anyway.** `REVEAL_BOND` is charged whenever a commit
 is not opened, in every terminal state including this one. Failing to complete a
@@ -826,20 +887,54 @@ challenge, §4.3, so refunding both would pay it twice):
 ```
 never challenged  ->  refund pot + challengeReserve
 challenged        ->  refund pot                      (the reserve is inside it)
-either way        ->  debit every non-revealer REVEAL_BOND(c)  (I25)
+
+every reason      ->  debit every non-revealer REVEAL_BOND(c)  (I25)
                       nothing is RETURNED — the bond was covered, never
                       escrowed (§5.2), so there is nothing to give back
-                      clear CHALLENGE_BOND without debit — §4.6's forfeit is
-                      for a round that ran and did not move the plurality, not
-                      for a case that could not resolve at all
-                      decrement openChallenges and m.liabilities (§2.4)
+                      pay nobody, write no index entry, credit no reputation
+                      decrement openVoteCount, openChallenges and
+                      m.liabilities by what this case added   (§2.4, I20)
                       retain finalizationBounty and maintenance
+
+NO_TURNOUT,       ->  no incoherence debit, and CHALLENGE_BOND clears without
+NO_REVEALS            debit: there is no tally, so neither test has an input.
+                      (NO_TURNOUT is round-0 only — §4.9 gives round 1 no gate —
+                      so no challenge can be outstanding in that row at all)
+
+NO_RANDOMNESS     ->  debit d(c) to every revealer on the losing side of the
+                      POOLED plurality (§4.2), and settle CHALLENGE_BOND(c)
+                      exactly as §4.6 would — on whether round 1 moved the
+                      plurality, which is a fact about the tally and needs no u
 ```
 
-The reason code is load-bearing rather than diagnostic: it decides the retry rule.
-`NO_TURNOUT` is a market problem nobody can cause, because commits are blind.
-`NO_REVEALS` and `NO_RANDOMNESS` are both steerable, so neither can take the
-free-retry treatment.
+The reason code is load-bearing rather than diagnostic: it decides both the debits
+above and the retry rule. `NO_TURNOUT` is a market problem nobody can cause,
+because commits are blind. `NO_REVEALS` is steerable by a party holding every
+commit. `NO_RANDOMNESS` is steerable by nobody once the debits are in place, but
+it is still *wanted* by a submitter facing rejection, and that is enough to deny it
+the free-retry treatment.
+
+**Why the `NO_RANDOMNESS` debits are here at all.** The full argument is §7.3; the
+short version is that the losing side's debit is now charged in **both** branches,
+so it cancels out of their comparison, and the draw is the only branch that can pay
+them. Under the earlier rule — nothing debited in `NO_RANDOMNESS` — the losing side
+of a visible tally strictly preferred the case to die, and §4.3 paid `DRAW_BOUNTY`
+to whoever poked the *expiry*, so waiting it out was not merely free but funded.
+That made I24 false by inaction, and the answer then on offer was to size a bounty
+against gas: a parameter defending an invariant.
+
+**What the rule costs.** A genuine failure of liveness now debits the
+plurality-losing revealers. Three things bound that:
+
+- **A chain halt cannot cause it.** `BLOCKHASH_HORIZON` is counted in blocks, not
+  in wall time, so reaching `NO_RANDOMNESS` requires 256 blocks to be *produced*
+  with nobody spending gas on a poke that pays a bounty. That is a market failure
+  with every participant present, not an act of god.
+- **Everyone who is debited had the whole horizon to prevent it**, and only one of
+  them had to act.
+- **Near a tied tally the debit falls on a side that was one vote from being the
+  other side.** That is the sharpest edge of the rule, and it is off-equilibrium
+  precisely because it is sharp: the party it falls on is the party who acts.
 
 **Why `NO_REVEALS` is separated from `NO_TURNOUT`.** An earlier revision folded
 "nobody revealed" into `NO_TURNOUT` and marked the whole row unsteerable. It is
@@ -850,10 +945,20 @@ reservation rather than a redesign. But I28 does not cover them, and §4.8's own
 steerability column is what decides the retry rule, so the row has to be honest.
 
 **`NO_RANDOMNESS` reserves the claim but carries the pot forward.** Reserving alone
-would repeat the mistake the `WITHHELD` treatment made: the party who benefits from
-the case dying is not the submitter, so a rule that locks *and levies* the submitter
-pays the attacker twice. Reserving stops the free re-roll; carrying the pot means
-the victim is not charged for someone else's inaction.
+would repeat the mistake the `WITHHELD` treatment made: a rule that locks *and*
+levies the submitter pays an attacker twice when the submitter is the victim.
+Carrying the pot means nobody is charged a fresh fee for someone else's inaction.
+
+**What the reservation now defends against has changed.** It was there to stop the
+losing side buying a re-roll. That motive is gone — §7.3 makes them the party who
+pokes. What remains is the *other* beneficiary: a **submitter facing rejection**,
+for whom `NO_RANDOMNESS` converts a permanent `REJECTED` (§8.4) into a second
+attempt at no cost. They cannot reach it — every revealer will poke before they do
+— so I24 holds. But if it is reached by accident they collect the windfall, and
+`RETRY_COOLDOWN` is what keeps that from being a cheap enough lottery to play for.
+**The asymmetry between a moderator, who is now debited here, and a submitter, who
+is not, is open work** and is where the permanence of `REJECTED` has to be
+re-examined rather than patched.
 
 **`UNRESOLVED` must never be reachable from an under-quorum pool by approving it.**
 A bounded failure is correct; an unsafe success is not.
@@ -934,10 +1039,25 @@ what the reserve exists to prevent.
 At `SETTLED`, for every revealed vote in either round:
 
 ```
-coherent with verdict    -> bond += share            (§5.3)
+coherent with verdict     -> bond += share           (§5.3)
 incoherent with verdict   -> bond -= d(c)            -> maintenance reserve
 committed, never revealed -> bond -= REVEAL_BOND(c)  -> maintenance reserve (§5.2)
 ```
+
+**Where there is no verdict, the coherence test reads the pooled plurality
+instead** — `UNRESOLVED(NO_RANDOMNESS)` and nowhere else, because it is the only
+terminal that holds a complete tally and never drew from it (§4.8, I30):
+
+```
+on the plurality's winning side  -> nothing; no payment exists to earn
+on the losing side               -> bond -= d(c)     -> maintenance reserve
+```
+
+The substitution is confined to that one terminal by construction: everywhere else
+either a verdict exists, in which case it is the input, or no tally exists, in
+which case neither test has one. **`d(c)` is the same coefficient either way** —
+this is not a second penalty with its own parameter, it is the same penalty reading
+the best fact the terminal has.
 
 **Every debit carries `(c)` — the case's pinned parameters, never the live ones**
 (§2.4, I27). §2.4 says "no coefficient is read at settlement at all", and that is
@@ -1205,8 +1325,13 @@ in two states the rule is meant to distinguish. That matters because `DRAW` is
 entered up to 40 minutes before `outcomeSeedBlock` on the unchallenged path (§7.2
 puts the round-1 windows in the formula unconditionally), and an implementation
 testing the hash would let any party terminate a live case during that window —
-avoiding their own incoherence debit, collecting `DRAW_BOUNTY`, and taking
-`UNRESOLVED`'s no-debit-for-anyone rule with them (§4.8).
+collecting `DRAW_BOUNTY` for killing a case that was going to draw.
+
+The `NO_RANDOMNESS` debits (§4.8) narrow who profits from that but do not repair
+it: the plurality *winner* near a tie, and any submitter heading for rejection,
+still gain, and a case that should have resolved does not. **A guard that fires in
+a state its justification does not describe is a defect whatever the payoff
+table says** — pricing is not a substitute for a correct condition.
 
 Generalized as **I29**: no guard may be expressed as an observation whose value is
 the same in states the guard is meant to separate. Disjointness (I18) does not
@@ -1225,12 +1350,58 @@ paid at finalization, a different transition with no expiry. An earlier revision
 named the wrong payment here, leaving the one transition with a hard deadline
 unfunded.
 
-**This closes the option of a better seed; it does not close the option of no seed
-at all.** With `d > E[share]`, every voter on the losing side of a visible tally
-prefers `UNRESOLVED(NO_RANDOMNESS)` — which debits nobody (§4.8) — to a draw they
-expect to lose, and killing the case requires only that all of them do nothing.
-`DRAW_BOUNTY` must therefore exceed the gas of the poke by enough that *some*
-coherent voter calls it, which is a parameter question recorded in §10.
+**This closes the option of a better seed. The option of *no* seed is closed by
+§4.8's debits, and the argument does not mention the bounty.**
+
+There is a fifty-one-minute interval in which the seed is public, so every party
+can compute the verdict, and recording it is still optional. That interval is
+irreducible under `blockhash`: it becomes readable the instant it exists and
+expires 256 blocks later, and any scheme built on it has a window in which the
+outcome is known and the accounting is not yet done. The question is therefore not
+how to remove the window but what a party gains inside it — and §4.8 makes the
+answer *nothing*, for every revealer, at every tally.
+
+> **Claim.** For every reachable non-empty tally, at least one revealer strictly
+> prefers poking the draw to letting the seed expire — and that preference does not
+> depend on the value of `d`, of `share`, or of `DRAW_BOUNTY`.
+>
+> *Proof.* Take any revealer on the losing side of the pooled plurality; one exists
+> unless the tally is unanimous. Let `a` be their own side's share of it, so
+> `0 < a ≤ 0.5`. §4.8 debits them `d` if the seed expires. The draw debits them `d`
+> only in the branch where their side loses it, and pays `share` in the other:
+>
+> ```
+> expire         :  −d
+> draw           :  f(a)·share  −  (1 − f(a))·d
+> draw − expire  :  f(a)·(share + d)   >  0        for every a > 0
+> ```
+>
+> The `d` terms cancel — it is charged in one branch and risked in the other — and
+> what remains is a chance of being paid that only the draw supplies. If the tally
+> is unanimous, every revealer is on the winning side, faces no debit in either
+> branch, and the draw pays `share > 0`. ∎
+
+Two things are worth reading off it.
+
+**`share + d` is §5.2's term.** The withholding band is `p < g/(share + d)`. A
+party deciding whether to withhold a reveal and a party deciding whether to let a
+seed expire are being asked the same question — what a chance at the pot is worth
+against a certain debit — and the design should answer it with one expression
+rather than two mechanisms.
+
+**The rule mobilizes the side that most wants the case dead.** Near a tied tally
+the *plurality winner* prefers expiry, and the rule does not pretend otherwise. At
+an exact tie §4.2 hands Reject the plurality and both sides sit at `a = 0.5`, so
+Reject's draw is a coin flip worth `0.5·share − 0.5·d = −0.2 × share` at
+`d = 1.4 × E[share]`, against zero for doing nothing. They are welcome to sit. The
+plurality *loser* prefers the draw at every `a`, and it takes one poke. Whoever has
+the most to lose from the case dying is exactly whoever pays the gas — which is the
+inversion the earlier rule got wrong, because there the party with the most to lose
+was the one who gained by waiting.
+
+`DRAW_BOUNTY` survives as funding for the expiry transition itself and as a
+convenience for third-party bots. **No invariant rests on its size**, which is the
+difference between this rule and the one it replaced.
 
 ---
 
@@ -1294,7 +1465,8 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 | `APPROVED` | reserved while listed | — |
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
 | `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no draw occurred and nobody could have caused it |
-| `UNRESOLVED(NO_RANDOMNESS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. §7.3 concedes the losing side prefers this terminal and reaches it by inaction, so it is steerable and cannot take the free-retry treatment — but the submitter is not the party who caused it, so it must not levy them either |
+| `UNRESOLVED(NO_REVEALS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. Steerable by a party holding every commit (§4.8), so not free; but the submitter did not cause it, so not levied either |
+| `UNRESOLVED(NO_RANDOMNESS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. No longer reserved because the losing side steers it — §7.3 makes poking dominant for them. Reserved because a **submitter facing rejection** gains from it: without the cooldown an expired seed would be a free retry of a case that was heading for a permanent `REJECTED` |
 
 **`policyVersion` is deliberately *not* in the key.** A key containing the version
 cannot produce a reservation that survives a version bump, so the earlier
@@ -1338,8 +1510,9 @@ the original draw.
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
-| **I24** | No party can change a case's terminal *class* in a direction favourable to them by an action taken after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes |
+| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that some revealer strictly prefers the draw at every tally (§7.3). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
+| **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. The non-reveal debit, the incoherence debit and `CHALLENGE_BOND` read the **tally**; payment, the index entry and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first group and not the second. I25 is this rule's instance for the non-reveal debit and §4.6's tally-settled `CHALLENGE_BOND` is its instance for the challenge; §4.8's `NO_RANDOMNESS` row is what forced the general statement |
 | **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
@@ -1359,6 +1532,16 @@ Stating the class rather than the instance is the difference between a fix and a
 property — the same lesson as the freeze bound, which was clamped at two call sites
 while a third existed.
 
+**I29 and I30 are the same move made twice more.** I29 came from a guard that read
+`blockhash` and I30 from a terminal that skipped a debit, and neither is phrased in
+terms of guards or debits: one quantifies over observations, the other over
+obligations. That is deliberate. Every earlier invariant here inherited the *noun*
+of the defect that produced it — a gate, a side, a bond, a row — and the next defect
+arrived wearing a different noun and slipped past all of them. An invariant that
+names a category of thing is a fix with a wider blast radius; an invariant that
+names a *relation* between what a rule reads and where it is allowed to fire is a
+property.
+
 ---
 
 ## 10. Open parameters and inherited work
@@ -1369,7 +1552,7 @@ while a third existed.
 |---|---|
 | `d`, `BOND_MIN` | `λ = d + G` is derived (§2.4); `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
-| `RETRY_COOLDOWN` | §8.4, now for `NO_RANDOMNESS` alone. The two-attackers-one-knob contradiction is gone with `WITHHELD`; what remains is a delay long enough to make repeated poke-refusal unattractive, and the pot carries forward so the submitter is not levied for it |
+| `RETRY_COOLDOWN` | §8.4, now for `NO_RANDOMNESS` alone. The two-attackers-one-knob contradiction is gone with `WITHHELD`, and **poke-refusal is no longer what it defends against** — §7.3 makes poking dominant for the plurality-losing side without reference to any parameter. What remains is the submitter facing rejection, for whom an expired seed converts a permanent `REJECTED` into a free second attempt. They cannot cause it; the cooldown is what stops an accidental expiry from being worth waiting for. **Open, and coupled to the permanence of `REJECTED` (§8.4) rather than to gas** |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |

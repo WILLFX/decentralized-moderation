@@ -60,6 +60,11 @@ Parameters marked *(working)* are simulation inputs, not final values.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §8.4 — **`UNRESOLVED(NO_RANDOMNESS)` does not retry**, and holds the claim key
+>   on `REJECTED`'s terms by reference. I26 already required it: that terminal is
+>   tallied by definition, and a reservation that expires releases the key. Any
+>   retry is worth more to the submitter than any draw, on *either* plurality,
+>   because every draw has a permanent branch and a retry has none.
 
 ---
 
@@ -94,7 +99,7 @@ Parameters marked *(working)* are simulation inputs, not final values.
 | ~~`MIN_REVEALS`~~ | — | **Removed, §4.8.** It was a terminal-class gate on observable state, and it was the only thing that ever made withholding attractive. The draw needs `N ≥ 1`, which is arithmetic, not policy. |
 | ~~`MIN_CHALLENGE_REVEALS`~~ | — | **Removed, §4.6.** §4.5's single-randomness rule makes an unchanged tally yield an identical verdict, so the floor has no job. |
 | `SUPER_QUORUM` | *(open)* | Reveals required for the strict assurance class (§8.3). |
-| `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(NO_RANDOMNESS)` may be resubmitted (§8.4). |
+| `RETRY_COOLDOWN` | *(open — §10)* | Delay before a claim that ended `UNRESOLVED(NO_REVEALS)` may be resubmitted (§8.4). **`NO_RANDOMNESS` no longer uses it** — that row does not retry at all (I26). |
 | `COMMIT_WINDOW` | 20 min | Per round. |
 | `REVEAL_WINDOW` | 20 min | Per round. |
 | ~~`FINALIZATION_GRACE`~~ | — | **Removed.** It named a deadline no transition established. The real one is `outcomeSeedBlock + BLOCKHASH_HORIZON` (§4.4), which `BLOCKHASH_HORIZON` already gives. |
@@ -803,7 +808,7 @@ debits and the retry rule.
 |---|---|---|---|
 | `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** — commits are blind | free, full refund |
 | `NO_REVEALS` | commits cleared the gate and `pooled == 0` at reveal close | **yes**, but only by holding *every* commit | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
-| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **no** — not by any revealer: the debits below make poking dominant for the plurality-losing side (§7.3). A submitter facing rejection still *gains* from it, and cannot cause it | claim reserved for `RETRY_COOLDOWN`, **pot carried forward** — no fresh fee |
+| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **no** — and by nobody who could gain: the debits below make poking dominant for the plurality-losing revealers, and §8.4's reservation makes it dominant for the submitter on *either* plurality | **no retry.** The claim carries `REJECTED`'s reservation by reference (§8.4, I26); the pot is refunded less maintenance |
 
 **There is exactly one quorum gate and it is on commits.** Commits are made blind —
 the tally does not exist yet — so no committer can steer it toward a result they
@@ -841,32 +846,35 @@ the wrong way.
 `N ≥ 1` remains, because a draw needs a tally. That is arithmetic, and no party can
 force it without withdrawing every one of their own votes.
 
-In every case: no verdict and no index entry, because both need a draw. **The
-debits are not uniform across the three rows**, because the three rows do not leave
-the same facts behind.
+In every case: no verdict, and no listing, because both need a draw. **The debits
+and the claim key are not uniform across the three rows**, because the three rows
+do not leave the same facts behind.
 
 **A terminal settles every obligation whose input it has, and only those** (I30).
 Sort this specification's obligations by what they read:
 
 ```
-from the TALLY    non-reveal debit      a commit that was never opened
-                  incoherence debit     a vote against the leading side
-                  CHALLENGE_BOND        did round 1 move the plurality (§4.6)
+from the TALLY     non-reveal debit     a commit that was never opened
+                   incoherence debit    a vote against the leading side
+                   CHALLENGE_BOND       did round 1 move the plurality (§4.6)
+                   the claim key        has this content been judged  (§8.4, I26)
 
-from the VERDICT  payment (§5.3)        who was coherent with the drawn outcome
-                  index entry (§8)
-                  reputation (§6)
+from the VERDICT   payment (§5.3)       who was coherent with the drawn outcome
+                   listing status       APPROVED / REJECTED           (§8.2)
+                   reputation (§6)
 ```
 
 `NO_TURNOUT` and `NO_REVEALS` have no tally — one never opened a reveal phase, the
-other closed with `pooled == 0` — so only the first line applies and the rest have
-no input to read. `NO_RANDOMNESS` has a **complete pooled tally and is missing
-nothing but `u`**, so every tally-derived obligation settles there exactly as it
-would have on the finalized path.
+other closed with `pooled == 0` — so only the first group applies, minus the key,
+which I26 attaches to having been tallied. `NO_RANDOMNESS` has a **complete pooled
+tally and is missing nothing but `u`**, so every tally-derived obligation settles
+there exactly as it would have on the finalized path, the claim key included.
 
-The verdict-derived column stays empty in all three. Revealers are paid nothing in
-any `UNRESOLVED`; what changed is that in `NO_RANDOMNESS` they no longer *lose*
-nothing either.
+The verdict-derived column stays empty in all three. **The index still gets an
+entry** — §8.2's `UNRESOLVED` is a status value, not an absence, and a reader must
+be able to tell "judged, undrawn" from "never submitted"; what none of the three
+writes is a *listing*. Revealers are paid nothing in any `UNRESOLVED`; what changed
+is that in `NO_RANDOMNESS` they no longer *lose* nothing either.
 
 **Non-revealers are debited anyway.** `REVEAL_BOND` is charged whenever a commit
 is not opened, in every terminal state including this one. Failing to complete a
@@ -891,7 +899,8 @@ challenged        ->  refund pot                      (the reserve is inside it)
 every reason      ->  debit every non-revealer REVEAL_BOND(c)  (I25)
                       nothing is RETURNED — the bond was covered, never
                       escrowed (§5.2), so there is nothing to give back
-                      pay nobody, write no index entry, credit no reputation
+                      pay nobody, list nothing, credit no reputation; the
+                      index entry is written as UNRESOLVED (§8.2)
                       decrement openVoteCount, openChallenges and
                       m.liabilities by what this case added   (§2.4, I20)
                       retain finalizationBounty and maintenance
@@ -905,14 +914,17 @@ NO_RANDOMNESS     ->  debit d(c) to every revealer on the losing side of the
                       POOLED plurality (§4.2), and settle CHALLENGE_BOND(c)
                       exactly as §4.6 would — on whether round 1 moved the
                       plurality, which is a fact about the tally and needs no u
+                      hold the claim key on REJECTED's terms (§8.4, I26); the
+                      index entry retains the published plurality beside the
+                      UNRESOLVED status, since that is what was established
 ```
 
 The reason code is load-bearing rather than diagnostic: it decides both the debits
 above and the retry rule. `NO_TURNOUT` is a market problem nobody can cause,
 because commits are blind. `NO_REVEALS` is steerable by a party holding every
-commit. `NO_RANDOMNESS` is steerable by nobody once the debits are in place, but
-it is still *wanted* by a submitter facing rejection, and that is enough to deny it
-the free-retry treatment.
+commit, so its retry is delayed and its pot carried. `NO_RANDOMNESS` is the only
+row that ends with the content **judged**, so I26 attaches to it and it does not
+retry at all (§8.4) — which is also what removes the last party who wanted it.
 
 **Why the `NO_RANDOMNESS` debits are here at all.** The full argument is §7.3; the
 short version is that the losing side's debit is now charged in **both** branches,
@@ -944,21 +956,30 @@ high — they must be the entire committing cohort — which is why this is a
 reservation rather than a redesign. But I28 does not cover them, and §4.8's own
 steerability column is what decides the retry rule, so the row has to be honest.
 
-**`NO_RANDOMNESS` reserves the claim but carries the pot forward.** Reserving alone
-would repeat the mistake the `WITHHELD` treatment made: a rule that locks *and*
-levies the submitter pays an attacker twice when the submitter is the victim.
-Carrying the pot means nobody is charged a fresh fee for someone else's inaction.
+**`NO_RANDOMNESS` reserves the claim permanently and refunds the pot.** Both halves
+matter and they answer different parties.
 
-**What the reservation now defends against has changed.** It was there to stop the
-losing side buying a re-roll. That motive is gone — §7.3 makes them the party who
-pokes. What remains is the *other* beneficiary: a **submitter facing rejection**,
-for whom `NO_RANDOMNESS` converts a permanent `REJECTED` (§8.4) into a second
-attempt at no cost. They cannot reach it — every revealer will poke before they do
-— so I24 holds. But if it is reached by accident they collect the windfall, and
-`RETRY_COOLDOWN` is what keeps that from being a cheap enough lottery to play for.
-**The asymmetry between a moderator, who is now debited here, and a submitter, who
-is not, is open work** and is where the permanence of `REJECTED` has to be
-re-examined rather than patched.
+The reservation answers the **submitter**, for whom any retry is worth more than
+any draw — every draw has a branch that ends the claim permanently and a retry has
+none, so the preference holds on the Approve plurality as well as the Reject one.
+§8.4 has the table. A cooldown is not a smaller version of this rule; it is the
+same windfall at a discount, and `RETRY_COOLDOWN` was the knob that would have had
+to be sized against `f(a)` to suppress it. The refund answers the *fee*: nothing is
+levied, because levying the submitter for an outcome nobody drew would repeat the
+mistake the `WITHHELD` treatment made — locking and levying the same party pays an
+attacker twice. `maintenance` is retained, as in every terminal, because a cohort's
+attention was really consumed.
+
+**Every party who can gain from the expiry can now also prevent it, and prefers
+to.** The plurality-losing revealers by §7.3's debit, the submitter by §8.4's
+reservation. What is left is the **plurality-winning revealers**, who pay no debit
+either way and whose gain is the difference between `f(a)` and certainty. That gain
+is largest near a tie and vanishes as `a → 1` — and near a tie the losing side is
+nearly as large, with every one of them facing a certain `d`. **The size of the
+group that benefits and the size of their benefit move in opposite directions**,
+which is the strongest form the argument takes without a mechanism that removes the
+51-minute window, and §7.3 explains why no such mechanism is available under
+`blockhash`.
 
 **`UNRESOLVED` must never be reachable from an under-quorum pool by approving it.**
 A bounded failure is correct; an unsafe success is not.
@@ -1399,6 +1420,13 @@ the most to lose from the case dying is exactly whoever pays the gas — which i
 inversion the earlier rule got wrong, because there the party with the most to lose
 was the one who gained by waiting.
 
+**And the submitter pokes too.** §8.4 holds the claim key on `REJECTED`'s terms
+when the seed expires, so the submitter's comparison is `f(a)` against zero on
+*either* plurality — every draw has an approval branch and expiry has none. They
+are the second mobilized party, they are guaranteed to exist, and unlike a
+moderator they are certainly watching the case they paid for. The claim above needs
+only one party; it has two, arriving from opposite directions.
+
 `DRAW_BOUNTY` survives as funding for the expiry transition itself and as a
 convenience for third-party bots. **No invariant rests on its size**, which is the
 difference between this rule and the one it replaced.
@@ -1433,6 +1461,15 @@ only; an evidence-oriented client may show the plurality with its tally. The
 plurality is a vote count, not a prediction: no draw has occurred when it is
 published, which is why §4.2 withdrew publishing one there.
 
+**`UNRESOLVED` retains the plurality where one was established.** A case that ends
+`NO_RANDOMNESS` was judged by a full cohort and never drawn, and the entry says
+exactly that — `UNRESOLVED` beside the `PLURALITY_*` value already published at
+`TALLY`. A case that ends `NO_TURNOUT` or `NO_REVEALS` carries `UNRESOLVED` alone,
+because there is nothing else true about it. **Nothing is listed in any of the
+three**, which is the only property a safe-search client needs; the distinction is
+for the reader who wants to know why, and for the submitter, whose claim key is
+held on `REJECTED`'s terms in the first case and released in the other two (§8.4).
+
 ### 8.3 Assurance comes from the tally, not from the draw
 
 ```
@@ -1466,7 +1503,59 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
 | `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no draw occurred and nobody could have caused it |
 | `UNRESOLVED(NO_REVEALS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. Steerable by a party holding every commit (§4.8), so not free; but the submitter did not cause it, so not levied either |
-| `UNRESOLVED(NO_RANDOMNESS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. No longer reserved because the losing side steers it — §7.3 makes poking dominant for them. Reserved because a **submitter facing rejection** gains from it: without the cooldown an expired seed would be a free retry of a case that was heading for a permanent `REJECTED` |
+| `UNRESOLVED(NO_RANDOMNESS)` | **the reservation `REJECTED` carries — by reference, not by copy** | none; only an explicit re-review case. The pot is refunded less maintenance, because there is no retry for it to carry forward to |
+
+**Why `NO_RANDOMNESS` does not retry, and why I26 already said so.**
+
+I26 reads: *once a claim has been tallied, no reachable terminal releases that
+claim's key.* `NO_RANDOMNESS` **is** tallied — that is the entire content of §4.8's
+distinction between it and the other two reasons, and it is why the debits settle
+there at all (I30). A reservation that expires after `RETRY_COOLDOWN` releases the
+key. **The row contradicted the invariant written to prevent it**, and the invariant
+was right. The other two rows are untouched: `NO_TURNOUT` never opened a reveal
+phase and `NO_REVEALS` closed with `pooled == 0`, so neither is tallied and neither
+is covered by I26.
+
+**A retry is worth more to the submitter than any draw, on either plurality.** The
+finding was that a submitter facing rejection escapes it by expiry. The reason the
+rule cannot be made conditional on the plurality is that the preference does not
+depend on it:
+
+```
+                    the draw                          expiry, if it retried
+plurality Reject    f(a) approved, else permanent     a fresh cohort, free
+plurality Approve   f(a) approved, else permanent     a fresh cohort, free
+```
+
+Every draw carries a branch that ends the claim permanently; a retry carries none.
+So a submitter leading the Reject plurality prefers expiry — and one leading the
+*Approve* plurality prefers it too, because `f(0.55) = 0.575` is a 42.5% chance of
+permanent rejection against a certain second attempt. **Any retry at all is a
+windfall.** A plurality-conditional rule would close half the hole and advertise
+the other half.
+
+**The submitter is not a bystander to the expiry.** They paid the fee, they hold
+the largest single interest in the case resolving, and poking the draw is one
+permissionless call inside a 51-minute window that pays a bounty. There is no
+reading of `NO_RANDOMNESS` in which the submitter could not have prevented it. That
+is what makes the row's severity theirs to have avoided rather than imposed —
+and, with §7.3's debits on the plurality-losing revealers, it puts a **second
+independent party** on the poke, one who is guaranteed to exist and to be watching.
+
+**By reference, not by copy.** The row's content is *equality with `REJECTED`*, not
+permanence. `REJECTED`'s permanence rests on design-v3 §8's 0.725% false-rejection
+figure, which `simulation/v3/FINDINGS-v3.md` §F locates as requiring `prior ≈ 0.96`,
+`rho ≈ 0` and `q = 0` simultaneously, and measures at 26–60% instead. That
+re-examination is open (§10). Writing this row as a reference means it moves when
+that row moves, instead of becoming a second site that has to be found and changed
+— which is the failure the freeze bound made when it was clamped at two call sites
+while a third existed (§9).
+
+**What it costs.** A submitter whose case died at a 90/10 Approve tally is not
+listed and must bring a re-review case. That is the sharpest edge of the rule, and
+it is the same edge as §4.8's near-tie debit: severe, off-equilibrium, and severe
+*because* off-equilibrium. Softening it re-opens the windfall, because the windfall
+is not a function of how favourable the tally was.
 
 **`policyVersion` is deliberately *not* in the key.** A key containing the version
 cannot produce a reservation that survives a version bump, so the earlier
@@ -1510,12 +1599,12 @@ the original draw.
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`. Adding any debit to this specification means accruing it there; no test may use a narrower expression |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
-| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that some revealer strictly prefers the draw at every tally (§7.3). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
+| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
 | **I25** | The non-reveal debit is applied in every terminal state, including those in which no verdict was drawn |
 | **I30** | A terminal state settles every obligation whose **inputs exist in that state**, and only those. The non-reveal debit, the incoherence debit and `CHALLENGE_BOND` read the **tally**; payment, the index entry and the reputation credit read the **verdict**. A terminal holding a tally and no verdict settles the first group and not the second. I25 is this rule's instance for the non-reveal debit and §4.6's tally-settled `CHALLENGE_BOND` is its instance for the challenge; §4.8's `NO_RANDOMNESS` row is what forced the general statement |
 | **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
 | **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
-| **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal |
+| **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |
 | **I19** | Every field of §4.1 is written or provably preserved by every transition. No field is implicitly carried across a round boundary |
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
@@ -1552,7 +1641,8 @@ property.
 |---|---|
 | `d`, `BOND_MIN` | `λ = d + G` is derived (§2.4); `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
-| `RETRY_COOLDOWN` | §8.4, now for `NO_RANDOMNESS` alone. The two-attackers-one-knob contradiction is gone with `WITHHELD`, and **poke-refusal is no longer what it defends against** — §7.3 makes poking dominant for the plurality-losing side without reference to any parameter. What remains is the submitter facing rejection, for whom an expired seed converts a permanent `REJECTED` into a free second attempt. They cannot cause it; the cooldown is what stops an accidental expiry from being worth waiting for. **Open, and coupled to the permanence of `REJECTED` (§8.4) rather than to gas** |
+| `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document** |
+| Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's 0.725% false-rejection figure, and `simulation/v3/FINDINGS-v3.md` §F locates that figure as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously** — measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |

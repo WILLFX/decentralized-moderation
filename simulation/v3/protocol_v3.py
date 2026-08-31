@@ -8,7 +8,9 @@ follows the state machine.
 things changed at the level of what a case *is*:
 
 * the verdict is a **majority of three tickets**, not one, so `P(Approve)` is
-  `f(a) = 3a² − 2a³` rather than `a`;
+  `f(â) = 3â² − 2â³` rather than `a`, where `â = (A+1)/(N+2)` is the posterior
+  mean of the population's Approve rate rather than the sample proportion
+  (state-machine §4.5);
 * the three tickets are **fixed once per claim** and reused at the final draw
   (state-machine §4.5), which makes the verdict *monotone* in the tally and is
   the whole reason a challenge cannot buy a re-roll;
@@ -57,9 +59,11 @@ class ParamsV3:
     widen_factor: float = 1.5
     widen_enabled: bool = True
 
-    # quorum (§4.8) — the gate is on COMMITS, decided before any tally exists
+    # quorum (§4.8) — the gate is on COMMITS, decided before any tally exists.
+    # There is no reveal-stage gate: `MIN_REVEALS` was removed, not relocated,
+    # and the residual `N >= 1` is arithmetic. What replaced its *other* job —
+    # stopping a thin tally from deciding a case outright — is §4.5's estimator.
     min_commits: int = 16
-    min_reveals: int = 16
 
     # economics (§5)
     fee: float = 90.0
@@ -127,23 +131,40 @@ def draw_tickets(rng: random.Random) -> Tuple[float, float, float]:
     return (rng.random(), rng.random(), rng.random())
 
 
+def a_hat(approve: int, total: int) -> float:
+    """`â = (A+1)/(N+2)` — §4.5.
+
+    The draw is taken against the posterior mean of the population's Approve
+    rate under a uniform prior, not against the sample proportion `A/N`.  `f`
+    consumes its argument as a population rate; feeding it `A/N` claims
+    certainty from `N` observations, and at a unanimous tally that claim is
+    exact — `f(1) = 1`, one revealed vote decides the case outright.
+
+    `â` is in `(0,1)` for every finite `N`, which is what makes I12 true in its
+    corrected form, and it converges on `A/N` as `N` grows: at `N = 34` the two
+    differ by at most 1.4 points.  It is parameter-free — `alpha = 1` is the
+    uniform prior, and it is symmetric.
+    """
+    if total <= 0:
+        raise ValueError("a_hat() on an empty tally — `N >= 1` is arithmetic (§4.8)")
+    return (approve + 1) / (total + 2)
+
+
 def verdict(u: Tuple[float, float, float], approve: int, total: int) -> bool:
     """Majority of three, evaluated against a tally.
 
-    The comparison is `u[i] < a`, matching the spec's `u·N < approve·2^128` and
-    **not** `u mod N < approve`.  Both are uniform and both give `f(a)`; only
-    this one is monotone in `a`, which is what makes a challenge that adds no
-    votes return an identical verdict (§4.5, I22).
+    The comparison is `u[i] < â`, matching the spec's
+    `u·(N+2) < (approve+1)·2^128` and **not** `u mod (N+2) < approve+1`.  Both
+    are uniform and both give `f(â)`; only this one is monotone in `â`, which is
+    what makes a challenge that adds no votes return an identical verdict
+    (§4.5, I22).
     """
-    if total <= 0:
-        raise ValueError("verdict() on an empty tally — I11 should have caught this")
-    a = approve / total
-    return sum(1 for x in u if x < a) >= 2
+    return sum(1 for x in u if x < a_hat(approve, total)) >= 2
 
 
 def f(a: float) -> float:
     """`P(Approve) = 3a² − 2a³`. The marginal distribution `draw_tickets` +
-    `verdict` reproduce; kept for closed-form comparison."""
+    `verdict` reproduce when handed `â`; kept for closed-form comparison."""
     return 3.0 * a * a - 2.0 * a ** 3
 
 
@@ -198,7 +219,7 @@ class Round:
 @dataclass
 class CaseResult:
     terminal: str                     # APPROVED | REJECTED | UNRESOLVED
-    reason: Optional[str] = None      # NO_TURNOUT | WITHHELD | NO_RANDOMNESS
+    reason: Optional[str] = None      # NO_TURNOUT | NO_REVEALS | NO_RANDOMNESS
     provisional: Optional[bool] = None
     challenged: bool = False
     rounds: Tuple[Round, ...] = ()
@@ -258,8 +279,8 @@ def run_case(p: ParamsV3, rng: random.Random, *, content_is_safe: bool,
     r0.approve = a_hon + (len(att) if attacker_wants is APPROVE else 0)
     r0.reject = (len(hon) - a_hon) + (0 if attacker_wants is APPROVE else len(att))
 
-    if r0.reveals < p.min_reveals:
-        return CaseResult("UNRESOLVED", "WITHHELD", rounds=(r0,))
+    if r0.reveals == 0:
+        return CaseResult("UNRESOLVED", "NO_REVEALS", rounds=(r0,))
 
     # ---- round 0: DRAW --------------------------------------------------
     u = draw_tickets(rng)

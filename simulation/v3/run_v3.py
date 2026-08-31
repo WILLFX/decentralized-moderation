@@ -11,6 +11,7 @@ from protocol_v3 import ParamsV3
 from experiments_v3 import (
     e1_amplifier_crossover, e2_registry_growth, e3_widening_turnout,
     e4_challenge_reliability, e5_viability, e6_honest_accuracy,
+    e7_estimator,
 )
 
 
@@ -23,6 +24,7 @@ def main() -> None:
           f"  MIN_COMMITS={b.min_commits}")
     print("=" * 78)
     e5_viability(b)
+    e7_estimator(b)
     e1_amplifier_crossover(b)
     e6_honest_accuracy(b)
     e4_challenge_reliability(b)

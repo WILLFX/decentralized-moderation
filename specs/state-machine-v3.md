@@ -60,6 +60,10 @@ Parameters marked *(working)* are simulation inputs, not final values.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §4.5 — **the draw is taken against `â = (A+1)/(N+2)`, not `A/N`.** A sample
+>   proportion is not a population rate, and `f(1) = 1` let one revealed vote decide
+>   a case with certainty. I11 and I12 both read true over that configuration and
+>   neither covered it.
 > - §8.4 — **`UNRESOLVED(NO_RANDOMNESS)` does not retry**, and holds the claim key
 >   on `REJECTED`'s terms by reference. I26 already required it: that terminal is
 >   tallied by definition, and a reservation that expires releases the key. Any
@@ -613,8 +617,9 @@ Each phase ends at `phaseDeadline`, a timestamp fixed when the phase opened.
 **Early closure on "everyone revealed" hands the last actor the entropy.** The
 reveal set is on-chain, so whoever holds the last reveal would choose between
 closing now and letting the deadline close it — a free binary choice over outcome
-seeds. At a hostile 30% of reveals that raises their odds from `f(0.3) = 21.6%` to
-`1 − (1−0.216)² = 38.5%` (design-v3 §7). No stake, no identities, no extra votes.
+seeds. At a hostile 30% of reveals over `N = 34` — `â = 0.306` — that raises their
+odds from `f(â) = 22.3%` to `1 − (1−0.223)² = 39.6%` (design-v3 §7). No stake, no
+identities, no extra votes.
 
 **Early closure on "everyone eligible has acted" is not computable** — §3.6.
 
@@ -632,7 +637,7 @@ What *is* permitted, and should be implemented: **permissionless immediate
 finalization.** Once the outcome block exists, anyone may finalize in that block.
 That removes the grace period from the common path without moving a deadline.
 
-### 4.5 The draw — one randomness per claim, evaluated twice
+### 4.5 The draw — one randomness per claim, taken against a posterior
 
 **Decision.** Three uniforms are realized **once per claim, at `DRAW`** — after
 the challenge window and after round 1 if there is one. There is no earlier
@@ -643,22 +648,79 @@ u[i] = uint128( H(OUTCOME_DOMAIN, chainId, contract, caseId, i,
                   blockhash(outcomeSeedBlock)) )          i = 0,1,2
        -- realized and used in the SAME transaction (§4.3's DRAW row)
 
-N = pooledApprove + pooledReject
-ticket[i] = ( u[i] · N  <  pooledApprove · 2^128 )        -- i.e. u[i]/2^128 < a
+N  = pooledApprove + pooledReject
+â  = (pooledApprove + 1) / (N + 2)                        -- NOT pooledApprove / N
+ticket[i] = ( u[i] · (N + 2)  <  (pooledApprove + 1) · 2^128 )
 verdict   = (ticket[0] + ticket[1] + ticket[2] ≥ 2) ? Approve : Reject
 ```
 
-`u[i]/2^128` is uniform on [0,1), so `P(ticket = Approve) = a` and
-`P(verdict = Approve) = 3a² − 2a³ = f(a)` exactly as before. Verified by simulation
-at 400k draws: 0.2146 / 0.4998 / 0.7833 / 0.9925 against `f` = 0.2160 / 0.5000 /
-0.7840 / 0.9927.
+`u[i]/2^128` is uniform on [0,1), so `P(ticket = Approve) = â` and
+`P(verdict = Approve) = 3â² − 2â³ = f(â)`. Verified at 400k draws over tallies of
+`N = 34`, empirical against closed form: 0.2231/0.2230, 0.5004/0.5000,
+0.7769/0.7770, 0.9801/0.9803.
 
-**Note the comparison form.** `u · N < approve · 2^128`, *not* `u mod N < approve`.
-Both are uniform, but only the first is **monotone in `a`**: with `u` fixed, adding
-Reject votes lowers `a`, which can flip tickets from Approve to Reject and never
-the reverse. The modulo form reshuffles on every change of `N`, so a single added
-vote acts as a fresh re-roll. Simulated over 20,000 fixed-`u` draws sweeping `a`
-across [0,1]: zero monotonicity violations.
+**Why the draw is taken against `â` and not against `A/N`.**
+
+`A/N` is a sample proportion of `N` votes, and `f` consumes it as though it were
+the population's Approve rate. At `N = 1` that is a claim of certainty from one
+observation, and the mechanism acts on it: `f(1) = 1`. `â` is the posterior mean of
+that rate under a uniform prior — the add-one estimator — which is the quantity `f`
+was always meant to receive. Three things follow.
+
+**`â ∈ (0, 1)` for every finite `N`, so neither outcome is ever certain.** That is
+what I12 asserts, and under `A/N` it was false at every unanimous tally — which is
+also every tally a party who controls all the reveals can produce.
+
+**It is parameter-free.** `α = 1` is the uniform prior and it is symmetric. Any
+other `α` is a claim about content in general; an asymmetric pair is a thumb on the
+scale, which §5.3 and §6 refuse elsewhere. There is nothing here to sweep.
+
+**It converges, and the distortion is bounded and largest where the evidence is
+weakest.** At `N = 34` the two rules differ by at most 1.4 points, and the
+difference is symmetric about `a = 0.5`:
+
+```
+A/N        0.00    0.09    0.29    0.41    0.50    0.71    0.91    1.00
+f(a)     0.0000  0.0220  0.2086  0.3690  0.5000  0.7914  0.9780  1.0000
+f(â)     0.0023  0.0343  0.2230  0.3762  0.5000  0.7770  0.9657  0.9977
+```
+
+**I22 survives, and the proof is one line.** Adding an Approve vote takes `â` from
+`(A+1)/(N+2)` to `(A+2)/(N+3)`, and `(A+2)(N+2) − (A+1)(N+3) = N + 1 − A > 0`
+because `A ≤ N`. Adding a Reject vote leaves the numerator and raises the
+denominator. Every added vote moves `â` strictly toward its own side — which is
+what the optional-stopping argument below runs on, and it would fail for a
+smoothing that was not of this form.
+
+**What it denies, and how weakly.** At a unanimous tally the cohort is overruled
+with probability:
+
+```
+N                     1       3       8      16      24      40     100
+P(overruled)      25.9%   10.4%    2.8%   0.89%   0.43%   0.17%   0.03%
+```
+
+An attacker who owns all sixteen reveals of a minimum-quorum case still gets 99.1%.
+**I12 is not a wall and this document should not pretend otherwise.** What it buys
+is that no incentive argument here has a degenerate branch: §7.3's
+`f(â)·(share + d) > 0` and §8.4's "every draw has an approval branch" are strict at
+*every* tally under `â`, and both were ties at a unanimous one under `A/N`.
+
+**What it costs.** `simulation/v3/FINDINGS-v3.md` §G measures it. False rejection of
+safe content with no attacker rises by 0.4 to 2.1 points depending on `prior`; the
+amplifier's crossover (§A) and the honest-accuracy table (§E6) move within noise.
+The cost is real, it lands on the number this design is already weakest on (§10,
+the permanence of `REJECTED`), and it is second-order against the 26–60% that
+honest error contributes there.
+
+**Note the comparison form.** `u · (N+2) < (approve+1) · 2^128`, *not*
+`u mod (N+2) < approve+1`. Both are uniform, but only the first is **monotone in
+`â`**: with `u` fixed, adding Reject votes lowers `â`, which can flip tickets from
+Approve to Reject and never the reverse. The modulo form reshuffles on every change
+of `N`, so a single added vote acts as a fresh re-roll. Simulated over 20,000
+fixed-`u` draws sweeping `a` across [0,1]: zero monotonicity violations. Both
+operands fit a `uint256` without care — `u` is 128 bits and `N+2` is at most 32, so
+the left side is under 160 bits, and so is the right.
 
 **Why this is the whole answer to challenge-round optional stopping.**
 
@@ -845,6 +907,17 @@ the wrong way.
 
 `N ≥ 1` remains, because a draw needs a tally. That is arithmetic, and no party can
 force it without withdrawing every one of their own votes.
+
+**`N ≥ 1` is a floor on existence, not on confidence, and it was carrying both
+jobs.** With the draw taken against `A/N`, a single revealed vote decided the case
+*with certainty* — and the two invariants that look like they cover it did not.
+I11 was about "under-quorum", a phrase that has meant the commit gate since the
+gate moved there, so a case can clear it and reach `APPROVED` on one reveal. I12
+quantified over "every side with ≥ 1 revealed vote", which at a unanimous tally is
+one side, and it has probability 1. **Both read true and neither said anything
+about the configuration they exist to prevent.** §4.5's `â` is what separates the
+two jobs: existence stays at `N ≥ 1`, and confidence becomes a function of `N`
+rather than an assumption about it.
 
 In every case: no verdict, and no listing, because both need a draw. **The debits
 and the claim key are not uniform across the three rows**, because the three rows
@@ -1482,9 +1555,17 @@ SUPER_SAFE  =  verdict == Approve
            AND no removal or re-review case is open
 ```
 
-A 3/3 draw alone means little: `P(3/3 Approve) = a³`, which is 34.3% at `a = 0.70`.
-The tally must participate in the classification. **The lottery selects truth; it
-does not manufacture certainty.**
+A 3/3 draw alone means little: `P(3/3 Approve) = â³`, which is 33.5% at `a = 0.70`
+and `N = 34`. The tally must participate in the classification. **The lottery
+selects truth; it does not manufacture certainty.**
+
+**The 3/3 clause was dead until §4.5 changed the estimator.** Under `A/N`,
+`pooledReject == 0` forces `a = 1`, which forces all three tickets Approve — so the
+conjunct above it made this one redundant, and the paragraph justifying it reasoned
+about a case the conjunction had already excluded. Under `â` a unanimous tally
+gives `â = (N+1)/(N+2)`, so `P(3/3) = â³` is 93.0% at `N = 40` and 84.2% at
+`N = 16`. The clause now does what it says: it separates a unanimous cohort that
+the draw confirmed from one it merely did not overrule.
 
 This replaces both v2's "unopposed subset" and the original "supersafe after 96
 hours of silence" (P0-10), which inherited the same defect from the other
@@ -1589,8 +1670,8 @@ the original draw.
 | **I8** | Penalties are invariant under settlement permutation |
 | **I9** | The cost of one incoherent vote is independent of `openVoteCount` |
 | **I10** | No phase closes before its `phaseDeadline` |
-| **I11** | Under-quorum can produce `UNRESOLVED` but never `APPROVED` |
-| **I12** | No tally admits a risk-free outcome: every side with ≥ 1 revealed vote has non-zero probability **at the moment every party's last decision is made**. Every revealed vote in either round is counted in the tally the verdict is evaluated against, and no randomness is public before the last vote is cast — a published `u` makes the outcome a step function of the tally and this invariant false for round 1 |
+| **I11** | **No verdict is more confident than the tally it was drawn from.** `P(Approve) = f(â)` with `â = (A+1)/(N+2)` (§4.5), so at `N` reveals neither outcome exceeds `f((N+1)/(N+2))` — 0.89% short of certainty at `N = 16`, 0.17% at `N = 40`. The old form, *"under-quorum can produce `UNRESOLVED` but never `APPROVED`"*, is the `N = 0` case of this and was vacuous for every other: "quorum" has meant the **commit** gate since §4.8 moved it there, so a case could clear it and reach `APPROVED` on one revealed vote with certainty |
+| **I12** | No tally admits a risk-free outcome: **both** outcomes have non-zero probability at every reachable tally, **at the moment every party's last decision is made**. Not *"every side with ≥ 1 revealed vote"* — that quantifier excludes the side with none, so it was vacuously true at exactly the unanimous tally where a party controlling every reveal bought certainty. `â ∈ (0,1)` for every finite `N` (§4.5) is what makes the corrected form true. Every revealed vote in either round is counted in the tally the verdict is evaluated against, and no randomness is public before the last vote is cast — a published `u` makes the outcome a step function of the tally and this invariant false for round 1 |
 | **I13** | `withdraw` implies `liabilities(m) == 0` — *every* outstanding claim discharged, not only open votes |
 | **I14** | No moderator's loss is another moderator's gain. This covers value **removed from `bond`**, value **withheld from a payment**, and any change to a divisor that raises someone else's share — the three are the same transfer written three ways |
 | **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
@@ -1610,8 +1691,16 @@ the original draw.
 | **I20** | Every terminal state discharges every liability it created: `openVoteCount` returns to its pre-commit value and every escrow is released, within a bounded number of permissionless calls |
 | **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
 
-I2 and I12 are inherited verbatim from v2 (I12 and the no-certainty rule) and are
-the two this design is least free to relax.
+I2 is inherited verbatim from v2. **I12 is not, any more** — its v2 phrasing is the
+one quoted above as wrong, and it was carried across three architectures without
+anyone noticing that its quantifier stops one short of the case it names. The
+no-certainty rule is still the property this design is least free to relax; what
+changed is that the invariant now states it.
+
+That is worth separating from the other corrections in this section. I18–I21, I29
+and I30 were *missing* — properties the document had not written down. I11 and I12
+were **present, prominent, and false**, and being prominent is what kept them from
+being read. An invariant nobody re-derives is a comment.
 
 **I18–I21 are generalizations, not additions.** Each was written because a specific
 defect of this document was an instance of it: a duplicated `REVEAL` guard (I18), a
@@ -1642,7 +1731,7 @@ property.
 | `d`, `BOND_MIN` | `λ = d + G` is derived (§2.4); `d` itself is not. It sets the confidence threshold at which honest voting is rational |
 | `REVEAL_BOND`, `G` | **Reopened.** `= d + G`, floored by §5.2's dominance argument once gas is in it. `G` moves with gas price, so this is a sweep parameter after all, and it drags `LAMBDA` with it |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document** |
-| Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's 0.725% false-rejection figure, and `simulation/v3/FINDINGS-v3.md` §F locates that figure as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously** — measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |
+| Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's false-rejection figure, which was **0.725% and is now 1.97%** — §4.5's estimator nearly tripled it from arithmetic alone, before any assumption is questioned. `simulation/v3/FINDINGS-v3.md` §F then locates even that as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously**, measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |

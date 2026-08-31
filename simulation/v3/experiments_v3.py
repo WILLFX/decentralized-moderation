@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from typing import Tuple
 
-from protocol_v3 import APPROVE, REJECT, ParamsV3, f, run_case, sweep
+from protocol_v3 import APPROVE, REJECT, ParamsV3, a_hat, f, run_case, sweep
 
 TRIALS = 4000
 
@@ -155,6 +155,39 @@ def e4_challenge_reliability(base: ParamsV3) -> None:
     bad0, _ = _rate(p0, safe=False)
     good0, _ = _rate(p0, safe=True, wants=REJECT, seed=23)
     print(f"    {'none':>6} {bad0:>22.3f} {good0:>20.3f}   <- no challenge round")
+
+
+def e7_estimator(base: ParamsV3) -> None:
+    """What `â = (A+1)/(N+2)` denies, and what it costs to deny it.
+
+    §4.5 draws against the posterior mean of the population's Approve rate
+    rather than the sample proportion. Under `A/N`, `f(1) = 1`: a unanimous
+    tally decides the case with certainty, and one revealed vote is a unanimous
+    tally. I11 and I12 both read true over that configuration without covering
+    it. The question this asks is what the correction costs everywhere else.
+    """
+    print("\nE7  The estimator — certainty denied, and the price of denying it")
+    print("    `f` consumes a POPULATION rate. `A/N` is a SAMPLE proportion, and")
+    print("    handing one to the other claims certainty from N observations.\n")
+    print(f"    {'N':>6} {'â at unanimity':>16} {'f(â)':>10} {'cohort overruled':>18}")
+    for n in (1, 2, 3, 5, 8, 16, 24, 40, 100):
+        ah = a_hat(n, n)
+        print(f"    {n:>6} {ah:>16.4f} {f(ah):>10.4f} {1 - f(ah):>17.2%}")
+    print("\n    Not a wall: an attacker owning all 16 reveals of a minimum-quorum")
+    print("    case still gets 99.1%. What it buys is that no incentive argument")
+    print("    in the spec has a degenerate branch — §7.3 and §8.4 are both strict")
+    print("    at every tally under â, and were ties at a unanimous one under A/N.\n")
+
+    print("    Cost: P(safe content rejected), no attacker, by honest prior")
+    print(f"    {'prior':>7} {'rejected':>11}")
+    for prior in (0.665, 0.85, 0.95, 0.99):
+        p = sweep(base, honest_prior=prior, attacker_share=0.0)
+        got, _ = _rate(p, safe=True, wants=APPROVE, trials=2500, seed=23)
+        print(f"    {prior:>7.3f} {1 - got:>11.3f}")
+    print("\n    Against `A/N` the same column reads 0.232 / 0.051 / 0.006 / 0.000.")
+    print("    The correction costs 0.3 to 2.1 points, on the number this design")
+    print("    is already weakest on, and second-order against the 26-60% that")
+    print("    honest error contributes to it (§F).")
 
 
 def e5_viability(base: ParamsV3) -> None:

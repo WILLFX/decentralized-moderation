@@ -40,7 +40,7 @@ now:  commit -> reveal -> draw -> PROVISIONAL                        ~1 hour
 
 **The result is not challenge-free.** An earlier revision of this document was, and
 §2.1 records why the window came back: a 2-of-3 majority certifies bad content
-21.6% of the time at a hostile 30% of reveals, and a single sealed round has no
+22.3% of the time at a hostile 30% of reveals, and a single sealed round has no
 mechanism to correct that. The challenge round is the correction, and §2.1 states
 exactly what it costs.
 
@@ -58,8 +58,15 @@ SUBMIT -> COMMIT -> REVEAL -> DRAW -> PROVISIONAL -> (§2.1) -> one of:
 
     two or three tickets Approve  ->  APPROVED
     two or three tickets Reject   ->  REJECTED
-    reveals < MIN_REVEALS         ->  UNRESOLVED
+    commits < MIN_COMMITS         ->  UNRESOLVED(NO_TURNOUT)
+    no reveals at all             ->  UNRESOLVED(NO_REVEALS)
 ```
+
+**There is no `MIN_REVEALS`.** state-machine-v3 §4.8 removed it rather than
+relocating it: a reveal-stage gate selects between terminal classes on state every
+revealer can watch, which was the only thing that ever made withholding attractive.
+The quorum gate is on *commits*, which are blind. What stops a thin tally from
+deciding a case outright is not a floor but the estimator of §3.
 
 There is no `CONTESTED` state and no post-draw appeal of a *final* claim. The
 verdict of the first round is **provisional** and may be challenged exactly once
@@ -76,8 +83,13 @@ verdict of the first round is **provisional** and may be challenged exactly once
 replacement, a side holding one revealed vote can never occupy two tickets, so a
 31–1 tally would decide with *certainty* — violating the rule that no stake
 majority buys a risk-free outcome. With replacement the one-vote side still wins
-0.287% of the time. Tickets carry no payout entitlement of their own (§5), so
+1.0% of the time. Tickets carry no payout entitlement of their own (§5), so
 sampling the same ballot twice creates no windfall.
+
+**Replacement is necessary and was mistaken for sufficient.** It removes certainty
+from the *sampling*; it leaves it in the *tally*, because a unanimous `A/N` is 1
+and `f(1) = 1` whatever the draw does. §3's estimator is what closes that, and a
+one-vote case is precisely the tally where the difference is largest.
 
 Eligibility is unchanged from v2: passive, hash-based, `H(m, c, r, seed) <
 threshold`, evaluated off-chain by each moderator. **Submitting a case still
@@ -186,37 +198,52 @@ designed to raise.
 
 ## 3. The confirmation rule
 
-Let `A` be revealed Approve votes, `R` revealed Reject, `N = A + R`, `a = A/N`.
-Three ticket sides are drawn independently, each Approve with probability `a`. The
-side appearing on at least two becomes the verdict:
+Let `A` be revealed Approve votes, `R` revealed Reject, `N = A + R`. Three ticket
+sides are drawn independently, each Approve with probability `â`, and the side
+appearing on at least two becomes the verdict:
 
 ```
-f(a) = P(APPROVED) = 3a² − 2a³          P(REJECTED) = 1 − f(a)
+â    = (A + 1) / (N + 2)                            -- NOT A/N; see below
+f(â) = P(APPROVED) = 3â² − 2â³      P(REJECTED) = 1 − f(â)
 ```
 
 **Implementation needs only the counts:**
 
 ```
-for i in 0..2:  ticket[i] = H(outcomeSeed, i) mod N < approve
+for i in 0..2:  ticket[i] = u[i] · (N + 2)  <  (A + 1) · 2^128
 verdict = (ticket[0] + ticket[1] + ticket[2] >= 2) ? Approve : Reject
 ```
 
 Three hashes and a comparison. No ballot array, no without-replacement bookkeeping,
 and no division by `N−1` — the divide-by-zero guard the two-ticket rule needed is
-gone with it.
+gone with it. **Not `mod (N+2)`**: only the multiplicative form is monotone in the
+tally, which is what makes a challenge that adds no votes return an identical
+verdict (`state-machine-v3` §4.5, I22).
+
+**Why `â` and not `A/N`.** `f` consumes a *population* Approve rate. `A/N` is a
+*sample* proportion of `N` votes, and handing one to the other claims certainty
+from `N` observations — at a unanimous tally, exactly: `f(1) = 1`, and one revealed
+vote is a unanimous tally. `â` is the posterior mean under a uniform prior, it is
+symmetric and parameter-free, and it lies strictly inside `(0,1)` for every finite
+`N`. **This paragraph replaces a claim that ran the other way**: an earlier revision
+said the finite-`N` correction "does not apply, because the tickets are drawn with
+replacement." The *sampling* is exact at every `N`. The *tally* is not, and that is
+the quantity the sampling is parameterised by.
 
 **`f` is a majority amplifier, and that is the whole of what it buys and costs.**
+At a cohort of `N = 34`:
 
 ```
-tally share a    0.51    0.60    0.70    0.80    0.90    0.95
-f(a)            0.515   0.648   0.784   0.896   0.972   0.9928
+tally share A/N   0.51    0.60    0.70    0.80    0.90    0.95
+â                0.500   0.583   0.694   0.778   0.889   0.917
+f(â)             0.500   0.624   0.777   0.874   0.966   0.980
 ```
 
-A 51% side wins 51.5% of the time; a 90% side wins 97.2%. **No outcome is certain
-— but a large coalition approaches certainty faster than under a linear lottery.**
-That is a real weakening of "no outcome can be engineered with certainty," and it
-is accepted deliberately (§5). With replacement, even a 31–1 tally leaves the
-one-vote side 0.287%.
+A 51% side wins half the time; a 90% side wins 96.6%. **No outcome is certain, and
+now that is true at every tally rather than every tally with votes on both sides**
+— but a large coalition still approaches certainty faster than under a linear
+lottery. That weakening of "no outcome can be engineered with certainty" is
+accepted deliberately (§5). A 31–1 tally leaves the one-vote side 1.0%.
 
 **Why three and not two, and not five.** Two tickets require a rule for
 disagreement, and §5 shows every such rule either destroys the safety gain or
@@ -234,13 +261,17 @@ Two attacks matter and they pull in opposite directions. `x` is the hostile shar
 |---|---|---|
 | one ticket (linear, v2) | 30% | 5% |
 | two tickets + `CONTESTED` (withdrawn) | 9% | 9.75% |
-| **three tickets, 2-of-3** | **21.6%** | **0.725%** |
+| **three tickets, 2-of-3** | **22.3%** | **1.97%** |
 
-**Against censorship this is the strongest rule available** — 0.725% where the
+Both figures are at `N = 34` and both moved when the draw moved to `â`: they were
+21.6% and 0.725% computed against `A/N`. **The censorship number nearly tripled**,
+and it is the one §8 leans on hardest.
+
+**Against censorship this is still the strongest rule available** — 1.97% where the
 withdrawn two-ticket rule gave 9.75% and a linear draw gave 5%. Amplification
 works for the honest majority whenever the honest side *is* the majority.
 
-**Against false approval it is the weakest of the three**, at 21.6% versus 9%. A
+**Against false approval it is the weakest of the three**, at 22.3% versus 9%. A
 hostile 30% of reveals certifies bad content roughly one time in five. That is the
 price of removing the abstention branch, and it must be quoted wherever the
 censorship number is quoted. **This is the number the challenge round of §2.1
@@ -252,15 +283,23 @@ reliably the honest side challenges.
 > right. It is one property seen twice, not two properties.
 
 **Everything above is a function of turnout, not of registered stake.** A 30%
-registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 21.6%. §9.
+registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 22.3%. §9.
 
 **What is no longer a cost.** The withdrawn rule contested 9.5% of ordinary content
 at `a = 0.95`, rising to 16.7% at a bare quorum of 12 — one case in six failing to
-certify on a single dissenting reveal. That is gone. False rejection of ordinary
-content is now 0.725%, and the finite-`N` correction that made the two-ticket rule
-worse at small cohorts does not apply: `f(a)` is exact at every `N`, because the
-tickets are drawn with replacement from the tally shares rather than from distinct
-ballots.
+certify on a single dissenting reveal. That is gone: false rejection of ordinary
+content at `N = 34` is 1.97%.
+
+**But the finite-`N` correction does apply, and this section used to deny it.** The
+claim was that `f(a)` is exact at every `N` because the tickets are drawn with
+replacement. Replacement makes the *sampling* exact; it says nothing about `a`,
+which is a sample proportion standing in for a population rate. So the rule is
+still `N`-sensitive, just in the estimator rather than in the draw: at `N = 12` a
+0.95 tally gives `â = 12/14 = 0.857` and `f(â) = 0.945`, so 5.5% false rejection
+against 1.97% at `N = 34`. **Small cohorts are still worse; they are worse for a
+different reason than the two-ticket rule was, and the direction of the effect is
+the one that makes it safe to be wrong** — a thin tally now under-claims instead of
+over-claiming.
 
 ## 5. Payout: exact cash neutrality is deliberately abandoned
 
@@ -460,8 +499,8 @@ reveal set is known on chain, so whoever holds the last reveal chooses between
 closing now and letting the deadline close it — a free binary choice over seeds:
 
 ```
-x = 0.30   single fixed seed:  f(x)          = 21.6%
-           choice of two:      1 − (1−f(x))² = 38.5%
+x = 0.30   single fixed seed:  f(â)          = 22.3%
+           choice of two:      1 − (1−f(â))² = 39.6%
 ```
 
 *Detecting that every eligible moderator has voted* is not computable under passive
@@ -503,14 +542,30 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics, policyVersi
 **Retry is closed by construction here, not priced.** The two-ticket rule needed a
 priced retry because it abstained on 9.5% of ordinary content and permanently
 excluding that content would have been wrong. Three tickets reject ordinary content
-0.725% of the time, so a permanent reservation is defensible without an escape
-hatch, and the optional-stopping surface closes with it.
+2.0% of the time at `N = 34`, so a permanent reservation is defensible without an
+escape hatch, and the optional-stopping surface closes with it.
 
-The residual case is the honest publisher unlucky enough to land in that 0.725%.
+**The margin this argument runs on is much thinner than it was written to be**, and
+it is the weakest load-bearing claim in this document. Three things have moved
+under it since:
+
+- The figure was **0.725%** and is **1.97%**, because the draw is taken against `â`
+  rather than `A/N` (§3). Nearly a factor of three, from arithmetic alone.
+- It assumes `a = 0.95` — that ordinary content draws a 95% honest tally.
+  `simulation/v3/FINDINGS-v3.md` measures 26–60% false rejection across the
+  plausible range of `prior`, and the 0.95 assumption is exactly the unmeasured
+  honest-accuracy figure the headline of that document is about.
+- It assumes independent error. §F of the same document shows correlated error
+  costs the *most* in the clean, no-attacker case — the regime this paragraph
+  describes.
+
+The residual case is the honest publisher unlucky enough to land in that band.
 They are not left without recourse: `REJECTED` is reopened by an explicit re-review
 case (below), which is a new claim carrying evidence rather than a repurchase of
 the same draw. **`NO_QUORUM` is the only free retry**, and it is free precisely
-because no draw occurred.
+because no draw occurred. `state-machine-v3` §10 carries the permanence of
+`REJECTED` as open work, blocked on the honest-accuracy measurement rather than on
+a parameter sweep.
 
 **A policy-version bump must not reopen rejections.** Scoping the reservation to
 `policyVersion` as written would make every ruleset change a scheduled amnesty that
@@ -531,7 +586,7 @@ which cautious clients stop treating them as certified unless renewed.
 ## 9. Turnout is the variable everything is priced on
 
 `x` is the hostile share **of revealed votes**, not of registered stake. A 30%
-registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 21.6% — and the
+registered attacker who is 50% of reveals gets `f(0.5) = 50%`, not 22.3% — and the
 amplifier that protects an honest majority works just as hard for a hostile one.
 Every number in §3 and §4 is a function of honest turnout inside a short window,
 and the design must fail closed: **insufficient participation produces
@@ -549,14 +604,16 @@ remains.
 ### 9.1 Assurance is a property of the tally, not of the draw
 
 A 3–0 ticket draw is stronger evidence than 2–1, but it is still three samples of
-the same tally. `P(3/3 Approve) = a³`:
+the same tally. `P(3/3 Approve) = â³`, at `N = 34`:
 
 ```
-a          0.60    0.70    0.80    0.90    0.95
-P(3/3)     21.6%   34.3%   51.2%   72.9%   85.7%
+tally A/N    0.60    0.70    0.80    0.90    0.95    1.00
+P(3/3)      19.9%   33.5%   47.1%   70.2%   77.0%   85.0%
 ```
 
-A case with 30% Reject votes still draws 3/3 Approve more than a third of the time.
+A case with 30% Reject votes still draws 3/3 Approve a third of the time — and
+note the last column, which was 100% under `A/N` and is what made §8.3's 3/3
+conjunct redundant beside its `pooledReject == 0` conjunct.
 So `unanimousTicketDraw` is stored as evidence but **must not by itself carry a
 high-assurance label.** The strict class requires the tally to participate:
 

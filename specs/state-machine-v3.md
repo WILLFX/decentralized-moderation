@@ -1804,25 +1804,71 @@ outcome is known and the accounting is not yet done. The question is therefore n
 how to remove the window but what a party gains inside it — and §4.8 makes the
 answer *nothing*, for every revealer, at every tally.
 
-> **Claim.** For every reachable non-empty tally, at least one revealer strictly
-> prefers poking the draw to letting the seed expire — and that preference does not
-> depend on the value of `d`, of `share`, or of `DRAW_BOUNTY`.
+> **Claim.** At every reachable non-empty tally, at least one party strictly prefers
+> poking the draw to letting the seed expire, and that preference depends on no
+> parameter of this specification.
 >
-> *Proof.* Take any revealer on the losing side of the pooled plurality; one exists
-> unless the tally is unanimous. Let `a` be their own side's share of it, so
-> `0 < a ≤ 0.5`. §4.8 debits them `d` if the seed expires. The draw debits them `d`
-> only in the branch where their side loses it, and pays `share` in the other:
+> *Proof — the submitter, at every tally.* The draw lists their content with
+> probability `f(â) > 0`, and `â ∈ (0,1)` for every finite `N` (§4.5), so the
+> probability is strictly positive at **every** tally including a unanimous Reject.
+> Expiry lists it with probability zero and holds the claim key on `REJECTED`'s
+> terms (§8.4). The submitter is not a moderator: `d`, `share` and `DRAW_BOUNTY` do
+> not appear in their comparison at all. ∎
+>
+> *Second and independent, at every non-unanimous tally — the revealers.* Take any
+> revealer on the losing side of the settled side; one exists unless the tally is
+> unanimous. Let `a` be their own side's share, so `0 < a ≤ 0.5`. §4.8 debits them
+> `d` if the seed expires, and the draw debits them `d` only in the branch where
+> their side loses it:
 >
 > ```
 > expire         :  −d
-> draw           :  f(a)·share  −  (1 − f(a))·d
-> draw − expire  :  f(a)·(share + d)   >  0        for every a > 0
+> draw           :  f(â)·share  −  (1 − f(â))·d
+> draw − expire  :  f(â)·(share + d)   >  0        for every â > 0
 > ```
 >
-> The `d` terms cancel — it is charged in one branch and risked in the other — and
-> what remains is a chance of being paid that only the draw supplies. If the tally
-> is unanimous, every revealer is on the winning side, faces no debit in either
-> branch, and the draw pays `share > 0`. ∎
+> The `d` terms cancel — charged in one branch, risked in the other — and what
+> remains is a chance of being paid that only the draw supplies. ∎
+
+**The revealers do not carry the unanimous tally, and the previous revision claimed
+they did.** Its proof ended *"if the tally is unanimous, every revealer is on the
+winning side, faces no debit in either branch, and the draw pays `share > 0`."*
+That was true under `A/N`, where `f(1) = 1` and a unanimous side never loses. Under
+`â` a unanimous cohort is overruled with probability `1 − f(â) > 0`, and in that
+branch every one of them is incoherent with the settled side and debited. There is
+also no losing side on expiry, so nobody is debited there and the `d` term has
+nothing to cancel against:
+
+```
+expire  :   0                          (no dissent exists, so no one is debited)
+draw    :   f(â)·share − (1−f(â))·d
+draw > expire   ⟺   d / share  <  f(â) / (1 − f(â))
+
+N (unanimous)      1       3       8      16      34
+breakeven       2.86    8.62   34.71  111.15  439.15
+```
+
+At the working `d = 1.4 × E[share]` that holds at every `N`. **But it holds because
+of a parameter value**, `d` is open (§10), and `simulation/v3/FINDINGS-v3.md` §E
+sweeps it to 10.0 — past the `N = 1` breakeven. That is why the submitter's branch
+is stated first and not as a footnote: it is the one that makes the Claim
+parameter-free, and it is a consequence of H5's reservation and H6's estimator that
+was never fed back into this proof.
+
+**This is the coupling running the direction I did not check.** H6 → H5 I found:
+§8.4's "every draw has an approval branch" was a tie under `A/N` and is strict
+under `â`. H6 → this runs the other way — the estimator made the unanimous branch
+*non-degenerate*, and non-degenerate means `d` entered a comparison the Claim said
+`d` does not enter. This section congratulates itself two paragraphs down that "no
+invariant rests on `DRAW_BOUNTY`'s size"; it had quietly begun resting on
+`d / share` instead. One parameter dependence traded for a quieter one is not
+progress, and the fix is not to bound `d` but to notice that a party outside the
+moderator economy already carries the case.
+
+**The assumption the submitter's branch does make**, stated rather than buried: that
+a submitter wants their content listed. They paid a fee for it, and §8.4's H5
+argument already rests on the same thing. A submitter indifferent to the outcome
+would not have submitted.
 
 Two things are worth reading off it.
 
@@ -1842,12 +1888,12 @@ the most to lose from the case dying is exactly whoever pays the gas — which i
 inversion the earlier rule got wrong, because there the party with the most to lose
 was the one who gained by waiting.
 
-**And the submitter pokes too.** §8.4 holds the claim key on `REJECTED`'s terms
-when the seed expires, so the submitter's comparison is `f(a)` against zero on
-*either* plurality — every draw has an approval branch and expiry has none. They
-are the second mobilized party, they are guaranteed to exist, and unlike a
-moderator they are certainly watching the case they paid for. The claim above needs
-only one party; it has two, arriving from opposite directions.
+**The submitter is the party the Claim rests on, not a bonus.** They are guaranteed
+to exist, they are certainly watching the case they paid for, and their comparison
+contains no moderator parameter. The revealers are the *second* guarantee and they
+cover every tally except the unanimous one. Two parties from opposite directions,
+and the order matters: state the parameter-free one first, or the next revision
+will trim the proof to the one that reads more cleverly.
 
 `DRAW_BOUNTY` survives as funding for the expiry transition itself and as a
 convenience for third-party bots. **No invariant rests on its size**, which is the
@@ -2032,7 +2078,7 @@ the original draw.
 | **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`, and equals the sum of that moderator's open claim records (§2.1) — an identity a view can assert, not an accounting convention. Adding any debit to this specification means creating a claim for it; no test may use a narrower expression |
-| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that at every tally some revealer strictly prefers the draw (§7.3) **and the submitter always does** (§8.4). **"Action" was the loophole**: an earlier revision satisfied this clause for things done and left things left undone to the size of `DRAW_BOUNTY`, which is a parameter, not an invariant |
+| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that **the submitter strictly prefers the draw at every tally** (§7.3, §8.4) and the plurality-losing revealers do so at every non-unanimous one. **This invariant has twice been left resting on a parameter** — first `DRAW_BOUNTY`'s size, then, after the estimator made the unanimous branch non-degenerate, `d / share`. Both times the rule was right and the *proof* had a branch nobody re-derived |
 | **I25** | The non-reveal debit fires wherever **a reveal phase opened**, including terminals in which no verdict was drawn — and *not* in `NO_TURNOUT`, where it never did. It was stated as "every terminal state", which over-corrected a revision that had waived it across all of `UNRESOLVED`: the requirement is the phase, not the terminal, and quantifying over terminals debited every committer in the one row the same section calls unsteerable |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
@@ -2097,6 +2143,7 @@ property.
 | Eligibility seed vs commit window | The 14-block margin above. It is now an arithmetic relation between two block counts rather than a hidden dependence on an assumed block time, which is what makes it statable at all. §3.1 has no equivalent of §7.3's "unavailable is not a test", so what happens when `blockhash(eligSeedBlock)` expires mid-window is unspecified: `H(..., 0, m)` is a perfectly good hash, so the eligible set would silently change to a publicly precomputable one at a known height. **Open, and tracked separately from this row because widening the margin and guarding the expiry are different fixes** |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
+| `d`, and the two upper bounds nobody had written next to each other | §5.1, §7.3. `d` has an upper bound from **viability** — honest voting is rational only while `d/share < prior/(1−prior)`, which is 1.99 at `prior = 0.665` and 19 at `prior = 0.95` — and a second from **poke dominance** at a unanimous tally, `d/share < f(â)/(1−f(â))`, which is 2.86 at `N = 1` and rises steeply with `N`. The two come from unrelated arguments in different sections and are within 45% of each other at the borderline prior. **Which one binds depends on the unmeasured quantity:** they cross at `prior = f(2/3) = 0.741`, below which viability is tighter and above which poke dominance is. Neither is load-bearing for I24 — §7.3's Claim is carried by the submitter, who has no `d` — but a sweep of `d` should see both, and FINDINGS §E currently sweeps to 10.0 without either |
 | Logic lifecycle and the force-discharge hammer | §2.4, I32. Two capabilities per authorized logic: `MAY_CREATE` and `MAY_DISCHARGE`. Revoking the first retires a contract; revoking the second while it holds an open claim strands every moderator who voted under it, so the registry refuses it — a comparison against a per-logic open-claim count, not a governance discipline. The residual is a logic that *cannot* discharge, which is a bug and not an attacker, and whose only recovery is a **timelocked per-logic force-discharge that simultaneously bars that logic from debiting** — release-then-take is the obvious abuse and the two must move together. Open: whether the timelock is `RulesetGovernor`'s existing one, and what a moderator can do during it |
 | Settlement cost vs `CLAIM_BOUNTY` | Commits per case are unbounded while the bounty is a fixed fraction of the fee. A case that becomes unprofitable to settle pins every participant's `openVoteCount` — I20 is only as strong as the incentive to make the call. **Two things tighten this and they are recorded here rather than left to be found:** eligibility is `H(...) < T` with no ceiling on the realized cohort, so the committer count an attacker can add is bounded only by their identity budget — v1 capped it at `MAX_PANEL = 128` and had the governor *validate* the cap, and v3 replaced a validated cap with an expectation. And I32's per-claim record adds a cold storage write per commit and a clear per settlement, which moves the crossover in the wrong direction. The cap and the record are separate decisions; the crossover is one number and both feed it |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |

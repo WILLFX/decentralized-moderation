@@ -201,3 +201,16 @@ def e5_viability(base: ParamsV3) -> None:
     print("\n    `d` is a chosen constant, so this table is a design choice rather")
     print("    than an emergent property. Under v2's identity-wide freezing the")
     print("    same column read 70 and honest turnout was zero at every fee.")
+    print()
+    print("    TWO bounds, from unrelated arguments (state-machine §10):")
+    print(f"    {'source':>18} {'bound on d/share':>18} {'binds when':>28}")
+    for prior in (0.665, 0.75, 0.85, 0.95):
+        print(f"    {'viability':>18} {prior/(1-prior):>18.2f} {f'prior = {prior}':>28}")
+    ah = 2/3
+    print(f"    {'poke dominance':>18} {f(ah)/(1-f(ah)):>18.2f} "
+          f"{'unanimous tally, N = 1':>28}")
+    print("\n    They cross at prior = f(2/3) = 0.741: below it viability is the")
+    print("    tighter bound, above it poke dominance is. Which one binds is a")
+    print("    function of the quantity nobody has measured. Neither is load-")
+    print("    bearing for I24 — §7.3's Claim is carried by the submitter, who")
+    print("    has no `d` — but this sweep reaches 10.0 and passes both.")

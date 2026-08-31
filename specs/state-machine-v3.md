@@ -987,13 +987,20 @@ round helps or hurts. Simulated at 30% hostile, `TARGET_COHORT` 40, honest turno
 0.8:
 
 ```
-                     h=0      h=0.25    h=0.5     h=1.0
-fresh round-1 draw   0.483    0.434     0.383     0.285
-same u (adopted)     0.316    0.309     0.300     0.284
+                     h=0      h=0.25    h=0.5     h=1.0    none
+fresh round-1 draw   0.483    0.434     0.383     0.285      —
+same u (adopted)     0.598    0.613     0.608     0.606    0.592
 ```
 
+**Source: `simulation/v3/FINDINGS-v3.md` §B, at the commit that last touched
+`simulation/v3/` (I33).** The adopted row was quoted here for three revisions as
+0.316 / 0.309 / 0.300 / 0.284, from a run predating the prior-aware model, and it
+was not refreshed when the engine was. The *fresh-draw* row is from that same old
+run and is kept only as the contrast the argument is about; what matters is the
+range, not the level.
+
 A fresh draw makes the challenge round a 20-point gift to an attacker when the
-honest side is unreliable. The same-`u` rule flattens that to 3 points — the design
+honest side is unreliable. The same-`u` rule flattens that to **1.6 points** — the design
 stops depending on a quantity that lives outside the contract.
 
 **Consequences elsewhere:**
@@ -2344,7 +2351,7 @@ property.
 | Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's false-rejection figure, which was **0.725% and is now 1.97%** — §4.5's estimator nearly tripled it from arithmetic alone, before any assumption is questioned. `simulation/v3/FINDINGS-v3.md` §F then locates even that as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously**, measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
-| `h` | Not a contract parameter at all — design-v3 O10. It decides whether §4.6's round halves the false-approval rate or nearly doubles it |
+| `h` | Not a contract parameter at all — design-v3 O10, and **largely defused rather than open**. §4.5's single-randomness rule flattens the whole of `h` to 1.6 points of false approval (FINDINGS §B), against the 20 a fresh round-1 draw produced. The old framing here — *"halves the false-approval rate or nearly doubles it"* — described the fresh-draw regime and was left standing after the rule that ended it. What remains open is not `h` but the finding underneath: the challenge round is a small net **negative** on false approval at every `h` measured, and is kept because it is the only correction path §8.4 and §8.5 have |
 | `CHALLENGE_BOND` | Sizing only, and **one job now that §4.6 made it unconditional**. It used to have to price a frivolous challenge *and* stay affordable for a single-identity dissenter — two requirements pulling opposite ways on one knob, and the conditional forfeit made the effective price differ between the two parties in the wrong direction. Unconditional, both parties face the same number, so it is a single question: what are twelve hours of the submitter's latency and one round of cohort attention worth? §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and it needs none to the reserve either — §5.3 removed that coupling |
 | `BLOCK_TIME`, and the bound the hybrid creates | §1. Denominating the schedule in blocks removed a *safety* dependence on block time (§7.2) and left a *scheduling* one: `BLOCK_TIME` sets how long a window is in wall-clock terms for the human moderators §10's honest-accuracy row is about. Wrong by 50% and windows are 50% off; nothing terminates that would not have. **But it carries one hard bound, which the previous revision could not even express:** the eligibility seed must survive its own commit window, `SEED_LAG + commitBlocks ≤ BLOCKHASH_HORIZON`, i.e. `BLOCK_TIME ≥ COMMIT_WINDOW / (BLOCKHASH_HORIZON − SEED_LAG)` = **4.72 s** at a 20-minute window. At the working 5 s the margin is **14 blocks**, which is thin, and sizing it is open work — see the row below. `RulesetGovernor` must validate the bound; a governance change that violates it silently re-points every eligibility test at a zero seed |
 | Eligibility seed vs commit window | The 14-block margin above. It is now an arithmetic relation between two block counts rather than a hidden dependence on an assumed block time, which is what makes it statable at all. §3.1 has no equivalent of §7.3's "unavailable is not a test", so what happens when `blockhash(eligSeedBlock)` expires mid-window is unspecified: `H(..., 0, m)` is a perfectly good hash, so the eligible set would silently change to a publicly precomputable one at a known height. **Open, and tracked separately from this row because widening the margin and guarding the expiry are different fixes** |

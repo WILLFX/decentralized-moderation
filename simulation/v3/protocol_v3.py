@@ -1,8 +1,10 @@
 """Simulation engine for the challenge-free-then-not architecture.
 
-Design: ``specs/design-v3.md``.  Normative: ``specs/state-machine-v3.md`` at
-`e2f374a`.  Where the two disagree the state machine wins, and this engine
-follows the state machine.
+Design: ``specs/design-v3.md``.  Normative: ``specs/state-machine-v3.md``.
+Where the two disagree the state machine wins, and this engine follows the
+state machine.  The commit this was last reconciled against is the one that
+last touched this file — see ``git log``, not a pin here, because a pin in a
+docstring is a number with no source that goes stale silently (I33).
 
 **The v2 engine cannot be reused and its results cannot be carried over.** Three
 things changed at the level of what a case *is*:
@@ -11,9 +13,10 @@ things changed at the level of what a case *is*:
   `f(â) = 3â² − 2â³` rather than `a`, where `â = (A+1)/(N+2)` is the posterior
   mean of the population's Approve rate rather than the sample proportion
   (state-machine §4.5);
-* the three tickets are **fixed once per claim** and reused at the final draw
-  (state-machine §4.5), which makes the verdict *monotone* in the tally and is
-  the whole reason a challenge cannot buy a re-roll;
+* the randomness is realized **once per claim, after all voting closes**
+  (state-machine §4.5) — not at round-0 close, and not once per round — which
+  makes the verdict *monotone* in the tally and is the whole reason a challenge
+  cannot buy a re-roll;
 * penalties are **balance debits**, not time freezes, so the risk/reward ratio is
   a chosen constant instead of `freeze_days × concurrent_cases`.
 
@@ -70,7 +73,8 @@ class ParamsV3:
     gas_cost: float = 3.0
     #: `d`, the incoherence debit, as a multiple of expected pay. §1 gives the
     #: working value `d = 1.4 × E[P/N]`, the ratio v2.1 found viable.
-    #: `REVEAL_BOND = LAMBDA = d` (§1, §2.4, §5.2).
+    #: `REVEAL_BOND = LAMBDA = d + G` (§1, §2.4, §5.2) — `G` is the gas
+    #: allowance, and this engine does not model gas, so it carries `d` alone.
     debit_multiple: float = 1.4
 
     # behaviour
@@ -123,7 +127,10 @@ class ParamsV3:
 # ---------------------------------------------------------------------------
 
 def draw_tickets(rng: random.Random) -> Tuple[float, float, float]:
-    """The three uniforms, realized ONCE at the round-0 draw and stored (§4.5).
+    """The three uniforms, realized ONCE per claim at the single draw (§4.5).
+
+    Not at round-0 close: §4.2 withdrew the provisional draw that used to sit
+    there.  The draw is the last transition before `FINALIZED`.
 
     On chain these are `uint128(H(OUTCOME_DOMAIN, …, i))`; here the [0,1) form is
     the same object without the fixed-point noise.
@@ -148,6 +155,18 @@ def a_hat(approve: int, total: int) -> float:
     if total <= 0:
         raise ValueError("a_hat() on an empty tally — `N >= 1` is arithmetic (§4.8)")
     return (approve + 1) / (total + 2)
+
+
+def plurality(approve: int, reject: int) -> bool:
+    """`plurality(A, R) = Approve iff A > R`, Reject otherwise — §4.2.
+
+    A FACT about the votes, total on any tally including a tie, and carrying no
+    randomness.  This is what `TALLY` publishes at the one-hour mark and what
+    every party sees before deciding whether to challenge.  §4.2 withdrew the
+    drawn provisional verdict that used to sit here, because publishing it
+    published `u` and with it the exact cost of flipping the case.
+    """
+    return approve > reject
 
 
 def verdict(u: Tuple[float, float, float], approve: int, total: int) -> bool:
@@ -282,15 +301,26 @@ def run_case(p: ParamsV3, rng: random.Random, *, content_is_safe: bool,
     if r0.reveals == 0:
         return CaseResult("UNRESOLVED", "NO_REVEALS", rounds=(r0,))
 
-    # ---- round 0: DRAW --------------------------------------------------
-    u = draw_tickets(rng)
-    prov = verdict(u, r0.approve, r0.reveals)
+    # ---- round 0: TALLY -------------------------------------------------
+    # §4.2 — what is published at one hour is the PLURALITY, a fact about the
+    # votes.  No randomness has been realized; §4.5 puts the single draw after
+    # the challenge window and after round 1 if there is one.
+    plur = plurality(r0.approve, r0.reject)
 
     pooled_a, pooled_r = r0.approve, r0.reject
 
     # ---- challenge window (§3.5, §3.5b) ---------------------------------
-    attacker_lost = (prov is not attacker_wants)
-    honest_lost = (prov is not content_is_safe)
+    # Both parties condition on what they can SEE, which is the plurality.
+    #
+    # The attacker knows which side they are pushing, so their test is direct.
+    # The honest side has no ground truth — an honest moderator knows their own
+    # vote and the published plurality and nothing else — so `honest_lost` is
+    # measured against where the honest votes actually fell, not against
+    # `content_is_safe`.  Comparing to ground truth handed the honest side an
+    # oracle they do not have, and it flattered the challenge round.
+    attacker_lost = (plur is not attacker_wants)
+    honest_majority = a_hon > (len(hon) - a_hon)
+    honest_lost = (plur is not honest_majority)
     challenged = attacker_lost or (honest_lost and rng.random() < p.honest_challenge_rate)
 
     rounds = (r0,)
@@ -299,6 +329,17 @@ def run_case(p: ParamsV3, rng: random.Random, *, content_is_safe: bool,
         # §3.4 — one vote per CLAIM. Round-0 voters are excluded.
         hon1 = _commits(p, rng, threshold_mult=1.0, excluded=voted, attacker=False)
         att1 = _commits(p, rng, threshold_mult=1.0, excluded=voted, attacker=True)
+        if p.widen_enabled and len(hon1) + len(att1) < p.min_commits:
+            # §3.3's widening step is not scoped to round 0 anywhere in the
+            # spec.  An earlier engine widened only round 0, which shrank the
+            # challenge cohort relative to the round it was being compared to.
+            ex1 = voted | set(hon1) | set(att1)
+            h2 = _commits(p, rng, threshold_mult=p.widen_factor - 1.0,
+                          excluded=ex1, attacker=False)
+            a2 = _commits(p, rng, threshold_mult=p.widen_factor - 1.0,
+                          excluded=ex1, attacker=True)
+            hon1 += [i for i in h2 if rng.random() < p.honest_always_on]
+            att1 += [i for i in a2 if rng.random() < p.attacker_always_on]
         r1.commits_honest, r1.commits_attacker = len(hon1), len(att1)
         # §4.9 — no quorum gate in round 1. An empty round is self-healing,
         # because an unchanged tally yields an identical verdict.
@@ -309,11 +350,16 @@ def run_case(p: ParamsV3, rng: random.Random, *, content_is_safe: bool,
         pooled_r += r1.reject
         rounds = (r0, r1)
 
-    # ---- the binding evaluation (§4.5) — SAME u, pooled tally ------------
+    # ---- DRAW (§4.5) — the ONLY randomness, after all voting closes ------
+    # It sits here, not above: §4.2 withdrew the round-0 provisional draw, and
+    # §7.2 puts the outcome block after all four windows whether or not round 1
+    # ran.  Nothing before this line has seen a random number, which is the
+    # whole point — the challenge decision above is made on a published FACT.
+    u = draw_tickets(rng)
     final = verdict(u, pooled_a, pooled_a + pooled_r)
     return CaseResult(
         "APPROVED" if final else "REJECTED",
-        provisional=prov, challenged=challenged, rounds=rounds,
+        provisional=plur, challenged=challenged, rounds=rounds,
         pooled_approve=pooled_a, pooled_reject=pooled_r,
     )
 

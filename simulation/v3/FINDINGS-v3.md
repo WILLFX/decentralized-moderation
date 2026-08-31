@@ -13,9 +13,13 @@ once per claim (§4.5), the draw taken against `â = (A+1)/(N+2)` rather than `A
 (§5.1), and no quorum gate in round 1 (§4.9). `f(â)` is reproduced to three
 decimals at 200k draws.
 
-**Every table below moved when the estimator changed.** The previous revision of
-this file drew against `A/N`; §G is the experiment that measures the difference,
-and the shifts elsewhere are within a point or two except where noted.
+**Every table below was re-run after the challenge decision was corrected.** An
+earlier engine had the parties decide whether to challenge by looking at a *drawn
+provisional verdict* — the thing §4.2 abolished — and gave the honest side
+`content_is_safe`, ground truth they do not have. Both are fixed: the decision now
+reads the published **plurality**, and the honest side's is measured against where
+their own votes fell. Round 1 also widens (§3.3), which it did not before. §B and
+§C moved materially; the rest moved by RNG reshuffling.
 
 ---
 
@@ -36,11 +40,11 @@ P(unsafe content approved), by honest accuracy and attacker share:
 
 ```
 honest prior       q=0     q=0.10    q=0.30
-     0.665        0.298     0.406     0.604
-     0.750        0.176     0.315     0.531
-     0.850        0.088     0.184     0.450
-     0.950        0.014     0.102     0.348
-     0.990        0.004     0.077     0.319
+     0.665        0.286     0.388     0.600
+     0.750        0.163     0.275     0.520
+     0.850        0.070     0.176     0.432
+     0.950        0.013     0.090     0.336
+     0.990        0.004     0.056     0.299
 ```
 
 **Read the `q=0` column.** With no attacker at all, a 66.5% honest prior approves
@@ -49,7 +53,7 @@ round that fixes that — it is a classifier-quality problem wearing a mechanism
 clothes.
 
 The 66.5% figure is inherited from v2's borderline-case prior. On ordinary content
-the honest number is plausibly 0.95+, where `q=0` gives 1.4%. **Which number is
+the honest number is plausibly 0.95+, where `q=0` gives 1.3%. **Which number is
 true is the single most valuable measurement a testnet can make**, and it dominates
 every parameter in `state-machine-v3` §10.
 
@@ -66,18 +70,18 @@ is the majority of reveals and a cost the moment it is not.
 
 ```
      q    effective   P(approved)   linear (f=a)   amplified by
-  0.05        0.368         0.346          0.368          0.94x
-  0.10        0.401         0.400          0.401          1.00x
-  0.15        0.435         0.447          0.435          1.03x
-  0.20        0.468         0.521          0.468          1.11x
-  0.25        0.501         0.566          0.501          1.13x
-  0.30        0.534         0.612          0.534          1.15x
-  0.40        0.601         0.714          0.601          1.19x
-  0.50        0.667         0.780          0.667          1.17x
+  0.05        0.368         0.327          0.368          0.89x
+  0.10        0.401         0.388          0.401          0.97x
+  0.15        0.435         0.469          0.435          1.08x
+  0.20        0.468         0.503          0.468          1.07x
+  0.25        0.501         0.554          0.501          1.10x
+  0.30        0.534         0.608          0.534          1.14x
+  0.40        0.601         0.694          0.601          1.16x
+  0.50        0.667         0.777          0.667          1.16x
 ```
 
 The analytic crossover — where `q + (1−q)(1−prior) = 0.5` — is at **q = 0.248**.
-The observed crossover is at **q ≈ 0.10**, well under half of it.
+The observed crossover is at **q ≈ 0.12**, half of it.
 
 **The gap is turnout variance.** `f` is below the diagonal for `â < 0.5` and above
 it for `â > 0.5`. With ~34 reveals the realized `â` has real spread, so a mean `â`
@@ -97,26 +101,31 @@ design's exposure to honest challenge reliability. It does.
 
 ```
    h      P(approved | unsafe)     P(approved | safe)
- 0.00                    0.630                  0.389
- 0.25                    0.632                  0.380
- 0.50                    0.612                  0.395
- 0.75                    0.595                  0.401
- 1.00                    0.597                  0.404
- none                    0.593                  0.406   <- no challenge round
+ 0.00                    0.598                  0.413
+ 0.25                    0.613                  0.388
+ 0.50                    0.608                  0.383
+ 0.75                    0.614                  0.397
+ 1.00                    0.606                  0.397
+ none                    0.592                  0.408   <- no challenge round
 ```
 
-A **3.7-point** range across the whole of `h`, against the 20-point range a fresh
-round-1 draw produced. O10 is defused.
+A **1.6-point** range across the whole of `h`, against the 20-point range a fresh
+round-1 draw produced. O10 is defused, and more decisively than the previous
+revision of this file showed: correcting the challenge decision to read the
+plurality rather than a drawn provisional more than halved the residual
+`h`-dependence, because a deterministic trigger removes the noise a coin flip was
+adding to *who* challenges.
 
 **But note the last row.** At these parameters the challenge round is a small net
-*negative* on false approval — 0.593 with no round at all, against 0.595–0.632 with
-one. The attacker always challenges a loss; the honest side challenges with
+*negative* on false approval — 0.592 with no round at all, against 0.598–0.614 with
+one. The penalty narrowed too (it was up to 3.9 points, now 2.2), but it did not
+change sign. The attacker always challenges a loss; the honest side challenges with
 probability `h`; and under §4.5 a challenge can only move the verdict toward
 whoever supplies votes. When the attacker is the reliable challenger, that
 asymmetry is theirs.
 
 The round is not worthless — it is the only correction path the architecture has,
-and §8.4 depends on it. But **it does not pay for itself on this metric**, and the
+and §8.4 and §8.5 depend on it. But **it does not pay for itself on this metric**, and the
 claim in design-v3 §1 that the round exists to correct §4's false-approval number
 is not supported at `q = 0.30, prior = 0.665`. It should be re-measured once
 `prior` is known.
@@ -129,16 +138,24 @@ who acts. Measured on the hostile share of reveals directly:
 
 ```
  honest always-on   no widen   with widen    shift   UNRESOLVED saved
-             10%       0.353        0.370   +0.017              29.5%
-             30%       0.353        0.371   +0.018              36.3%
-             60%       0.353        0.363   +0.010              43.2%
-            100%       0.353        0.348   −0.005              48.1%
+             10%       0.347        0.395   +0.049              28.1%
+             30%       0.347        0.389   +0.043              33.3%
+             60%       0.347        0.369   +0.023              40.4%
+            100%       0.347        0.351   +0.005              46.3%
 ```
 
-The shift exists and moves in the predicted direction, but it is **1.8 points at
-worst against 30–48 points of liveness**. The trade is strongly favourable and
-§3.3's conclusion survives even though its argument was incomplete. Recorded as
-priced rather than as a defect.
+The shift exists, moves in the predicted direction, and is **three times larger
+than the previous revision measured** — 4.9 points at worst against 28–46 points of
+liveness. The earlier figure was understated because the engine widened only round
+0; round 1 widens on the same schedule (§3.3 scopes it to neither round) and the
+effect compounds across both. Note also that the last row is now **positive**: even
+a fully always-on honest side loses a little composition to widening, where before
+it appeared to gain.
+
+The trade is still strongly favourable and §3.3's conclusion survives. But the
+margin is 6:1, not 17:1, and this is the finding most likely to move again if the
+model of *who is awake at minute 12* is refined. Recorded as priced, with the
+price now known to be higher than it looked.
 
 ## D. F9 bites hardest at the *small* end
 
@@ -147,15 +164,15 @@ size it was calibrated for. Calibrated for 1,000:
 
 ```
  registry   E[cohort]   P(approved)   P(unresolved)
-      250          10         0.052           0.919
-      500          20         0.565           0.087
-    1,000          40         0.599           0.000
-    2,000          80         0.630           0.000
-   10,000         400         0.615           0.000
+      250          10         0.049           0.922
+      500          20         0.575           0.092
+    1,000          40         0.605           0.000
+    2,000          80         0.586           0.000
+   10,000         400         0.597           0.000
 ```
 
 **Below the calibration size the system stops working**, not gracefully: at 250
-moderators the expected cohort is 10 against `MIN_COMMITS` 16, and 92% of cases end
+moderators the expected cohort is 10 against `MIN_COMMITS` 16, and 92.2% of cases end
 `UNRESOLVED(NO_TURNOUT)`. That is the launch condition, and it is the one the spec
 does not survive.
 
@@ -274,14 +291,17 @@ unanimous one under `A/N`.
 **What it costs.** P(safe content rejected), no attacker:
 
 ```
- prior     A/N        â     shift
- 0.665   0.232    0.244    +0.012
- 0.850   0.051    0.072    +0.021
- 0.950   0.006    0.009    +0.003
- 0.990   0.000    0.004    +0.004
+ prior       â
+ 0.665   0.265
+ 0.850   0.074
+ 0.950   0.017
+ 0.990   0.005
 ```
 
-0.3 to 2.1 points, on the number this design is already weakest on, and
+Against `A/N` the same column read 0.232 / 0.051 / 0.006 / 0.000 before the
+challenge decision was corrected; the estimator's own contribution is 0.3 to 2.1
+points, measured on the previous engine. It lands on the number this design is
+already weakest on, and
 second-order against the 26–60% that honest error contributes to it (§F). The
 distortion is bounded — at `N = 34` the two rules differ by at most 1.4 points, and
 symmetrically about `â = 0.5` — and it is largest exactly where the evidence is

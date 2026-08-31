@@ -87,6 +87,12 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §3.1 — **the eligibility predicate is guarded on block height, not on the
+>   value `blockhash` returns** (I29, second instance). Unguarded it does not fail
+>   when the seed is unreadable: `H(…, 0, m)` is a good hash, so it silently
+>   selects a set computable by anyone from the moment the case exists. The seed
+>   block does not exist for the first three blocks of **every** commit phase, so
+>   this was not a drift edge case.
 > - §5.5 — **settlement is pulled per moderator, not swept per case** (I20).
 >   The committer count has no ceiling, so a sweep funded by a fixed fraction of a
 >   fixed fee is unbounded on one side and a case can become unprofitable to
@@ -472,12 +478,71 @@ test scales with whatever the parameter turns out to be.
 ### 3.1 The predicate
 
 ```
-eligible(m, c, r)  iff  H(ELIGIBILITY_DOMAIN, chainId, contract,
-                          caseId, roundSeed(c, r), m) < threshold(c, r, now)
+eligible(m, c, r)  iff  eligSeedBlock(c,r) < block.number
+                                          ≤ eligSeedBlock(c,r) + BLOCKHASH_HORIZON
+                   and  H(ELIGIBILITY_DOMAIN, chainId, contract,
+                          caseId, roundSeed(c, r), m) < threshold(c, r)
 ```
 
 Evaluated **off-chain** by each moderator and verified on-chain only when they
 commit. The contract never enumerates the eligible set — see §3.6.
+
+**The first line is the whole of this section's correction, and I29 already
+required it.** An earlier revision had the hash and no height guard at all. §7.3
+reasons carefully that `blockhash` returning zero is ambiguous — it means *expired*
+and it means *has not happened yet* — but it reasons about the **outcome** seed
+only. The eligibility seed had the same ambiguity, no guard, and one property that
+makes it worse: `H(…, 0, m)` is a perfectly good hash, so an unguarded predicate
+does not fail. **It silently selects a different eligible set**, and that set is
+computable by anyone from the moment the case exists.
+
+Both ambiguous states occur, and the one at the head occurs **every round**:
+
+```
+eligSeedBlock  = roundOpen + SEED_LAG                        = roundOpen + 2
+readable       = roundOpen + 3  ..  roundOpen + 258          (SEED_LAG + HORIZON)
+commit phase   = roundOpen + 0  ..  roundOpen + 240          (commitBlocks, §1)
+
+head:  3 blocks, EVERY round, where the seed block does not exist yet
+tail: 18 blocks of margin before the seed expires
+```
+
+**The head gap is the serious one.** For the first three blocks of every commit
+phase the seed block has not been produced, so an unguarded implementation
+evaluates every moderator against `roundSeed = 0` — a set that depends only on
+`caseId`, and is therefore precomputable at submission, hours ahead. An attacker
+computes which of their identities pass under the zero seed for every live case and
+commits in those blocks. Everyone else is waiting for a seed that does not exist
+yet. **That is not a tail edge case reachable under drift; it is every round, by
+construction**, and it hands the opening of each cohort to whoever is watching for
+it — the always-on party §3.3 and FINDINGS §C are already about.
+
+**Both guards are block-height comparisons, never observations of the returned
+hash** (I29). A guard phrased as "the seed is unavailable" is true in both states
+and distinguishes neither, which is the defect I29 was written from — in the
+*other* seed, one section over.
+
+**When the tail guard fires, the failure is graceful.** Commits revert for the
+remainder of the phase, turnout is whatever arrived before it, and a thin round
+ends `UNRESOLVED(NO_TURNOUT)` — free retry, no debit for anyone (§4.8, and the
+non-reveal debit does not apply there either). A round that loses its seed loses
+its votes, not its participants' bonds.
+
+**The arithmetic constraint, now that both sides are in blocks** (§0, I31):
+
+```
+commitBlocks  ≤  SEED_LAG + BLOCKHASH_HORIZON  =  258
+```
+
+At `BLOCK_TIME = 5 s` a 20-minute window is 240 blocks, so the margin is **18
+blocks** and the bound on `BLOCK_TIME` is `1200 / 258 = 4.651 s`. `RulesetGovernor`
+must validate it: a governance change below that bound does not fail loudly, it
+re-points the tail of every commit window at a zero seed.
+
+**The head gap is not a defect to be closed but a cost to be stated.** A moderator
+cannot evaluate eligibility before the seed exists; that is arithmetic, not a rule.
+So the *usable* commit window is `commitBlocks − SEED_LAG − 1` = **237 blocks**,
+and §1's twenty minutes is the scheduled length rather than the workable one.
 
 ### 3.2 Domain separation
 
@@ -1945,7 +2010,13 @@ a state its justification does not describe is a defect whatever the payoff
 table says** — pricing is not a substitute for a correct condition.
 
 Generalized as **I29**: no guard may be expressed as an observation whose value is
-the same in states the guard is meant to separate. Disjointness (I18) does not
+the same in states the guard is meant to separate. **§3.1 was the second instance
+and it was live when I29 was written** — the eligibility seed had the identical
+ambiguity, no guard at all, and a worse failure mode: an unguarded outcome-seed
+read terminates a case, while an unguarded eligibility read *succeeds* against a
+publicly precomputable eligible set. Writing the invariant in this section did not
+find it in the next one, which is the argument for I33's mechanical form over
+another prose generalization. Disjointness (I18) does not
 catch this — the two `DRAW` guards *are* disjoint under the correct reading; the
 defect was one guard being true in a state its own justification does not
 describe.
@@ -2429,8 +2500,8 @@ property.
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10, and **largely defused rather than open**. §4.5's single-randomness rule flattens the whole of `h` to 1.6 points of false approval (FINDINGS §B), against the 20 a fresh round-1 draw produced. The old framing here — *"halves the false-approval rate or nearly doubles it"* — described the fresh-draw regime and was left standing after the rule that ended it. What remains open is not `h` but the finding underneath: the challenge round is a small net **negative** on false approval at every `h` measured, and is kept because it is the only correction path §8.4 and §8.5 have |
 | `CHALLENGE_BOND` | Sizing only, and **one job now that §4.6 made it unconditional**. It used to have to price a frivolous challenge *and* stay affordable for a single-identity dissenter — two requirements pulling opposite ways on one knob, and the conditional forfeit made the effective price differ between the two parties in the wrong direction. Unconditional, both parties face the same number, so it is a single question: what are twelve hours of the submitter's latency and one round of cohort attention worth? §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and it needs none to the reserve either — §5.3 removed that coupling |
-| `BLOCK_TIME`, and the bound the hybrid creates | §1. Denominating the schedule in blocks removed a *safety* dependence on block time (§7.2) and left a *scheduling* one: `BLOCK_TIME` sets how long a window is in wall-clock terms for the human moderators §10's honest-accuracy row is about. Wrong by 50% and windows are 50% off; nothing terminates that would not have. **But it carries one hard bound, which the previous revision could not even express:** the eligibility seed must survive its own commit window, `SEED_LAG + commitBlocks ≤ BLOCKHASH_HORIZON`, i.e. `BLOCK_TIME ≥ COMMIT_WINDOW / (BLOCKHASH_HORIZON − SEED_LAG)` = **4.72 s** at a 20-minute window. At the working 5 s the margin is **14 blocks**, which is thin, and sizing it is open work — see the row below. `RulesetGovernor` must validate the bound; a governance change that violates it silently re-points every eligibility test at a zero seed |
-| Eligibility seed vs commit window | The 14-block margin above. It is now an arithmetic relation between two block counts rather than a hidden dependence on an assumed block time, which is what makes it statable at all. §3.1 has no equivalent of §7.3's "unavailable is not a test", so what happens when `blockhash(eligSeedBlock)` expires mid-window is unspecified: `H(..., 0, m)` is a perfectly good hash, so the eligible set would silently change to a publicly precomputable one at a known height. **Open, and tracked separately from this row because widening the margin and guarding the expiry are different fixes** |
+| `BLOCK_TIME`, and the bound the hybrid creates | §1. Denominating the schedule in blocks removed a *safety* dependence on block time (§7.2) and left a *scheduling* one: `BLOCK_TIME` sets how long a window is in wall-clock terms for the human moderators §10's honest-accuracy row is about. Wrong by 50% and windows are 50% off; nothing terminates that would not have. **But it carries one hard bound, which the previous revision could not even express:** the eligibility seed must survive its own commit window, `commitBlocks ≤ SEED_LAG + BLOCKHASH_HORIZON = 258` (§3.1), i.e. `BLOCK_TIME ≥ 1200 / 258` = **4.651 s** at a 20-minute window, with **18 blocks** of margin at the working 5 s. `RulesetGovernor` must validate it; a change below the bound does not fail loudly, it re-points the tail of every commit window at a zero seed. **This row previously read 4.72 s and 14 blocks**, from arithmetic that put `SEED_LAG` on the wrong side of the inequality — quoted from the port assessment rather than derived here, which is the I33 failure this document had just finished writing down |
+| Eligibility seed vs commit window | **Closed as a correctness question, open as a sizing one.** §3.1 now carries the height guards I29 required, so a seed that has expired *or has not happened yet* reverts a commit instead of silently re-pointing eligibility at `roundSeed = 0`. What remains is sizing: 18 blocks of tail margin is thin, and the 3-block head gap costs 1.25% of every commit window and cannot be removed — a moderator cannot evaluate a seed that does not exist. Both shrink if `BLOCK_TIME` falls or `COMMIT_WINDOW` rises, which is why `RulesetGovernor` validates the bound rather than the spec assuming it |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | `d`, and the two upper bounds nobody had written next to each other | §5.1, §7.3. `d` has an upper bound from **viability** — honest voting is rational only while `d/share < prior/(1−prior)`, which is 1.99 at `prior = 0.665` and 19 at `prior = 0.95` — and a second from **poke dominance** at a unanimous tally, `d/share < f(â)/(1−f(â))`, which is 2.86 at `N = 1` and rises steeply with `N`. The two come from unrelated arguments in different sections and are within 45% of each other at the borderline prior. **Which one binds depends on the unmeasured quantity:** they cross at `prior = f(2/3) = 0.741`, below which viability is tighter and above which poke dominance is. Neither is load-bearing for I24 — §7.3's Claim is carried by the submitter, who has no `d` — but a sweep of `d` should see both, and FINDINGS §E currently sweeps to 10.0 without either |

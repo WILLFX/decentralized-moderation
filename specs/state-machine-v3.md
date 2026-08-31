@@ -87,6 +87,12 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §5.3 / §9 — **every quantity a rule reads is re-derivable at the site that uses
+>   it, and no number appears whose source is not named** (I33). `reveals1` was
+>   written as a bare name with no field behind it, and its only available binding
+>   activated the whole challenge reserve on every *unchallenged* case. It is
+>   derived now, and zero on that path by arithmetic rather than by a reset nobody
+>   performs.
 > - §4.8 — **every obligation names the condition under which it fires** (I30), and
 >   there are no groups. Sorting them into *reads nothing / tally / verdict* put the
 >   challenge reserve in two places at once — it is sized by the tally and triggered
@@ -627,8 +633,13 @@ struct Case {
     uint32  paramsVersion;     // I27 — the immutable parameter block in force at
                                //   submission. Every debit this case produces is
                                //   computed from it, never from the live values
-    uint128 pot;               // initial pot; grows by the reserve on challenge
-    uint128 challengeReserve;  // escrowed; refunded or activated
+    uint128 pot;               // the initial pot, and it never grows: the
+                               //   reserve is added at SETTLEMENT, not held
+                               //   here (§5.3). An earlier comment said "grows
+                               //   by the reserve on challenge", which was the
+                               //   rule before the activation became proportional
+    uint128 challengeReserve;  // escrowed throughout; refunded, or activated in
+                               //   part at settlement (§5.3)
     uint40  phaseDeadline;     // a BLOCK HEIGHT, not a timestamp (§0)
     uint40  eligSeedBlock;     // armed at round open
     uint40  outcomeSeedBlock;  // armed at submission, from the SCHEDULED heights
@@ -1144,14 +1155,14 @@ at the debit site.
 
 **Why the groups had to go.** They partitioned obligations by what each *reads*,
 assuming every obligation reads exactly one of the three. The reserve activation
-reads two: the **tally** for its size (`reveals1 / reveals0`) and the **verdict**
+reads two: the **tally** for its size (round-1 reveals over round-0) and the **verdict**
 for whether it happens at all — it offsets the dilution of a payment, and with no
 payment there is nothing to offset. The previous revision filed it under the tally,
 while §4.3 and §4.8 both filed it under the verdict. Those are not two readings of
 one rule; they are two rules, and the money does not balance between them.
 
 **The failure, with numbers.** A challenged case reaches `NO_RANDOMNESS` with
-`reveals0 = 30`, `reveals1 = 20`, `pot = 80`, `challengeReserve = 20`. Under the
+`reveals0 = 30`, 20 round-1 reveals, `pot = 80`, `challengeReserve = 20`. Under the
 grouping, the activation fires: `min(20, floor(80·20/30)) = 20` moves into `pot`.
 The value-flow block below then refunds `pot + challengeReserve` in full. **Twenty
 is paid out twice against an escrow that holds it once.** That is an insolvency,
@@ -1528,6 +1539,7 @@ there is nothing left for an external prize to buy here.
 ### 5.3 Payment
 
 ```
+reveals1  = (pooledApprove + pooledReject) − reveals0     -- round-1 reveals
 activated = min( challengeReserve , floor(pot · reveals1 / reveals0) )
 P         = pot + activated
 W         = votes matching `verdict`, from either round
@@ -1536,10 +1548,32 @@ remainder = P − share · W                 -> maintenance reserve, never to mo
 challengeReserve − activated              -> refunded to the submitter
 ```
 
+**`reveals1` is derived, not stored, and that is the whole of the fix.** An earlier
+revision wrote it as a bare name. It is not a field: §4.1 has `revealsThisRound` and
+`reveals0` and nothing else, so the only binding available to an implementer is
+`revealsThisRound` — and `TALLY → COMMIT` resets that for round 1 while
+`TALLY → DRAW` does not. **On the unchallenged path `revealsThisRound` still holds
+round 0's count**, so
+
+```
+activated = min(reserve, floor(pot · reveals0 / reveals0)) = reserve
+```
+
+and the entire challenge reserve activates into the pot of a case nobody
+challenged. The submitter's refund of `challengeReserve − activated` is zero, on
+most cases, which is the exact inverse of what the next paragraph says this rule is
+for. An implementer who binds it that way is not misreading the specification; the
+specification does not say.
+
+Written as `(pooledApprove + pooledReject) − reveals0` it is **zero on the
+unchallenged path by arithmetic**, not by a reset someone has to remember to
+perform, and both operands are fields §4.1 declares and every path maintains.
+
 `reveals0 ≥ 1` is guaranteed by the `REVEAL(r=0) → TALLY` guard, so the division is
-total. Both counts are **tally facts, fixed at reveal close and independent of the
-verdict** — the reserve must not become a second quantity a party can steer by
-choosing an outcome (I30).
+total wherever this formula runs — and by §4.8's table it runs only where a verdict
+was drawn, which is downstream of that guard. Both counts are **tally facts, fixed
+at reveal close and independent of the verdict** — the reserve must not become a
+second quantity a party can steer by choosing an outcome (I30).
 
 **The reserve activates in proportion to the dilution it exists to offset.** Its
 job (design-v3 §2.1) is that opening a challenge must not tax the round-0 voters by
@@ -2087,6 +2121,7 @@ the original draw.
 | **I30** | **Every obligation names the condition under which it fires, and a terminal fires exactly those whose condition it meets** (§4.8's table). Magnitudes are unconstrained — an obligation may compute its size from anything the terminal holds; only the condition decides *whether*. An earlier form sorted obligations into three groups by what they read, and the partition did not fit its members: the reserve activation reads the tally for its size and the verdict for whether it happens at all, so it was filed under the tally by §9 and under the verdict by §4.3 and §4.8, and twenty units of reserve were paid out twice. **A condition is a property of the obligation; a group is a property of the partition** — and a new rule can be mis-filed into a group, where it can only fail to state a condition, which is visible |
 | **I31** | **No comparison in this specification spans two units of time.** A deadline is denominated in blocks iff a block-denominated chain constant can expire inside it; wall-clock quantities are records or lifecycle delays that no block constant runs inside. The single wall-clock→block conversion happens once, at case creation, from a pinned parameter (§1 `BLOCK_TIME`, §4.3), and no rule reads it afterwards. **A conversion inside a comparison is a defect even when its constant is correct**, because correctness of the constant is a property of the chain on the day and not of the specification |
 | **I32** | **Only the case that created a claim on a bond may discharge it, and only the logic that created that case may act on it.** `liabilities` is a sum of records, never a figure a caller states. A property about *authorization*, not about arithmetic: conservation can balance while attribution is wrong, which is how v1's P0-2 drained escrow inside a single contract. Discharge capability is separable from creation capability and cannot be revoked from a logic holding an open claim, or retiring a contract would strand every moderator who voted under it |
+| **I33** | **Every quantity a rule or an argument reads is re-derivable, at the site that uses it, from something this document defines — and no number appears whose source is not named.** A parameter's source is §1; a case field's is §4.1 and a moderator field's §2.1; a measurement's is a named `FINDINGS` section *and* the run that produced it; a derived constant's is its formula **and the estimator it was computed under**. A number with no cited source is a defect whether or not it is currently correct, because nothing tells the next revision which numbers it has just invalidated. Unlike I18–I21, I29 and I30 this is checkable mechanically, which is why it is worth having |
 
 I2 is inherited verbatim from v2. **I12 is not, any more** — its v2 phrasing is the
 one quoted above as wrong, and it was carried across three architectures without
@@ -2112,6 +2147,16 @@ locked stake permanently (I20), and a debit with no stated destination (I21).
 Stating the class rather than the instance is the difference between a fix and a
 property — the same lesson as the freeze bound, which was clamped at two call sites
 while a third existed.
+
+**I33 is the one that would have caught the last three.** I29's second clause reads
+*"no parameter's value is written outside §1"* — and it inherited the noun
+**parameter**. Not one of the quantities that then went wrong is a parameter:
+`reveals1` was a **field** with no declaration, §4.5's `h` table is a **measurement**
+bound to a run that has since been re-run, and `f(1/32) = 0.287%` is a **derived
+constant** bound to an estimator that has been replaced. I29 was written from a
+defect that happened to be a parameter, and the next three instances arrived
+wearing three different nouns. I33 quantifies over *sources* instead, which is the
+only category that covers all four.
 
 **I29 and I30 are the same move made twice more.** I29 came from a guard that read
 `blockhash` and I30 from a terminal that skipped a debit, and neither is phrased in

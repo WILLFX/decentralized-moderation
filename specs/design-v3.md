@@ -154,8 +154,8 @@ excluded from, and was a coordination trap. The job is done structurally instead
 (`state-machine-v3` §4.5). An unchanged tally yields an identical verdict, so there is no second draw
 to buy, and the verdict is monotone in the tally — adding votes can move it only
 toward the side that was added. An attacker who lost round 0 at `a₀ = 0.3125` needs
-a median of **21** Approve votes to flip it, against **zero** for a 23.2% chance
-under a fresh draw.
+a median of **22** Approve votes to flip it, against **zero** for a 24.6% chance
+under a fresh draw (`state-machine-v3` §4.5, exact `Beta(2,2)` quantiles).
 
 **Funding: a prefunded, refundable challenge reserve.**
 
@@ -641,11 +641,6 @@ because no tally existed — not merely because no draw occurred, which is also 
 of `NO_RANDOMNESS` and does not earn it one. `state-machine-v3` §10 carries the permanence of
 `REJECTED` as open work, blocked on the honest-accuracy measurement rather than on
 a parameter sweep.
-
-**A policy-version bump must not reopen rejections.** Scoping the reservation to
-`policyVersion` as written would make every ruleset change a scheduled amnesty that
-an attacker can simply wait for. Rejections persist across versions; only an
-explicit re-review case reopens one.
 
 **A policy-version bump must not reopen rejections.** Scoping the reservation to
 `policyVersion` as written would make every ruleset change a scheduled amnesty that

@@ -1032,7 +1032,7 @@ is that no incentive argument here has a degenerate branch: §7.3's
 *every* tally under `â`, and both were ties at a unanimous one under `A/N`.
 
 **What it costs.** `simulation/v3/FINDINGS-v3.md` §G measures it. False rejection of
-safe content with no attacker rises by 0.4 to 2.1 points depending on `prior`; the
+safe content with no attacker rises by 0.3 to 2.1 points depending on `prior`; the
 amplifier's crossover (§A) and the honest-accuracy table (§E6) move within noise.
 The cost is real, it lands on the number this design is already weakest on (§10,
 the permanence of `REJECTED`), and it is second-order against the 26–60% that
@@ -1056,16 +1056,18 @@ moves `a`, and can only move the verdict *toward the side they added*. **There i
 no second roll to buy.** The only way to change the answer is to change the
 evidence, which is what the round is for.
 
-What that costs an attacker who lost round 0 at `a₀ = 0.3125` (10 Approve, 22
-Reject), measured over 20,000 draws:
+What that costs an attacker who lost round 0 at 10 Approve, 22 Reject — `a₀ =
+0.3125`, `â₀ = 11/34 = 0.3235`, which is the number the draw actually reads. The
+median of three uniforms is `Beta(2,2)` whose CDF is `f` itself, so these are exact
+quantiles rather than a simulation (I33):
 
 ```
 Approve votes needed to flip the verdict
-    median  21        10th pct  3        90th pct  98
-    47.1% of the time they need more than 22 — parity in the pooled tally or worse
-    6.9%  of the time two votes suffice
+    median  22        10th pct  4        90th pct  103
+    48.8% of the time they need more than 22 — parity in the pooled tally or worse
+    6.7%  of the time two votes suffice
 
-under a fresh round-1 draw they need ZERO extra votes for a 23.2% chance
+under a fresh round-1 draw they need ZERO extra votes for a 24.6% chance
 ```
 
 So the rule converts *buy another lottery ticket* into *buy a majority of the
@@ -1119,8 +1121,11 @@ stops depending on a quantity that lives outside the contract.
   than pricing it.
 
 **With replacement is still required**, and now trivially: `u[0..2]` are
-independent, so a side holding one revealed vote keeps `f(1/32) = 0.287%`. Without
-independence a 31–1 tally would decide with certainty, contradicting I12.
+independent, so a side holding one revealed vote keeps `f(â) = 0.997%` at `â = 2/34`.
+Without independence a 31–1 tally would decide with certainty — though since §4.5
+took the draw against `â`, so would a 31–1 tally *with* replacement under the old
+`A/N`, and the estimator now carries that argument. Sampling with replacement is
+still necessary; it stopped being what makes I12 true.
 
 The implementation must guard `N > 0` explicitly: `MIN_REVEALS` is gone (§4.8), so
 `N ≥ 1` is now the only thing standing between the draw and a division by zero, and
@@ -1236,7 +1241,7 @@ debits and the retry rule.
 |---|---|---|---|
 | `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** — commits are blind | free, full refund |
 | `NO_REVEALS` | commits cleared the gate and `pooled == 0` at reveal close | **yes**, but only by holding *every* commit | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
-| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **no** — and by nobody who could gain: the debits below make poking dominant for the plurality-losing revealers, and §8.4's reservation makes it dominant for the submitter on *either* plurality | **no retry.** The claim carries `REJECTED`'s reservation by reference (§8.4, I26); the pot is refunded less maintenance |
+| `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **not by any party who can reach it.** Poking is dominant for the submitter at every tally (§7.3) and for the plurality-losing revealers at every non-unanimous one, so no coalition that *wants* the expiry can also produce it. **The plurality-winning revealers do gain** — they pay no debit either way and their gain is the gap between `f(â)` and certainty — and that residual is stated below rather than denied here | **no retry.** The claim carries `REJECTED`'s reservation by reference (§8.4, I26); the pot is refunded less maintenance |
 
 **There is exactly one quorum gate and it is on commits.** Commits are made blind —
 the tally does not exist yet — so no committer can steer it toward a result they
@@ -1262,9 +1267,9 @@ side; withholding removes it, which strictly lowers that side's probability —
 
 ```
 tally     P(your side) if you reveal    if you withhold
-13A/7R                        0.7183             0.6928
-10A/10R                       0.5000             0.4606
- 6A/14R                       0.2160             0.1713
+13A/7R                        0.6995             0.6752
+10A/10R                       0.5000             0.4643
+ 6A/14R                       0.2393             0.1983
 ```
 
 — *and* forfeits `REVEAL_BOND` (§5.2). A censor who withholds now removes their own

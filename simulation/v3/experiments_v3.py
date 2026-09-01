@@ -190,6 +190,63 @@ def e7_estimator(base: ParamsV3) -> None:
     print("    honest error contributes to it (§F).")
 
 
+def e8_permanence(base: ParamsV3) -> None:
+    """H8 — is permanent `REJECTED` defensible, and does the recourse reach it?
+
+    §8.5's re-review reuses `u` and pools the tally, so `a_hat` converges on
+    `prior` — not on the truth. A case lost because `median(u)` landed ABOVE the
+    population's true support can never be reopened successfully, however many
+    votes arrive. A flip is possible iff `a_hat0 < median(u) < prior`.
+    """
+    print("\nE8  H8 — permanence, and how far the recourse actually reaches")
+    print("    A re-review pools votes at the same `prior`, so â climbs toward")
+    print("    `prior` and stops. Lost draws with median(u) > prior are final.\n")
+    print(f"    {'prior':>7} {'P(rejected)':>12} {'flippable':>11} "
+          f"{'IRRECOVERABLE':>15}")
+    rng = random.Random(9)
+    for prior in (0.665, 0.75, 0.85, 0.95, 0.99):
+        rej = flip = 0
+        n = 60000
+        for _ in range(n):
+            N = 34
+            A = sum(1 for _ in range(N) if rng.random() < prior)
+            ah, m = a_hat(A, N), sorted(rng.random() for _ in range(3))[1]
+            if ah > m:
+                continue
+            rej += 1
+            if ah < m < prior:
+                flip += 1
+        fr = flip / max(rej, 1)
+        print(f"    {prior:>7.3f} {rej/n:>12.3f} {fr:>10.1%} "
+              f"{rej/n*(1-fr):>15.1%}")
+    print("\n    The last column is what §8.4's permanence actually costs: safe")
+    print("    content excluded with NO recourse that can reach it. It spans four")
+    print("    orders of magnitude across the plausible range of `prior`.\n")
+
+    print("    And the other side — if permanence were conditional on the")
+    print("    plurality, so a REJECTED case whose cohort said Approve could retry:")
+    print(f"    {'q':>6} {'prior':>7} {'P(win one draw)':>17} {'P(win | retry)':>16}")
+    rng = random.Random(17)
+    for q, prior in ((0.30, 0.665), (0.30, 0.95), (0.0, 0.665)):
+        n = 40000
+        win = extra = 0
+        for _ in range(n):
+            N = 34
+            att = sum(1 for _ in range(N) if rng.random() < q)
+            A = att + sum(1 for _ in range(N - att) if rng.random() > prior)
+            ah, m = a_hat(A, N), sorted(rng.random() for _ in range(3))[1]
+            if ah > m:
+                win += 1
+            elif A > N - A:
+                extra += 1
+        print(f"    {q:>6.2f} {prior:>7.3f} {win/n:>17.1%} {(win+extra)/n:>16.1%}")
+    print("\n    Both columns are governed by the SAME quantity. At prior 0.95")
+    print("    permanence costs 0.7% and conditional retry buys an attacker 0.7")
+    print("    points. At 0.665 permanence costs 23% and retry buys them 23.")
+    print("    `prior` does not decide which failure dominates — it decides")
+    print("    whether either failure exists.")
+
+
 def e5_viability(base: ParamsV3) -> None:
     """Does honest participation survive the debit? The v2 question, re-asked."""
     print("\nE5  Viability — the confidence a debit demands, against a 66.5% prior")

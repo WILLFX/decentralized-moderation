@@ -619,19 +619,26 @@ excluding that content would have been wrong. Three tickets reject ordinary cont
 2.0% of the time at `N = 34`, so a permanent reservation is defensible without an
 escape hatch, and the optional-stopping surface closes with it.
 
-**The margin this argument runs on is much thinner than it was written to be**, and
-it is the weakest load-bearing claim in this document. Three things have moved
-under it since:
+**That argument is dead, and `state-machine-v3` §8.6 replaces it rather than
+patching it.** Three things moved under it: the figure was 0.725% and is 1.97%
+(2.47% exact) because the draw is taken against `â` (§3); it assumes `a = 0.95`,
+which is exactly the unmeasured honest-accuracy quantity FINDINGS' headline is
+about; and it assumes independent error, where FINDINGS §F shows correlation costs
+the most in the clean case this paragraph describes.
 
-- The figure was **0.725%** and is **1.97%**, because the draw is taken against `â`
-  rather than `A/N` (§3). Nearly a factor of three, from arithmetic alone.
-- It assumes `a = 0.95` — that ordinary content draws a 95% honest tally.
-  `simulation/v3/FINDINGS-v3.md` measures 26–60% false rejection across the
-  plausible range of `prior`, and the 0.95 assumption is exactly the unmeasured
-  honest-accuracy figure the headline of that document is about.
-- It assumes independent error. §F of the same document shows correlated error
-  costs the *most* in the clean, no-attacker case — the regime this paragraph
-  describes.
+**What permanence actually costs is not the false-rejection rate but the part of it
+the recourse cannot reach.** A re-review pools votes at the population's own rate,
+so `â` converges on `prior` and a case lost to a `median(u)` above `prior` can never
+be reopened. FINDINGS §H: **22.8% of safe content irrecoverably excluded at
+`prior = 0.665`, 0.7% at 0.95.**
+
+**Permanence stays anyway, and the reason is not that the rate is acceptable.**
+Conditioning it on the plurality — the natural repair, since most false rejections
+at a low `prior` are cases the cohort approved and the lottery overrode — hands a
+hostile 30% optional stopping worth 22.6 points at `prior = 0.665` and 0.7 at 0.95.
+**Both sides are governed by the same quantity and both vanish together.** `prior`
+does not decide which failure dominates; it decides whether either exists. No rule
+about who may resubmit fixes a cohort that misjudges a third of what it sees.
 
 The residual case is the honest publisher unlucky enough to land in that band.
 They are not left without recourse: `REJECTED` is reopened by an explicit re-review

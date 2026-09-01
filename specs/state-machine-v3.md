@@ -87,6 +87,12 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §8.6 — **permanence stays, and the argument it used to rest on is gone.** What
+>   it costs is not the false-rejection rate but the part of it §8.5's recourse
+>   cannot reach — 22.8% of safe content at `prior = 0.665`, 0.7% at 0.95. The
+>   plurality-conditional repair buys an attacker the same margin it saves a
+>   publisher, and both vanish as `prior` rises: `prior` decides whether either
+>   failure exists, not which one dominates.
 > - §8.1 — **the index is written at the transition that establishes a terminal**,
 >   and there are four of those (I15). The rule named `FINALIZED` alone, so the
 >   three `UNRESOLVED` rows wrote the index during settlement — the coupling §8.1
@@ -2373,10 +2379,8 @@ and, with §7.3's debits on the plurality-losing revealers, it puts a **second
 independent party** on the poke, one who is guaranteed to exist and to be watching.
 
 **By reference, not by copy.** The row's content is *equality with `REJECTED`*, not
-permanence. `REJECTED`'s permanence rests on design-v3 §8's 0.725% false-rejection
-figure, which `simulation/v3/FINDINGS-v3.md` §F locates as requiring `prior ≈ 0.96`,
-`rho ≈ 0` and `q = 0` simultaneously, and measures at 26–60% instead. That
-re-examination is open (§10). Writing this row as a reference means it moves when
+permanence. See §8.6 for what that permanence now rests on, which is not the rate it
+used to be argued from. Writing this row as a reference means it moves when
 that row moves, instead of becoming a second site that has to be found and changed
 — which is the failure the freeze bound made when it was clamped at two call sites
 while a third existed (§9).
@@ -2398,12 +2402,6 @@ The version under which a case was decided is still recorded, on the *case* (§4
 and on the index entry (§8.2), because a reader needs to know which rules produced
 a verdict. It just cannot be part of the identity of the claim. Only a re-review
 case — a new claim carrying evidence — reopens a rejection.
-
-**Correction is a separate claim. Re-review is not.** A *removal* case asks a
-different question about the same content — is a listed entry still fit to be
-listed — so it runs the same engine, produces `REMOVED` or `RETAINED`, and earns
-its own key through `actionType`. A *re-review* asks the **same** question again,
-and everything below follows from that.
 
 ### 8.5 Re-review — reopening a claim, not creating one
 
@@ -2449,11 +2447,22 @@ a challenge round arriving late, and it inherits all three of §4.5's consequenc
   that already won, so the next one is harder. If the content is genuinely unsafe,
   every attempt makes the tally more lopsided; if it is genuinely safe, new voters
   flip it. **The mechanism converges rather than being replayed.**
-- **The bar scales with how wrong the first cohort would have to have been.** A
-  34–0 rejection needs 34-odd votes to move; an 18–16 rejection needs three. Recall
-  that false rejection lives at the near-ties (`f(â)` is a coin flip there), so
-  **the recourse is cheapest exactly where the original was least certain**. That
-  falls out of the arithmetic; it is not tuned.
+- **It reaches an unrepresentative cohort and not an unlucky draw**, and an
+  earlier revision of this list claimed the opposite. Votes arriving at the
+  population's rate `p` drive `â` toward `p` and no further — `â = (A+1)/(N+2)`
+  with `A ≈ pN` converges on `p`, not on the truth. The case was lost because
+  `median(u) > â₀`. So a reopening can flip it **iff `â₀ < median(u) < p`**: the
+  first cohort under-sampled real support and more votes recover it. If
+  `median(u) > p`, no number of reopenings ever flips the case, because `â` has
+  nowhere left to climb.
+
+  Measured (`simulation/v3/FINDINGS-v3.md` §H): at `prior = 0.665`, **82% of false
+  rejections are outside the recourse entirely**. The list previously said the bar
+  "scales with how wrong the first cohort would have to have been" and that the
+  recourse is "cheapest exactly where the original was least certain". Both were
+  wrong, and in the direction that flatters the rule: the recourse is narrowest
+  exactly where false rejection is commonest, because both are driven by the same
+  `prior`.
 
 **The prior tally is evidence, not participation.** Voters from an earlier opening
 have settled — they were paid or debited against the verdict that stood then, and a
@@ -2481,6 +2490,74 @@ the scarce resource and FINDINGS §D shows a thin registry. §10 carries it.
 re-review reads `REJECTED`, plus the fact that one is open — §8.3 already
 conditions `SUPER_SAFE` on that and needs it to be visible. Nothing is listed on
 the strength of a pending question.
+
+### 8.6 What permanence rests on, now that the rate is measured
+
+**The argument §8.4 inherited is dead.** design-v3 §8 justified permanent
+reservation with a 0.725% false-rejection rate: rare enough that permanently
+excluding that content is defensible. Three things have happened to that number.
+§4.5's estimator moved it to 1.97% (2.47% exact) from arithmetic alone. FINDINGS §F
+located the assumptions it needs — `prior ≈ 0.96`, `rho ≈ 0`, `q = 0`, all three at
+once. And FINDINGS §H now measures what permanence actually costs, which is not the
+false-rejection rate but the part of it **the recourse cannot reach** (§8.5):
+
+```
+prior     P(safe content rejected)    reachable by re-review    IRRECOVERABLE
+0.665                        0.279                     18.1%            22.8%
+0.750                        0.181                     24.8%            13.6%
+0.850                        0.083                     38.2%             5.1%
+0.950                        0.020                     66.4%             0.7%
+0.990                        0.004                     94.7%             0.0%
+```
+
+**Four orders of magnitude, and `prior` is unmeasured.** That is the whole of H8.
+
+**The obvious repair does not work, and measuring it is what settles this.** Most
+false rejections at a low `prior` are cases whose *plurality was Approve* and whose
+draw went the other way — the cohort said list it and the lottery overrode them.
+Conditioning permanence on the plurality is therefore the natural fix: a `REJECTED`
+case whose cohort approved it gets a fresh cohort and a fresh `u`. It is not
+steerable (commits are blind, §4.8) and it costs a full fee. But:
+
+```
+q      prior     P(attacker wins one draw)    P(wins | that retry exists)
+0.30   0.665                         54.3%                         76.9%
+0.30   0.950                         27.9%                         28.6%
+0.00   0.665                         27.7%                         28.4%
+```
+
+At `prior = 0.665` a hostile 30% gets `PLURALITY_APPROVE` on unsafe content 59% of
+the time, so the rule hands them optional stopping — 76.9% on one extra attempt,
+and reopening is unbounded. That is the surface §4.5 spent the architecture closing,
+reintroduced at the claim-key layer.
+
+**Both columns are governed by the same quantity, and that is the finding.** At
+`prior = 0.95` permanence costs 0.7% and the conditional retry buys an attacker 0.7
+points — **either rule is fine.** At 0.665 permanence costs 22.8% and the retry buys
+them 22.6 — **neither rule is fine.** `prior` does not decide which failure
+dominates. It decides whether either failure exists.
+
+**So permanence stays, and the reason is not that the rate is acceptable.** It is
+that no claim-key rule fixes this. At a low `prior` the mechanism is faithfully
+reporting a population that misjudges a third of the content it sees; whether the
+resulting exclusion is permanent or retryable changes who suffers, not whether the
+index is wrong. Retrying converges on the same `prior` (§8.5). The alternative is
+worse on the attacker side by the same margin it is better on the publisher side,
+and both margins vanish together as `prior` rises.
+
+**This closes H8 as a decision and leaves it open as a measurement.** The rule is
+not the problem, and changing it would be motion rather than progress. What the
+standing constraint blocks — deployment with material funds, and presenting the
+index as reliable safe-search certification — is precisely the regime where the
+rule's cost is real, and it stays blocked. **`measurement/prior/` is not a
+nice-to-have that would improve a parameter; it is the thing that decides whether
+this architecture is deployable at all.**
+
+**Correction is a separate claim. Re-review is not.** A *removal* case asks a
+different question about the same content — is a listed entry still fit to be
+listed — so it runs the same engine, produces `REMOVED` or `RETAINED`, and earns
+its own key through `actionType`. A *re-review* asks the **same** question again,
+and everything below follows from that.
 
 ---
 
@@ -2589,7 +2666,7 @@ property.
 | The plug-in residual in `f(â)` | §4.5. `f(â)` sits above the exact posterior predictive `E[f(θ)] = (A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))` at every tally but the tie — 4.1 points at `N = 1`, 0.15 at `N = 40`. Kept deliberately: three ticket comparisons are the senior reviewer's rule and the shape §4.5's argument is written in, and the exact form would be a third change to the core verdict arithmetic in one revision. **Every figure derived from `f` in either document inherits the over-claim** and is labelled with the estimator per I33. Re-openable on evidence, and the closed form is recorded in §4.5 so nobody derives it twice |
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document** |
-| Permanence of `REJECTED` | §8.4. It rests on design-v3 §8's false-rejection figure, which was **0.725% and is now 1.97%** — §4.5's estimator nearly tripled it from arithmetic alone, before any assumption is questioned. `simulation/v3/FINDINGS-v3.md` §F then locates even that as requiring `prior ≈ 0.96`, `rho ≈ 0` and `q = 0` **simultaneously**, measuring 26–60% instead across the plausible range. Two of the three are unmeasured and the third is assumed away elsewhere in the document. `UNRESOLVED(NO_RANDOMNESS)` now carries this row *by reference*, so whatever re-examination concludes moves both together. **Blocked on the honest-accuracy measurement, not on a parameter sweep** |
+| Permanence of `REJECTED` | **Closed as a rule decision (§8.6); open as a measurement.** Permanence stays, and not because the rate is acceptable: FINDINGS §H measures what it costs as the *irrecoverable* share of false rejections — 22.8% of safe content at `prior = 0.665`, 0.7% at 0.95. The natural repair, conditioning permanence on the plurality, hands a hostile 30% optional stopping worth 22.6 points at the same low `prior` and 0.7 at the high one. **Both sides are governed by `prior` and both vanish together**, so no claim-key rule is what decides this. What remains open is the measurement, and the standing constraint already blocks the regime where the cost is real |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |
 | `h` | Not a contract parameter at all — design-v3 O10, and **largely defused rather than open**. §4.5's single-randomness rule flattens the whole of `h` to 1.6 points of false approval (FINDINGS §B), against the 20 a fresh round-1 draw produced. The old framing here — *"halves the false-approval rate or nearly doubles it"* — described the fresh-draw regime and was left standing after the rule that ended it. What remains open is not `h` but the finding underneath: the challenge round is a small net **negative** on false approval at every `h` measured, and is kept because it is the only correction path §8.4 and §8.5 have |

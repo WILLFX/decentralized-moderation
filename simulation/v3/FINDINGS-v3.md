@@ -325,6 +325,61 @@ content. `state-machine-v3` §10 carries the question of dropping it.
 
 ---
 
+## H. Permanence, and how far the recourse actually reaches
+
+`state-machine-v3` §8.4 makes `REJECTED` permanent and §8.5 makes a re-review the
+sole recourse. **The recourse is narrower than the spec claimed**, and measuring how
+much narrower is what decides H8.
+
+A re-review reuses `u` and pools votes into the same tally, so `â = (A+1)/(N+2)`
+with votes arriving at rate `prior` converges on **`prior`** — not on the truth. The
+case was lost because `median(u) > â₀`. So a reopening can flip it *iff*
+`â₀ < median(u) < prior`: the first cohort under-sampled real support and more votes
+recover it. Above `prior`, `â` has nowhere left to climb and no number of reopenings
+changes anything.
+
+```
+prior     P(safe content rejected)    reachable by re-review    IRRECOVERABLE
+0.665                        0.279                     18.1%            22.8%
+0.750                        0.181                     24.8%            13.6%
+0.850                        0.083                     38.2%             5.1%
+0.950                        0.020                     66.4%             0.7%
+0.990                        0.004                     94.7%             0.0%
+```
+
+**The recourse is narrowest exactly where false rejection is commonest**, because
+both are driven by the same `prior`. §8.5 previously claimed the opposite — that the
+bar "scales with how wrong the first cohort would have to have been" and the
+recourse is "cheapest where the original was least certain" — and that has been
+corrected.
+
+**The obvious repair costs the same as it saves.** Most false rejections at a low
+`prior` are cases whose plurality was Approve and whose draw went the other way, so
+conditioning permanence on the plurality looks like the fix. Measured against an
+attacker:
+
+```
+q      prior     P(attacker wins one draw)    P(wins | that retry exists)
+0.30   0.665                         54.3%                         76.9%
+0.30   0.950                         27.9%                         28.6%
+0.00   0.665                         27.7%                         28.4%
+```
+
+At `prior = 0.665` a hostile 30% gets `PLURALITY_APPROVE` on unsafe content 59% of
+the time, so the rule hands them optional stopping — and reopening is unbounded, so
+76.9% is a lower bound.
+
+**Both columns are governed by the same quantity.** At `prior = 0.95` permanence
+costs 0.7% and the retry buys an attacker 0.7 points: either rule is fine. At 0.665
+permanence costs 22.8% and the retry buys 22.6: neither is. **`prior` does not
+decide which failure dominates — it decides whether either failure exists**, which
+is why §8.6 keeps the rule and treats the measurement as the blocking item.
+
+This is the headline of this document arriving at the claim-key layer. No rule about
+who may resubmit fixes a cohort that misjudges a third of what it sees.
+
+---
+
 ## What this engine does not model
 
 - **Bond dynamics across cases.** Debits and rewards accumulate; capacity is meant

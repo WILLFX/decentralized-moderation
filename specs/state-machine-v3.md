@@ -87,6 +87,11 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §8.1 — **the index is written at the transition that establishes a terminal**,
+>   and there are four of those (I15). The rule named `FINALIZED` alone, so the
+>   three `UNRESOLVED` rows wrote the index during settlement — the coupling §8.1
+>   itself calls v2's mistake — and at launch registry sizes those rows are 92% of
+>   cases. §5.5 sharpened it: pulled settlement may never complete at all.
 > - §8.2 / §8.2b — **an index entry has a content-derived identity, and zero is
 >   never a writable value** (I29). A claim key names a *set* of entries and cannot
 >   name a member, so deletion had nothing stable to address; and the status enum
@@ -831,18 +836,18 @@ role, and only in the one terminal that has a tally and no verdict.
 |---|---|---|---|
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; **convert the three windows to block counts from `BLOCK_TIME(c)` and pin them — the only wall-clock→block conversion in the specification (§0, §7.2)**; `round = 0`; arm both seeds (§7); `phaseDeadline = block.number + commitBlocks(c)`. **No moderator is selected, reserved, or notified on chain.** |
 | `COMMIT` **(r=0)** | `REVEAL` | `block.number ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = block.number + revealBlocks(c)` |
-| `COMMIT` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`. Nobody could have steered this — see §4.8 |
+| `COMMIT` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`; **write the index entry** in `O(MAX_TOPICS)` (§8.1). Nobody could have steered this — see §4.8 |
 | `COMMIT` **(r=1)** | `REVEAL` | `block.number ≥ phaseDeadline` | `phaseDeadline = block.number + revealBlocks(c)`. **No quorum gate in round 1** — §4.9 |
 | `REVEAL` **(r=0)** | `TALLY` | `block.number ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = block.number + challengeBlocks(c)` |
-| `REVEAL` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`. Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
+| `REVEAL` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`; **write the index entry** (§8.1). Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
 | `TALLY` | `TALLY` | `challenge()` (§3.5): `mayChallenge(caller)` (§2.4), `block.number < phaseDeadline`, `challenger == 0` | **registers only.** `challenger = msg.sender`; `openChallenges++`. Nothing is transferred — the bond is *covered*, not escrowed (§2.4). No phase change, no seed armed, no deadline moved. A second call reverts (I17) |
 | `TALLY` | `COMMIT` | `block.number ≥ phaseDeadline` and `challenger != 0` | `round = 1`; **`revealsThisRound = 0`; `commitsThisRound = 0`**; arm the round-1 **eligibility** seed from this scheduled close (§3.5b, §7.1); `phaseDeadline = block.number + commitBlocks(c)`. **`challengeReserve` is not touched** — it activates at settlement, in proportion to round-1 reveals (§5.3), so opening a round moves no value |
 | `TALLY` | `DRAW` | `block.number ≥ phaseDeadline` and `challenger == 0` | enter the waiting state. **Nothing is enabled in `DRAW` until `block.number > outcomeSeedBlock`** (§7.2) — on this path that is ~40 minutes away, because the seed block includes the round-1 windows whether or not round 1 runs |
 | `REVEAL` **(r=1)** | `DRAW` | `block.number ≥ phaseDeadline` | pool round-1 reveals. **No threshold** (§4.6), and none needed (§4.9) |
 | `DRAW` | `FINALIZED` | `outcomeSeedBlock < block.number ≤ outcomeSeedBlock + BLOCKHASH_HORIZON` | **store `outcomeEntropy = blockhash(outcomeSeedBlock)`**, then derive `u[0..2]` from it and evaluate `verdict` against the **pooled** tally (§4.5) — **the only randomness in the claim's life**, re-derived unchanged at any later re-review (§8.5); **`terminal = APPROVED | REJECTED`**; store `unanimousDraw`; pay `DRAW_BOUNTY`; `finalizedAt = now`. `CHALLENGE_BOND(c)` settles at the challenger's `claim()`; the reserve activation is O(1) and is computed here, at `FINALIZED`, because `share` depends on it (§4.6, §5.3, §5.5) |
-| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
-| `FINALIZED` | — | `claim(c, m)` | **per moderator, not per case** (§5.5). Settles one participant's claim: pay `share` if coherent, debit otherwise, discharge their claim record and decrement `openVoteCount` / `openChallenges` / `m.liabilities` (§2.4, I32). Permissionless, self-funded, order-independent. **There is no case-level `SETTLED`** — see below |
-| **`UNRESOLVED`** | — | **`claim(c, m)`** | **§4.8 — per-moderator discharge, same shape. Fire exactly the obligations whose requirement this terminal meets (§4.8's table, I30): no verdict was drawn, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate; `CHALLENGE_BOND(c)` is debited wherever one was registered; the non-reveal debit applies wherever a reveal phase opened, which is every reason except `NO_TURNOUT`; the incoherence debit applies wherever a settled side exists, which is `NO_RANDOMNESS` alone. Decrement `openVoteCount`, `openChallenges` and `m.liabilities` per §2.4; refund per §4.8. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
+| `DRAW` | `UNRESOLVED` | `block.number > outcomeSeedBlock + BLOCKHASH_HORIZON` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_RANDOMNESS`; **write the index entry, retaining the plurality** (§8.1, §8.2); pay `DRAW_BOUNTY` to the caller. **The pooled tally survives into settlement** — this is the one `UNRESOLVED` row that leaves one behind, and §4.8 settles every tally-derived obligation against it |
+| `FINALIZED` | — | `claim(c, m)` | **per moderator, not per case** (§5.5), and it never touches the index (§8.1, I15). Settles one participant's claim: pay `share` if coherent, debit otherwise, discharge their claim record and decrement `openVoteCount` / `openChallenges` / `m.liabilities` (§2.4, I32). Permissionless, self-funded, order-independent. **There is no case-level `SETTLED`** — see below |
+| **`UNRESOLVED`** | — | **`claim(c, m)`** | **§4.8 — per-moderator discharge, same shape. The index entry was written at the transition into `UNRESOLVED` and settlement does not touch it (§8.1, I15). Fire exactly the obligations whose requirement this terminal meets (§4.8's table, I30): no verdict was drawn, so nothing is paid, no listing appears, no reputation is credited and `challengeReserve` does not activate; `CHALLENGE_BOND(c)` is debited wherever one was registered; the non-reveal debit applies wherever a reveal phase opened, which is every reason except `NO_TURNOUT`; the incoherence debit applies wherever a settled side exists, which is `NO_RANDOMNESS` alone. Decrement `openVoteCount`, `openChallenges` and `m.liabilities` per §2.4; refund per §4.8. Nothing is "returned" — `REVEAL_BOND` was covered, never escrowed (§5.2)** |
 
 Every transition is permissionless. `DRAW_BOUNTY` pays for the draw poke — the only
 transition with a hard expiry — and `CLAIM_BOUNTY` for finalization. **Neither
@@ -1376,7 +1381,9 @@ every reason      ->  refund pot + challengeReserve IN FULL — the reserve
                       never activates here, because activation requires a
                       verdict and none was drawn (§5.3)
                       pay nobody, list nothing, credit no reputation
-                      index entry written as UNRESOLVED (§8.2)
+                      -- the index entry was ALREADY written, at the
+                         transition that set terminal = UNRESOLVED (§8.1,
+                         §4.3). Settlement never touches the index
                       decrement openVoteCount, openChallenges and
                       m.liabilities by what this case added   (§2.4, I20)
                       retain finalizationBounty and maintenance
@@ -2158,11 +2165,35 @@ difference between this rule and the one it replaced.
 
 ### 8.1 Finality is independent of payout
 
-At `FINALIZED` — **not** when moderators are paid — the index is written in bounded
-`O(MAX_TOPICS)` work, and `share` is fixed.
+**At the transition that establishes a terminal** — not when moderators are paid —
+the index is written in bounded `O(MAX_TOPICS)` work, and `share` is fixed.
 
-Moderator accounting (`claim()`, reputation, debits) happens afterwards and may be
-batched. **A reader must never wait for moderator payouts to see a result.** v2
+**There are four such transitions, not one.** This section said "at `FINALIZED`",
+and §4.8 then had the index entry for an `UNRESOLVED` case written during
+settlement — which is the exact coupling the next paragraph names as v2's mistake,
+reintroduced in the three rows the paragraph did not mention:
+
+```
+DRAW           -> FINALIZED    (APPROVED | REJECTED)   -- was covered
+COMMIT  (r=0)  -> UNRESOLVED   (NO_TURNOUT)            -- was not
+REVEAL  (r=0)  -> UNRESOLVED   (NO_REVEALS)            -- was not
+DRAW           -> UNRESOLVED   (NO_RANDOMNESS)         -- was not
+```
+
+**And the uncovered rows are the common case, not the tail.** At FINDINGS §D's
+launch registry of 250 the expected cohort is 10 against `MIN_COMMITS` 16, so
+**92% of cases terminate on the first of those rows.** The rule covered the path a
+healthy market takes and left the path the launch market takes.
+
+§5.5 makes it worse than it was when the audit found it: settlement is now pulled
+per moderator and may *never* complete, so an index write bundled into it is behind
+an unbounded number of independent calls that no one is obliged to make. §8.2
+argues at length that a reader must distinguish "judged, undrawn" from "never
+submitted" — and until the entry exists, they cannot.
+
+Moderator accounting (`claim(c, m)`, reputation, debits) happens afterwards, per
+participant, whenever each chooses. **A reader must never wait for moderator
+payouts to see a result.** v2
 wrote the index at the end of settlement and so coupled the two. v3 goes further
 than decoupling them: §5.5 removed the case-level settled state entirely, so there
 is no later moment for a reader to be waiting on.
@@ -2466,7 +2497,7 @@ the strength of a pending question.
 | **I12** | No tally admits a risk-free outcome: **both** outcomes have non-zero probability at every reachable tally, **at the moment every party's last decision is made**. Not *"every side with ≥ 1 revealed vote"* — that quantifier excludes the side with none, so it was vacuously true at exactly the unanimous tally where a party controlling every reveal bought certainty. `â ∈ (0,1)` for every finite `N` (§4.5) is what makes the corrected form true. Every revealed vote in either round is counted in the tally the verdict is evaluated against, and no randomness is public before the last vote is cast — a published `u` makes the outcome a step function of the tally and this invariant false for round 1 |
 | **I13** | `withdraw` implies `liabilities(m) == 0` — *every* outstanding claim discharged, not only open votes |
 | **I14** | No moderator's loss is another moderator's gain. This covers value **removed from `bond`**, value **withheld from a payment**, and any change to a divisor that raises someone else's share — the three are the same transfer written three ways |
-| **I15** | The index status at `FINALIZED` does not change as settlement batches proceed |
+| **I15** | The index status is written at **the transition that establishes a terminal** — all four of them (§8.1) — and no settlement changes it. Not "at `FINALIZED`", which named one of the four and left the other three writing the index during settlement; and not "as settlement batches proceed", which named a mechanism §5.5 removed. A re-review (§8.5) changes the status only by establishing a new terminal, which is the same rule and not an exception to it |
 | **I16** | Every state predicate in §2.2 and §4.2 is mutually exclusive |
 | **I17** | At most one challenge round exists **per opening** of a claim. A re-review is a second opening (§8.5) and carries its own single challenge round; what it may never do is produce a second *randomness*, which is I5 and is the property this one was standing in for. Stated per claim, it would have forbidden the recourse §8.4's permanence depends on |
 | **I18** | The guards of §4.3 are pairwise disjoint: in every reachable state **at most one** row is enabled. Not "exactly one" — no row is enabled in `COMMIT`, `REVEAL` or `DRAW` before the relevant deadline or block, including the interval between reveal close and `outcomeSeedBlock` |

@@ -87,6 +87,11 @@ are listed there with what would decide them.
 >   tally-derived debits and pays nothing. That is what makes poking the draw
 >   dominant for the plurality-losing side and closes I24 against *inaction*, which
 >   the previous revision left to the size of `DRAW_BOUNTY`.
+> - §8.2 / §8.2b — **an index entry has a content-derived identity, and zero is
+>   never a writable value** (I29). A claim key names a *set* of entries and cannot
+>   name a member, so deletion had nothing stable to address; and the status enum
+>   began at `PLURALITY_APPROVE`, so an unwritten slot read as a live interim
+>   status in the section whose whole purpose is that those are distinguishable.
 > - §3.1 — **the eligibility predicate is guarded on block height, not on the
 >   value `blockhash` returns** (I29, second instance). Unguarded it does not fail
 >   when the seed is unreadable: `H(…, 0, m)` is a good hash, so it silently
@@ -203,7 +208,7 @@ are listed there with what would decide them.
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
 | `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever pokes the draw, or its expiry (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). **It is a convenience, not the reason the poke happens** — §7.3 makes poking dominant for the plurality-losing side at any bounty, including zero. |
 | `CLAIM_BOUNTY` | 1 % of fee | Paid to whoever triggers finalization. |
-| `MAX_TOPICS` | 5 | Topics per submission. |
+| `MAX_TOPICS` | 5 | Topics per submission. Unused slots in the fixed-width field read 0, which is why `topicKey == 0` is not a legal topic (§8.2b, I29). |
 | `FEE_BASE`, `FEE_PER_TOPIC` | *(open — §10)* | Must pay `TARGET_COHORT` voters above gas. |
 
 **The submission payment has four components** (design-v3 §2.1):
@@ -2167,12 +2172,57 @@ is no later moment for a reader to be waiting on.
 **Decision.** `IndexRegistry` carries status as a distinct value:
 
 ```
-PLURALITY_APPROVE | PLURALITY_REJECT | APPROVED | REJECTED | UNRESOLVED
+NONE = 0 | PLURALITY_APPROVE | PLURALITY_REJECT | APPROVED | REJECTED | UNRESOLVED
 ```
 
 The alternative — withhold the entry until `FINALIZED` — was rejected because it
 throws away the one-hour answer that the whole architecture is built to produce,
 and because a reader cannot distinguish "not yet decided" from "never submitted".
+
+**`NONE = 0` is the whole of that argument and an earlier revision left it out.**
+The enum began at `PLURALITY_APPROVE`, so an unwritten slot and a case whose
+plurality leans Approve **read identically** — in the section whose entire stated
+purpose is that those two are distinguishable. A safe-search client would have been
+right to treat every never-submitted item as carrying a live interim status. The
+zero slot is not a sixth status; it is what makes the other five mean anything.
+
+### 8.2b Every index identifier is derived from content
+
+**Decision.** An entry is addressed by
+
+```
+entryKey  = H(claimKey, topicKey)
+topicKey  = H(canonical topic string)          -- never 0; see below
+```
+
+**A claim key cannot address an entry, and nothing else was specified.** §8.4 keys
+*claims*; §8.1 writes up to `MAX_TOPICS` entries per claim, one per topic. So the
+claim key names a set of entries and cannot name a member of it — and deletion
+needs to name a member: removing an entry from a topic's list is a swap-and-pop
+against a position map, and a position map needs a stable key. The port assessment
+had to invent one to write `deleteEntry` at all, which is the sign that it was
+missing rather than implicit.
+
+**Content-derived, not a counter, and v1 paid a CRITICAL to learn it.** P0-1a found
+that a logic-local identifier breaks across a migration: a replacement contract
+starts its counter fresh and collides with entries the old one wrote. §8.4 already
+applies the lesson to claims — the key is content and topics, and `policyVersion`
+was deliberately excluded so a reservation survives a ruleset change. **The lesson
+was applied to claims and not to entries**, and entries are the thing a migration
+actually has to keep addressing.
+
+The property, so it is not half-applied again: **every identifier this index
+exposes is a function of content. None is a function of insertion order, of a
+counter, or of any state a particular logic contract owns.** A replacement contract
+re-derives the same identifier from the same content rather than issuing a new one.
+
+**`topicKey` is never 0, and neither is any position the map stores.** A claim
+carries up to `MAX_TOPICS` topics in a fixed-width slot, so unused slots read 0; if
+0 were also a legal topic, "no topic here" and "the topic whose key is 0" would be
+the same read. The same holds one level down: a position map returning 0 for
+"absent" cannot distinguish absent from *first in the list*. Both are I29 — a read
+whose value is identical in two states it must separate — and the second is
+`M2.6-F1` verbatim, which this codebase has already fixed once.
 
 Clients choose their own risk: a cautious safe-search filter includes `APPROVED`
 only; an evidence-oriented client may show the plurality with its tally. The
@@ -2430,7 +2480,7 @@ the strength of a pending question.
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
 | **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
-| **I29** | No guard is expressed as an observation whose value is the same in states the guard must separate, and no parameter's value is written outside §1. Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe |
+| **I29** | **No read — a guard, a sentinel, a status, a lookup — returns a value that is the same in two states the read must separate.** Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe. Stated for *guards* first, from `blockhash` returning zero for an expired block and for a future one (§7.3) — and the next three instances were not guards: the same ambiguity unguarded in §3.1's eligibility predicate, a status enum with no `NONE` so an unwritten entry read as a live plurality (§8.2), and a topic key of 0 indistinguishable from an unused slot (§8.2b). **The noun was "guard"** |
 | **I30** | **Every obligation names the condition under which it fires, and a terminal fires exactly those whose condition it meets** (§4.8's table). Magnitudes are unconstrained — an obligation may compute its size from anything the terminal holds; only the condition decides *whether*. An earlier form sorted obligations into three groups by what they read, and the partition did not fit its members: the reserve activation reads the tally for its size and the verdict for whether it happens at all, so it was filed under the tally by §9 and under the verdict by §4.3 and §4.8, and twenty units of reserve were paid out twice. **A condition is a property of the obligation; a group is a property of the partition** — and a new rule can be mis-filed into a group, where it can only fail to state a condition, which is visible |
 | **I31** | **No comparison in this specification spans two units of time.** A deadline is denominated in blocks iff a block-denominated chain constant can expire inside it; wall-clock quantities are records or lifecycle delays that no block constant runs inside. The single wall-clock→block conversion happens once, at case creation, from a pinned parameter (§1 `BLOCK_TIME`, §4.3), and no rule reads it afterwards. **A conversion inside a comparison is a defect even when its constant is correct**, because correctness of the constant is a property of the chain on the day and not of the specification |
 | **I32** | **Only the case that created a claim on a bond may discharge it, and only the logic that created that case may act on it.** `liabilities` is a sum of records, never a figure a caller states. A property about *authorization*, not about arithmetic: conservation can balance while attribution is wrong, which is how v1's P0-2 drained escrow inside a single contract. Discharge capability is separable from creation capability and cannot be revoked from a logic holding an open claim, or retiring a contract would strand every moderator who voted under it |
@@ -2460,6 +2510,14 @@ locked stake permanently (I20), and a debit with no stated destination (I21).
 Stating the class rather than the instance is the difference between a fix and a
 property — the same lesson as the freeze bound, which was clamped at two call sites
 while a third existed.
+
+**I29's own history is the argument for stating a relation and not a category.**
+It was written about *guards*, from one `blockhash` read, and its next three
+instances were an unguarded predicate, a status enum and a sentinel topic — none of
+them a guard. Broadening it to *reads* did not require a new idea; it required
+deleting a noun. Every generalization in this section has had the same shape, and
+the only one that resists it is I33, which quantifies over sources rather than over
+any kind of thing.
 
 **I33 is the one that would have caught the last three.** I29's second clause reads
 *"no parameter's value is written outside §1"* — and it inherited the noun

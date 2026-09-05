@@ -135,7 +135,11 @@ are listed there with what would decide them.
 >   by the verdict — and the two rules paid the same twenty units out twice. A
 >   condition is a property of the obligation; a group is a property of the
 >   partition, and only one of those a new rule can be mis-filed into.
-> - §2.4 — **a claim on a bond is a record, not a subtraction** (I32). Only the case
+> - §2.4 — **a claim on a bond is a record, not a subtraction** (I32), and a
+>   broken logic is **condemned** rather than force-discharged: once condemned,
+>   anyone may release any of its claims, forever. Partial application is not a
+>   state, so there is no list to lose and no moderator left worse off than before
+>   the recovery ran. Only the case
 >   that created it may discharge it, and only the logic that created that case may
 >   act on it. I1's "structural" covered the arithmetic and not the authorization:
 >   with `liabilities` a bare scalar the release amount had to come from the caller,
@@ -405,10 +409,63 @@ the act of retiring a contract. So the two are separate capabilities, and
 registry knows the count; the rule is a comparison, not a governance discipline.
 
 The residual is a logic that *will not* discharge — a bug, not an attacker. The
-only recovery is a governance action, and it should be named as the hammer it is:
-a **timelocked, per-logic force-discharge that simultaneously bars that logic from
-debiting**, so it cannot release liabilities and then take bond against them. It is
-in §10 with the rest of the open work, unhidden.
+recovery is **condemnation**, and it is one sentence:
+
+> **Once a logic is condemned, any of its claims may be discharged by anyone,
+> forever.**
+
+Governance sets one timelocked flag. `dischargeCondemned(m, caseId, kind)` is then
+permissionless, releases one claim, and is idempotent — no list, no ordering, and
+callable by the affected moderator themselves.
+
+**Condemnation adds a discharge path; it does not remove one.** The condemned logic
+keeps `MAY_DISCHARGE` and may still settle claims it holds legitimately. So the
+rule above — that `MAY_DISCHARGE` is not revocable while a claim is open — is never
+excepted, and this section has no caller that breaks its own constraint.
+
+**What this replaces, and why.** An earlier revision specified a *force-discharge*:
+a timelocked action that walked a caller-supplied list of the logic's claims,
+released them, and set `caps = 0` to bar the logic from debiting. Three things were
+wrong with it and only one was the thing this document had worried about:
+
+- **The bar was redundant.** Force-discharge deletes the claim, and §2.4's own
+  construction — *you may draw against the claim you hold and nothing else* —
+  already makes `debit` revert on a deleted claim. It was a rule stacked on a
+  construction that gave the property.
+- **The release and the bar had different arities, and the harm was the total
+  one.** The registry holds a *count* of a logic's claims, not an enumeration, so
+  the release was `O(claims)` from a caller-supplied list while the bar was `O(1)`
+  and immediate. On a partial list the harm landed in full on the first
+  transaction and the repair only if governance finished the walk. **A moderator
+  omitted from the list was strictly worse off than before the hammer fell** —
+  liability standing, and the only contract that could discharge it now stripped
+  and barred. The hammer stranded the people it existed to un-strand, and a lost
+  list stranded them permanently, because the registry can say how many claims
+  remain and not which.
+- **It set `caps = 0` while `openClaims != 0`**, which is the one case the
+  paragraph above forbids. It was the sole caller that broke its own rule.
+
+Condemnation has none of these because **partial application is not a state**.
+There is nothing to leave half-done, so there is no list to lose and no ordering to
+get wrong. It is also smaller: measured at **7,796 bytes against 8,209** for the
+force-discharge in the same probe.
+
+**Condemnation forgives the debits, and that is a decision rather than an
+oversight.** Releasing a claim without assessing what it covered pardons the
+pending penalty, so every moderator with an open claim under a condemned logic
+withdraws clean. The registry cannot do otherwise: a claim record holds `amount`
+and `logic` (§2.1) and **not the case's outcome**, which lives in the contract that
+is broken. Charging the maximum instead would debit moderators who were about to be
+*paid*, for a defect in code they do not control.
+
+The cost is a payoff, and it should be stated rather than discovered: **wedge a
+logic, hold losing positions, and governance's only recovery hands your bond back
+intact.** It is bounded by the attacker's own liabilities, which are bounded by
+their bond, and it requires them to first find a wedge in an audited contract —
+that is a bug class, not a strategy. But *"a bug, not an attacker"* is a claim
+about the **cause**, and whether it stays true is decided by the recovery's payoff
+structure. This one pays. `RulesetGovernor`'s timelock and the visibility of a
+condemnation are what stand between that and a routine move.
 
 **`liabilities` is accrued, never recomputed, and the coefficients are the
 *case's*.** `LAMBDA(c)` and `CHALLENGE_BOND(c)` are the values pinned into case `c`
@@ -2676,7 +2733,7 @@ property.
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | `d`, and the two upper bounds nobody had written next to each other | §5.1, §7.3. `d` has an upper bound from **viability** — honest voting is rational only while `d/share < prior/(1−prior)`, which is 1.99 at `prior = 0.665` and 19 at `prior = 0.95` — and a second from **poke dominance** at a unanimous tally, `d/share < f(â)/(1−f(â))`, which is 2.86 at `N = 1` and rises steeply with `N`. The two come from unrelated arguments in different sections and are within 45% of each other at the borderline prior. **Which one binds depends on the unmeasured quantity:** they cross at `prior = f(2/3) = 0.741`, below which viability is tighter and above which poke dominance is. Neither is load-bearing for I24 — §7.3's Claim is carried by the submitter, who has no `d` — but a sweep of `d` should see both, and FINDINGS §E currently sweeps to 10.0 without either |
-| Logic lifecycle and the force-discharge hammer | §2.4, I32. Two capabilities per authorized logic: `MAY_CREATE` and `MAY_DISCHARGE`. Revoking the first retires a contract; revoking the second while it holds an open claim strands every moderator who voted under it, so the registry refuses it — a comparison against a per-logic open-claim count, not a governance discipline. The residual is a logic that *cannot* discharge, which is a bug and not an attacker, and whose only recovery is a **timelocked per-logic force-discharge that simultaneously bars that logic from debiting** — release-then-take is the obvious abuse and the two must move together. Open: whether the timelock is `RulesetGovernor`'s existing one, and what a moderator can do during it |
+| Logic lifecycle, and what condemnation forgives | §2.4, I32. The capability half is settled and **measured free**: `MAY_CREATE` / `MAY_DISCHARGE` as a bitmap plus an `openClaims` counter came in **486 bytes cheaper** than the `LogicState` / `authEpoch` / `logicLiabilities` machinery it replaces. Condemnation replaced the force-discharge and is 413 bytes smaller again. What stays open is not the mechanism but its **price**: condemnation pardons every pending debit under the condemned logic, because the registry holds a claim's amount and not its outcome. That is defensible — the alternative debits moderators who were about to be paid — and it sets a payoff for wedging a logic deliberately. Open: whether the timelock is `RulesetGovernor`'s existing one, and whether a pardon should cost the condemned logic's *submitters* anything |
 | Cohort size and the dilution of `share` | **The settlement-cost half of this is closed** — §5.5 pulls settlement per moderator, so there is no aggregate a fixed bounty must cover and I32's per-claim record is paid for by the claimant it belongs to. What survives is payment adequacy. `d(c)` is pinned at submission (I27) while `share = P/W` falls with realized turnout, so a party who inflates the cohort worsens **everyone's** `d/share` ex post — and commits are blind, so nobody who committed can respond. FINDINGS §D measures the organic version (a registry of 10,000 against a `T` calibrated for 1,000 gives an expected cohort of 400 and a fortieth of the per-voter pay); the adversarial version costs the attacker `LAMBDA` in locked capital per identity and puts their own identities on the same bad ratio. **Open, and it is a `FEE_BASE` question, not an I20 one** |
 | Claim-key squatting | `submit` reserves a claim key (§4.3) with no check on who may claim it, so any content hash can be held for the price of a fee, repeatedly. The mirror of design-v3 O1: the key is simultaneously too tight against substitutes and too loose about who may take it |
 

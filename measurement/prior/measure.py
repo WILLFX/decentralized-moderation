@@ -70,6 +70,66 @@ def run(configs: Sequence[Config], items: Sequence[Item],
     return r
 
 
+@dataclass
+class CaseRecord:
+    """One settled testnet case, which is what this measurement actually reads.
+
+    `votes` maps a moderator identity to their revealed vote. `truth` is the
+    adjudicated answer, supplied for a SAMPLE of cases — not for all of them.
+    The chain supplies everything else for free.
+    """
+    id: str
+    votes: Dict[str, bool]
+    truth: bool
+    guidelines_version: int = 1
+
+
+def band_of(approve: int, reject: int) -> str:
+    """Difficulty band from the tally itself — `â`'s distance from a coin flip.
+
+    **The cohort tells you which band a case is in.** There is no corpus to
+    construct and no difficulty to assign by hand: a case that split 17/17 was
+    hard for the people who judged it and a case that went 33/1 was not.
+
+    The honest caveat: this bands by *observed disagreement*, which is not
+    independent of the quantity being measured. If moderators are poor, tallies
+    split and everything lands in `hard`. That makes the band informative about
+    the cohort, not about some objective difficulty of the item — and it is
+    still the right stratifier, because §8.6's permanence and §4's false-approval
+    rate are both functions of what the cohort did.
+    """
+    n = approve + reject
+    if n == 0:
+        return "empty"
+    d = abs((approve + 1) / (n + 2) - 0.5)          # â, per state-machine §4.5
+    return "easy" if d >= 0.30 else "medium" if d >= 0.15 else "hard"
+
+
+def from_testnet(cases: Sequence[CaseRecord]) -> Tuple[Result, List["_Item"]]:
+    """Build the same `Result` the model path produces, from settled cases.
+
+    A moderator is a rater and a case is an item, so `prior_by_band`, `rho` and
+    `rho_is_usable` below apply unchanged — they were never model-specific.
+    """
+    r = Result()
+    items: List[_Item] = []
+    for c in cases:
+        a = sum(1 for v in c.votes.values() if v)
+        items.append(_Item(c.id, c.truth, band_of(a, len(c.votes) - a)))
+        for mod, vote in c.votes.items():
+            r.votes[(mod, c.id)] = bool(vote)
+    return r, items
+
+
+@dataclass
+class _Item:
+    """The minimum `prior_by_band` and `rho` need. A hand-built corpus is one
+    way to produce these; a testnet is the other, and the better one."""
+    id: str
+    truth: bool
+    difficulty: str
+
+
 def prior_by_band(res: Result, items: Sequence[Item]) -> Dict[str, Tuple[float, int]]:
     """`P(vote == truth)`, per difficulty band. **Never report one average.**
     §8.4 makes `REJECTED` permanent on the strength of a false-rejection rate;

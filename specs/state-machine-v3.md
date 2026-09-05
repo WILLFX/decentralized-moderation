@@ -252,7 +252,8 @@ struct Moderator {
                              //   construction rather than by discipline (I23)
     uint40  maturesAt;
     uint40  exitRequestedAt;
-    uint32  trackEpoch;
+    uint40  trackEpoch;      // when `track` was last decayed — §6. A TIMESTAMP,
+                             //   like the other lifecycle fields (§0, I31)
     uint128 track;           // reputation, WAD-scaled (§6)
 }
 ```
@@ -286,11 +287,23 @@ Bond is the working capital that penalties consume and rewards replenish.
 | State | Predicate |
 |---|---|
 | `NONE` | `stake == 0` |
-| `PENDING` | `stake > 0 && now < maturesAt` |
+| `PENDING` | `stake > 0 && now < maturesAt && exitRequestedAt == 0` |
 | `ACTIVE` | `stake > 0 && now ≥ maturesAt && exitRequestedAt == 0` |
-| `EXITING` | `exitRequestedAt != 0` |
+| `EXITING` | `stake > 0 && exitRequestedAt != 0` |
 
-Four states, mutually exclusive by construction. **There is no `SUSPENDED`.** What
+Four states, mutually exclusive by construction — **and an earlier revision of this
+table was not.** `PENDING` carried no `exitRequestedAt` conjunct while `ACTIVE`
+did, and §2.3 requires a `PENDING → EXITING` transition, without which stake is
+locked for `MATURATION` with no way out. **A `PENDING` moderator who took that
+transition satisfied both predicates**, so I16 was false in the table I16 quantifies
+over. `EXITING` gains `stake > 0` for the same reason: exclusivity should hold
+structurally rather than depend on `withdraw` remembering to clear the flag, which
+it does anyway for §2.3's separate reason.
+
+Found by implementation (`contracts/src/v3/StakeRegistry.sol`), not by reading —
+and note *how*: a test asserting on an `if`-`else` implementation of `stateOf`
+could never have caught it, because an if-else chain is exclusive by construction
+whatever the predicates say. It has to be asserted against the raw predicates. **There is no `SUSPENDED`.** What
 varies for an `ACTIVE` moderator is whether they are *solvent enough to commit*
 (§2.4), which is a predicate over `bond` and `openVoteCount` rather than a state.
 
@@ -1958,8 +1971,37 @@ forfeits by being abandoned.** Maturation alone is not churn resistance, because
 funded attacker pre-ages identities in bulk. What makes replacement expensive is
 that track record does not transfer.
 
+**The decay is a function of elapsed time, not of settlements.**
+
+```
+track  =  track · DECAY^(now − trackEpoch)  +  1        on a coherent settlement
+trackEpoch = now
+```
+
+`trackEpoch` (§2.1) is what makes this expressible; an earlier revision declared
+the field and gave it no job, which is how the rule below came to be written
+per-settlement instead.
+
+**Two things were wrong with decaying per settlement, and only the first was
+noticed.** Decay applied once per settled case, with the factor pinned per case
+(I27), is **order-dependent**: with factors `a ≠ b`, settling A-then-B gives
+`t·a·b + b + 1` and B-then-A gives `t·a·b + a + 1`, a gap of exactly `a − b`. §5.5
+makes settlement permissionless and unordered, so the caller picks. That breaks the
+requirement stated in this section's own last line.
+
+The second is worse and is the reason time is the right variable rather than a
+repair to the ordering. **Per-settlement decay decays with activity, and this
+section says it should decay with abandonment.** Every settlement multiplies the
+accumulated track by `DECAY < 1`, so a moderator who participates heavily erodes
+their own history fastest while one who stops participating erodes nothing at all —
+the exact inverse of *"what an identity forfeits by being abandoned."* Time-based
+decay is order-independent **because** it measures the right thing: two settlements
+in the same block apply `DECAY^0` whichever way round they land, and settlements at
+different times apply the elapsed interval, which no caller chooses.
+
 Whether `d` should scale with `track` is `design-v3` O6 and triage D4, and it is
-open. The update must be order-independent whatever is decided.
+open. `DECAY` itself is open (§10). The update is order-independent whatever is
+decided, and now by construction rather than by instruction.
 
 ---
 
@@ -2730,6 +2772,7 @@ property.
 | `CHALLENGE_BOND` | Sizing only, and **one job now that §4.6 made it unconditional**. It used to have to price a frivolous challenge *and* stay affordable for a single-identity dissenter — two requirements pulling opposite ways on one knob, and the conditional forfeit made the effective price differ between the two parties in the wrong direction. Unconditional, both parties face the same number, so it is a single question: what are twelve hours of the submitter's latency and one round of cohort attention worth? §2.4 covers it in `liabilities()`, so no relation to `BOND_MIN` is required and it needs none to the reserve either — §5.3 removed that coupling |
 | `BLOCK_TIME`, and the bound the hybrid creates | §1. Denominating the schedule in blocks removed a *safety* dependence on block time (§7.2) and left a *scheduling* one: `BLOCK_TIME` sets how long a window is in wall-clock terms for the human moderators §10's honest-accuracy row is about. Wrong by 50% and windows are 50% off; nothing terminates that would not have. **But it carries one hard bound, which the previous revision could not even express:** the eligibility seed must survive its own commit window, `commitBlocks ≤ SEED_LAG + BLOCKHASH_HORIZON = 258` (§3.1), i.e. `BLOCK_TIME ≥ 1200 / 258` = **4.651 s** at a 20-minute window, with **18 blocks** of margin at the working 5 s. `RulesetGovernor` must validate it; a change below the bound does not fail loudly, it re-points the tail of every commit window at a zero seed. **This row previously read 4.72 s and 14 blocks**, from arithmetic that put `SEED_LAG` on the wrong side of the inequality — quoted from the port assessment rather than derived here, which is the I33 failure this document had just finished writing down |
 | Eligibility seed vs commit window | **Closed as a correctness question, open as a sizing one.** §3.1 now carries the height guards I29 required, so a seed that has expired *or has not happened yet* reverts a commit instead of silently re-pointing eligibility at `roundSeed = 0`. What remains is sizing: 18 blocks of tail margin is thin, and the 3-block head gap costs 1.25% of every commit window and cannot be removed — a moderator cannot evaluate a seed that does not exist. Both shrink if `BLOCK_TIME` falls or `COMMIT_WINDOW` rises, which is why `RulesetGovernor` validates the bound rather than the spec assuming it |
+| `DECAY` | §6. The per-second decay factor on `track`. Open, and it is the one parameter whose *shape* was decided by a defect rather than by an argument: an earlier revision decayed per settlement, which was both order-dependent and backwards — it eroded the history of moderators who participated and left abandoned identities untouched. Time-based decay fixes the direction; the rate is still a choice, and it prices how fast an abandoned identity stops being worth reusing |
 | `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | `d`, and the two upper bounds nobody had written next to each other | §5.1, §7.3. `d` has an upper bound from **viability** — honest voting is rational only while `d/share < prior/(1−prior)`, which is 1.99 at `prior = 0.665` and 19 at `prior = 0.95` — and a second from **poke dominance** at a unanimous tally, `d/share < f(â)/(1−f(â))`, which is 2.86 at `N = 1` and rises steeply with `N`. The two come from unrelated arguments in different sections and are within 45% of each other at the borderline prior. **Which one binds depends on the unmeasured quantity:** they cross at `prior = f(2/3) = 0.741`, below which viability is tighter and above which poke dominance is. Neither is load-bearing for I24 — §7.3's Claim is carried by the submitter, who has no `d` — but a sweep of `d` should see both, and FINDINGS §E currently sweeps to 10.0 without either |

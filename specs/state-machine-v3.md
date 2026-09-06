@@ -226,7 +226,7 @@ are listed there with what would decide them.
 | `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger (§3.3). |
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
 | `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever pokes the draw, or its expiry (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). **It is a convenience, not the reason the poke happens** — §7.3 makes poking dominant for the plurality-losing side at any bounty, including zero. |
-| `CLAIM_BOUNTY` | 1 % of fee | Paid to whoever triggers finalization. |
+| `CLAIM_BOUNTY` | 1 % of fee | Paid to whoever triggers finalization. **Retained, not paid, on every `UNRESOLVED` row (§4.8) — and §10 records that as an open question**, because those transitions are permissionless too and somebody poked them. |
 | `MAX_TOPICS` | 5 | Topics per submission. Unused slots in the fixed-width field read 0, which is why `topicKey == 0` is not a legal topic (§8.2b, I29). |
 | `FEE_BASE`, `FEE_PER_TOPIC` | *(open — §10)* | Must pay `TARGET_COHORT` voters above gas. |
 
@@ -1497,9 +1497,9 @@ activates only at settlement, in proportion to round-1 reveals (§5.3). No termi
 here draws a verdict, so nothing is paid, so nothing activates:
 
 ```
-every reason      ->  refund pot + challengeReserve IN FULL — the reserve
-                      never activates here, because activation requires a
-                      verdict and none was drawn (§5.3)
+every reason      ->  refund challengeReserve IN FULL — it never activates
+                      here, because activation requires a verdict and none
+                      was drawn (§5.3)
                       pay nobody, list nothing, credit no reputation
                       -- the index entry was ALREADY written, at the
                          transition that set terminal = UNRESOLVED (§8.1,
@@ -1507,6 +1507,20 @@ every reason      ->  refund pot + challengeReserve IN FULL — the reserve
                       decrement openVoteCount, openChallenges and
                       m.liabilities by what this case added   (§2.4, I20)
                       retain finalizationBounty and maintenance
+
+NO_TURNOUT,       ->  refund pot
+NO_RANDOMNESS
+
+NO_REVEALS        ->  CARRY the pot forward; do NOT refund it. §8.4 reserves
+                      the claim for RETRY_COOLDOWN and retries it with the
+                      pot carried forward and no fresh fee — which a refund
+                      makes impossible
+
+NO_TURNOUT,       ->  refund DRAW_BOUNTY. The draw is UNREACHABLE from both
+NO_REVEALS            rows, so it pays for a transition that cannot happen
+
+NO_RANDOMNESS     ->  DRAW_BOUNTY is PAID, to whoever poked the expiry
+                      (§4.3's DRAW -> UNRESOLVED row)
 
 NO_REVEALS,       ->  debit every non-revealer REVEAL_BOND(c)  (I25)
 NO_RANDOMNESS,        nothing is RETURNED — the bond was covered, never
@@ -1529,6 +1543,38 @@ NO_RANDOMNESS     ->  debit d(c) to every revealer on the losing side of the
                       index entry retains the published plurality beside the
                       UNRESOLVED status, since that is what was established
 ```
+
+**Two of those rows were added after the implementation found them, and both were
+contradictions rather than omissions.**
+
+**The pot.** An earlier revision of this block said *"refund pot + challengeReserve
+IN FULL"* on **every** reason. That contradicts §8.4's table, which retries
+`NO_REVEALS` with the *pot carried forward and no fresh fee* — a pot that was
+refunded cannot be carried, so the two rules could not both be followed.
+
+They are **not** economically equivalent, which is why this mattered rather than
+being a choice of wording: the same block *retains* `finalizationBounty` and
+maintenance, so refund-and-resubmit costs the submitter those two components on
+every cycle while carrying costs nothing. Under §4.8c a censor forcing `NO_REVEALS`
+would then levy his victim on each attempt — the exact outcome §8.4's row exists to
+prevent when it says *"the submitter did not cause it, so not levied either."*
+**§8.4 is the specific rule and it wins; this block is corrected to match.**
+
+**The draw bounty.** The fee splits five ways — `pot`, `challengeReserve`,
+`DRAW_BOUNTY`, `CLAIM_BOUNTY`, maintenance (§1, §4.3's submit row) — and this block
+named four, refunding two and retaining two. `DRAW_BOUNTY` appeared in neither list,
+so an implementer had to guess, and retaining it charges the submitter for a
+transition that is unreachable on a row this same section calls unsteerable and
+refunds in full. The rule that decides all four rows above:
+
+> **A bounty is refunded where the transition it pays for cannot occur, and paid
+> where that transition was performed.**
+
+> **Newly visible, and not settled here.** `CLAIM_BOUNTY` is retained on every
+> `UNRESOLVED` row, yet every terminal transition is permissionless and somebody
+> paid gas to poke it. Whether the finalization bounty should pay that poker on
+> those rows — as `DRAW_BOUNTY` already does on `NO_RANDOMNESS` — is a fee-schedule
+> change rather than a correction, so it is recorded in §10 and not decided here.
 
 The reason code is load-bearing rather than diagnostic: it decides both the debits
 above and the retry rule. `NO_TURNOUT` is a market problem nobody can cause,
@@ -2944,6 +2990,7 @@ property.
 | §8.3's 3/3 conjunct | Live since the estimator changed, and **arbitrary rather than meaningful**: under a unanimous tally the tickets are iid, so 3/3 versus 2/1 is a coin flip that excludes a random 7% of qualifying content at `N = 40` and 16% at `N = 16`. §8.3 argues against it in its own headline. Dropping it makes `SUPER_SAFE` a function of the tally alone, which is what that section says assurance should be — but it changes what a published assurance label promises, so it is a decision rather than a correction. **Open, and cheap to close either way** |
 | The plug-in residual in `f(â)` | §4.5. `f(â)` sits above the exact posterior predictive `E[f(θ)] = (A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))` at every tally but the tie — 4.1 points at `N = 1`, 0.15 at `N = 40`. Kept deliberately: three ticket comparisons are the senior reviewer's rule and the shape §4.5's argument is written in, and the exact form would be a third change to the core verdict arithmetic in one revision. **Every figure derived from `f` in either document inherits the over-claim** and is labelled with the estimator per I33. Re-openable on evidence, and the closed form is recorded in §4.5 so nobody derives it twice |
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
+| `CLAIM_BOUNTY` on `UNRESOLVED` | **Surfaced by the M2.7 implementation, not by review.** §4.8 retains the finalization bounty on all three `UNRESOLVED` rows, but every terminal transition is permissionless and somebody paid gas to poke it — and `DRAW_BOUNTY` is *paid* to exactly that poker on `NO_RANDOMNESS`. Either the two bounties are treated alike or §4.8 must say why not. Deliberately **not** decided when the pot and draw-bounty rows were corrected: those were contradictions, this is a fee-schedule change, and the two should not ride together |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document.** **Its required value rose with §4.8b and has not been recomputed:** the sizing assumed sixteen bonds because `MIN_COMMITS` was 16, and the gate is gone (§4.8c), so the same deterrence now has to come from delay alone against a single bond. §4.8c measures the exposure at 7.1% of cases at registry 100 and 0.33% at 250 — small, but it was **zero** before, so this row is no longer a tuning question that can be deferred with the others |
 | Permanence of `REJECTED` | **Closed as a rule decision (§8.6); open as a measurement.** Permanence stays, and not because the rate is acceptable: FINDINGS §H measures what it costs as the *irrecoverable* share of false rejections — 22.8% of safe content at `prior = 0.665`, 0.7% at 0.95. The natural repair, conditioning permanence on the plurality, hands a hostile 30% optional stopping worth 22.6 points at the same low `prior` and 0.7 at the high one. **Both sides are governed by `prior` and both vanish together**, so no claim-key rule is what decides this. What remains open is the measurement, and the standing constraint already blocks the regime where the cost is real |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |

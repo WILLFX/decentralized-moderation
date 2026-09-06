@@ -21,7 +21,7 @@ def main() -> None:
     print("Moderation v3 — three tickets, one randomness, one challenge round")
     print(f"registry={b.n_moderators}  cohort={b.target_cohort}  fee={b.fee}"
           f"  d={b.penalty_debit:.2f} ({b.debit_multiple}x pay)"
-          f"  MIN_COMMITS={b.min_commits}")
+          f"  min commits={b.min_commits} (no quorum gate — §4.8b)")
     print("=" * 78)
     e5_viability(b)
     e7_estimator(b)

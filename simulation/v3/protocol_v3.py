@@ -34,7 +34,10 @@ listed in `state-machine-v3.md` §10:
     a widening step at a publicly known minute favour an always-on cohort?
 3.  **`h`.** Honest challenge reliability, the one quantity that lives outside the
     contract.  §4.5 claims the single-randomness rule largely defuses it.
-4.  The open parameters: `d`, `BOND_MIN`, `MIN_COMMITS`, `CHALLENGE_BOND`.
+4.  The open parameters: `d`, `BOND_MIN`, `CHALLENGE_BOND`.  `MIN_COMMITS`
+    was on this list and is no longer a parameter at all — E14/E14b measured it
+    inert above its calibration registry and destructive below, and §4.8b
+    removed it.  See ``FINDINGS-adaptive.md`` §2.
 
 The attacker is pay-insensitive throughout: their prize is the listing, which is
 external to the protocol, so they act whenever eligible and able.  Honest turnout

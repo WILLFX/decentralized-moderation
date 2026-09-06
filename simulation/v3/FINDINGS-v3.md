@@ -9,8 +9,9 @@ lottery to a majority of three.
 
 The engine follows the state machine, not the design document: three tickets fixed
 once per claim (§4.5), the draw taken against `â = (A+1)/(N+2)` rather than `A/N`
-(§4.5), the quorum gate on commits and no reveal-stage gate (§4.8), balance debits
-(§5.1), and no quorum gate in round 1 (§4.9). `f(â)` is reproduced to three
+(§4.5), **no quorum gate in either round** (§4.8, §4.8b — §D below is the
+measurement that removed the commit gate, and the tables above it were produced
+while it still stood), balance debits (§5.1). `f(â)` is reproduced to three
 decimals at 200k draws.
 
 **Every table below was re-run after the challenge decision was corrected.** An
@@ -285,9 +286,13 @@ consumes a population rate; handing it a sample proportion claims certainty from
    100           0.9902   0.9997              0.03%
 ```
 
-**One revealed vote is a unanimous tally**, and `MIN_COMMITS` does not prevent one:
-the quorum gate is on commits, and a revealer count of 1 needs only that the other
-fifteen committers withhold. Under `A/N` that single vote decided the case with
+**One revealed vote is a unanimous tally**, and `MIN_COMMITS` did not prevent one
+even while it stood: the gate was on commits, so a revealer count of 1 needed only
+that the other fifteen committers withhold. §4.8b has since removed the gate
+entirely, which makes the `N = 1` row above **reachable rather than hypothetical**
+and this section's argument load-bearing rather than defensive — the 25.93%
+discount is now the only thing standing between one vote and a decided case.
+Under `A/N` that single vote decided the case with
 certainty, and both invariants that look like they cover it read true without
 covering it — I11 quantified over "under-quorum", which has meant the commit gate
 since §4.8 moved it there, and I12 over "every side with ≥ 1 revealed vote", which

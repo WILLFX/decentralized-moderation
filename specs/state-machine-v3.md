@@ -2242,6 +2242,57 @@ accrues with no path out is a defect neither contract's tests can catch, because
 *"there is no exit"* is not a failing assertion. It joins the standing constraint's
 P0 set rather than the open-parameter list.
 
+#### 5.6.1 The mechanism
+
+Three pieces, and each is shaped by an existing rule rather than invented.
+
+```
+registry:   depositMaintenance(amount)
+              PERMISSIONLESS. Pulls `amount` with transferFrom, THEN
+              maintenanceReserve += amount
+
+registry:   proposeMaintenanceWithdrawal(to, amount)   -- onlyGovernance
+            cancelMaintenanceWithdrawal()              -- onlyGovernance
+            executeMaintenanceWithdrawal()             -- onlyGovernance
+              eta = block.timestamp + timelockDelay, exactly as caps and
+              condemnation already do. `amount <= maintenanceReserve` is
+              checked at EXECUTE, against the live value
+
+Moderation: sweepMaintenance()
+              PERMISSIONLESS. Forwards `maintenanceAccrued` through
+              depositMaintenance and zeroes the local accumulator
+```
+
+**The deposit needs no capability bit.** `MAY_CREATE` and `MAY_DISCHARGE` gate
+*obligations on a moderator's bond*; a deposit creates none — it hands the registry
+money. Anyone may donate to the maintenance reserve and nobody is harmed by their
+doing so, so a third bit would be a governance surface bought for nothing.
+
+**It must pull the tokens, not merely increment the counter.** `balanceBuckets()`
+is `totalStake + totalBond + maintenanceReserve` and `solvent()` compares it to the
+real balance (I21). A deposit that raised the counter without moving value would
+make the registry insolvent by exactly `amount`, and it would do so through a
+permissionless function — which is why the permissionlessness and the pull are one
+decision and not two.
+
+**The withdrawal preserves solvency by construction**, because it lowers the
+balance and `maintenanceReserve` by the same amount. What it must never do is reach
+past its own bucket:
+
+> **The single assertion this whole change turns on: a maintenance withdrawal can
+> never reduce `totalStake + totalBond`.** Governance may take protocol revenue;
+> it may not take a moderator's stake or bond. The cap at `maintenanceReserve` is
+> the only thing enforcing that, and it is checked at execute rather than at
+> propose because the reserve is live state and a proposal is not a lock on it.
+
+**The sweep is lazy and permissionless, not per-terminal.** Forwarding at each
+terminal would put a token transfer on the hot path of every case that ends —
+`submit` is already the largest call in the system at 435k gas — for no benefit,
+since nothing reads the reserve between sweeps. Permissionless is safe here for the
+same reason the deposit is: the call moves value in exactly one direction, toward
+the pool it belongs in, and a griefer who calls it repeatedly pays gas to do the
+protocol's housekeeping.
+
 ---
 
 ## 6. Reputation

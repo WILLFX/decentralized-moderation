@@ -552,6 +552,9 @@ formula names three conversions, so adding a fourth field would depart from both
 Scaling the already-converted block count keeps one conversion per case and adds no
 field. Both operands come from the same pinned parameter block (I27).
 
+**Ruling: adopted** (remediation order, "also adopted"). §3.3 will record the
+scaling. No code change.
+
 **Threat model.** None. The ratio is exact in the intended configuration
 (720/1200 of 240 blocks = 144) and rounds down otherwise, which shortens the
 un-widened period rather than extending it.
@@ -611,10 +614,13 @@ says which terminal judges them. Requiring what §8.5 assumes turns a silent
 ambiguity into a precondition anyone can clear, since `claim(c, m)` is
 permissionless.
 
+**Ruling: confirmed** (remediation order §3). The reading is adopted and §8.5 will
+be amended to state the precondition rather than assume it. No code change.
+
 **Threat model.** A re-review can be delayed by an unsettled claim. Because
 settlement is permissionless and self-funded, whoever wants the re-review can settle
 the stragglers first, so this is a liveness cost of one transaction per straggler
-rather than a block. Carried into the report as a spec question.
+rather than a block — and not a griefing vector, since anyone can clear it.
 
 ### D3-9. A re-opened case draws from stored entropy and has no expiry
 
@@ -628,10 +634,13 @@ case's draw follows. Re-arming a fresh outcome seed would make `NO_RANDOMNESS`
 reachable a second time on a claim that already holds its randomness, which
 contradicts "one randomness per claim"; reading the stored word cannot expire.
 
+**Ruling: recorded** (remediation order, "also adopted"). The timing gap is
+acknowledged and no change is made pending a §3.5b/§8.5 amendment.
+
 **Threat model.** Removes a terminal that should not be reachable. It also means a
 reopened case has no `DRAW` waiting window, so finalization is immediate at reveal
 close — a timing difference between a first opening and a re-review, which §3.5b's
-uniform-latency argument does not cover. Carried into the report.
+uniform-latency argument does not cover.
 
 ### D3-10. Maintenance accrues in `Moderation`, separately from the registry's
 
@@ -643,42 +652,78 @@ nobody earned accumulate in `Moderation.maintenanceAccrued`. Debits accumulate i
 it; §1's fee split and §5.3's remainder are held by `Moderation` and the registry
 boundary has no call to deposit them. No section says whether the two are one pool.
 
-**Threat model.** Neither pool has an exit — the same gap already recorded for the
-registry. Nothing can be drawn from either, so no value is at risk today; what is
-at risk is that a later sweep is written against one pool and misses the other.
-Carried into the report.
+**Ruling: confirmed as a real gap, and out of scope here** (remediation order §4).
+The target is one pool with a timelocked governance exit, which requires changing
+`StakeRegistry` — frozen — so it goes in a separate order against both contracts.
+No forwarding path is added here.
 
-### D3-11. Unearned bounties are retained rather than refunded
+**Threat model.** Neither pool has an exit. Nothing can be drawn from either, so no
+value is at risk today; what is at risk is that a later sweep is written against one
+pool and misses the other.
 
-**What.** On `NO_TURNOUT` and `NO_REVEALS`, and for the claim bounty on
-`NO_RANDOMNESS`, the unpaid bounty is folded into `maintenanceAccrued`.
+### D3-11. `DRAW_BOUNTY` is refunded where the draw is unreachable — **REVERSED**
 
-**Why.** §4.8's value-flow block refunds `pot + challengeReserve` and retains
-"finalizationBounty and maintenance". `DRAW_BOUNTY` is a fifth fee component and the
-block does not mention it on the two terminals that never reach `DRAW`. Retaining
-is the conservative reading — it does not pay a bounty for work nobody did and does
-not enlarge a refund the spec did not authorise.
+**Ruling: reversed** (M2.7 remediation order §1, spec corrected at `6489bfd`). The
+objection this entry raised was upheld and the implementation it described was
+wrong. This entry records both.
 
-**Threat model.** A submitter whose case dies at `NO_TURNOUT` loses the draw bounty
-as well as maintenance, on a row §4.8 calls unsteerable and "free, full refund".
-That is a real cost to the party the row is meant to protect, and it is the reading
-this implementation chose rather than one §4.8 states. **Open question in the
-report.**
+**What it was.** On `NO_TURNOUT` and `NO_REVEALS` the unpaid `DRAW_BOUNTY` was
+folded into `maintenanceAccrued` along with the claim bounty.
 
-### D3-12. `NO_REVEALS` carries the pot; §4.8 says every reason refunds it
+**What it is now.** `_settleBounties` refunds whatever `DRAW_BOUNTY` remains and
+retains `CLAIM_BOUNTY`. §4.8 now states the rule that decides it:
 
-**What.** On `NO_REVEALS` the pot is moved to `carriedPot[claimKey]` and only the
-challenge reserve is refunded.
+> A bounty is refunded where the transition it pays for cannot occur, and paid
+> where that transition was performed.
 
-**Why.** §8.4's table says `NO_REVEALS` retries *"after the cooldown, pot carried
-forward, no fresh fee"*. §4.8's value-flow block says *"every reason → refund pot +
-challengeReserve IN FULL"*. Both cannot hold: the pot is either returned or carried.
-§8.4 is the retry-specific rule and §4.8's block is the general one, so §8.4 wins.
+`_payBounty` zeroes the draw bounty at the moment it is paid, so *refund whatever
+remains* is that rule with no per-reason branch: `NO_TURNOUT` and `NO_REVEALS` never
+reach `DRAW` so the whole bounty returns, and `NO_RANDOMNESS` already paid it to
+whoever poked the expiry so nothing remains.
 
-**Threat model.** If the general rule was meant, the submitter is under-refunded by
-the pot until they retry, and a submitter who never retries never gets it. If §8.4
-was meant — as implemented — the "no fresh fee" retry is funded. **This is a direct
-contradiction between two sections and is the first question in the report.**
+**Why the original reading was wrong.** Retaining it charged the submitter for a
+transition that cannot happen, on a row §4.8 itself calls unsteerable and refunds in
+full — the same shape §4.8 rejects for the non-reveal debit, where the requirement
+is *a reveal phase that opened* rather than *a terminal state*.
+
+**`CLAIM_BOUNTY` is deliberately unchanged.** The same argument applies to it, since
+every terminal transition is permissionless and somebody paid gas to poke it. §10
+now carries that as an open question: it is a fee-schedule change rather than a
+contradiction, and the two must not ride together. `M47` mutates the code into
+refunding it, and the suite kills that — the retention is pinned, not incidental.
+
+**Threat model.** Strictly returns value to the party §4.8 says is not levied.
+Conservation is unchanged: the bounty moves between two of this contract's own
+sinks, never out of it except through `withdrawRefund` to the recorded submitter.
+
+**Tests.** `test_valueConservation_noTurnoutRefundsPotReserveAndDrawBounty`,
+`..._noRevealsCarriesThePotAndRefundsTheDrawBounty`,
+`..._noRandomnessPaysTheDrawBountyToThePoker`, and the finalized-case assertion that
+both bounties reach the poker.
+
+### D3-12. `NO_REVEALS` carries the pot — **CONFIRMED**, and §4.8 was corrected
+
+**Ruling: confirmed** (remediation order §2). The implementation was right and the
+spec was wrong; `6489bfd` corrects §4.8's value-flow block. No code change.
+
+**What.** On `NO_REVEALS` the pot moves to `carriedPot[claimKey]` and only the
+challenge reserve — and now the draw bounty, per D3-11 — is refunded.
+
+**Why.** §8.4's table retries `NO_REVEALS` *"after the cooldown, pot carried
+forward, no fresh fee"*; §4.8's block said *"every reason → refund pot +
+challengeReserve IN FULL"*. A refunded pot cannot be carried, so the two could not
+both be followed. §8.4 is the specific rule and it wins.
+
+**Why it was a contradiction and not a wording choice.** The two are not
+economically equivalent: §4.8 also retains the finalization bounty and maintenance,
+so refund-and-resubmit costs the submitter both on every cycle while carrying costs
+nothing. Under §4.8c — where one identity now suffices to force `NO_REVEALS` — a
+censor would levy his victim on each attempt, the exact outcome §8.4's row exists to
+prevent when it says *"the submitter did not cause it, so not levied either."*
+
+**Threat model.** As implemented, the censorship path costs the censor a
+`REVEAL_BOND` per attempt and costs the submitter only time. Under the withdrawn
+reading it would also have cost the submitter two fee components per cycle.
 
 ### D3-13. `Moderation` holds the governor role directly
 

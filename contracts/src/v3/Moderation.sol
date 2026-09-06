@@ -791,7 +791,7 @@ contract Moderation is ReentrancyGuard {
             reservationOf[key] = Reservation.PERMANENT;
         }
 
-        _retainBounties(caseId);
+        _settleBounties(caseId);
         _writeIndex(caseId, IndexStatus.UNRESOLVED);
 
         emit Terminated(caseId, uint8(Terminal.UNRESOLVED), uint8(r));
@@ -826,14 +826,29 @@ contract Moderation is ReentrancyGuard {
         emit BountyPaid(caseId, to, amount);
     }
 
-    /// @dev A bounty nobody earned is retained, as §4.8 retains the finalization
-    ///      bounty. §4.8's value-flow block names `pot` and `challengeReserve` and
-    ///      says nothing about `DRAW_BOUNTY` on the two pre-`TALLY` terminals; this
-    ///      is the conservative reading and it is an open question in the report.
-    function _retainBounties(uint256 caseId) internal {
+    /// @dev §4.8's deciding rule, as corrected at `6489bfd`:
+    ///
+    ///        A bounty is refunded where the transition it pays for cannot occur,
+    ///        and paid where that transition was performed.
+    ///
+    ///      `DRAW_BOUNTY` is zeroed by `_payBounty` at the moment it is paid, so
+    ///      refunding whatever REMAINS is that rule with no per-reason branch:
+    ///      `NO_TURNOUT` and `NO_REVEALS` never reach `DRAW`, so the whole bounty
+    ///      returns to the submitter; `NO_RANDOMNESS` already paid it to whoever
+    ///      poked the expiry, so nothing remains to return. Retaining it charged
+    ///      the submitter for a transition that cannot happen, on rows §4.8 calls
+    ///      unsteerable and refunds in full.
+    ///
+    ///      `CLAIM_BOUNTY` is retained, and that is deliberate rather than an
+    ///      oversight: the same argument applies to it, because every terminal
+    ///      transition is permissionless and somebody paid gas to poke it. §10
+    ///      carries that as an open question — it is a fee-schedule change rather
+    ///      than a contradiction, and the two must not ride together.
+    function _settleBounties(uint256 caseId) internal {
         Case storage c = cases[caseId];
-        maintenanceAccrued += uint256(c.drawBounty) + uint256(c.claimBounty);
+        refundOwed[caseId] += c.drawBounty;
         c.drawBounty = 0;
+        maintenanceAccrued += c.claimBounty;
         c.claimBounty = 0;
     }
 

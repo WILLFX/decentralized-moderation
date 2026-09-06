@@ -1844,8 +1844,18 @@ contract ModerationV3Test is Test {
         mod.draw(id);
 
         Moderation.Case memory c = mod.caseInfo(id);
-        uint256 bounty = token.balanceOf(poker);
-        assertGt(bounty, 0, "the poker was paid");
+        // §4.8's rule: paid where the transition was PERFORMED. The draw happened,
+        // and finalization with it, so both bounties go to whoever poked it.
+        assertEq(
+            token.balanceOf(poker),
+            (FEE * 50) / 10_000 + (FEE * 100) / 10_000,
+            "DRAW_BOUNTY + CLAIM_BOUNTY, to the poker"
+        );
+        assertEq(c.drawBounty, 0, "and nothing is left owing on the case");
+        assertEq(c.claimBounty, 0);
+        // Unchallenged, so §5.3 activates none of the reserve: the refund is the
+        // reserve alone, with no bounty folded into it.
+        assertEq(mod.refundOwed(id), uint256(c.challengeReserve), "no bounty in the refund");
 
         for (uint256 i; i < who.length; ++i) {
             mod.claim(id, who[i]);
@@ -1857,23 +1867,85 @@ contract ModerationV3Test is Test {
             "what is left is exactly maintenance plus the division remainder");
     }
 
-    /// @dev An `UNRESOLVED` case refunds pot and reserve in full and retains
-    ///      maintenance and the unearned bounties.
-    function test_valueConservation_unresolvedRefundsPotAndReserve() public {
+    /// MUTATION: retain `DRAW_BOUNTY` on the pre-`TALLY` terminals instead of
+    ///           refunding it.
+    /// @dev §4.8, as corrected at `6489bfd`: a bounty is refunded where the
+    ///      transition it pays for CANNOT OCCUR, and paid where that transition was
+    ///      performed. `DRAW` is unreachable from `NO_TURNOUT` and `NO_REVEALS`, so
+    ///      retaining the draw bounty charged the submitter for a transition that
+    ///      cannot happen — on rows the same section calls unsteerable.
+    function test_valueConservation_noTurnoutRefundsPotReserveAndDrawBounty() public {
         uint256 id = _submit();
         _matureAll();
         vm.roll(mod.caseInfo(id).phaseDeadline);
         mod.closeCommit(id);
 
         Moderation.Case memory c = mod.caseInfo(id);
-        uint256 owed = mod.refundOwed(id);
-        assertEq(owed, uint256(c.pot) + c.challengeReserve, "pot + reserve, in full");
+        uint256 drawB = (FEE * 50) / 10_000;
+        uint256 claimB = (FEE * 100) / 10_000;
+
+        assertEq(
+            mod.refundOwed(id),
+            uint256(c.pot) + c.challengeReserve + drawB,
+            "pot + reserve + DRAW_BOUNTY: the draw is unreachable from here"
+        );
+        assertEq(c.drawBounty, 0, "moved to the refund, not retained");
+        assertEq(c.claimBounty, 0, "and CLAIM_BOUNTY was retained - open in s10");
+        assertEq(mod.maintenanceAccrued(), (FEE * 1000) / 10_000 + claimB, "maintenance + the retained claim bounty");
 
         uint256 b0 = token.balanceOf(submitter);
         mod.withdrawRefund(id);
-        assertEq(token.balanceOf(submitter) - b0, owed);
-        assertEq(c.drawBounty, 0, "the unearned bounty was retained");
-        assertEq(c.claimBounty, 0);
+        assertEq(token.balanceOf(submitter) - b0, uint256(c.pot) + c.challengeReserve + drawB);
+        assertEq(token.balanceOf(address(mod)), mod.maintenanceAccrued(), "nothing stranded");
+    }
+
+    /// @dev The same rule on `NO_REVEALS`, where the POT carries rather than
+    ///      refunding (§8.4) but the draw bounty still returns.
+    function test_valueConservation_noRevealsCarriesThePotAndRefundsTheDrawBounty() public {
+        uint256 id = _submit();
+        address m = _moderator(1);
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+        _commit(id, m, APPROVE);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+
+        Moderation.Case memory c = mod.caseInfo(id);
+        uint256 drawB = (FEE * 50) / 10_000;
+        assertEq(mod.carriedPot(c.claimKey), c.pot, "the pot carries, per s8.4");
+        assertEq(
+            mod.refundOwed(id),
+            uint256(c.challengeReserve) + drawB,
+            "reserve + DRAW_BOUNTY, and NOT the pot"
+        );
+        assertEq(c.drawBounty, 0);
+    }
+
+    /// @dev And `NO_RANDOMNESS` PAYS it, to whoever poked the expiry — so nothing
+    ///      remains to refund. This is the row that makes "refund whatever remains"
+    ///      the whole rule rather than a per-reason branch.
+    function test_valueConservation_noRandomnessPaysTheDrawBountyToThePoker() public {
+        uint256 id = _submit();
+        _toTally(id, 2, 1);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+        vm.roll(uint256(mod.caseInfo(id).outcomeSeedBlock) + HORIZON + 1);
+
+        uint256 p0 = token.balanceOf(poker);
+        vm.prank(poker);
+        mod.draw(id);
+
+        Moderation.Case memory c = mod.caseInfo(id);
+        uint256 drawB = (FEE * 50) / 10_000;
+        assertEq(token.balanceOf(poker) - p0, drawB, "paid, because the transition WAS performed");
+        assertEq(c.drawBounty, 0);
+        assertEq(
+            mod.refundOwed(id),
+            uint256(c.pot) + c.challengeReserve,
+            "pot + reserve only: the draw bounty was earned, not refunded"
+        );
     }
 
     // =========================================================================

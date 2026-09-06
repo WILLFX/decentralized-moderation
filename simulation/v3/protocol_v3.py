@@ -62,11 +62,19 @@ class ParamsV3:
     widen_factor: float = 1.5
     widen_enabled: bool = True
 
-    # quorum (§4.8) — the gate is on COMMITS, decided before any tally exists.
-    # There is no reveal-stage gate: `MIN_REVEALS` was removed, not relocated,
-    # and the residual `N >= 1` is arithmetic. What replaced its *other* job —
-    # stopping a thin tally from deciding a case outright — is §4.5's estimator.
-    min_commits: int = 16
+    # quorum — there is none, in either round (§4.8, §4.8b).
+    #
+    # `MIN_REVEALS` went first: a terminal-class gate on state every revealer can
+    # watch. `MIN_COMMITS` followed, at 1 rather than 16, because E14/E14b
+    # measured it inert at every registry above its calibration size and
+    # destructive below — see `FINDINGS-adaptive.md` §2. What stops a thin tally
+    # from deciding a case outright is §4.5's estimator, not a floor.
+    #
+    # **`FINDINGS-v3.md` predates this and was produced at 16.** Its §D figure —
+    # 92.2% NO_TURNOUT at registry 250 — is the measurement that removed the
+    # gate, so it is history and not a current property. Re-running run_v3.py
+    # now will not reproduce it; that is correct, and §D says so.
+    min_commits: int = 1
 
     # economics (§5)
     fee: float = 90.0

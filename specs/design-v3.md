@@ -70,15 +70,19 @@ SUBMIT -> COMMIT -> REVEAL -> TALLY -> (§2.1) -> DRAW -> one of:
 
     two or three tickets Approve  ->  APPROVED
     two or three tickets Reject   ->  REJECTED
-    commits < MIN_COMMITS         ->  UNRESOLVED(NO_TURNOUT)
+    nobody committed at all       ->  UNRESOLVED(NO_TURNOUT)
     no reveals at all             ->  UNRESOLVED(NO_REVEALS)
 ```
 
-**There is no `MIN_REVEALS`.** state-machine-v3 §4.8 removed it rather than
-relocating it: a reveal-stage gate selects between terminal classes on state every
-revealer can watch, which was the only thing that ever made withholding attractive.
-The quorum gate is on *commits*, which are blind. What stops a thin tally from
-deciding a case outright is not a floor but the estimator of §3.
+**There is no quorum gate.** state-machine-v3 §4.8 removed `MIN_REVEALS` rather
+than relocating it: a reveal-stage gate selects between terminal classes on state
+every revealer can watch, which was the only thing that ever made withholding
+attractive. §4.8b then removed the commit gate as well, for an unrelated reason —
+it was an absolute count gating a cohort proportional to a registry size the
+contract is forbidden to observe, which made it inert above its calibration size
+and destructive below it. **What stops a thin tally from deciding a case outright
+is not a floor but the estimator of §3**, and that sentence is now the whole
+answer rather than half of one.
 
 There is no `CONTESTED` state and no post-draw appeal. **The first round produces
 no verdict at all** — it produces a *plurality*, a fact about the votes, which may
@@ -767,8 +771,12 @@ covers; the four-contract audit does not carry over.
   the hybrid one-hour/challenge lifecycle and its challenge reserve (§2.1),
   `MIN_CHALLENGE_REVEALS`, the assurance definition in §9.1, fixed `outcomeBlock`,
   no lazy re-arming, eligibility widening, claim keys, approval expiry,
-  a raised reveal quorum** — the senior reviewer. The last of these is adopted in
-  substance and not in form: the number moved to `MIN_COMMITS` (§9).
+  a raised reveal quorum** — the senior reviewer. The last of these was adopted in
+  substance and not in form — the number moved to `MIN_COMMITS` — and is now
+  **withdrawn outright**: state-machine-v3 §4.8b removes that gate too, having
+  measured it inert at every registry above its calibration size and destructive
+  below. The reviewer's underlying concern, that a thin tally should not decide a
+  case, is answered by the estimator instead of by a floor.
 - **The cost accounting in §4, the result that neutrality forces a penalty-free
   contested branch (which is what withdrew the two-ticket rule), the ticket-pot
   construction recorded in §5.1, the reading-pays argument and dissent risk in

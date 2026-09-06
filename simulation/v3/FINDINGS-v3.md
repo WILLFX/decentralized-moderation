@@ -176,6 +176,17 @@ moderators the expected cohort is 10 against `MIN_COMMITS` 16, and 92.2% of case
 `UNRESOLVED(NO_TURNOUT)`. That is the launch condition, and it is the one the spec
 does not survive.
 
+> **This table is history, and `protocol_v3.py` no longer reproduces it.** It was
+> produced at `MIN_COMMITS = 16`, and it is the measurement that removed the
+> parameter: `FINDINGS-adaptive.md` §2 swept it 1–16 across both `prior` values and
+> three registry sizes, found it inert at every registry ≥ 1,000 and destructive at
+> 250 with no safety gain at either `prior`, and `state-machine-v3` §4.8b deleted
+> it. `min_commits` now defaults to 1 and the 250 row reads **0.000** unresolved
+> — an empty round is not merely rare at this registry, it did not occur in 4,000
+> trials, which is what "the gate was the failure" means concretely. The
+> finding stands as the reason for the change; the number is not a current property
+> of the design.
+
 Above it, composition is stable and the verdict distribution barely moves — but the
 pot splits `TARGET_COHORT` ways, so at 10,000 moderators per-voter pay is a fortieth
 of its calibrated value while gas is unchanged. `d = 1.4 × E[P/N]` falls with pay;

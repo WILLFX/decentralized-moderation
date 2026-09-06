@@ -62,12 +62,16 @@ are listed there with what would decide them.
 > - §4.8 — one terminal `UNRESOLVED` with a reason, rather than separate
 >   `NO_QUORUM` and `VOID` states. §4.8 later split the reason codes, because
 >   they carry different debits and different retry rules.
-> - §4.8 / §5.2 — **there is exactly one quorum gate and it is on commits.**
->   `MIN_REVEALS` is removed rather than relocated: it was a terminal-class gate on
->   observable state, and the only thing that ever made withholding attractive.
-> - §4.9 — **round 1 has no quorum gate.** §4.5's monotonicity makes an empty
->   challenge round self-healing, and a gate there would let a rejected submitter
->   escape their rejection by challenging and staying quiet.
+> - §4.8 / §4.8b / §5.2 — **there is no quorum gate at all.** `MIN_REVEALS` went
+>   first: a terminal-class gate on observable state, and the only thing that ever
+>   made withholding attractive. `MIN_COMMITS` followed for a different reason —
+>   it was an absolute count gating a quantity proportional to an unobservable
+>   registry, so it was inert above its calibration size and destructive below.
+>   What survives is `N ≥ 1`, which is arithmetic, and §4.5's `â`, which makes
+>   confidence a function of the tally instead of an assumption about it.
+> - §4.9 — **neither round has a quorum gate.** §4.5's monotonicity makes an empty
+>   challenge round self-healing, and a gate in either round lets a losing
+>   submitter escape by staying quiet.
 > - §5.1 — **penalties are balance debits, never time.** No moderator is ever
 >   suspended; there is no `SUSPENDED` state anywhere in this document.
 > - §5.4 — a debit that would exceed the posted bond is impossible by
@@ -207,7 +211,7 @@ are listed there with what would decide them.
 | `MATURATION` | *(open)* | Delay before newly staked value may vote. Set from the attack-preparation horizon, **not** from any penalty term. |
 | `EXIT_COOLDOWN` | 7 d | Delay between exit request and withdrawal. **Stays in seconds** — no block-denominated constant expires inside it, so converting it would buy nothing and cost the wall-clock predictability the conversion exists to preserve (§0). Same for `MATURATION` and `RETRY_COOLDOWN`. |
 | `TARGET_COHORT` | 40 | Expected eligible moderators per round. |
-| `MIN_COMMITS` | 16 | Commits required at commit close, or the case ends `UNRESOLVED(NO_TURNOUT)` (§4.8). **This is the quorum gate** — decided before anyone can see a tally. |
+| ~~`MIN_COMMITS`~~ | — | **Removed, §4.8b.** It was an absolute count gating a cohort proportional to a registry size §3.6 forbids observing, so it was inert wherever the registry exceeded its calibration and destructive below. Measured (`simulation/v3/FINDINGS-adaptive.md` §2): identical outcomes for every value 1–16 at registry ≥ 1,000, and 92% `NO_TURNOUT` at 250 with no safety gain at either `prior`. The gate a thin tally needs is on **confidence**, and §4.5's `â` is already it. |
 | ~~`MIN_REVEALS`~~ | — | **Removed, §4.8.** It was a terminal-class gate on observable state, and it was the only thing that ever made withholding attractive. The draw needs `N ≥ 1`, which is arithmetic, not policy. |
 | ~~`MIN_CHALLENGE_REVEALS`~~ | — | **Removed, §4.6.** §4.5's single-randomness rule makes an unchanged tally yield an identical verdict, so the floor has no job. |
 | `SUPER_QUORUM` | *(open)* | Reveals required for the strict assurance class (§8.3). |
@@ -609,10 +613,11 @@ and distinguishes neither, which is the defect I29 was written from — in the
 *other* seed, one section over.
 
 **When the tail guard fires, the failure is graceful.** Commits revert for the
-remainder of the phase, turnout is whatever arrived before it, and a thin round
-ends `UNRESOLVED(NO_TURNOUT)` — free retry, no debit for anyone (§4.8, and the
-non-reveal debit does not apply there either). A round that loses its seed loses
-its votes, not its participants' bonds.
+remainder of the phase and turnout is whatever arrived before it. Since §4.8b a
+thin round **proceeds** on what it has, discounted by `â`; only a round the guard
+truncated to *nothing* ends `UNRESOLVED(NO_TURNOUT)` — free retry, no debit for
+anyone (§4.8, and the non-reveal debit does not apply there either). A round that
+loses its seed loses its votes, not its participants' bonds.
 
 **The arithmetic constraint, now that both sides are in blocks** (§0, I31):
 
@@ -911,8 +916,8 @@ role, and only in the one terminal that has a tally and no verdict.
 | From | To | Trigger | Effect |
 |---|---|---|---|
 | — | `COMMIT` | `submit(...)` | charge fee; split into pot / reserve / bounty / maintenance; reserve dedup keys (§8.4); pin ruleset and guidelines versions; **convert the three windows to block counts from `BLOCK_TIME(c)` and pin them — the only wall-clock→block conversion in the specification (§0, §7.2)**; `round = 0`; arm both seeds (§7); `phaseDeadline = block.number + commitBlocks(c)`. **No moderator is selected, reserved, or notified on chain.** |
-| `COMMIT` **(r=0)** | `REVEAL` | `block.number ≥ phaseDeadline` and `commitsThisRound ≥ MIN_COMMITS` | `phaseDeadline = block.number + revealBlocks(c)` |
-| `COMMIT` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `commitsThisRound < MIN_COMMITS` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`; **write the index entry** in `O(MAX_TOPICS)` (§8.1). Nobody could have steered this — see §4.8 |
+| `COMMIT` **(r=0)** | `REVEAL` | `block.number ≥ phaseDeadline` and `commitsThisRound ≥ 1` | `phaseDeadline = block.number + revealBlocks(c)` |
+| `COMMIT` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `commitsThisRound == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_TURNOUT`; **write the index entry** in `O(MAX_TOPICS)` (§8.1). Nobody could have steered this — see §4.8. The condition is **empty, not thin** (§4.8b) |
 | `COMMIT` **(r=1)** | `REVEAL` | `block.number ≥ phaseDeadline` | `phaseDeadline = block.number + revealBlocks(c)`. **No quorum gate in round 1** — §4.9 |
 | `REVEAL` **(r=0)** | `TALLY` | `block.number ≥ phaseDeadline` and `pooled ≥ 1` | pool this round's reveals; publish the **plurality** (§8.2) — a fact, not a verdict; `reveals0 = revealsThisRound`; `phaseDeadline = block.number + challengeBlocks(c)` |
 | `REVEAL` **(r=0)** | `UNRESOLVED` | `block.number ≥ phaseDeadline` and `pooled == 0` | **`terminal = UNRESOLVED`**; `unresolvedReason = NO_REVEALS`; **write the index entry** (§8.1). Not a policy gate — there is no tally to draw from — but **steerable**, see §4.8 |
@@ -1101,7 +1106,10 @@ N                     1       3       8      16      24      40     100
 P(overruled)      25.9%   10.4%    2.8%   0.89%   0.43%   0.17%   0.03%
 ```
 
-An attacker who owns all sixteen reveals of a minimum-quorum case still gets 99.1%.
+An attacker who owns all sixteen reveals of a case still gets 99.1%. Since §4.8b
+there is no minimum, so the left of that table is reachable and not hypothetical:
+**`N = 1` is the configuration a gate used to exclude and `â` now discounts by
+25.9%.**
 **I12 is not a wall and this document should not pretend otherwise.** What it buys
 is that no incentive argument here has a degenerate branch: §7.3's
 `f(â)·(share + d) > 0` and §8.4's "every draw has an approval branch" are strict at
@@ -1315,13 +1323,19 @@ debits and the retry rule.
 
 | Reason | Condition | Steerable? | Retry |
 |---|---|---|---|
-| `NO_TURNOUT` | `commitsThisRound < MIN_COMMITS` at commit close | **no** — commits are blind | free, full refund |
+| `NO_TURNOUT` | `commitsThisRound == 0` at commit close | **no** — commits are blind, and this row needs *every* eligible identity to abstain | free, full refund |
 | `NO_REVEALS` | commits cleared the gate and `pooled == 0` at reveal close | **yes**, but only by holding *every* commit | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
 | `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **not by any party who can reach it.** Poking is dominant for the submitter at every tally (§7.3) and for the plurality-losing revealers at every non-unanimous one, so no coalition that *wants* the expiry can also produce it. **The plurality-winning revealers do gain** — they pay no debit either way and their gain is the gap between `f(â)` and certainty — and that residual is stated below rather than denied here | **no retry.** The claim carries `REJECTED`'s reservation by reference (§8.4, I26); the pot is refunded less maintenance |
 
-**There is exactly one quorum gate and it is on commits.** Commits are made blind —
-the tally does not exist yet — so no committer can steer it toward a result they
-cannot see.
+**The commit gate was the last quorum gate, and §4.8b removes it too.** What
+follows in this section is the argument that retired `MIN_REVEALS`; §4.8b shows it
+applies unchanged to `MIN_COMMITS`, which this section kept without re-deriving.
+The residue is `commitsThisRound ≥ 1`, and it is arithmetic: a reveal phase with
+nothing to reveal has no work to do.
+
+Commits are made blind — the tally does not exist yet — so no committer could
+steer the old gate toward a result they cannot see. That was true and it is why the
+gate looked harmless. It is not the property that matters; see §4.8b.
 
 **The reveal-stage gate is removed, not relocated.** An earlier revision added the
 commit gate and *kept* `MIN_REVEALS`, which left a second gate selecting between
@@ -1553,14 +1567,87 @@ which is the strongest form the argument takes without a mechanism that removes 
 51-minute window, and §7.3 explains why no such mechanism is available under
 `blockhash`.
 
-**`UNRESOLVED` must never be reachable from an under-quorum pool by approving it.**
-A bounded failure is correct; an unsafe success is not.
+**`UNRESOLVED` must never be reachable from a thin pool by approving it.** A bounded
+failure is correct; an unsafe success is not. Stated without the word "quorum",
+which named a gate §4.8b removes.
 
-### 4.9 Round 1 has no quorum gate, and needs none
+### 4.8b `MIN_COMMITS` is removed
 
-**Decision.** `MIN_COMMITS` is tested at round 0 only. Round 1
-always proceeds to its reveal phase and always proceeds to `DRAW`, whatever
-turnout it attracts — including none.
+**Decision.** There is no quorum gate in either round. `commitsThisRound ≥ 1`
+replaces `commitsThisRound ≥ MIN_COMMITS` at the round-0 commit close, and
+`NO_TURNOUT` now fires only on an **empty** round, not a thin one.
+
+**Why the parameter could not work, structurally.** `T` is calibrated so the
+expected cohort is `TARGET_COHORT` at an assumed registry size, and §3.6 forbids
+maintaining the active-moderator count that would let it be recalibrated. So the
+realized cohort is proportional to a registry the contract cannot observe, while
+`MIN_COMMITS` is an absolute count. **The two are pinned to the same assumption and
+fail in opposite directions when it is wrong**: below the calibration size `T`
+makes the cohort small and `MIN_COMMITS` demands it be large, and the errors
+multiply rather than cancel. At the calibration size 16 is 40% of a cohort of 40
+and reasonable; at a registry of 250 it is 160% of a cohort of 10.
+
+**Measured** (`simulation/v3/FINDINGS-adaptive.md` §2, E14/E14b — both `prior`
+values, three registry sizes, `MIN_COMMITS` swept 1–16):
+
+- At registry **≥ 1,000** every value from 1 to 16 produces **identical** outcomes
+  to three decimal places, on false approval, false rejection and reveal count.
+  The gate never binds.
+- At registry **250** it binds and only destroys: 92% `UNRESOLVED` at 16, 0.5% at
+  4, and **0.000 over 4,000 trials at 1** — with false approval **0.668 → 0.614**
+  at `prior` 0.665 and **0.411 → 0.380** at `prior` 0.95. Lowering it eliminates
+  the liveness failure and does not cost safety **at either `prior`**.
+
+The second bullet was checked at both `prior` values deliberately. At 0.665 the
+effective hostile share is 0.534, past §4.5's crossover, so the amplifier works for
+the attacker and a *thinner* tally can flatter the result for a reason that has
+nothing to do with the gate. At 0.95 that inversion is absent and the direction is
+the same. A finding that only held at 0.665 would have been an artifact.
+
+**So the parameter has two regimes, inert and harmful, and no third.** There is no
+value of `MIN_COMMITS` and no registry size at which it does the job it was
+introduced to do.
+
+**What does that job.** §4.8 has already written the argument, one gate earlier:
+
+> existence stays at `N ≥ 1`, and confidence becomes a function of `N` rather than
+> an assumption about it.
+
+That is `â = (A+1)/(N+2)`. A count gate asserts confidence by fiat and then plays
+no further part in the verdict; `â` carries it into the verdict itself, and I11
+bounds it — no verdict exceeds `f((N+1)/(N+2))`, which is 25.9% short of certainty
+at `N = 1` and 0.89% at `N = 16`. **A thin tally is not excluded, it is
+discounted**, and the discount is largest exactly where a gate would have fired.
+§4.8 applied this reasoning to `MIN_REVEALS` and did not carry it one row up.
+
+**What this costs.** A case can now settle on very few reveals, and at `N = 1` a
+unanimous tally still reaches `f(2/3) = 74.1%`. That is a real residue and it is
+the same residue §4.8 accepted for `MIN_REVEALS` — bounded by `â` rather than by a
+count, and visible in the verdict rather than hidden behind a gate that fired. It
+is not new exposure; it is the old exposure, now stated.
+
+**A note on `NO_TURNOUT`'s incidence, because the old justification answered a
+different question.** §4.8's table calls the row unsteerable and grants it a free
+retry with no reservation (§8.4) on the grounds that **nobody can cause it**. True,
+and it was the right answer to steerability. It is not an answer about *incidence*:
+at the launch registry the row fired **92% of the time on its own**, and the
+submitter is its sole beneficiary — claim released, pot refunded, resubmit freely.
+§4.9 identified this defect shape for round 1 and wrote I26 for it, but I26 is keyed
+to "once a claim has been **tallied**", and `NO_TURNOUT` is pre-tally, so round 0's
+instance sat outside the invariant by construction. Requiring an *empty* round
+narrows the row from the modal outcome to a genuine market failure, which is what
+its treatment was written for. The free retry is unchanged and now describes a case
+that is actually rare.
+
+### 4.9 Neither round has a quorum gate
+
+**Decision.** Round 1 always proceeds to its reveal phase and always proceeds to
+`DRAW`, whatever turnout it attracts — including none. **This section was written
+when round 0 still had a gate and this one did not; §4.8b removed the asymmetry by
+removing the gate, so what follows is now the general rule rather than an exception
+to one.** The argument below is unchanged and is the reason §4.8b's direction was
+the only one available: a gate could not have been *added* to round 1 to match
+round 0, so the two could only be reconciled downward.
 
 **Why no gate is needed.** By §4.5 the verdict is `u` evaluated against the pooled
 tally, and `u` is fixed for the claim. A round 1 that adds no votes leaves the
@@ -2290,10 +2377,16 @@ REVEAL  (r=0)  -> UNRESOLVED   (NO_REVEALS)            -- was not
 DRAW           -> UNRESOLVED   (NO_RANDOMNESS)         -- was not
 ```
 
-**And the uncovered rows are the common case, not the tail.** At FINDINGS §D's
-launch registry of 250 the expected cohort is 10 against `MIN_COMMITS` 16, so
-**92% of cases terminate on the first of those rows.** The rule covered the path a
+**And the uncovered rows were the common case, not the tail.** At FINDINGS §D's
+launch registry of 250 the expected cohort was 10 against `MIN_COMMITS` 16, so
+**92% of cases terminated on the first of those rows.** The rule covered the path a
 healthy market takes and left the path the launch market takes.
+
+That is stated in the past tense because §4.8b removed the gate that produced it,
+and the index-write obligation this section establishes is what makes the removal
+safe to reason about: the entry is written at the transition into `UNRESOLVED`
+whatever the reason code, so narrowing `NO_TURNOUT` to an empty round changes how
+often the row is reached and nothing about what a reader can see when it is.
 
 §5.5 makes it worse than it was when the audit found it: settlement is now pulled
 per moderator and may *never* complete, so an index write bundled into it is behind
@@ -2687,7 +2780,7 @@ and everything below follows from that.
 | **I21** | Every value the specification moves — removed from `bond`, withheld from a payment, or left over from integer division — has a named destination in this document, and that destination is never another moderator |
 | **I22** | The verdict is monotone in `a` for fixed `u`: adding votes to one side can move the verdict only toward that side, never away from it |
 | **I23** | `m.liabilities` is the single point of truth for claims on `bond`, and equals the sum of that moderator's open claim records (§2.1) — an identity a view can assert, not an accounting convention. Adding any debit to this specification means creating a claim for it; no test may use a narrower expression |
-| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. The only quorum gate is on commits, which are blind; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that **the submitter strictly prefers the draw at every tally** (§7.3, §8.4) and the plurality-losing revealers do so at every non-unanimous one. **This invariant has twice been left resting on a parameter** — first `DRAW_BOUNTY`'s size, then, after the estimator made the unanimous branch non-degenerate, `d / share`. Both times the rule was right and the *proof* had a branch nobody re-derived |
+| **I24** | No party can change a case's terminal *class* in a direction favourable to them by anything they do **or decline to do** after the tally becomes observable. Since §4.8b there is no quorum gate in either round, so the terminal class no longer turns on a count any party contributes to; the residual `N ≥ 1` requirement is arithmetic, and forcing it means withdrawing all of one's own votes **and** every other eligible identity abstaining; and the one class reachable by pure inaction, `NO_RANDOMNESS`, is priced so that **the submitter strictly prefers the draw at every tally** (§7.3, §8.4) and the plurality-losing revealers do so at every non-unanimous one. **This invariant has twice been left resting on a parameter** — first `DRAW_BOUNTY`'s size, then, after the estimator made the unanimous branch non-degenerate, `d / share`. Both times the rule was right and the *proof* had a branch nobody re-derived |
 | **I25** | The non-reveal debit fires wherever **a reveal phase opened**, including terminals in which no verdict was drawn — and *not* in `NO_TURNOUT`, where it never did. It was stated as "every terminal state", which over-corrected a revision that had waived it across all of `UNRESOLVED`: the requirement is the phase, not the terminal, and quantifying over terminals debited every committer in the one row the same section calls unsteerable |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
@@ -2773,7 +2866,7 @@ property.
 | `BLOCK_TIME`, and the bound the hybrid creates | §1. Denominating the schedule in blocks removed a *safety* dependence on block time (§7.2) and left a *scheduling* one: `BLOCK_TIME` sets how long a window is in wall-clock terms for the human moderators §10's honest-accuracy row is about. Wrong by 50% and windows are 50% off; nothing terminates that would not have. **But it carries one hard bound, which the previous revision could not even express:** the eligibility seed must survive its own commit window, `commitBlocks ≤ SEED_LAG + BLOCKHASH_HORIZON = 258` (§3.1), i.e. `BLOCK_TIME ≥ 1200 / 258` = **4.651 s** at a 20-minute window, with **18 blocks** of margin at the working 5 s. `RulesetGovernor` must validate it; a change below the bound does not fail loudly, it re-points the tail of every commit window at a zero seed. **This row previously read 4.72 s and 14 blocks**, from arithmetic that put `SEED_LAG` on the wrong side of the inequality — quoted from the port assessment rather than derived here, which is the I33 failure this document had just finished writing down |
 | Eligibility seed vs commit window | **Closed as a correctness question, open as a sizing one.** §3.1 now carries the height guards I29 required, so a seed that has expired *or has not happened yet* reverts a commit instead of silently re-pointing eligibility at `roundSeed = 0`. What remains is sizing: 18 blocks of tail margin is thin, and the 3-block head gap costs 1.25% of every commit window and cannot be removed — a moderator cannot evaluate a seed that does not exist. Both shrink if `BLOCK_TIME` falls or `COMMIT_WINDOW` rises, which is why `RulesetGovernor` validates the bound rather than the spec assuming it |
 | `DECAY` | §6. The per-second decay factor on `track`. Open, and it is the one parameter whose *shape* was decided by a defect rather than by an argument: an earlier revision decayed per settlement, which was both order-dependent and backwards — it eroded the history of moderators who participated and left abandoned identities untouched. Time-based decay fixes the direction; the rate is still a choice, and it prices how fast an abandoned identity stops being worth reusing |
-| `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10 against `MIN_COMMITS` 16 and **92% of cases end `UNRESOLVED(NO_TURNOUT)`**. That is the launch condition. Above the calibration size composition is stable but per-voter pay falls linearly while gas does not. Too small is a liveness failure, too large an economic one; neither is a safety failure |
+| `T` and registry size | §3.3 calibrates `T` so the expected cohort is `TARGET_COHORT`, which needs the active-moderator count — the quantity §3.6 says cannot be maintained on chain. **Measured** (`simulation/v3/FINDINGS-v3.md` §D): with `T` calibrated for 1,000, a registry of 250 gives an expected cohort of 10, and against the old `MIN_COMMITS` 16 that produced **92% `UNRESOLVED(NO_TURNOUT)`**. **§4.8b removed that gate**, and with `NO_TURNOUT` narrowed to an empty round the residue at registry 250 is **0.000 over 4,000 trials** (`FINDINGS-v3.md` §D, re-run) — so the launch-size failure was the gate and not the registry. What remains open is unchanged and is economic: above the calibration size composition is stable but per-voter pay falls linearly while gas does not, so `d = 1.4 × E[P/N]` falls with pay while `G` does not. Too large is an economic failure; it is still not a safety one |
 | **Honest accuracy** | **The binding constraint, and it is not in this document.** `simulation/v3/FINDINGS-v3.md` shows that with *zero* attackers a 66.5% honest prior approves 30% of unsafe content, because an honest error is indistinguishable from a hostile vote and enters the verdict through the same term. Every safety figure written as a function of `x` is really a function of `q + (1−q)(1−prior)`. At `prior = 0.95` the same figure is 1%. Measuring `prior` on real content dominates every other open parameter here |
 | `d`, and the two upper bounds nobody had written next to each other | §5.1, §7.3. `d` has an upper bound from **viability** — honest voting is rational only while `d/share < prior/(1−prior)`, which is 1.99 at `prior = 0.665` and 19 at `prior = 0.95` — and a second from **poke dominance** at a unanimous tally, `d/share < f(â)/(1−f(â))`, which is 2.86 at `N = 1` and rises steeply with `N`. The two come from unrelated arguments in different sections and are within 45% of each other at the borderline prior. **Which one binds depends on the unmeasured quantity:** they cross at `prior = f(2/3) = 0.741`, below which viability is tighter and above which poke dominance is. Neither is load-bearing for I24 — §7.3's Claim is carried by the submitter, who has no `d` — but a sweep of `d` should see both, and FINDINGS §E currently sweeps to 10.0 without either |
 | Logic lifecycle, and what condemnation forgives | §2.4, I32. The capability half is settled and **measured free**: `MAY_CREATE` / `MAY_DISCHARGE` as a bitmap plus an `openClaims` counter came in **486 bytes cheaper** than the `LogicState` / `authEpoch` / `logicLiabilities` machinery it replaces. Condemnation replaced the force-discharge and is 413 bytes smaller again. What stays open is not the mechanism but its **price**: condemnation pardons every pending debit under the condemned logic, because the registry holds a claim's amount and not its outcome. That is defensible — the alternative debits moderators who were about to be paid — and it sets a payoff for wedging a logic deliberately. Open: whether the timelock is `RulesetGovernor`'s existing one, and whether a pardon should cost the condemned logic's *submitters* anything |

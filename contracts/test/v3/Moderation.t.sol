@@ -1613,6 +1613,219 @@ contract ModerationV3Test is Test {
     }
 
     // =========================================================================
+    // Mutation-campaign gaps: tests added after survivors were reported
+    // =========================================================================
+
+    /// MUTATION M17: key the one-vote allowance on `revealedVote` instead of
+    ///               `commitments`.
+    /// @dev §3.4's attack verbatim, and trap 1 of the work order: commit in round 0,
+    ///      ABANDON for the price of `REVEAL_BOND`, and commit again in round 1 with
+    ///      the round-0 tally in hand. The earlier I3 test used a moderator who had
+    ///      revealed, so the mutated check still blocked them and the mutation
+    ///      survived. The allowance is consumed by the COMMIT.
+    function test_I3_anAbandonedRound0CommitterCannotCommitInRound1() public {
+        uint256 id = _submit();
+        address abandoner = _moderator(1);
+        address other = _moderator(2);
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+        _commit(id, abandoner, APPROVE);
+        _commit(id, other, APPROVE);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        _reveal(id, other, APPROVE); // `abandoner` never reveals
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+        assertEq(mod.revealOf(id, abandoner), 0, "fixture: they abandoned");
+
+        address ch = _moderator(950);
+        _matureAll();
+        vm.prank(ch);
+        mod.challenge(id);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+        vm.roll(block.number + SEED_LAG + 1);
+
+        Moderation.Case memory c = mod.caseInfo(id);
+        bytes32 h = mod.commitHash(id, c.round, c.paramsVersion, abandoner, REJECT, _salt(abandoner));
+        vm.prank(abandoner);
+        vm.expectRevert(Moderation.AlreadyCommitted.selector);
+        mod.commit(id, h);
+    }
+
+    /// MUTATION M16: drop `block.number >= phaseDeadline` from `commit`.
+    /// @dev No phase closes itself. Between the deadline and whoever calls
+    ///      `closeCommit` there is an open-ended window, and without this guard a
+    ///      late committer can enter it — extending the commit phase for as long as
+    ///      nobody pokes the transition.
+    function test_s4_3_commitIsRefusedAtAndAfterTheDeadline() public {
+        uint256 id = _submit();
+        address m = _moderator(1);
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+
+        Moderation.Case memory c = mod.caseInfo(id);
+        bytes32 h = mod.commitHash(id, c.round, c.paramsVersion, m, APPROVE, _salt(m));
+
+        vm.roll(c.phaseDeadline); // exactly at the deadline
+        vm.prank(m);
+        vm.expectRevert(Moderation.DeadlinePassed.selector);
+        mod.commit(id, h);
+
+        vm.roll(uint256(c.phaseDeadline) + 50); // and well past it, still in COMMIT
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.COMMIT), "nobody has poked the close");
+        vm.prank(m);
+        vm.expectRevert(Moderation.DeadlinePassed.selector);
+        mod.commit(id, h);
+    }
+
+    /// MUTATION M8: set `unanimousDraw` on any 2-of-3 draw.
+    /// @dev §8.3 reads this flag and nothing else reads `u` back. The entropy is
+    ///      chosen with `vm.setBlockhash` so both a split and a unanimous draw are
+    ///      exercised deterministically.
+    function test_s8_3_unanimousDrawRecordsWhetherAllThreeTicketsAgreed() public {
+        bool sawSplit;
+        bool sawUnanimous;
+        for (uint256 k; k < 12 && !(sawSplit && sawUnanimous); ++k) {
+            uint256 id = _submitFresh(700 + k);
+            _toTally(id, 3, 3); // â = 1/2: the split-likeliest tally
+            vm.roll(mod.caseInfo(id).phaseDeadline);
+            mod.closeTally(id);
+
+            uint256 sb = mod.caseInfo(id).outcomeSeedBlock;
+            vm.roll(sb + 1);
+            vm.setBlockhash(sb, keccak256(abi.encode("draw", k)));
+            mod.draw(id);
+
+            Moderation.Case memory c = mod.caseInfo(id);
+            (, uint8 tickets) = mod.decideAt(id, c.outcomeEntropy);
+            assertEq(c.unanimousDraw, tickets == 0 || tickets == 3, "the flag is 3/3 or 0/3, not a majority");
+            if (tickets == 1 || tickets == 2) sawSplit = true;
+            else sawUnanimous = true;
+        }
+        assertTrue(sawSplit, "a split draw was exercised");
+        assertTrue(sawUnanimous, "and a unanimous one");
+    }
+
+    /// MUTATION M6: delete the stored-entropy shortcut from `draw`.
+    /// @dev The earlier test called `decideAt` with the entropy passed in, which
+    ///      proves `_decide` is pure but never drives `draw` down the stored-entropy
+    ///      path — and the reopen test ended at `NO_TURNOUT` before reaching a
+    ///      second draw. A re-opened case's `outcomeSeedBlock` is long past, so
+    ///      re-reading `blockhash` sends it to `NO_RANDOMNESS` instead.
+    function test_s8_5_aReopenedCaseDrawsFromStoredEntropyWithNoLiveBlockhash() public {
+        uint256 id = _submit();
+        address[] memory who = _toTally(id, 0, 5);
+        _rollToDraw(id);
+        mod.draw(id);
+        Moderation.Case memory c0 = mod.caseInfo(id);
+        assertEq(c0.terminal, uint8(Moderation.Terminal.REJECTED));
+        for (uint256 i; i < who.length; ++i) {
+            mod.claim(id, who[i]);
+        }
+
+        vm.prank(submitter);
+        mod.reopen(id, FEE);
+
+        // A new cohort turns up and votes the other way.
+        address[] memory fresh = new address[](9);
+        for (uint256 i; i < 9; ++i) {
+            fresh[i] = _moderator(600 + i);
+        }
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+        for (uint256 i; i < 9; ++i) {
+            _commit(id, fresh[i], APPROVE);
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        for (uint256 i; i < 9; ++i) {
+            _reveal(id, fresh[i], APPROVE);
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+
+        // The outcome seed block is far behind us and unreadable.
+        assertGt(block.number, uint256(mod.caseInfo(id).outcomeSeedBlock) + HORIZON, "the hash is long gone");
+
+        mod.draw(id);
+        Moderation.Case memory c1 = mod.caseInfo(id);
+        assertTrue(
+            c1.terminal == uint8(Moderation.Terminal.APPROVED) || c1.terminal == uint8(Moderation.Terminal.REJECTED),
+            "the re-review DRAWS - it does not expire"
+        );
+        assertEq(c1.outcomeEntropy, c0.outcomeEntropy, "and on the same word as the first draw");
+        assertEq(c1.pooledApprove, 9, "the new votes pooled with the old");
+        assertEq(c1.pooledReject, 5);
+    }
+
+    /// @dev M7 is an EQUIVALENT mutant, and this is the property that makes it one.
+    ///      §4.5 says `DRAW` is unreachable with an empty tally, so an `N > 0` guard
+    ///      inside `draw` can never fire — which is why adding it changes no
+    ///      observable behaviour and why no test can catch it. The guard is
+    ///      nonetheless wrong to add: a revert in `DRAW` is unrecoverable, so it
+    ///      would be a latent trap the day a new row routes an empty tally there.
+    ///      What is testable is the reachability claim itself.
+    function test_s4_5_drawIsUnreachableWithAnEmptyTally() public {
+        // Round 0 with no reveals goes to NO_REVEALS, never to DRAW.
+        uint256 a = _submitFresh(801);
+        address m = _moderator(1);
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+        _commit(a, m, APPROVE);
+        vm.roll(mod.caseInfo(a).phaseDeadline);
+        mod.closeCommit(a);
+        vm.roll(mod.caseInfo(a).phaseDeadline);
+        mod.closeReveal(a);
+        assertEq(mod.caseInfo(a).phase, uint8(Moderation.Phase.UNRESOLVED));
+        assertEq(mod.caseInfo(a).unresolvedReason, uint8(Moderation.Reason.NO_REVEALS));
+
+        // The only two rows entering DRAW both require a non-empty pooled tally:
+        // TALLY -> DRAW is downstream of the `pooled >= 1` guard, and
+        // REVEAL(r=1) -> DRAW is downstream of TALLY.
+        uint256 b = _submitFresh(802);
+        _toTally(b, 1, 0);
+        vm.roll(mod.caseInfo(b).phaseDeadline);
+        mod.closeTally(b);
+        assertEq(mod.caseInfo(b).phase, uint8(Moderation.Phase.DRAW));
+        assertGe(uint256(mod.caseInfo(b).pooledApprove) + mod.caseInfo(b).pooledReject, 1, "DRAW always has a tally");
+    }
+
+    /// @dev M22 and M24 are EQUIVALENT mutants for the same reason: the terminals
+    ///      their conditions would newly admit cannot produce a settleable claim.
+    ///      `NO_TURNOUT` requires an empty round, so no claim exists to settle;
+    ///      `NO_REVEALS` requires `pooled == 0`, so no settler has a revealed vote
+    ///      and the incoherence branch is unreachable there. Asserted rather than
+    ///      argued.
+    function test_I30_theUnreachableSettlementBranchesAreUnreachable() public {
+        // NO_TURNOUT: nobody committed, so `claim` has nothing to settle.
+        uint256 a = _submitFresh(811);
+        _matureAll();
+        vm.roll(mod.caseInfo(a).phaseDeadline);
+        mod.closeCommit(a);
+        assertEq(mod.caseInfo(a).commitsThisRound, 0, "an EMPTY round");
+        address nobody = _moderator(1);
+        vm.expectRevert(Moderation.NotCommitted.selector);
+        mod.claim(a, nobody);
+
+        // NO_REVEALS: every committer is a non-revealer, so no settler reaches the
+        // incoherence branch.
+        uint256 b = _submitFresh(812);
+        address m = nobody;
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+        _commit(b, m, APPROVE);
+        vm.roll(mod.caseInfo(b).phaseDeadline);
+        mod.closeCommit(b);
+        vm.roll(mod.caseInfo(b).phaseDeadline);
+        mod.closeReveal(b);
+        assertEq(uint256(mod.caseInfo(b).pooledApprove) + mod.caseInfo(b).pooledReject, 0);
+        assertEq(mod.revealOf(b, m), 0, "no revealed vote exists to be judged incoherent");
+    }
+
+    // =========================================================================
     // Value conservation
     // =========================================================================
 

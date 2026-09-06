@@ -223,7 +223,7 @@ are listed there with what would decide them.
 | `CHALLENGE_WINDOW` | 12 h → **8,640 blocks** | From publication of the round-0 plurality (`TALLY`). |
 | `SEED_LAG` | 2 blocks | Between arming and realizing a seed. |
 | `BLOCKHASH_HORIZON` | 256 blocks | How long `blockhash` remains readable. A property of the EVM, not a choice. **Every deadline it can expire inside is denominated in the same unit** (§0), which is what makes §7.3's rarity argument checkable rather than dependent on an assumed block time. |
-| `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger (§3.3). |
+| `LATE_WIDEN_AT` | minute 12 of commit | Eligibility widening trigger. **Stays in minutes and is never added to a block height** — §3.3 derives the boundary as `roundOpen + commitBlocks · LATE_WIDEN_AT / COMMIT_WINDOW`, a ratio of two minute-valued constants applied to an already-converted window, so no comparison spans two units (§0, I31). |
 | `LATE_WIDEN_FACTOR` | 1.5× | Threshold multiplier at widening. |
 | `DRAW_BOUNTY` | 0.5 % of fee | Paid to whoever pokes the draw, or its expiry (§4.3). Separate from `CLAIM_BOUNTY` because the draw, not finalization, is the transition with a hard expiry (§7.3, F16). **It is a convenience, not the reason the poke happens** — §7.3 makes poking dominant for the plurality-losing side at any bounty, including zero. |
 | `CLAIM_BOUNTY` | 1 % of fee | Paid to whoever triggers finalization. **Retained, not paid, on every `UNRESOLVED` row (§4.8) — and §10 records that as an open question**, because those transitions are permissionless too and somebody poked them. |
@@ -644,11 +644,31 @@ eligibility seed and the outcome seed are separate values with separate domains
 ### 3.3 The threshold, and in-window widening
 
 ```
-threshold(c, r, t) = T                      for t < roundOpen + LATE_WIDEN_AT
+widenAt(c) = roundOpen + (commitBlocks(c) · LATE_WIDEN_AT) / COMMIT_WINDOW
+             -- a BLOCK HEIGHT, derived from the window already converted at
+                submission. LATE_WIDEN_AT and COMMIT_WINDOW are both minutes,
+                so the ratio is dimensionless and the units close (§0, I31)
+
+threshold(c, r, h) = T                      for h < widenAt(c)
                      T · LATE_WIDEN_FACTOR   thereafter
 ```
 
 `T` is set so that the expected eligible count is `TARGET_COHORT`.
+
+**This was a unit-span, and the M2.7 implementation found it.** The rule used to
+read `t < roundOpen + LATE_WIDEN_AT` with `roundOpen` a block height and
+`LATE_WIDEN_AT` "minute 12 of commit" — a wall-clock constant added to a block
+counter, which is exactly what I31 forbids and what §0 exists to prevent. It is the
+same defect class as the `EXIT_COOLDOWN` conversions, in the one section nobody
+re-read when §0 was written.
+
+**It is derived from `commitBlocks`, not converted afresh.** §4.1 declares three
+converted window fields and §7.2 names three conversions; a fourth field or a
+second conversion site would give `BLOCK_TIME` two places to be read and I27 one
+more thing to pin. Scaling the already-converted window by a dimensionless ratio of
+two minute-valued constants adds neither. At the working values —
+`LATE_WIDEN_AT` 12 min, `COMMIT_WINDOW` 20 min, `commitBlocks` 240 — this is
+`roundOpen + 144`.
 
 **The widening schedule is fixed when the round opens** — it is not conditional on
 how many commitments have arrived. Conditional widening reads live state and
@@ -2755,9 +2775,24 @@ the same key, and inherits everything the claim already holds:
 same claimKey            no new key, so the reservation is what admits it
 same u                   §4.5's randomness, re-derived from stored entropy
 pooled tally carries      pooledApprove / pooledReject are not reset
-prior voters are DONE     already settled; not re-judged, not re-paid
+prior voters are DONE     PRECONDITION, not a fact: every prior voter must
+                          already have settled, and `reopen` REQUIRES it
 fee                      as a submission — the new cohort's work is real
 ```
+
+**That row used to read "already settled; not re-judged, not re-paid", and it was
+asserting something §5.5 makes untrue.** Settlement is pulled per moderator and may
+never complete, so at the moment a reopen is attempted an earlier voter can still be
+unsettled — and then they sit between two terminals with no rule saying which one
+judges them. The M2.7 implementation hit this and asked; the resolution is to make
+`reopen` *require* what the row assumed rather than to invent a rule for the
+straddling voter.
+
+**This costs nothing, because `claim(c, m)` is permissionless (§5.5).** Anyone who
+wants the reopen can settle the stragglers themselves, so the precondition is
+always satisfiable by the party who wants it satisfied and no one can hold a
+re-review hostage by declining to claim. A precondition that only the blocker can
+clear would be a griefing vector; this one is not.
 
 **Why the tally carries forward, and what it buys.** §4.5 already proved the
 shape: with `u` fixed, **an unchanged tally yields an identical verdict**, and

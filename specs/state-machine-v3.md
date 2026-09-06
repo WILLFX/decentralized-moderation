@@ -1110,6 +1110,7 @@ An attacker who owns all sixteen reveals of a case still gets 99.1%. Since §4.8
 there is no minimum, so the left of that table is reachable and not hypothetical:
 **`N = 1` is the configuration a gate used to exclude and `â` now discounts by
 25.9%.**
+
 **I12 is not a wall and this document should not pretend otherwise.** What it buys
 is that no incentive argument here has a degenerate branch: §7.3's
 `f(â)·(share + d) > 0` and §8.4's "every draw has an approval branch" are strict at
@@ -1194,7 +1195,7 @@ stops depending on a quantity that lives outside the contract.
   verdict on an unchanged tally. So one word is kept, `blockhash(outcomeSeedBlock)`,
   from which all three tickets re-derive forever. One slot, not three, and it is
   what makes "one randomness per claim" true for the *life* of the claim rather
-  than for one opening of it. §8.3's `unanimousDraw` flag also survives, because
+  than for one opening of it. §8.3's `unanimousDraw` flag also survives, because it
   is the one thing read back.
 - **Nothing about `u` is knowable while anyone is still voting.** `u` is realized
   at `DRAW`, after every reveal in both rounds. An earlier revision realized it at
@@ -1211,9 +1212,33 @@ took the draw against `â`, so would a 31–1 tally *with* replacement under the
 `A/N`, and the estimator now carries that argument. Sampling with replacement is
 still necessary; it stopped being what makes I12 true.
 
-The implementation must guard `N > 0` explicitly: `MIN_REVEALS` is gone (§4.8), so
-`N ≥ 1` is now the only thing standing between the draw and a division by zero, and
-a revert inside the draw leaves a case permanently unfinalizable.
+**The draw must NOT guard `N > 0`, and an earlier revision of this paragraph said
+it must.** It read: *"`N ≥ 1` is now the only thing standing between the draw and a
+division by zero, and a revert inside the draw leaves a case permanently
+unfinalizable."* The second clause is true and is exactly why the first is
+dangerous — it asked for a revert in the one transition where reverting is
+unrecoverable, to prevent a fault that cannot occur.
+
+**The draw does not divide.** Both forms above are division-free by construction:
+
+- `â`'s denominator is `N + 2`, which is **at least 2** at every tally including
+  the empty one. The add-one estimator removed the zero denominator as a side
+  effect of removing the certainty at `N = 1` (§4.5) — that is the same change,
+  seen from the other end.
+- the ticket comparison is **cross-multiplied** — `u·(N+2) < (A+1)·2^128` — for
+  monotonicity (see *Note the comparison form* above), and cross-multiplying
+  removes the division along with the re-roll.
+
+At `A = N = 0` the arithmetic is well defined and gives `f(0.5) = 0.5`: a coin
+flip on zero evidence, which is the correct reading of no evidence and not an
+error state. Verified at 200,000 draws per tally.
+
+The paragraph is a survival from the `A/N` era, where `N = 0` genuinely was a
+division by zero. **`N ≥ 1` remains true and remains worth stating — but as a
+structural fact, not a guard**: §4.3 routes `pooled == 0` to `NO_REVEALS` at reveal
+close, and the pooled tally never decreases, so `DRAW` is unreachable with an empty
+tally. Nothing needs to check what nothing can violate, and adding the check would
+convert an impossible state into a permanently stuck one.
 
 ### 4.6 A challenge that does not move the tally
 

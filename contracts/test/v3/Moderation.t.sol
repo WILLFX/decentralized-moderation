@@ -336,6 +336,33 @@ contract ModerationV3Test is Test {
         assertApproxEqAbs(approves, 358, 45, "empirical rate tracks f(4/5) = 0.896");
     }
 
+    /// MUTATION: give the three uniforms a shared index, so they are identical.
+    /// @dev §4.5 — "with replacement is still required, and now trivially:
+    ///      `u[0..2]` are independent, so a side holding one revealed vote keeps
+    ///      `f(â) = 0.997%` at `â = 2/34`." Without independence the three tickets
+    ///      collapse to one and `P(Approve)` becomes `â` rather than `f(â)`.
+    ///
+    ///      Tested STRUCTURALLY rather than by rate: a split draw (1 or 2 tickets
+    ///      of 3) is impossible when the tickets are identical, and a rate
+    ///      assertion wide enough to be stable is also wide enough to miss the
+    ///      difference between `â` and `f(â)`.
+    function test_s4_5_theThreeTicketsAreIndependent() public {
+        uint256 id = _submit();
+        _toTally(id, 3, 3); // â = 1/2, where a split draw is most likely
+
+        uint256 split;
+        uint256 unanimous;
+        for (uint256 i; i < 200; ++i) {
+            (, uint8 tickets) = mod.decideAt(id, keccak256(abi.encode("ind", i)));
+            if (tickets == 1 || tickets == 2) split++;
+            else unanimous++;
+        }
+        assertGt(split, 0, "a split draw must be reachable - the tickets are three, not one");
+        assertGt(unanimous, 0, "and so must a unanimous one");
+        // Three iid Bernoulli(1/2): P(split) = 6/8.
+        assertApproxEqAbs(split, 150, 25, "the split rate is that of three independent tickets");
+    }
+
     /// @dev I11 — no verdict is more confident than the tally it was drawn from.
     ///      Neither outcome exceeds `f((N+1)/(N+2))` at any `N`.
     function test_I11_confidenceIsBoundedByTheTally() public {
@@ -1371,6 +1398,54 @@ contract ModerationV3Test is Test {
         vm.prank(submitter);
         uint256 retry = mod.submit(keccak256("content"), keccak256("meta"), topics, FEE);
         assertGt(mod.caseInfo(retry).pot, carried, "the carried pot is added to the new one");
+    }
+
+    /// MUTATION: drop the `tallied` branch from `_toUnresolved`.
+    /// @dev I26 — once a claim has been TALLIED, no reachable terminal releases its
+    ///      key. §8.4's table is written for a FIRST opening: §8.5 introduced a
+    ///      second one and the table was not revisited for it, so `NO_TURNOUT`'s
+    ///      "not reserved, free retry" row would release the key of a claim a
+    ///      previous opening had tallied and permanently reserved. Reachable in
+    ///      three transactions: reject a claim, reopen it, let the re-review draw
+    ///      no commits.
+    function test_I26_aReReviewCannotReleaseAPreviouslyTalliedKey() public {
+        uint256 id = _submit();
+        address[] memory who = _toTally(id, 0, 5);
+        _rollToDraw(id);
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).terminal, uint8(Moderation.Terminal.REJECTED));
+        bytes32 key = mod.caseInfo(id).claimKey;
+        assertEq(uint8(mod.reservationOf(key)), uint8(Moderation.Reservation.PERMANENT));
+
+        for (uint256 i; i < who.length; ++i) {
+            mod.claim(id, who[i]);
+        }
+        vm.prank(submitter);
+        mod.reopen(id, FEE);
+
+        // The re-review attracts nobody, so it ends NO_TURNOUT.
+        _matureAll();
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        assertEq(mod.caseInfo(id).unresolvedReason, uint8(Moderation.Reason.NO_TURNOUT));
+
+        assertEq(uint8(mod.reservationOf(key)), uint8(Moderation.Reservation.PERMANENT),
+            "a tallied claim's key is never released");
+        vm.prank(submitter);
+        vm.expectRevert(Moderation.KeyReserved.selector);
+        mod.submit(keccak256("content"), keccak256("meta"), topics, FEE);
+    }
+
+    /// @dev The same guard must not over-fire: a FIRST opening that reaches
+    ///      `NO_TURNOUT` has an empty pooled tally, is not tallied, and retries
+    ///      freely — which is the row's whole point.
+    function test_I26_aFirstOpeningNoTurnoutStillRetriesFreely() public {
+        uint256 id = _submit();
+        _matureAll();
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        assertEq(mod.caseInfo(id).pooledApprove + mod.caseInfo(id).pooledReject, 0, "never tallied");
+        assertEq(uint8(mod.reservationOf(mod.caseInfo(id).claimKey)), uint8(Moderation.Reservation.FREE));
     }
 
     /// @dev `policyVersion` is deliberately absent from the key, so a ruleset change

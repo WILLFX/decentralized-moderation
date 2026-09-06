@@ -762,8 +762,19 @@ contract Moderation is ReentrancyGuard {
         refundOwed[caseId] += uint256(c.pot) + uint256(c.challengeReserve);
 
         // §8.4's retry rule, per reason.
+        //
+        // I26 — once a claim has been TALLIED, no reachable terminal releases its
+        // key. The pooled tally never decreases and carries across a re-review
+        // (§8.5), so `pooled >= 1` IS "this claim has been tallied". §8.4's table
+        // is written for a first opening and its `NO_TURNOUT` and `NO_REVEALS`
+        // rows would otherwise release the key of a claim a PREVIOUS opening had
+        // tallied and permanently reserved. Stating the invariant here rather
+        // than special-casing re-review keeps the two rows honest for both.
         bytes32 key = c.claimKey;
-        if (r == Reason.NO_TURNOUT) {
+        bool tallied = (uint256(c.pooledApprove) + c.pooledReject) >= 1;
+        if (tallied) {
+            reservationOf[key] = Reservation.PERMANENT;
+        } else if (r == Reason.NO_TURNOUT) {
             // Not reserved, free retry: no draw occurred and nobody could have
             // caused it (commits are blind).
             reservationOf[key] = Reservation.FREE;

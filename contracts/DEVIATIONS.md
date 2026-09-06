@@ -480,3 +480,217 @@ monolith could not do. `Round.nSeats` now counts what was actually seated. The
 *seated*. Short panels are a liveness path, not an error: the round opens COMMIT
 with whatever it seated, and under-participation falls through to the existing
 widen and VOID handling.
+
+---
+
+# v3 implementation deviations from `specs/state-machine-v3.md`
+
+M2.7, `contracts/src/v3/Moderation.sol`. The `D3-` prefix marks the v3 port; the
+`D-` entries above are M2/M2.5/M2.6 against the v1 spec and are untouched.
+
+Every entry: **what**, **why**, **threat-model impact**. The state machine remains
+the source of truth; these are implementation resolutions, not new mechanism. Where
+§4 was silent or self-contradicting, the entry says so and the question is carried
+into the M2.7 report rather than settled here.
+
+### D3-1. `IIndexRegistry` is declared by `Moderation`, not imported
+
+**What.** `IndexRegistry` has not been ported to v3 (§Scope classifies it "survives
+with edits" and it is not in this order's scope), so `Moderation` declares the
+minimum surface §8 requires of it:
+`writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality)`.
+
+**Why.** §8.1 obliges the terminal transition to write the index, and §4.8 obliges
+`NO_RANDOMNESS` to retain the published plurality *beside* the `UNRESOLVED` status.
+Neither is expressible through a single status byte, so the interface carries both.
+
+**Threat model.** None on its own — the mock in the suite counts writes so I15 can
+be checked by count and order rather than by final state. The real risk is that the
+v3 `IndexRegistry` is written to a different shape later; the interface is one
+declaration and the port must reconcile it.
+
+### D3-2. `Case` carries seven fields §4.1 does not list
+
+**What.** `claimKey`, `contentHash`, `metaHash`, `submitter`, `topicCount`, plus
+`drawBounty` and `claimBounty`.
+
+**Why.** §4.1's struct ends with the comment *"content, metadata, topics,
+ruleset/guidelines versions: as v2"*, which is where the first five come from. The
+two bounty fields are not covered by that clause: §4.8's value-flow block says a
+terminal *"retains finalizationBounty"*, which presupposes the case holds one, and
+§1 splits the fee into five components of which §4.1 stores only two (`pot`,
+`challengeReserve`). Recomputing a bounty from `pot` is not exact under integer
+division, so the two amounts are stored.
+
+**Threat model.** Storage only. Each bounty is paid at most once and zeroed, so a
+re-review's second draw cannot re-pay a bounty the first already spent.
+
+### D3-3. Refunds and shares are pulled, never pushed
+
+**What.** A terminal transition credits `refundOwed[caseId]`; the submitter (or
+anyone, on their behalf) calls `withdrawRefund`. Moderator payment already runs
+through `claim(c, m)`.
+
+**Why.** §4.8 says a terminal refunds the pot and reserve but does not say by what
+mechanism. Pushing a transfer inside the transition lets a submitter contract whose
+`receive` reverts brick the terminal for everyone — including the index write §8.1
+requires and every moderator's discharge path. §5.5 already chose pull for
+settlement; this is the same choice for the same reason.
+
+**Threat model.** Strictly reduces surface. The failure it prevents is a submitter
+who is a contract, which is not an exotic case.
+
+### D3-4. `LATE_WIDEN_AT` is scaled from `commitBlocks`, not converted separately
+
+**What.** §3.3's widening boundary is computed as
+`roundOpen + commitBlocks · LATE_WIDEN_AT / COMMIT_WINDOW`.
+
+**Why.** §3.3 compares `t` against `roundOpen + LATE_WIDEN_AT`, and `t` is a block
+height while §1 gives `LATE_WIDEN_AT` in minutes — a comparison spanning two units,
+which I31 forbids. §4.1 declares exactly three converted window fields and §7.2's
+formula names three conversions, so adding a fourth field would depart from both.
+Scaling the already-converted block count keeps one conversion per case and adds no
+field. Both operands come from the same pinned parameter block (I27).
+
+**Threat model.** None. The ratio is exact in the intended configuration
+(720/1200 of 240 blocks = 144) and rounds down otherwise, which shortens the
+un-widened period rather than extending it.
+
+### D3-5. `share` is recomputed, not stored
+
+**What.** `shareOf(caseId)` derives `share` on each call from `pot`,
+`challengeReserve`, `reveals0`, the pooled tally and `verdict`.
+
+**Why.** §8.1 says `share` is *fixed* at the terminal transition; §4.1 declares no
+field for it. Every input is immutable after the terminal, so recomputation is
+fixed in the sense §8.1 means, and it is `O(1)`.
+
+**Threat model.** None. A stored field and a recomputation from immutable inputs are
+observationally identical; the recomputation cannot drift because nothing it reads
+can change.
+
+### D3-6. Test-fixture parameter values are fixtures, not proposals
+
+**What.** `Moderation.t.sol` sets `BOND_MIN`, `CHALLENGE_BOND`, `GAS_ALLOWANCE`
+(through `LAMBDA` and `REVEAL_BOND`), `MATURATION`, `RETRY_COOLDOWN`,
+`SUPER_QUORUM` and the bounty/reserve/maintenance split to concrete numbers.
+
+**Why.** §1 and §10 leave all of them open and the work order forbids picking
+values. A case cannot run without numbers, so they live in the test and nowhere
+else: the contract holds no default, and `applyParams` accepts any block that
+satisfies the one bound below.
+
+**Threat model.** None, provided nothing reads these as recommendations. They are
+chosen to make paths reachable in a suite, not to be safe.
+
+### D3-7. `BLOCK_TIME`'s bound is enforced; its value is not
+
+**What.** `applyParams` rejects any block where
+`ceil(COMMIT_WINDOW / BLOCK_TIME) > SEED_LAG + BLOCKHASH_HORIZON`.
+
+**Why.** §3.1 and §10 derive `commitBlocks ≤ 258`, so `BLOCK_TIME ≥ 4.651 s` with
+18 blocks of margin at 5 s. §3.1 says `RulesetGovernor` must validate it. That
+contract is not ported, and an unvalidated block does not fail loudly — it
+re-points the tail of every commit window at a seed that has expired — so the check
+is enforced here as well. It must be duplicated in `RulesetGovernor` when that is
+written, not moved.
+
+**Threat model.** Closes the failure §7.2 measured on the old `blockAt()` schedule,
+where fast blocks were fatal and slow blocks benign.
+
+### D3-8. `reopen` requires prior claims to be settled
+
+**What.** `reopen` reverts with `ClaimsOutstanding` unless every vote claim the case
+created has been discharged.
+
+**Why.** §8.5 states that prior voters *"are already settled; not re-judged, not
+re-paid"* as a fact. It is not one: §5.5 pulls settlement per moderator and it *may
+never complete*. Without this check a moderator who committed under the first
+opening and never claimed is stranded between two terminals, and no rule in §4 or §8
+says which terminal judges them. Requiring what §8.5 assumes turns a silent
+ambiguity into a precondition anyone can clear, since `claim(c, m)` is
+permissionless.
+
+**Threat model.** A re-review can be delayed by an unsettled claim. Because
+settlement is permissionless and self-funded, whoever wants the re-review can settle
+the stragglers first, so this is a liveness cost of one transaction per straggler
+rather than a block. Carried into the report as a spec question.
+
+### D3-9. A re-opened case draws from stored entropy and has no expiry
+
+**What.** When `outcomeEntropy` is already set, `draw` finalizes from it
+immediately, without consulting `outcomeSeedBlock` or `BLOCKHASH_HORIZON`.
+
+**Why.** §8.5 requires a re-review to return an identical verdict on an unchanged
+tally, and §4.5 stores one word precisely so `u` re-derives *"for the life of the
+claim"* after `blockhash` has expired. §8.5 does not say what schedule a reopened
+case's draw follows. Re-arming a fresh outcome seed would make `NO_RANDOMNESS`
+reachable a second time on a claim that already holds its randomness, which
+contradicts "one randomness per claim"; reading the stored word cannot expire.
+
+**Threat model.** Removes a terminal that should not be reachable. It also means a
+reopened case has no `DRAW` waiting window, so finalization is immediate at reveal
+close — a timing difference between a first opening and a re-review, which §3.5b's
+uniform-latency argument does not cover. Carried into the report.
+
+### D3-10. Maintenance accrues in `Moderation`, separately from the registry's
+
+**What.** The fee's maintenance component, the §5.3 division remainder, and bounties
+nobody earned accumulate in `Moderation.maintenanceAccrued`. Debits accumulate in
+`StakeRegistry.maintenanceReserve`.
+
+**Why.** §5.1 sends every debit to "the maintenance reserve" and the registry holds
+it; §1's fee split and §5.3's remainder are held by `Moderation` and the registry
+boundary has no call to deposit them. No section says whether the two are one pool.
+
+**Threat model.** Neither pool has an exit — the same gap already recorded for the
+registry. Nothing can be drawn from either, so no value is at risk today; what is
+at risk is that a later sweep is written against one pool and misses the other.
+Carried into the report.
+
+### D3-11. Unearned bounties are retained rather than refunded
+
+**What.** On `NO_TURNOUT` and `NO_REVEALS`, and for the claim bounty on
+`NO_RANDOMNESS`, the unpaid bounty is folded into `maintenanceAccrued`.
+
+**Why.** §4.8's value-flow block refunds `pot + challengeReserve` and retains
+"finalizationBounty and maintenance". `DRAW_BOUNTY` is a fifth fee component and the
+block does not mention it on the two terminals that never reach `DRAW`. Retaining
+is the conservative reading — it does not pay a bounty for work nobody did and does
+not enlarge a refund the spec did not authorise.
+
+**Threat model.** A submitter whose case dies at `NO_TURNOUT` loses the draw bounty
+as well as maintenance, on a row §4.8 calls unsteerable and "free, full refund".
+That is a real cost to the party the row is meant to protect, and it is the reading
+this implementation chose rather than one §4.8 states. **Open question in the
+report.**
+
+### D3-12. `NO_REVEALS` carries the pot; §4.8 says every reason refunds it
+
+**What.** On `NO_REVEALS` the pot is moved to `carriedPot[claimKey]` and only the
+challenge reserve is refunded.
+
+**Why.** §8.4's table says `NO_REVEALS` retries *"after the cooldown, pot carried
+forward, no fresh fee"*. §4.8's value-flow block says *"every reason → refund pot +
+challengeReserve IN FULL"*. Both cannot hold: the pot is either returned or carried.
+§8.4 is the retry-specific rule and §4.8's block is the general one, so §8.4 wins.
+
+**Threat model.** If the general rule was meant, the submitter is under-refunded by
+the pot until they retry, and a submitter who never retries never gets it. If §8.4
+was meant — as implemented — the "no fresh fee" retry is funded. **This is a direct
+contradiction between two sections and is the first question in the report.**
+
+### D3-13. `Moderation` holds the governor role directly
+
+**What.** `applyParams` is `onlyGovernor`, with a plain `setGovernor`.
+
+**Why.** `RulesetGovernor` is not ported. §4.1 requires versioned parameter blocks
+pinned per case (I27) and something must publish them. The propose/execute timelock
+pattern lives in the governor, not here, so this is a seat for it rather than a
+replacement.
+
+**Threat model.** Until `RulesetGovernor` v3 exists, parameter changes have no
+timelock at this contract. Pinning still holds — a change cannot affect a live case
+(I27) — so the exposure is limited to cases submitted after the change. It must be
+replaced by the governor before any deployment, and the standing constraint already
+forbids one.

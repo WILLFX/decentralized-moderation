@@ -420,3 +420,64 @@ rarest depth-3 round pays it; depth-0 (5 seats) is far cheaper.
 
 Soft budgets are adjusted to measured reality per work order D9 and are
 documented, not load-bearing. Full per-test gas is in `contracts/.gas-snapshot`.
+
+---
+
+# v3 gas — `Moderation` (M2.7)
+
+Measured with `gasleft()` around each call in `test/v3/ModerationGas.t.sol`, so the
+figures exclude the 21,000-gas transaction base and calldata cost. Cohort of 34 —
+the size §4.5's verdict figures are quoted at — with `MAX_TOPICS = 5`, the worst
+case for the index write.
+
+**The index is a counting stub in this measurement.** A real `IndexRegistry` write
+is a cold `SSTORE` per topic on top of every figure marked `+index`; at 5 topics
+that is roughly 100k more on a first write. `IndexRegistry` is not ported to v3
+(§Scope), so the true figure is not measurable yet — this is a floor, not a budget.
+
+## Per-transaction
+
+| Call | Gas | Notes |
+|---|---:|---|
+| `submit` (5 topics) | 434,600 | writes the whole `Case`, five topic slots, and pulls the fee |
+| `commit` | 63,380 | includes `mayCommit` + `createVoteClaim` across the registry boundary |
+| `reveal` | 28,700 | no cross-contract call |
+| `challenge` | 60,285 | registers only — no transfer, no phase change, no seed |
+| `closeCommit` → `REVEAL` | 5,011 | |
+| `closeCommit` → `UNRESOLVED(NO_TURNOUT)` | 58,836 | `+index` |
+| `closeReveal` → `TALLY` | 38,570 | `+index` (the interim plurality, §8.2) |
+| `closeReveal` → `UNRESOLVED(NO_REVEALS)` | 77,165 | `+index`, and carries the pot (§8.4) |
+| `closeTally` → `DRAW` | 3,525 | the cheapest row: it enters a waiting state |
+| `closeTally` → `COMMIT (r=1)` | 4,919 | resets both per-round counters, arms the elig seed |
+| `draw` → `FINALIZED` | 107,743 | `+index`, three ticket hashes, two bounty transfers |
+| `draw` → `UNRESOLVED(NO_RANDOMNESS)` | 61,962 | `+index`, one bounty transfer |
+| `claim` — coherent | 93,975 | `reward` + `recordParticipation` + `discharge` |
+| `claim` — incoherent | 63,723 | `debit` + `discharge` |
+| `claim` — non-revealer | 65,608 | `debit(REVEAL_BOND)` + `discharge` |
+| `claimChallenge` | 59,509 | `debit(CHALLENGE_BOND)` + `discharge` |
+| `withdrawRefund` | 6,970 | |
+
+## There is no aggregate transaction, and that is the point
+
+The largest single transaction is `submit` at ~435k — about 2.6% of a 17M Gnosis
+block. **No path in this contract costs more than one participant's own work**,
+because §5.5 pulls settlement per moderator: a 34-voter case costs 34 independent
+`claim` calls of ~64–94k each, not one sweep of ~2.7M.
+
+This is the substantive change from v1, where settlement was batched per case and
+`GAS_BUDGETS.md` had to size a 3.5M–5M budget against the block limit and a bounty
+against the aggregate. The v1 concern — that one moderator's presence could revert
+the batch for every other voter in the case — is not expressible here: each claim is
+its own transaction and its own failure domain.
+
+`draw` is the only transition with a hard expiry (§7.3), and at ~108k inside a
+51-minute window it is well under any plausible congestion floor.
+
+## What this does not measure
+
+- **The real index write.** See above.
+- **`reopen` (§8.5).** It costs roughly a `submit` without the topic writes, and it
+  is gated on every prior claim being settled (D3-8), so its true cost to a
+  re-reviewer includes clearing any stragglers at ~64–94k each.
+- **Cold vs warm moderators.** `commit` is measured warm. A moderator's first
+  interaction with the registry in a block pays cold-account costs on top.

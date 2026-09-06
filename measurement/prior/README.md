@@ -73,7 +73,9 @@ because it is easy to omit:
 - **Per-moderator revealed votes**, not only the pooled counts. `reveal()` must
   emit the moderator and their vote. `state-machine-v3` §4.1 stores only
   `pooledApprove` / `pooledReject`, which is correct for the contract and
-  insufficient for this.
+  insufficient for this. **This one requirement now carries three measurements
+  rather than one** — `rho`, and both halves of the reliability spread below — so
+  it is the single highest-value line in this document.
 - **The pinned `guidelinesVersion` per case** (§4.1 already pins it). Cases decided
   under different guideline text are different experiments and must not be pooled.
 
@@ -129,7 +131,40 @@ so, and the estimator reads *negative* on small samples even when errors are
 strongly shared, because the per-item expectation is estimated from the same few
 votes it is compared against.
 
-Then feed both into `simulation/v3/correlated.py`.
+**Report the *spread* of `prior`, not only its mean.** `reliability_spread()` does
+this and `report()` prints it. It costs nothing extra to collect — the votes are
+already keyed `(rater, item)` for `rho`'s sake — and it answers a question the mean
+cannot:
+
+- **`sd`** — whether reliability weighting is worth having.
+  `simulation/v3/FINDINGS-weighted.md` §1 measures the gain as a function of this
+  and finds it **exactly zero at zero spread**. If moderators are uniform there is
+  nothing to sort. At `sd = 0.157` weighting is worth 15 points of false approval;
+  at 0.273, 32 points. Nothing else measured in this project moves that number.
+- **`p95`** — whether it is *safe* to have. Weighting is farmable: an attacker
+  never has to dodge a known-answer case, because he can answer everything
+  honestly except the one case he is attacking, so his score measures his
+  **judgment** rather than his behaviour. Above a crossover he ends up holding
+  more of the weight than the heads — 65% from 35% at the extreme — and no weight
+  cap removes it (§6). The crossovers are **0.797** at `prior` 0.665 and **0.967**
+  at 0.95.
+
+**The testnet can measure the attacker's side of that without labelling
+attackers.** It does not need to know who is hostile: the quantity that matters is
+what a *motivated careful reader* achieves on this content mix, and **the best
+honest raters are careful readers**. The upper tail of the per-rater distribution
+is the estimate. No panel, no separate study, no new instrument — the same votes,
+read at the top of the distribution instead of the middle.
+
+One trap, encoded in the docstring because it runs in the dangerous direction:
+**`p95` is biased upward.** It is the near-maximum of a set of noisy estimates, so
+it captures whoever got lucky as well as whoever is good. At 30 items a genuinely
+0.665 rater reads 0.80 or better about 5% of the time — which is exactly the
+quantile being reported. `min_items = 30` is a floor, not a target, and a `p95`
+from thin data is an upper bound on an upper bound.
+
+Then feed `rho` into `simulation/v3/correlated.py`, and the spread into
+`simulation/v3/run_weighted.py` as `concentration` and `attacker_gold_accuracy`.
 
 ## What the answer decides
 
@@ -138,7 +173,16 @@ Then feed both into `simulation/v3/correlated.py`.
 | **≈ 0.95+** | False rejection ~1.7% at `rho = 0`, and `simulation/v3/FINDINGS-v3.md` §H puts the irrecoverable share at 0.7%. §8.6's permanence is defensible, `SUPER_SAFE` is reachable, and grinding a listing by resubmission costs ~229 fees. |
 | **≈ 0.665** | With *zero attackers*, ~29% of safe content is rejected — 22.8% of it with no recourse that can reach it (§H) — and ~29% of unsafe content approved, with 9 resubmissions enough to list anything. That is not a search index, and no state machine repairs it. |
 
+And one row the spread decides on its own:
+
+| `sd` and `p95` | consequence |
+|---|---|
+| **`sd` ≈ 0** | Reliability weighting is inert. Whatever `prior` turns out to be, the design is stuck with it and the only remaining lever is better moderators or fewer of the hard cases. |
+| **`sd` large, `p95` < crossover** | Weighting is worth 15–32 points of false approval, most of it at the low `prior` where the design is weakest. This is the largest improvement anything measured here has produced. |
+| **`p95` ≥ crossover** | Weighting runs in reverse at comparable magnitude and is not adoptable at any weight cap. |
+
 **This blocks deployment, not work.** The standing constraint already blocks
-deployment. Nothing in `specs/` or `contracts/` waits on this number; what waits on
-it is whether any of it should be launched with material funds, and whether the
-index may be described as safe-search certification.
+deployment. Nothing in `specs/` or `contracts/` waits on these numbers; what waits
+on them is whether any of it should be launched with material funds, whether the
+index may be described as safe-search certification, and — now — whether
+reliability weighting is an improvement or an own goal.

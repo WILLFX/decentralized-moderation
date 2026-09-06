@@ -25,7 +25,7 @@ import itertools
 import json
 import statistics
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from corpus import Item
 from guidelines import GUIDELINES_V1, build_prompt
@@ -179,6 +179,80 @@ def rho(res: Result, items: Sequence[Item]) -> float:
     return 0.0 if e >= 1.0 else (o - e) / (1 - e)
 
 
+#: Above this, reliability weighting stops helping and starts helping the
+#: attacker. Measured in `simulation/v3/FINDINGS-weighted.md` §3 at 8,000 trials:
+#: 0.797 at `prior` 0.665, 0.967 at `prior` 0.95. The bar is not the mean plus a
+#: constant — it tracks how heavy the honest cohort's left tail is — so it must be
+#: read against the band's own `prior`, not against a single number.
+WEIGHTING_CROSSOVER = {0.665: 0.797, 0.95: 0.967}
+
+
+def reliability_by_rater(res: Result, items: Sequence[Item],
+                         band: Optional[str] = None,
+                         min_items: int = 30) -> Dict[str, Tuple[float, int]]:
+    """Per-rater `P(vote == truth)`, Laplace-smoothed, for raters with enough
+    items to estimate.
+
+    Smoothed as `(hits + 1) / (n + 2)` — the same uniform prior `â` uses — because
+    the quantity this feeds is a **log-odds weight**, and an unsmoothed 1.0 or 0.0
+    sends that to infinity. `min_items` is not optional: see
+    `reliability_spread`'s docstring for why the upper tail of a small-sample
+    estimate lies.
+    """
+    truth = {i.id: i.truth for i in items}
+    bands = {i.id: i.difficulty for i in items}
+    acc: Dict[str, List[int]] = {}
+    for (rater, item_id), vote in res.votes.items():
+        if band is not None and bands[item_id] != band:
+            continue
+        acc.setdefault(rater, []).append(int(vote == truth[item_id]))
+    return {r: ((sum(v) + 1) / (len(v) + 2), len(v))
+            for r, v in acc.items() if len(v) >= min_items}
+
+
+def reliability_spread(res: Result, items: Sequence[Item],
+                       min_items: int = 30) -> Dict[str, Dict[str, float]]:
+    """The two numbers reliability weighting turns on, per band.
+
+    **`sd`** decides whether weighting pays at all. `FINDINGS-weighted.md` §1: the
+    gain scales with it and is *exactly zero* at zero spread. If moderators are
+    uniform there is nothing to sort and the whole idea is inert.
+
+    **`p95`** decides whether it is safe. An attacker does not need to dodge gold
+    cases; he answers everything honestly except the case he is attacking, so his
+    score is what his *judgment* is worth. The testnet cannot label attackers —
+    but it does not have to. **The best honest raters are the careful readers**,
+    so the upper tail of this distribution is the estimate of what a motivated
+    adversary achieves on this content mix. If it clears the band's crossover,
+    weighting is unsafe and no weight cap fixes that (§6).
+
+    **`p95` is biased UPWARD and this is not a detail.** It is the maximum of a set
+    of noisy estimates, so it captures whoever got lucky as well as whoever is
+    good — the winner's curse, and it runs in the direction that makes weighting
+    look unsafe when it may not be. `min_items` is the only defence: at 30 items a
+    true-0.665 rater reads 0.80 or better about 5% of the time, which is exactly
+    the quantile being reported, so **30 is a floor and not a target.** Report `n`
+    alongside and treat a `p95` from thin data as an upper bound on the upper
+    bound.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for band in sorted({i.difficulty for i in items} | {None}, key=str):
+        rel = reliability_by_rater(res, items, band, min_items)
+        if len(rel) < 2:
+            continue
+        vals = sorted(v for v, _ in rel.values())
+        k = max(0, min(len(vals) - 1, int(round(0.95 * (len(vals) - 1)))))
+        out["ALL" if band is None else band] = {
+            "mean": statistics.fmean(vals),
+            "sd": statistics.stdev(vals),
+            "p95": vals[k],
+            "max": vals[-1],
+            "n_raters": len(vals),
+            "min_items_per_rater": min(n for _, n in rel.values()),
+        }
+    return out
+
+
 def rho_is_usable(res: Result, min_configs: int = 8, min_items: int = 100) -> bool:
     """`rho` is badly biased at small rater counts and will read NEGATIVE on a
     handful of configurations even when errors are strongly shared — the
@@ -200,4 +274,26 @@ def report(res: Result, items: Sequence[Item]) -> None:
           f"{'' if ok else '   <-- UNUSABLE: too few configs/items, see rho_is_usable'}")
     print("    0 -> a cohort of N is N opinions")
     print("    1 -> a cohort of N is one opinion sampled N times (P1-4 / O4)")
-    print("\nFeed both into simulation/v3/correlated.py.")
+
+    spread = reliability_spread(res, items)
+    print("\nreliability spread, per band — decides whether weighting is worth")
+    print("having (`sd`) and whether it is safe to have (`p95`):")
+    if not spread:
+        print("    (no band has 2+ raters with 30+ items — not estimable yet)")
+    for b, s in sorted(spread.items()):
+        band_prior = prior_by_band(res, items).get(b, (float('nan'), 0))[0]
+        cross = min(WEIGHTING_CROSSOVER.items(),
+                    key=lambda kv: abs(kv[0] - band_prior))[1]
+        flag = "  <-- ABOVE CROSSOVER: weighting favours the attacker" \
+            if s["p95"] >= cross else ""
+        print(f"    {b:>10}  mean {s['mean']:.4f}  sd {s['sd']:.4f}  "
+              f"p95 {s['p95']:.4f}  max {s['max']:.4f}  "
+              f"(raters={int(s['n_raters'])}, min items/rater="
+              f"{int(s['min_items_per_rater'])}, crossover~{cross:.3f}){flag}")
+    print("    sd  ~0     -> weighting is inert; the gain scales with this")
+    print("    p95 >= crossover -> weighting runs in reverse, and no cap fixes it")
+    print("    p95 is biased UP on thin data (winner's curse) — read it as an")
+    print("    upper bound on an upper bound until items/rater is well past 30.")
+
+    print("\nFeed rho into simulation/v3/correlated.py, and the spread into")
+    print("simulation/v3/run_weighted.py (concentration, attacker_gold_accuracy).")

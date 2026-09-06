@@ -1324,7 +1324,7 @@ debits and the retry rule.
 | Reason | Condition | Steerable? | Retry |
 |---|---|---|---|
 | `NO_TURNOUT` | `commitsThisRound == 0` at commit close | **no** — commits are blind, and this row needs *every* eligible identity to abstain | free, full refund |
-| `NO_REVEALS` | commits cleared the gate and `pooled == 0` at reveal close | **yes**, but only by holding *every* commit | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
+| `NO_REVEALS` | at least one commit and `pooled == 0` at reveal close | **yes**, by holding *every* commit — and §4.8b made that much cheaper; see §4.8c | claim reserved for `RETRY_COOLDOWN`, pot carried forward |
 | `NO_RANDOMNESS` | the fixed outcome seed expired unread (§7.3) | **not by any party who can reach it.** Poking is dominant for the submitter at every tally (§7.3) and for the plurality-losing revealers at every non-unanimous one, so no coalition that *wants* the expiry can also produce it. **The plurality-winning revealers do gain** — they pay no debit either way and their gain is the gap between `f(â)` and certainty — and that residual is stated below rather than denied here | **no retry.** The claim carries `REJECTED`'s reservation by reference (§8.4, I26); the pot is refunded less maintenance |
 
 **The commit gate was the last quorum gate, and §4.8b removes it too.** What
@@ -1507,8 +1507,9 @@ NO_RANDOMNESS     ->  debit d(c) to every revealer on the losing side of the
 
 The reason code is load-bearing rather than diagnostic: it decides both the debits
 above and the retry rule. `NO_TURNOUT` is a market problem nobody can cause,
-because commits are blind. `NO_REVEALS` is steerable by a party holding every
-commit, so its retry is delayed and its pot carried. `NO_RANDOMNESS` is the only
+because commits are blind — and since §4.8b it needs an *empty* round, not a thin
+one. `NO_REVEALS` is steerable by a party holding every commit, so its retry is
+delayed and its pot carried; §4.8c measures how much §4.8b cheapened that. `NO_RANDOMNESS` is the only
 row that ends with the content **judged**, so I26 attaches to it and it does not
 retry at all (§8.4) — which is also what removes the last party who wanted it.
 
@@ -1537,10 +1538,15 @@ plurality-losing revealers. Three things bound that:
 **Why `NO_REVEALS` is separated from `NO_TURNOUT`.** An earlier revision folded
 "nobody revealed" into `NO_TURNOUT` and marked the whole row unsteerable. It is
 not: a party holding *every* commit on a case can withhold all of them and reach a
-terminal that, under the free-retry treatment, hands the claim back. The bar is
-high — they must be the entire committing cohort — which is why this is a
-reservation rather than a redesign. But I28 does not cover them, and §4.8's own
-steerability column is what decides the retry rule, so the row has to be honest.
+terminal that, under the free-retry treatment, hands the claim back. I28 does not
+cover them, and §4.8's own steerability column is what decides the retry rule, so
+the row has to be honest.
+
+**This paragraph used to end "the bar is high — they must be the entire committing
+cohort — which is why this is a reservation rather than a redesign." That clause is
+withdrawn.** The bar was high because `MIN_COMMITS` was 16, so the entire committing
+cohort meant sixteen identities; §4.8b removed the gate and the same words now mean
+*one*. §4.8c measures what that cost and what still prices it.
 
 **`NO_RANDOMNESS` reserves the claim permanently and refunds the pot.** Both halves
 matter and they answer different parties.
@@ -1638,6 +1644,62 @@ instance sat outside the invariant by construction. Requiring an *empty* round
 narrows the row from the modal outcome to a genuine market failure, which is what
 its treatment was written for. The free retry is unchanged and now describes a case
 that is actually rare.
+
+### 4.8c What §4.8b cost: the price of `NO_REVEALS` fell by the gate
+
+**§4.8b removed a gate that four other sentences were quietly relying on**, and
+this section states the bill rather than leaving it to be rediscovered.
+
+`NO_REVEALS` is reachable by a party who holds **every** commit on a case and
+withholds them all. That sentence is unchanged. What changed is what it costs:
+under `MIN_COMMITS = 16` the party had to *be* sixteen committing identities and
+pay sixteen `REVEAL_BOND`s; with the floor at 1 they need to be **one**.
+
+**Measured** — `P(the commit set is non-empty and entirely hostile)`, at `q = 0.30`
+and the same availability the rest of the simulation uses, 200,000 trials:
+
+| registry | E[cohort] | reachable now (floor 1) | reachable before (floor 16) |
+|---:|---:|---:|---:|
+| 100 | 4 | **0.0714** | 0.00000 |
+| 250 | 10 | **0.0033** | 0.00000 |
+| 500 | 20 | 0.00001 | 0.00000 |
+| 1,000 | 40 | 0.00000 | 0.00000 |
+
+The old column is zero everywhere because an all-hostile cohort of sixteen at
+`q = 0.30` is not a rare event, it is an absent one. **So this is not a widened
+attack, it is a created one** — and it is created exactly at the registry sizes
+§4.8b exists to serve.
+
+**What the attack buys, stated precisely, because it is smaller than it first
+looks.** `NO_REVEALS` carries the claim forward with **no fresh fee** (§8.4), so
+the submitter loses time and not money. The censor buys `RETRY_COOLDOWN` of
+unavailability for one `REVEAL_BOND`. He cannot repeat it at will: he must be the
+sole committer *again*, which at registry 250 is 1 attempt in 300. To suppress one
+item at that size he needs it resubmitted three hundred times, which is not an
+attack but a rounding error. At registry 100 it is 1 in 14, which is a real
+nuisance and is below any size this design should launch at (§10).
+
+**What still prices it, and what that now costs.** `RETRY_COOLDOWN`, and §10's row
+already names this as its one remaining job — *"a delay long enough that reaching
+`NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs."* **That sizing
+was computed against sixteen bonds and must now be computed against one**, so the
+required delay rises by roughly the gate that was removed. This is the live
+parameter consequence of §4.8b and it is recorded in §10.
+
+**Why the fix is a parameter and not a floor.** Restoring a minimum-commit
+condition on this row alone would reintroduce §4.8b's defect in miniature — an
+absolute count gating a cohort proportional to an unobservable registry — and it
+would fire hardest at the small registries where the row is the only thing keeping
+cases alive. §4.8 already reached this conclusion once for `MIN_REVEALS`:
+`RETRY_COOLDOWN` is *"one knob, one attacker"*, and one knob is the right shape
+here even though its value has moved.
+
+**The pattern, recorded because it is the fourth instance.** I19, I25, I17 and I29
+each inherited a limitation that was a *noun* — "round boundary", "terminal state",
+"claim", "guard" — and broadening each meant deleting the noun. Here the noun was
+**"every commit"**, and its strength was never in the word: it was in a parameter
+one section away. A sentence whose guarantee is supplied by a constant it does not
+name will keep reading true after the constant changes.
 
 ### 4.9 Neither round has a quorum gate
 
@@ -2530,7 +2592,7 @@ claimKey = H(actionType, contentHash, metadataHash, canonicalTopics)
 | `APPROVED` | reserved while listed | — |
 | `REJECTED` | **permanently reserved** | none; only an explicit re-review case |
 | `UNRESOLVED(NO_TURNOUT)` | not reserved | freely — no draw occurred and nobody could have caused it |
-| `UNRESOLVED(NO_REVEALS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. Steerable by a party holding every commit (§4.8), so not free; but the submitter did not cause it, so not levied either |
+| `UNRESOLVED(NO_REVEALS)` | **reserved for `RETRY_COOLDOWN`** | after the cooldown, **pot carried forward, no fresh fee**. Steerable by a party holding every commit (§4.8), so not free; but the submitter did not cause it, so not levied either. **`RETRY_COOLDOWN` is the whole price, and §4.8c raised what it has to cover** — the steering party now needs one identity where they needed sixteen |
 | `UNRESOLVED(NO_RANDOMNESS)` | **the reservation `REJECTED` carries — by reference, not by copy** | none; only an explicit re-review case. The pot is refunded less maintenance, because there is no retry for it to carry forward to |
 
 **Why `NO_RANDOMNESS` does not retry, and why I26 already said so.**
@@ -2784,7 +2846,7 @@ and everything below follows from that.
 | **I25** | The non-reveal debit fires wherever **a reveal phase opened**, including terminals in which no verdict was drawn — and *not* in `NO_TURNOUT`, where it never did. It was stated as "every terminal state", which over-corrected a revision that had waived it across all of `UNRESOLVED`: the requirement is the phase, not the terminal, and quantifying over terminals debited every committer in the one row the same section calls unsteerable |
 | **I26** | Once a claim has been tallied, no reachable terminal releases that claim's key. Monotone in "voting has happened" — the draw is last, so keying it to the draw would exclude every pre-draw terminal. **§8.4's `NO_RANDOMNESS` row contradicted this** by reserving for `RETRY_COOLDOWN` and then releasing: that terminal is tallied by definition. The invariant was right and the row was wrong, which is the second time in this section a correctly-stated property was contradicted by a table written without consulting it |
 | **I27** | Every debit is computed with the parameter values pinned into its case at submission. No claim's cost is a function of a parameter changed after the claim was created |
-| **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this |
+| **I28** | Withholding a reveal is never favourable **to a party that wants a side to win**: it forfeits `REVEAL_BOND(c)` and strictly lowers that side's probability. It says nothing about a party playing for a *terminal class* rather than a verdict — a censor holding every commit can still reach `NO_REVEALS`, which is why §4.8 reserves the claim there rather than relying on this. **§4.8b made that censor's job sixteen times cheaper** and §4.8c measures it: the reservation is now carrying a load it was sized for under a gate that no longer exists |
 | **I29** | **No read — a guard, a sentinel, a status, a lookup — returns a value that is the same in two states the read must separate.** Disjointness (I18) is necessary and not sufficient: a guard can be uniquely enabled and still be enabled in a state its justification does not describe. Stated for *guards* first, from `blockhash` returning zero for an expired block and for a future one (§7.3) — and the next three instances were not guards: the same ambiguity unguarded in §3.1's eligibility predicate, a status enum with no `NONE` so an unwritten entry read as a live plurality (§8.2), and a topic key of 0 indistinguishable from an unused slot (§8.2b). **The noun was "guard"** |
 | **I30** | **Every obligation names the condition under which it fires, and a terminal fires exactly those whose condition it meets** (§4.8's table). Magnitudes are unconstrained — an obligation may compute its size from anything the terminal holds; only the condition decides *whether*. An earlier form sorted obligations into three groups by what they read, and the partition did not fit its members: the reserve activation reads the tally for its size and the verdict for whether it happens at all, so it was filed under the tally by §9 and under the verdict by §4.3 and §4.8, and twenty units of reserve were paid out twice. **A condition is a property of the obligation; a group is a property of the partition** — and a new rule can be mis-filed into a group, where it can only fail to state a condition, which is visible |
 | **I31** | **No comparison in this specification spans two units of time.** A deadline is denominated in blocks iff a block-denominated chain constant can expire inside it; wall-clock quantities are records or lifecycle delays that no block constant runs inside. The single wall-clock→block conversion happens once, at case creation, from a pinned parameter (§1 `BLOCK_TIME`, §4.3), and no rule reads it afterwards. **A conversion inside a comparison is a defect even when its constant is correct**, because correctness of the constant is a property of the chain on the day and not of the specification |
@@ -2857,7 +2919,7 @@ property.
 | §8.3's 3/3 conjunct | Live since the estimator changed, and **arbitrary rather than meaningful**: under a unanimous tally the tickets are iid, so 3/3 versus 2/1 is a coin flip that excludes a random 7% of qualifying content at `N = 40` and 16% at `N = 16`. §8.3 argues against it in its own headline. Dropping it makes `SUPER_SAFE` a function of the tally alone, which is what that section says assurance should be — but it changes what a published assurance label promises, so it is a decision rather than a correction. **Open, and cheap to close either way** |
 | The plug-in residual in `f(â)` | §4.5. `f(â)` sits above the exact posterior predictive `E[f(θ)] = (A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))` at every tally but the tie — 4.1 points at `N = 1`, 0.15 at `N = 40`. Kept deliberately: three ticket comparisons are the senior reviewer's rule and the shape §4.5's argument is written in, and the exact form would be a third change to the core verdict arithmetic in one revision. **Every figure derived from `f` in either document inherits the over-claim** and is labelled with the estimator per I33. Re-openable on evidence, and the closed form is recorded in §4.5 so nobody derives it twice |
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
-| `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document** |
+| `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document.** **Its required value rose with §4.8b and has not been recomputed:** the sizing assumed sixteen bonds because `MIN_COMMITS` was 16, and the gate is gone (§4.8c), so the same deterrence now has to come from delay alone against a single bond. §4.8c measures the exposure at 7.1% of cases at registry 100 and 0.33% at 250 — small, but it was **zero** before, so this row is no longer a tuning question that can be deferred with the others |
 | Permanence of `REJECTED` | **Closed as a rule decision (§8.6); open as a measurement.** Permanence stays, and not because the rate is acceptable: FINDINGS §H measures what it costs as the *irrecoverable* share of false rejections — 22.8% of safe content at `prior = 0.665`, 0.7% at 0.95. The natural repair, conditioning permanence on the plurality, hands a hostile 30% optional stopping worth 22.6 points at the same low `prior` and 0.7 at the high one. **Both sides are governed by `prior` and both vanish together**, so no claim-key rule is what decides this. What remains open is the measurement, and the standing constraint already blocks the regime where the cost is real |
 | `FEE_BASE`, `FEE_PER_TOPIC` | Must clear gas for `TARGET_COHORT` voters — the binding constraint in every simulation so far |
 | `SUPER_QUORUM` | §8.3 |

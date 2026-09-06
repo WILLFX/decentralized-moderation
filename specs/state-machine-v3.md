@@ -2193,6 +2193,55 @@ whose size an attacker chooses.
 A finalized losing vote still counts against `openVoteCount` until **that
 moderator's** claim settles, so it cannot be reused before its debit lands.
 
+### 5.6 The maintenance reserve is one pool, and it needs an exit
+
+**Decision.** There is **one** maintenance reserve, it is held by the registry, and
+it has a **timelocked governance withdrawal**. Neither half of that sentence was
+previously written down, and the M2.7 implementation is what made the omission
+visible.
+
+**This document already assumed one pool and never said so.** Twelve places say
+*"the maintenance reserve"* — definite article, singular — and not one says where it
+is or how value leaves it. The implementation necessarily produced **two**, because
+the two inflows sit in different contracts:
+
+```
+registry pool    <- every debit (§5.1, §5.2, §4.6): d, REVEAL_BOND,
+                    CHALLENGE_BOND. Grows through `debit` alone
+Moderation pool  <- the fee's maintenance component (§1), §5.3's remainder,
+                    and CLAIM_BOUNTY retained on UNRESOLVED (§4.8)
+```
+
+**Neither has a withdrawal.** Value accrues in both, forever, with no defined
+spender. That is not a policy of burning it — §5.3's remainder rule exists to stop
+rounding dust becoming a moderator's windfall, not to destroy it, and §1 calls the
+fee's maintenance component *"nonrecoverable"* from the **submitter's** point of
+view, which says nothing about whether the protocol can spend it.
+
+**Why one pool rather than two with an exit each.** An exit is a
+governance-controlled withdrawal from a contract holding user funds — the highest
+-risk surface either contract will have. Two of them is two timelocks, two sets of
+tests and two chances to get it wrong, for a distinction with no consequence: both
+inflows are protocol revenue, and the provenance difference (submitter fees versus
+moderator debits) changes who paid, not what may be done with it.
+
+**Why the registry rather than `Moderation`.** §2.4 already makes the registry the
+authority on custody and solvency, and `balanceBuckets()` /`solvent()` already
+account for its own reserve. Putting the single pool there extends an invariant that
+exists rather than writing a second one. `Moderation` is logic; a logic contract
+that permanently holds protocol revenue is holding value it has no rule for.
+
+**Cost, stated because it is the reason this is not fixed here.** It needs a
+registry entry point — a deposit path callable by a capable logic — and the registry
+is frozen at `b4dcaf8` with a 25/25 mutation run behind it. So this is a change to
+**both** contracts and belongs in its own order, not in a `Moderation` remediation.
+Until then the two pools stand, and §10 carries it.
+
+**Severity.** Treat it as blocking for deployment and not for work: value that
+accrues with no path out is a defect neither contract's tests can catch, because
+*"there is no exit"* is not a failing assertion. It joins the standing constraint's
+P0 set rather than the open-parameter list.
+
 ---
 
 ## 6. Reputation
@@ -3025,6 +3074,7 @@ property.
 | §8.3's 3/3 conjunct | Live since the estimator changed, and **arbitrary rather than meaningful**: under a unanimous tally the tickets are iid, so 3/3 versus 2/1 is a coin flip that excludes a random 7% of qualifying content at `N = 40` and 16% at `N = 16`. §8.3 argues against it in its own headline. Dropping it makes `SUPER_SAFE` a function of the tally alone, which is what that section says assurance should be — but it changes what a published assurance label promises, so it is a decision rather than a correction. **Open, and cheap to close either way** |
 | The plug-in residual in `f(â)` | §4.5. `f(â)` sits above the exact posterior predictive `E[f(θ)] = (A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))` at every tally but the tie — 4.1 points at `N = 1`, 0.15 at `N = 40`. Kept deliberately: three ticket comparisons are the senior reviewer's rule and the shape §4.5's argument is written in, and the exact form would be a third change to the core verdict arithmetic in one revision. **Every figure derived from `f` in either document inherits the over-claim** and is labelled with the estimator per I33. Re-openable on evidence, and the closed form is recorded in §4.5 so nobody derives it twice |
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
+| **The maintenance reserve has no exit** | **Surfaced by the M2.7 implementation, and the only P0 on this list.** §5.6 decides the target — one pool, held by the registry, with a timelocked governance withdrawal — but the fix touches `StakeRegistry`, which is frozen at `b4dcaf8` behind a 25/25 mutation run, so it needs its own order against **both** contracts. Until then value accrues in two pools with no path out. Not catchable by either suite: *"there is no exit"* is not a failing assertion. **Blocks deployment, not work** |
 | `CLAIM_BOUNTY` on `UNRESOLVED` | **Surfaced by the M2.7 implementation, not by review.** §4.8 retains the finalization bounty on all three `UNRESOLVED` rows, but every terminal transition is permissionless and somebody paid gas to poke it — and `DRAW_BOUNTY` is *paid* to exactly that poker on `NO_RANDOMNESS`. Either the two bounties are treated alike or §4.8 must say why not. Deliberately **not** decided when the pot and draw-bounty rows were corrected: those were contradictions, this is a fee-schedule change, and the two should not ride together |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document.** **Its required value rose with §4.8b and has not been recomputed:** the sizing assumed sixteen bonds because `MIN_COMMITS` was 16, and the gate is gone (§4.8c), so the same deterrence now has to come from delay alone against a single bond. §4.8c measures the exposure at 7.1% of cases at registry 100 and 0.33% at 250 — small, but it was **zero** before, so this row is no longer a tuning question that can be deferred with the others |
 | Permanence of `REJECTED` | **Closed as a rule decision (§8.6); open as a measurement.** Permanence stays, and not because the rate is acceptable: FINDINGS §H measures what it costs as the *irrecoverable* share of false rejections — 22.8% of safe content at `prior = 0.665`, 0.7% at 0.95. The natural repair, conditioning permanence on the plurality, hands a hostile 30% optional stopping worth 22.6 points at the same low `prior` and 0.7 at the high one. **Both sides are governed by `prior` and both vanish together**, so no claim-key rule is what decides this. What remains open is the measurement, and the standing constraint already blocks the regime where the cost is real |

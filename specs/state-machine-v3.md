@@ -2636,6 +2636,28 @@ REVEAL  (r=0)  -> UNRESOLVED   (NO_REVEALS)            -- was not
 DRAW           -> UNRESOLVED   (NO_RANDOMNESS)         -- was not
 ```
 
+**A fifth write, and it is the only one that touches an entry belonging to a
+different case.** A removal case (`actionType = REMOVE`, §8.5) carries its own
+claim key, so its own terminal writes its own entry by the four rows above. But
+when it *succeeds* it must also set the original `LIST` entry to `REMOVED` (§8.2),
+because that is the entry a reader consults:
+
+```
+DRAW -> FINALIZED, actionType == REMOVE, verdict == Approve
+     -> ALSO set the LIST entry for the same (content, topic) to REMOVED,
+        and drop it from the topic's enumerable listing
+```
+
+The verdict is `Approve` because the question a removal case asks is *"should this
+be removed"* — `actionType` inverts what an Approve **means**, and nothing about
+the draw changes. A removal that fails writes its own entry and touches nothing
+else; `RETAINED` is a terminal, not a status (§8.2).
+
+**This is the one place a case's terminal reaches outside its own claim key**, so
+it is stated here rather than left to be inferred from §8.5. Both entry keys are
+derived from content (§8.2b), so the second one is computable from the removal
+case's own fields and needs no stored pointer.
+
 **And the uncovered rows were the common case, not the tail.** At FINDINGS §D's
 launch registry of 250 the expected cohort was 10 against `MIN_COMMITS` 16, so
 **92% of cases terminated on the first of those rows.** The rule covered the path a
@@ -2665,7 +2687,8 @@ is no later moment for a reader to be waiting on.
 **Decision.** `IndexRegistry` carries status as a distinct value:
 
 ```
-NONE = 0 | PLURALITY_APPROVE | PLURALITY_REJECT | APPROVED | REJECTED | UNRESOLVED
+NONE = 0 | PLURALITY_APPROVE | PLURALITY_REJECT | APPROVED | REJECTED
+         | UNRESOLVED | REMOVED
 ```
 
 The alternative — withhold the entry until `FINALIZED` — was rejected because it
@@ -2677,7 +2700,39 @@ The enum began at `PLURALITY_APPROVE`, so an unwritten slot and a case whose
 plurality leans Approve **read identically** — in the section whose entire stated
 purpose is that those two are distinguishable. A safe-search client would have been
 right to treat every never-submitted item as carrying a live interim status. The
-zero slot is not a sixth status; it is what makes the other five mean anything.
+zero slot is not a status among the others; it is what makes the rest mean anything.
+
+**`REMOVED` was missing and the §8 re-read found it.** §8.5 says a removal case
+*"produces `REMOVED` or `RETAINED`"* and *"earns its own key through
+`actionType`"* — a different `claimKey`, so by §8.2b a different `entryKey`. With
+no `REMOVED` slot, a successful removal wrote a second entry while the original
+went on reading `APPROVED`, and nothing in this document said which one a reader
+believes. Two entries about one piece of content, disagreeing, in the section whose
+purpose is that a reader can tell states apart.
+
+**One entry per `(content, topic)`, and its status is the latest resolved question
+about it.**
+
+```
+removal SUCCEEDS  ->  the LIST entry's status becomes REMOVED
+removal FAILS     ->  the LIST entry is untouched and stays APPROVED
+```
+
+`RETAINED` is the *case's* terminal, not an entry status: the LIST answer was not
+disturbed, so there is nothing to write. Only one of the two needs a slot.
+
+**Why a status and not a deletion.** For a safe-search client `REMOVED` and
+`REJECTED` are the same instruction — do not show it — and §8.2b says that is the
+only property such a client needs. The distinction is *"for the reader who wants to
+know why"*, and deleting the entry destroys exactly that reader's answer. It would
+also make a content-derived identifier resolve to nothing, which is the property
+§8.2b spends its length establishing.
+
+**What is deleted is the listing, not the record.** A `REMOVED` entry leaves the
+topic's enumerable list of listed content — that is the swap-and-pop against a
+position map §8.2b reasons about — while the entry itself persists and remains
+addressable at the same `entryKey`. Those are two different objects and an earlier
+reading of §8.2b conflated them.
 
 ### 8.2b Every index identifier is derived from content
 
@@ -2746,6 +2801,39 @@ SUPER_SAFE  =  verdict == Approve
 A 3/3 draw alone means little: `P(3/3 Approve) = â³`, which is 33.5% at `a = 0.70`
 and `N = 34`. The tally must participate in the classification. **The lottery
 selects truth; it does not manufacture certainty.**
+
+**`SUPER_SAFE` is not a status, it is a query, and this section never said where it
+lives.** It is absent from §8.2's enum — correctly, because its last conjunct is
+**live**: a re-review or removal opened years later must revoke it, and §8.5 says
+the index has to make that visible. A stored flag would go stale; a value computed
+from `Moderation` would make a reader consult two contracts to answer the one
+question the index exists to answer.
+
+**Split it at the join between what is settled and what is not.**
+
+```
+stored at the write, immutable thereafter — all tally facts, all known
+at the terminal (§8.1):
+    verdict == Approve, no challenge opened, 3/3 draw,
+    revealCount >= SUPER_QUORUM, pooledReject == 0, reveals == commits
+                                                      -> one bit: `strict`
+
+live, maintained by Moderation across the entry's life:
+    openQuestions   incremented when a re-review or removal case OPENS
+                    against this content, decremented at its terminal
+
+SUPER_SAFE(entry)  =  entry.strict  AND  entry.openQuestions == 0
+```
+
+One bit and one counter, both on the entry, so the answer is O(1) and local to the
+index. The static half can never go stale because every input to it is fixed at the
+terminal that wrote it; the live half is the only thing that moves, and it moves
+under the one contract that knows a case opened.
+
+**`openQuestions` is a counter and not a boolean** for the same reason
+`topicKey == 0` is illegal (§8.2b, I29): two concurrent re-reviews closing one at a
+time would clear a boolean while a question was still open, and *"no question is
+open"* would then read true in a state it must exclude.
 
 **The 3/3 clause was dead until §4.5 changed the estimator.** Under `A/N`,
 `pooledReject == 0` forces `a = 1`, which forces all three tickets Approve — so the

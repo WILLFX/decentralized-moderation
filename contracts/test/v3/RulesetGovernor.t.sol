@@ -374,6 +374,57 @@ contract RulesetGovernorTest is Test {
         mod.applyParams(p);
     }
 
+    /// @dev **The boundary, and why the test above was not enough.**
+    ///
+    ///      `test_s10_theSeedHorizonBoundIsRejectedAtProposeTime` uses a commit
+    ///      window of 20,000 blocks against a limit of 258. That is so far past the
+    ///      bound that a WRONG bound rejects it too — mutation M26 replaces
+    ///      `seedLag + blockhashHorizon` with `blockhashHorizon - seedLag` and the
+    ///      test stays green, because 20,000 exceeds 254 just as surely as 258.
+    ///      A test that passes while the invariant happens to hold is not a test of
+    ///      the invariant.
+    ///
+    ///      258 blocks is `SEED_LAG (2) + BLOCKHASH_HORIZON (256)` exactly. It must
+    ///      be ACCEPTED — the seed survives its own commit window by one block — and
+    ///      259 must not. Only the correct expression separates those two.
+    ///
+    /// MUTATION: M26 — `blockhashHorizon - seedLag` in either layer.
+    function test_s10_theSeedHorizonBoundIsExactAtItsLimit() public {
+        Moderation.Params memory p = _params(LAMBDA);
+        p.commitWindow = 1290; // 258 blocks at 5s == seedLag + blockhashHorizon
+
+        vm.prank(owner);
+        gov.proposeParams(p); // accepted at the limit
+        (, uint256 eta,) = gov.pendingParamsProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        uint32 v = gov.executeParams(p);
+        assertEq(mod.paramsAt(v).commitWindow, 1290, "and the lower layer agrees at the limit");
+
+        p.commitWindow = 1295; // 259 blocks — one past it
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.CommitWindowExceedsSeedHorizon.selector);
+        gov.proposeParams(p);
+    }
+
+    /// @dev The window is converted with a CEILING, so a window that does not divide
+    ///      evenly still gets the block it actually spills into. Flooring hands back
+    ///      a commit window whose last partial block reads an expired seed.
+    ///
+    ///      1,291 seconds at 5s is 258.2 blocks: ceiling 259 (over the bound, must
+    ///      be refused), floor 258 (at the bound, wrongly accepted). Only this
+    ///      remainder distinguishes them.
+    ///
+    /// MUTATION: M27 — integer division without the `+ blockTime - 1`.
+    function test_s10_theBlockCountCeilsRatherThanFloors() public {
+        Moderation.Params memory p = _params(LAMBDA);
+        p.commitWindow = 1291;
+
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.CommitWindowExceedsSeedHorizon.selector);
+        gov.proposeParams(p);
+    }
+
     function test_aMalformedRulesetIsRejectedAtProposeTime() public {
         Moderation.Params memory p = _params(LAMBDA);
         p.blockTime = 0;
@@ -460,6 +511,47 @@ contract RulesetGovernorTest is Test {
         vm.expectRevert(RulesetGovernor.NoPendingProposal.selector);
         gov.executeGuidelines(keccak256("t"));
         assertEq(gov.guidelinesVersion(), 0, "nothing was published");
+    }
+
+    /// MUTATION: leave the pending record in place after a successful execute.
+    ///
+    /// @dev Without the delete, `executeGuidelines` is replayable: the same queued
+    ///      text can be published again and again, each time consuming a version.
+    ///      That is worse than a redundant call — it INFLATES the version counter,
+    ///      and the counter is what partitions the measurement's dataset.
+    function test_s4_1_guidelinesExecuteAtMostOnce() public {
+        bytes32 h = keccak256("text");
+        assertEq(_publishGuidelines(h), 1);
+
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.NoPendingProposal.selector);
+        gov.executeGuidelines(h);
+
+        assertEq(gov.guidelinesVersion(), 1, "one publication, one version");
+    }
+
+    /// MUTATION: drop `onlyGovernance` from any guidelines entry point.
+    function test_s4_1_everyGuidelinesPathIsGovernanceOnly() public {
+        bytes32 h = keccak256("text");
+
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        gov.proposeGuidelines(h);
+
+        vm.prank(owner);
+        gov.proposeGuidelines(h);
+
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        gov.cancelGuidelines();
+
+        (, uint256 eta,) = gov.pendingGuidelinesProposal();
+        vm.warp(eta);
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        gov.executeGuidelines(h);
+
+        assertEq(gov.guidelinesVersion(), 0, "a stranger published nothing");
     }
 
     /// ACCEPTANCE 4b — a reader recovers which text a case was decided under, FROM
@@ -568,6 +660,39 @@ contract RulesetGovernorTest is Test {
         vm.prank(owner);
         vm.expectRevert(RulesetGovernor.BindingNotMutual.selector);
         other.bindModeration(mod); // `mod` names `gov`, not `other`
+    }
+
+    /// MUTATION: drop `onlyGovernance` from `bindModeration`.
+    ///
+    /// @dev The bind is the trust relationship. Permissionless, anyone could race a
+    ///      deployment and bind a governor to a `Moderation` before its operator
+    ///      does — and because the bind is one-way, the correct one could then never
+    ///      be made.
+    function test_f3_bindIsGovernanceOnly() public {
+        RulesetGovernor fresh = new RulesetGovernor(owner, TIMELOCK);
+        Moderation m = new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), address(fresh));
+
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        fresh.bindModeration(m);
+
+        vm.prank(owner);
+        fresh.bindModeration(m);
+        assertEq(address(fresh.moderation()), address(m));
+    }
+
+    /// MUTATION: drop the zero-address guard from `bindModeration`.
+    ///
+    /// @dev Near-equivalent and worth killing anyway. Without the guard the call
+    ///      still reverts — `address(0).governor()` is a high-level call to an
+    ///      address with no code — but with a decode failure rather than a named
+    ///      error. Asserting the SELECTOR is what makes the guard load-bearing;
+    ///      asserting "it reverts" would pass either way.
+    function test_f3_bindRefusesTheZeroAddress() public {
+        RulesetGovernor fresh = new RulesetGovernor(owner, TIMELOCK);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.ZeroAddress.selector);
+        fresh.bindModeration(Moderation(address(0)));
     }
 
     /// MUTATION: allow rebinding.

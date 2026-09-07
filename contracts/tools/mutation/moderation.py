@@ -182,6 +182,14 @@ MUTATIONS = [
  ("M42", "I31/§10", "the BLOCK_TIME bound not enforced",
   "        if (cb > uint256(p.seedLag) + uint256(p.blockhashHorizon)) revert CommitWindowExceedsSeedHorizon();\n", ""),
 
+ ("M42b", "I31/§10", "the bound puts seedLag on the WRONG SIDE of the inequality",
+  "        if (cb > uint256(p.seedLag) + uint256(p.blockhashHorizon)) revert CommitWindowExceedsSeedHorizon();",
+  "        if (cb > uint256(p.blockhashHorizon) - uint256(p.seedLag)) revert CommitWindowExceedsSeedHorizon();"),
+
+ ("M42c", "I31/§10", "the commit-window block count floors instead of ceiling",
+  "        uint256 cb = _ceilDiv(p.commitWindow, p.blockTime);",
+  "        uint256 cb = uint256(p.commitWindow) / p.blockTime;"),
+
  ("M45", "I26/§8.5", "a re-review's NO_TURNOUT releases a previously tallied key",
   "        bool tallied = (uint256(c.pooledApprove) + c.pooledReject) >= 1;\n        if (tallied) {\n            reservationOf[key] = Reservation.PERMANENT;\n        } else if (r == Reason.NO_TURNOUT) {",
   "        if (r == Reason.NO_TURNOUT) {"),

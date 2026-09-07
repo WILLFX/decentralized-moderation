@@ -1523,6 +1523,28 @@ contract ModerationV3Test is Test {
         p.blockTime = 5; // 240 blocks <= 258
         vm.prank(gov);
         mod.applyParams(p);
+
+        // AT the bound, and one past it. The two cases above are 300 and 240 —
+        // both far from 258, so a bound written `blockhashHorizon - seedLag`
+        // (= 254) rejects 300 and accepts 240 exactly as the correct one does, and
+        // this test would stay green while the constraint was wrong. Only the
+        // limit itself separates them.
+        p.commitWindow = 1290; // 258 blocks == seedLag + blockhashHorizon, EXACTLY
+        vm.prank(gov);
+        mod.applyParams(p);
+        assertEq(mod.paramsAt(mod.paramsVersion()).commitWindow, 1290, "the seed survives by one block");
+
+        p.commitWindow = 1295; // 259 blocks — one past
+        vm.prank(gov);
+        vm.expectRevert(Moderation.CommitWindowExceedsSeedHorizon.selector);
+        mod.applyParams(p);
+
+        // And the conversion CEILS: 1,291s at 5s is 258.2 blocks, so it spills into
+        // block 259 and must be refused. Flooring would accept it.
+        p.commitWindow = 1291;
+        vm.prank(gov);
+        vm.expectRevert(Moderation.CommitWindowExceedsSeedHorizon.selector);
+        mod.applyParams(p);
     }
 
     /// @dev The bound is enforced; the VALUE is not. 4.651 s is the floor and the

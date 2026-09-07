@@ -854,9 +854,38 @@ struct Case {
                                //   claim (§4.5, §8.5). blockhash expires; this
                                //   does not, and a re-review must not re-roll
     uint40  finalizedAt;       // a TIMESTAMP — a record, never compared (§0)
-    // content, metadata, topics, ruleset/guidelines versions: as v2
+    uint32  guidelinesVersion; // I27, and see below — PINNED at submission, like
+                               //   paramsVersion. Not derived, not joined by height
+    // content, metadata, topics, ruleset version: as v2
 }
 ```
+
+**`guidelinesVersion` is a pin and not a join, and the M2.11 implementation found
+that this document had never said so.** §4.1 previously read
+`ruleset/guidelines versions: as v2` in a comment and declared no field, so the
+governor substituted a height join — version, text hash and effective block —
+which answers *"what was in force at submission"* and is a **derivation**, not a
+pin. It reached the right answer for the wrong reason and only while nothing
+changed mid-case.
+
+**The deciding argument is fairness, not measurement.** `d` is charged for voting
+incoherently with the settled side (§5.1). If the guidelines change while a case is
+live, moderators who committed before read one text and those after read another —
+and whichever side loses is **debited for correctly applying the instructions it
+was given**. That is precisely the wrong I27 exists to prevent for parameters,
+applied to the thing that decides what the moderator is being *asked* rather than
+what they are paid.
+
+**So the mid-case question dissolves rather than being answered.** Under a pin,
+every moderator on a case reads the version pinned at its submission, whatever
+governance does meanwhile — which is why a pin is the right mechanism and a join
+is not. The question *"which text did the moderators actually read"* has one answer
+per case, by construction, and `measurement/prior` can partition on it without
+knowing when any change landed.
+
+**The text stays off-chain and that is unchanged.** The pin carries a version; the
+governor's log carries version → text hash (§10). A reader recovers the text from
+the two together, and neither has to trust an off-chain label.
 
 Votes **pool**: `pooledApprove` / `pooledReject` accumulate across both rounds and
 are never reset. The binding draw is taken against the pooled tally.
@@ -3249,6 +3278,8 @@ property.
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
 | ~~The maintenance reserve has no exit~~ | **CLOSED at `c2d4407`.** Was this list's only P0, surfaced by the M2.7 implementation and not by review — *"there is no exit"* is not a failing assertion, so neither suite could have caught it. §5.6/§5.6.1 decided one pool in the registry with a timelocked withdrawal; M2.8 implemented it. `StakeRegistry` 33/33 mutations killed on a **combined** baseline (the original 25 re-run plus 8 for the new surface), 10,065 B. The `executeMaintenanceWithdrawal` body names `maintenanceReserve` and nothing else — `totalStake` and `totalBond` do not appear in it, so there is no arithmetic to subvert, only the cap to evade, and that is checked against live state at execute |
 | **A listing is permanent — the removal case cannot be created** | **P0, and it outranks `RulesetGovernor`.** Surfaced by the M2.9 implementation (D3-15). §8.4 keys claims on `actionType` and §8.5 fixes it to `{LIST, REMOVE}`, but `Moderation.claimKeyOf` hardcodes `"LIST"` and `submit` takes no action type — so the case type §8.5 names as the recourse for a listed entry is unreachable, while §8.4 withholds re-review from `APPROVED` on the assumption that it exists. `APPROVED` is reserved while listed, so resubmission is closed too, and the reservation clears only on `REMOVED`, which nothing can produce. **Worse than the permanence §8.6 calls decisive**: 28.6% of unsafe content is listed at `prior` 0.665 with *zero* attackers (60% at `q = 0.30`), against §8.6's 22.8% irrecoverable false rejection — and unlike rejection it has no partial recourse. §8.1's fifth write and half of §8.3's `openQuestions` already exist in `IndexRegistry` and are unreachable until this closes |
+| ~~`guidelinesVersion` is not pinned~~ | **DECIDED at this commit; implementation open (D3-21).** §4.1 declared no field and the M2.11 governor substituted a height join. Ruled a **pin**, on fairness rather than measurement: `d` is charged for incoherence with the settled side, so a mid-case guidelines change debits whichever half of the cohort loses **for correctly applying the instructions it was given** — I27's own argument, applied to what the moderator is *asked* rather than what they are paid. Under a pin the mid-case question dissolves instead of needing an answer. Costs one `uint32` on `Case` and `Moderation` has 3,148 B; if it does not fit, that is a finding and not a licence to keep the join |
+| **The governor is unreplaceable, and by omission rather than by decision** | **D3-20.** v1's F3 rested on `Moderation.governor` being `immutable`; v3 made it mutable via `setGovernor`, which is `onlyGovernor` — and the governor exposes no path to it, so the field is frozen because nobody wrote the caller. A defect in the governor's own logic then has no route around it. **Frozen by omission reads as deliberate to an auditor and was not**, which is the reason to close it rather than document it. The fix is governor-side only (`RulesetGovernor` has 20,249 B spare, `Moderation` delta zero) and must re-check reciprocity at execute — an incoming governor not already bound to the same `Moderation` bricks the pair |
 | **The two contracts have different governance postures, and nobody chose that** | **This is what `RulesetGovernor` is actually for**, and it is narrower than the rows above imply now that the `BLOCK_TIME` bound is validated in `Moderation`. `StakeRegistry` timelocks everything a governor can do — caps, condemnation, maintenance withdrawal — behind `propose`/`cancel`/`execute`. `Moderation.applyParams` is `onlyGovernor` and **takes effect immediately**: no pending record, no `eta`, nothing for anyone to observe or exit ahead of. I27 pins parameters per case at submission, so **live cases are safe and only future ones move** — which is why this is a governance-risk asymmetry rather than a correctness defect. The asymmetry was never decided; it is where the two contracts happened to land. Closing it is the fourth contract's job |
 | **`execute*()` takes no argument, so a pending proposal can be swapped under an approver** | **Low, inherited, and not introduced by M2.8.** `executeCaps()` and `executeMaintenanceWithdrawal()` both execute *whatever is pending*, while `executeCondemn(logic)` names its target. Inside a multisig that means one signer can queue a withdrawal, a second replace it, and an approval given for the first execute the second. **The timelock defuses it rather than the signature does**: a replacement calls `propose*` again, which sets a fresh `eta`, so the swapped proposal waits the full delay in the open before it can execute. The fix — take the parameters at execute and require they match the pending record — is small but touches `executeCaps`, which is inside the original mutation baseline, so it is recorded rather than bundled into M2.8 |
 | `CLAIM_BOUNTY` on `UNRESOLVED` | **Surfaced by the M2.7 implementation, not by review.** §4.8 retains the finalization bounty on all three `UNRESOLVED` rows, but every terminal transition is permissionless and somebody paid gas to poke it — and `DRAW_BOUNTY` is *paid* to exactly that poker on `NO_RANDOMNESS`. Either the two bounties are treated alike or §4.8 must say why not. Deliberately **not** decided when the pot and draw-bounty rows were corrected: those were contradictions, this is a fee-schedule change, and the two should not ride together |

@@ -37,16 +37,31 @@ contract IndexRegistry {
         REMOVED
     }
 
+    /// @notice What the claim behind an entry ASKED. §8.5's `actionType`, carried
+    ///         onto the entry because the listing predicate needs it.
+    /// @dev These must agree with `Moderation.ActionType`. A claim key is
+    ///      `H(actionType, ...)`, so the index cannot recover the action type from
+    ///      the key it is handed — the writer states it and the index records it.
+    ///      `test_s8_2_actionTypeConstantsAgreeWithModeration` pins the agreement.
+    uint8 public constant ACTION_LIST = 0;
+    uint8 public constant ACTION_REMOVE = 1;
+
     /// @notice One entry per `(content, topic)`. Its status is the latest RESOLVED
     ///         question about it.
     /// @dev `strict` and `openQuestions` are §8.3's split: the static half is fixed
     ///      at the terminal that wrote it and can never go stale, and the live half
     ///      is the only thing that moves.
+    ///
+    ///      `actionType` says what the entry's claim asked, and without it `status`
+    ///      is ambiguous: `APPROVED` on a `LIST` claim means "show this", and
+    ///      `APPROVED` on a `REMOVE` claim means "stop showing it". Those are
+    ///      opposite instructions to a safe-search reader wearing one enum value.
     struct Entry {
         uint8 status;
         uint8 plurality;
         bool strict;
         uint32 openQuestions;
+        uint8 actionType;
     }
 
     // =========================================================================
@@ -65,10 +80,20 @@ contract IndexRegistry {
     mapping(bytes32 => Entry) internal entries;
 
     /// @notice `topicKey -> entryKey[]` — the enumerable listing of LISTED content.
-    /// @dev Membership is exactly `status == APPROVED`. A `REMOVED` entry leaves
-    ///      this list while the entry itself persists and stays addressable at the
-    ///      same `entryKey`: the listing and the record are two different objects,
-    ///      and an earlier reading of §8.2b conflated them.
+    /// @dev Membership is exactly `status == APPROVED && actionType == ACTION_LIST`.
+    ///      A `REMOVED` entry leaves this list while the entry itself persists and
+    ///      stays addressable at the same `entryKey`: the listing and the record are
+    ///      two different objects, and an earlier reading of §8.2b conflated them.
+    ///
+    ///      **The second conjunct is not decoration.** The predicate read
+    ///      `status == APPROVED` alone while every claim was a `LIST` claim, which
+    ///      made it accidentally right. A `REMOVE` claim that carries — verdict
+    ///      Approve, meaning *remove it* — writes `APPROVED` to its OWN entry, and
+    ///      under the one-conjunct predicate that entry joins the topic's listing.
+    ///      The successful removal would publish itself as approved content, in the
+    ///      list a safe-search reader consults. Membership is a property of the
+    ///      LISTING, not of whichever claim happened to be writing when it was
+    ///      first stated.
     mapping(bytes32 => bytes32[]) internal listing;
 
     /// @notice `topicKey -> entryKey -> index + 1`.
@@ -113,6 +138,8 @@ contract IndexRegistry {
     error ZeroAddress();
     error ZeroTopicKey();
     error BadStatus();
+    error BadActionType();
+    error NotAListEntry();
     error NoSuchEntry();
     error NoQuestionOpen();
     error NoPendingProposal();
@@ -155,24 +182,29 @@ contract IndexRegistry {
     /// @dev Membership of the topic's listing is exactly `status == APPROVED`,
     ///      re-derived on every write, so the listing cannot drift from the status
     ///      it is supposed to reflect.
-    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality, bool strict)
-        external
-        onlyWriter
-        returns (bytes32 entryKey)
-    {
+    function writeEntry(
+        bytes32 claimKey,
+        bytes32 topicKey,
+        uint8 status,
+        uint8 plurality,
+        bool strict,
+        uint8 actionType
+    ) external onlyWriter returns (bytes32 entryKey) {
         // §8.2b, I29 — a claim carries up to MAX_TOPICS topics in a fixed-width
         // slot and unused slots read 0, so a legal zero topic would make "no topic
         // here" and "the topic whose key is 0" the same read.
         if (topicKey == bytes32(0)) revert ZeroTopicKey();
         if (status == uint8(Status.NONE) || status > uint8(Status.REMOVED)) revert BadStatus();
+        if (actionType > ACTION_REMOVE) revert BadActionType();
 
         entryKey = entryKeyOf(claimKey, topicKey);
         Entry storage e = entries[entryKey];
         e.status = status;
         e.plurality = plurality;
         e.strict = strict;
+        e.actionType = actionType;
 
-        _syncListing(topicKey, entryKey, status);
+        _syncListing(topicKey, entryKey, status, actionType);
         emit EntryWritten(entryKey, topicKey, claimKey, status, strict);
     }
 
@@ -193,16 +225,30 @@ contract IndexRegistry {
         entryKey = entryKeyOf(listClaimKey, topicKey);
         Entry storage e = entries[entryKey];
         if (e.status == uint8(Status.NONE)) revert NoSuchEntry();
+        // The fifth write reaches outside its own claim key, so it states what it
+        // is allowed to reach: a LIST answer. Pointing it at a REMOVE entry would
+        // let a removal case mark another removal case's record REMOVED.
+        if (e.actionType != ACTION_LIST) revert NotAListEntry();
 
         e.status = uint8(Status.REMOVED);
-        _syncListing(topicKey, entryKey, uint8(Status.REMOVED));
-        emit EntryWritten(entryKey, topicKey, listClaimKey, uint8(Status.REMOVED), e.strict);
+
+        // §8.3 — `strict` is the static half of SUPER_SAFE and survives everything
+        // else, because every conjunct is a fact about a tally that already
+        // happened. A removal is the one event that falsifies it, and it must be
+        // cleared HERE rather than left to the counter: the removal case closes its
+        // own question at the same terminal, so `openQuestions` returns to 0 and a
+        // retained `strict` would make a REMOVED entry read SUPER_SAFE — the exact
+        // claim the index exists to never make wrongly.
+        e.strict = false;
+
+        _syncListing(topicKey, entryKey, uint8(Status.REMOVED), e.actionType);
+        emit EntryWritten(entryKey, topicKey, listClaimKey, uint8(Status.REMOVED), false);
     }
 
     /// @dev Swap-and-pop against the position map, `O(1)`. The moved element's
     ///      position is rewritten, which is the whole reason the map exists.
-    function _syncListing(bytes32 topicKey, bytes32 entryKey, uint8 status) internal {
-        bool shouldBeListed = (status == uint8(Status.APPROVED));
+    function _syncListing(bytes32 topicKey, bytes32 entryKey, uint8 status, uint8 actionType) internal {
+        bool shouldBeListed = (status == uint8(Status.APPROVED) && actionType == ACTION_LIST);
         uint256 p = posPlusOne[topicKey][entryKey];
 
         if (shouldBeListed) {

@@ -56,6 +56,14 @@ contract SystemHandler is Test {
     /// @dev Every unit of token that entered the system, per actor, so
     ///      conservation is checkable without trusting either contract's ledger.
     uint256 public ghostPaidIn;
+
+    /// @dev `caseId -> contentHash`, for LIST cases only. A removal case must name
+    ///      the content of a listing, and nothing on-chain enumerates that.
+    mapping(uint256 => bytes32) public listContent;
+
+    /// @dev Removal cases actually created. Read by the reachability test — a
+    ///      removal path the fuzzer never enters is a path nobody is testing.
+    uint256 public callsRemoval;
     mapping(uint256 => bool) public ghostTerminated;
 
     /// @dev What each actor actually committed, so a reveal can match its own
@@ -199,14 +207,43 @@ contract SystemHandler is Test {
     function hSubmit(uint256 seed) external {
         if (caseIds.length > 12) return; // keep the state space walkable
         address s = _actor(seed);
+        bytes32 content = keccak256(abi.encode("c", seed, caseIds.length));
         token.mint(s, FEE);
         ghostPaidIn += FEE;
         vm.startPrank(s);
         token.approve(address(mod), type(uint256).max);
-        try mod.submit(keccak256(abi.encode("c", seed, caseIds.length)), keccak256("m"), topics, FEE) returns (
-            uint256 id
-        ) {
+        try mod.submit(content, keccak256("m"), topics, FEE) returns (uint256 id) {
             caseIds.push(id);
+            listContent[id] = content; // only LIST cases: a removal names one of these
+        } catch {}
+        vm.stopPrank();
+    }
+
+    /// @dev M2.10's removal case. It names a LIST case's content, which is the only
+    ///      way it can reach a listed entry — `submitRemoval` computes the LIST
+    ///      claim key from the content it is handed (S8.2b, no stored pointer), so a
+    ///      handler that invented a content hash would be rejected every time and
+    ///      the removal path would sit at zero coverage while looking exercised.
+    ///
+    ///      The new case is pushed into `caseIds`, so `hCommit`/`hReveal`/`hPoke`/
+    ///      `hClaim` drive it through the SAME engine as a listing. That is the
+    ///      point: a removal is not a second machine, and the invariants must see it
+    ///      commit, reveal, draw and settle like anything else.
+    function hSubmitRemoval(uint256 seed, uint256 caseSeed) external {
+        if (caseIds.length > 12) return;
+        uint256 target = _case(caseSeed);
+        if (target == 0) return;
+        bytes32 content = listContent[target];
+        if (content == bytes32(0)) return;
+
+        address s = _actor(seed);
+        token.mint(s, FEE);
+        ghostPaidIn += FEE;
+        vm.startPrank(s);
+        token.approve(address(mod), type(uint256).max);
+        try mod.submitRemoval(content, keccak256("m"), topics, FEE) returns (uint256 id) {
+            caseIds.push(id);
+            callsRemoval++;
         } catch {}
         vm.stopPrank();
     }

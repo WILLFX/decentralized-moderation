@@ -14,7 +14,14 @@ contract MockLogic {
     }
 
     function write(bytes32 k, bytes32 t, uint8 s, uint8 p, bool strict) external returns (bytes32) {
-        return idx.writeEntry(k, t, s, p, strict);
+        return idx.writeEntry(k, t, s, p, strict, idx.ACTION_LIST());
+    }
+
+    function writeAs(bytes32 k, bytes32 t, uint8 s, uint8 p, bool strict, uint8 act)
+        external
+        returns (bytes32)
+    {
+        return idx.writeEntry(k, t, s, p, strict, act);
     }
 
     function remove(bytes32 k, bytes32 t) external returns (bytes32) {
@@ -428,7 +435,7 @@ contract IndexRegistryTest is Test {
         bytes32 k = _claimKey("LIST");
         vm.prank(stranger);
         vm.expectRevert(IndexRegistry.NotWriter.selector);
-        idx.writeEntry(k, TOPIC_A, APPROVED, 1, false);
+        idx.writeEntry(k, TOPIC_A, APPROVED, 1, false, 0);
 
         vm.prank(stranger);
         vm.expectRevert(IndexRegistry.NotWriter.selector);

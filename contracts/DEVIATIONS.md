@@ -807,6 +807,12 @@ standing between this and a four-contract audit.
 keys are content-derived (§8.2b), so no stored pointer is needed either way — the
 index side is ready for whichever it is.
 
+> **CLOSED at M2.10.** `claimKeyOf` takes the action type, `submitRemoval` creates a
+> `REMOVE` case, and a removal that carries drives the fifth write and clears the
+> `LIST` claim's reservation to `FREE`. The recourse exists and the circle closes:
+> `test_s8_1_theCircleClosesFromListingToRemovalToResubmission`. What M2.10 did NOT
+> settle is who pays and whether a cooldown applies — see D3-19.
+
 ### D3-16. `SUPER_QUORUM` moved from a call argument to a pinned parameter
 
 **What.** `Moderation.superSafe(caseId, superQuorum)` is gone. The static half of
@@ -835,3 +841,63 @@ implement it as stated and leave the decision upstream, so that is what this doe
 the error is conservative: some entries that could defensibly read `SUPER_SAFE` do
 not. Dropping it later loosens a published assurance label, which is why it is not
 being done incidentally.
+
+### D3-18. A removal is refused at submission unless its target is listed
+
+**What.** `Moderation.submitRemoval` requires `index.isListed(listKey, topic)` for
+every topic the claim carries, and reverts `NotListed` otherwise. §8 never states
+this guard.
+
+**Why it is not a policy choice.** The M2.10 order raises "can a removal be opened
+against content that is not listed?" as an open question, and it would be one if the
+alternative were merely permissive. It is not. `IndexRegistry.removeListing` reverts
+`NoSuchEntry` on an entry that was never written, and the fifth write happens
+**inside `_finalize`**. Without the guard, a removal naming content or a topic no
+`LIST` claim ever carried would take the fee, consume a cohort's commit/reveal
+attention, reach `DRAW` — and then revert on every `draw()` call, forever. The case
+could never reach a terminal, so every `KIND_VOTE` claim against it would stay open,
+every voter's bond would stay locked, and I13 would keep those moderators from ever
+withdrawing. **One unfinalizable case permanently freezes the stake of everyone who
+voted in it.**
+
+So the guard is what makes the fifth write *total*, and the absence of a guard is a
+liveness defect rather than a looser policy. The choice M2.10 makes is only *where*
+to place it — at submission, before any value or attention is committed, rather than
+at finalization where the failure is unrecoverable.
+
+**Threat model.** The guard is `O(MAX_TOPICS)` reads against the index at
+submission. It is checked once, and a listing removed between submission and
+finalization does not re-brick the case: once written, an entry is never `NONE`
+again (`writeEntry` rejects `NONE`, `removeListing` writes `REMOVED`), so
+`removeListing` cannot revert after the precondition has held once. Two concurrent
+removals against one listing both finalize; the second is a no-op on the listing.
+
+**What stays open.** Whether a removal should be permitted against a `REJECTED` or
+`UNRESOLVED` entry — currently refused, since there is nothing listed to take down —
+is a policy question this deviation does not settle.
+
+### D3-19. What M2.10 did not decide about removal economics
+
+**What.** A removal case is priced exactly like a listing: the submitter of the
+removal pays `feeBase + feePerTopic * n`, split by §1 into pot, bounties, reserve
+and maintenance. A successful removal refunds nothing extra to the party who brought
+it, and there is no cooldown parameter between removal attempts.
+
+**Why.** Both are §10-shaped questions the order explicitly reserved, and neither
+has a default that falls out of §8. Implementing either would be picking an
+incentive in Solidity.
+
+**What the engine already answers, without a new rule.** A *failed* removal
+permanently reserves the `REMOVE` key — §8.4's `REJECTED` row, applied to the
+removal claim like any other. So a second identical removal is refused, and the only
+recourse is `reopen` on the removal case, which carries the tally forward and is
+self-defeating for exactly the reason §8.5 gives. **Repetition is already bounded**;
+what is open is whether a *cooldown* should additionally throttle it, which is a
+different question from whether it is unbounded.
+
+**Threat model.** Removal is a paid action with a permanent reservation on failure,
+so it is not free griefing. But the cost of a failed removal falls on the party who
+raised the question, which under-incentivises correcting a false approval — the
+failure mode the M2.10 order calls the one a safe-search index exists to prevent.
+That asymmetry is the substance of the open question and it is not neutral: the
+current pricing makes catching a bad listing cost the same as making one.

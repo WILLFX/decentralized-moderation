@@ -7,17 +7,23 @@ import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {StakeRegistry} from "./StakeRegistry.sol";
 
 /// @notice The index this contract publishes to (§8.1, §8.2, §8.3).
-/// @dev The real `IndexRegistry` surface as of M2.9. This was an improvised
+/// @dev The real `IndexRegistry` surface as of M2.10. This was an improvised
 ///      four-argument stub (D3-1) while the index was unported; `strict` and the
 ///      two question calls are §8.3's split, and `removeListing` is §8.1's fifth
-///      write. Only `removeListing` is unreachable from here — see D3-15.
+///      write. M2.10 made `removeListing` reachable, closing D3-15.
 interface IIndexRegistry {
-    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality, bool strict)
-        external
-        returns (bytes32);
+    function writeEntry(
+        bytes32 claimKey,
+        bytes32 topicKey,
+        uint8 status,
+        uint8 plurality,
+        bool strict,
+        uint8 actionType
+    ) external returns (bytes32);
     function openQuestion(bytes32 claimKey, bytes32 topicKey) external;
     function closeQuestion(bytes32 claimKey, bytes32 topicKey) external;
     function removeListing(bytes32 listClaimKey, bytes32 topicKey) external returns (bytes32);
+    function isListed(bytes32 claimKey, bytes32 topicKey) external view returns (bool);
 }
 
 /// @title Moderation (v3) — the case state machine
@@ -112,6 +118,22 @@ contract Moderation is ReentrancyGuard {
         UNRESOLVED
     }
 
+    /// @notice §8.5's action type — what a claim ASKS about the content.
+    /// @dev `LIST` asks "should this be shown"; `REMOVE` asks "should this be taken
+    ///      down". It is a term in `claimKey` (§8.4), so the two questions about one
+    ///      piece of content earn different keys and neither reservation binds the
+    ///      other.
+    ///
+    ///      A **re-review is not here**, and §8.5 is explicit about why: a re-review
+    ///      under its own action type would carry a different key, and the permanent
+    ///      reservation it exists to escape would not bind it. `reopen` reopens a
+    ///      claim in place. `REMOVE` is a genuinely different question and earns a
+    ///      key; a re-review is the same question asked again and must not.
+    enum ActionType {
+        LIST,
+        REMOVE
+    }
+
     /// @notice Claim-key reservation (§8.4). Keyed on content and topics only —
     ///         `policyVersion` is deliberately absent, or a ruleset change would be
     ///         a scheduled amnesty an attacker could wait for.
@@ -196,6 +218,7 @@ contract Moderation is ReentrancyGuard {
         bytes32 metaHash;
         address submitter;
         uint8 topicCount;
+        uint8 actionType; // §8.5 — LIST or REMOVE; a term in `claimKey`
     }
 
     // =========================================================================
@@ -257,6 +280,11 @@ contract Moderation is ReentrancyGuard {
 
     event ParamsApplied(uint32 indexed version);
     event Submitted(uint256 indexed caseId, address indexed submitter, bytes32 indexed claimKey, uint256 fee);
+
+    /// @notice A removal carried and the LIST claim's entries left the index.
+    /// @dev Emitted once per case, not once per topic: the fifth write is
+    ///      `O(MAX_TOPICS)` but the FACT it establishes is one fact about one claim.
+    event ListingRemoved(uint256 indexed caseId, bytes32 indexed listClaimKey);
     event Committed(uint256 indexed caseId, address indexed m, uint8 round);
     event Revealed(uint256 indexed caseId, address indexed m, uint8 vote);
     event Challenged(uint256 indexed caseId, address indexed challenger);
@@ -294,6 +322,7 @@ contract Moderation is ReentrancyGuard {
     error NotTerminal();
     error AlreadySettled();
     error KeyReserved();
+    error NotListed();
     error FeeTooLow();
     error TooManyTopics();
     error ZeroTopic();
@@ -369,6 +398,58 @@ contract Moderation is ReentrancyGuard {
         nonReentrant
         returns (uint256 caseId)
     {
+        return _submit(uint8(ActionType.LIST), contentHash, metaHash, topics, fee);
+    }
+
+    /// @notice §8.5's removal case — "should this listed content be taken down".
+    /// @dev **The same engine.** Same cohort, same `â`, same three tickets, same
+    ///      challenge round, same settlement; `actionType` changes what the answer
+    ///      is ABOUT, never how it is reached. Everything below the precondition is
+    ///      `_submit`, shared verbatim with a listing.
+    ///
+    ///      `verdict == APPROVE` on this claim means **remove it**.
+    ///
+    ///      The precondition is a LIVENESS requirement, not a policy choice, and it
+    ///      is the answer to the order's open question 3. `removeListing` reverts
+    ///      `NoSuchEntry` on an entry that was never written. Without the guard a
+    ///      removal naming a topic the LIST claim never carried would take a fee,
+    ///      spend a cohort's attention, reach the draw — and then revert INSIDE
+    ///      `_finalize`, on every call, forever. The case would be unfinalizable and
+    ///      every bond committed to it unrecoverable. The guard is what makes the
+    ///      fifth write total, and the argument is in DEVIATIONS D3-18.
+    function submitRemoval(bytes32 contentHash, bytes32 metaHash, bytes32[] calldata topics, uint256 fee)
+        external
+        nonReentrant
+        returns (uint256 caseId)
+    {
+        // The LIST key is COMPUTED from this case's own fields (§8.2b) — no stored
+        // pointer. That is why a removal must name the same content, metadata and
+        // topics as the listing it targets: the key it targets IS those fields.
+        bytes32 listKey = claimKeyOf(uint8(ActionType.LIST), contentHash, metaHash, topics);
+
+        uint256 n = topics.length;
+        for (uint256 i; i < n; ++i) {
+            if (!index.isListed(listKey, topics[i])) revert NotListed();
+        }
+
+        caseId = _submit(uint8(ActionType.REMOVE), contentHash, metaHash, topics, fee);
+
+        // §8.3 — a removal is an open question against the LIST entries, and
+        // SUPER_SAFE must stop reading true the moment it opens. The question is
+        // against the LIST claim's entries, NOT this case's own.
+        questionOpen[caseId] = true;
+        for (uint256 i; i < n; ++i) {
+            index.openQuestion(listKey, topics[i]);
+        }
+    }
+
+    function _submit(
+        uint8 actionType,
+        bytes32 contentHash,
+        bytes32 metaHash,
+        bytes32[] calldata topics,
+        uint256 fee
+    ) internal returns (uint256 caseId) {
         uint32 v = paramsVersion;
         if (v == 0) revert BadParams();
         Params storage p = paramBlocks[v];
@@ -380,7 +461,7 @@ contract Moderation is ReentrancyGuard {
         }
         if (fee < uint256(p.feeBase) + uint256(p.feePerTopic) * n) revert FeeTooLow();
 
-        bytes32 key = claimKeyOf(contentHash, metaHash, topics);
+        bytes32 key = claimKeyOf(actionType, contentHash, metaHash, topics);
         _requireKeyFree(key, p);
 
         address(token).safeTransferFrom(msg.sender, address(this), fee);
@@ -405,6 +486,7 @@ contract Moderation is ReentrancyGuard {
         c.metaHash = metaHash;
         c.submitter = msg.sender;
         c.topicCount = uint8(n);
+        c.actionType = actionType;
         for (uint256 i; i < n; ++i) {
             caseTopics[caseId][i] = topics[i];
         }
@@ -440,13 +522,61 @@ contract Moderation is ReentrancyGuard {
         emit PhaseChanged(caseId, uint8(Phase.NONE), uint8(Phase.COMMIT), 0);
     }
 
-    /// @dev §8.4. `policyVersion` is deliberately not in the key.
-    function claimKeyOf(bytes32 contentHash, bytes32 metaHash, bytes32[] calldata topics)
+    /// @notice §8.4 — `claimKey = H(actionType, contentHash, metaHash, topics)`.
+    /// @dev `policyVersion` is deliberately NOT in the key. A key containing the
+    ///      version cannot produce a reservation that survives a version bump, which
+    ///      would make every ruleset change a scheduled amnesty an attacker could
+    ///      wait for.
+    ///
+    ///      `actionType` IS in the key, and that is what lets one piece of content
+    ///      carry two live questions — "show this" and "take this down" — without
+    ///      either reservation binding the other. It hardcoded `"LIST"` until M2.10,
+    ///      which is why the removal case could not be created (D3-15).
+    function claimKeyOf(uint8 actionType, bytes32 contentHash, bytes32 metaHash, bytes32[] calldata topics)
         public
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode("LIST", contentHash, metaHash, topics));
+        return keccak256(abi.encode(actionType, contentHash, metaHash, topics));
+    }
+
+    /// @dev The same derivation over a MEMORY topics array, for the two sites that
+    ///      recompute a LIST key from a stored case (§8.2b: computed, never stored).
+    ///      `abi.encode` of a memory and a calldata `bytes32[]` are identical, and
+    ///      `test_s8_4_memoryAndCalldataKeyDerivationsAgree` holds that.
+    function _claimKeyMem(uint8 actionType, bytes32 contentHash, bytes32 metaHash, bytes32[] memory topics)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(actionType, contentHash, metaHash, topics));
+    }
+
+    /// @dev The LIST claim a removal case targets, recomputed from the case's own
+    ///      fields. §2.2 of the M2.10 order: both entry keys are content-derived, so
+    ///      NO STORED POINTER is needed — and a stored one could disagree with the
+    ///      content, which a derived one cannot.
+    function _listClaimKey(uint256 caseId) internal view returns (bytes32) {
+        Case storage c = cases[caseId];
+        uint256 n = c.topicCount;
+        bytes32[] memory t = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
+            t[i] = caseTopics[caseId][i];
+        }
+        return _claimKeyMem(uint8(ActionType.LIST), c.contentHash, c.metaHash, t);
+    }
+
+    /// @notice The claim key an open question is recorded against.
+    /// @dev A re-review reopens the LIST claim in place, so its question is against
+    ///      that claim's own entries. A REMOVAL is a separate claim asking about
+    ///      SOMEONE ELSE'S entries, so its question is against the LIST claim's.
+    ///      One function, so open and close cannot disagree about where the question
+    ///      was recorded — which would leak a permanently non-zero `openQuestions`
+    ///      and pin `SUPER_SAFE` false forever.
+    function _questionKey(uint256 caseId) internal view returns (bytes32) {
+        Case storage c = cases[caseId];
+        if (c.actionType == uint8(ActionType.REMOVE)) return _listClaimKey(caseId);
+        return c.claimKey;
     }
 
     function _requireKeyFree(bytes32 key, Params storage p) internal view {
@@ -723,6 +853,36 @@ contract Moderation is ReentrancyGuard {
 
         _writeIndex(caseId, verdict == uint8(Outcome.APPROVE) ? IndexStatus.APPROVED : IndexStatus.REJECTED);
 
+        // §8.1's FIFTH WRITE — the only write that reaches outside its own claim
+        // key, and the exit the circle lacked (D3-15).
+        //
+        // A removal that CARRIES sets the LIST entry to REMOVED and drops it from
+        // the topic's listing. A removal that FAILS writes its own entry above and
+        // touches nothing else: "RETAINED" is this case's terminal, not a status
+        // any LIST entry takes.
+        if (c.actionType == uint8(ActionType.REMOVE) && verdict == uint8(Outcome.APPROVE)) {
+            bytes32 listKey = _listClaimKey(caseId);
+            uint256 nt = c.topicCount;
+            for (uint256 i; i < nt; ++i) {
+                index.removeListing(listKey, caseTopics[caseId][i]);
+            }
+
+            // §2.4 — the LIST claim's reservation clears to FREE, and that single
+            // assignment is what makes the content RESUBMITTABLE. §8.4 reserves an
+            // APPROVED key "while listed"; the content is no longer listed, so the
+            // condition the reservation was held under has lapsed and the key must
+            // follow it. Leaving it LISTED is the permanence this order exists to
+            // break: removed, unlistable, and unresubmittable at once.
+            //
+            // FREE and not PERMANENT: a removal says THIS content should not be
+            // shown as it stands, which is a judgement about the content, not about
+            // whether the question may ever be asked again. I26 is not engaged —
+            // it binds the claim that was tallied, and the claim tallied here is the
+            // REMOVE claim, whose own key stays reserved by the branch above.
+            reservationOf[listKey] = Reservation.FREE;
+            emit ListingRemoved(caseId, listKey);
+        }
+
         _payBounty(caseId, true, msg.sender);
 
         emit Drawn(caseId, verdict, tickets, entropy);
@@ -820,17 +980,22 @@ contract Moderation is ReentrancyGuard {
         uint256 n = c.topicCount;
         bytes32 key = c.claimKey;
         uint8 plur = c.plurality;
+        uint8 act = c.actionType;
         bool strict = (s == IndexStatus.APPROVED) && _strict(caseId);
         for (uint256 i; i < n; ++i) {
-            index.writeEntry(key, caseTopics[caseId][i], uint8(s), plur, strict);
+            index.writeEntry(key, caseTopics[caseId][i], uint8(s), plur, strict, act);
         }
 
-        // §8.3 — the question this re-review opened is resolved at its terminal.
-        // Guarded by `s`, because the interim TALLY write is not a terminal.
+        // §8.3 — the question this re-review or removal opened is resolved at its
+        // terminal. Guarded by `s`, because the interim TALLY write is not a
+        // terminal. Closed against `_questionKey`, which is the LIST claim for a
+        // removal and this claim for a re-review — the same function `openQuestion`
+        // was called through, so the two cannot disagree.
         if (questionOpen[caseId] && s != IndexStatus.PLURALITY_APPROVE && s != IndexStatus.PLURALITY_REJECT) {
             questionOpen[caseId] = false;
+            bytes32 qk = _questionKey(caseId);
             for (uint256 i; i < n; ++i) {
-                index.closeQuestion(key, caseTopics[caseId][i]);
+                index.closeQuestion(qk, caseTopics[caseId][i]);
             }
         }
     }
@@ -843,10 +1008,15 @@ contract Moderation is ReentrancyGuard {
     ///      per case like every other. The 3/3 conjunct is included as §8.3 states
     ///      it; §10 has whether it should be there at all, and this order does not
     ///      decide it.
+    ///      The `actionType` conjunct is not redundant with `verdict == APPROVE`.
+    ///      On a REMOVE claim, Approve means *remove it*, so without it a unanimous
+    ///      successful removal would stamp SUPER_SAFE onto the removal's own entry —
+    ///      reading "certified safe" off the record of a takedown.
     function _strict(uint256 caseId) internal view returns (bool) {
         Case storage c = cases[caseId];
         uint256 reveals = uint256(c.pooledApprove) + c.pooledReject;
-        return c.verdict == uint8(Outcome.APPROVE) && c.challenger == address(0) && c.unanimousDraw
+        return c.actionType == uint8(ActionType.LIST) && c.verdict == uint8(Outcome.APPROVE)
+            && c.challenger == address(0) && c.unanimousDraw
             && reveals >= _p(caseId).superQuorum && c.pooledReject == 0 && reveals == uint256(c.commitsThisRound);
     }
 
@@ -1074,8 +1244,9 @@ contract Moderation is ReentrancyGuard {
         // already wrote, and SUPER_SAFE must stop reading true while it stands.
         questionOpen[caseId] = true;
         uint256 nt = c.topicCount;
+        bytes32 qk = _questionKey(caseId);
         for (uint256 i; i < nt; ++i) {
-            index.openQuestion(c.claimKey, caseTopics[caseId][i]);
+            index.openQuestion(qk, caseTopics[caseId][i]);
         }
 
         emit Reopened(caseId, msg.sender, fee);

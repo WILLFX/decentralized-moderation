@@ -175,8 +175,8 @@ MUTATIONS = [
   "            carriedPot[key] = c.pot;\n            refundOwed[caseId] -= c.pot;", "            carriedPot[key] = 0;"),
 
  ("M41", "§8.4", "policyVersion folded into the claim key",
-  '        public\n        pure\n        returns (bytes32)\n    {\n        return keccak256(abi.encode("LIST", contentHash, metaHash, topics));',
-  '        public\n        view\n        returns (bytes32)\n    {\n        return keccak256(abi.encode("LIST", contentHash, metaHash, topics, paramsVersion));'),
+  '        public\n        pure\n        returns (bytes32)\n    {\n        return keccak256(abi.encode(actionType, contentHash, metaHash, topics));',
+  '        public\n        view\n        returns (bytes32)\n    {\n        return keccak256(abi.encode(actionType, contentHash, metaHash, topics, paramsVersion));'),
 
  # --- §10 / I31 ----------------------------------------------------------
  ("M42", "I31/§10", "the BLOCK_TIME bound not enforced",
@@ -203,7 +203,7 @@ MUTATIONS = [
   "        address(token).safeApprove"),
 
  ("M50", "§8.3", "reopen opens no question against the entries it already wrote",
-  "        questionOpen[caseId] = true;\n        uint256 nt = c.topicCount;\n        for (uint256 i; i < nt; ++i) {\n            index.openQuestion(c.claimKey, caseTopics[caseId][i]);\n        }\n\n",
+  "        questionOpen[caseId] = true;\n        uint256 nt = c.topicCount;\n        bytes32 qk = _questionKey(caseId);\n        for (uint256 i; i < nt; ++i) {\n            index.openQuestion(qk, caseTopics[caseId][i]);\n        }\n\n",
   ""),
 
  ("M51", "§8.3", "the re-review's terminal never closes the question it opened",
@@ -225,6 +225,55 @@ MUTATIONS = [
  ("M44", "§8.5", "reopen resets the pooled tally",
   "        c.commitsThisRound = 0;\n        c.revealsThisRound = 0;\n        c.challenger = address(0);",
   "        c.commitsThisRound = 0;\n        c.revealsThisRound = 0;\n        c.pooledApprove = 0;\n        c.pooledReject = 0;\n        c.challenger = address(0);"),
+
+ # --- M2.10: the removal case ---------------------------------------------
+ ("M54", "\u00a78.4/M2.10", "claimKeyOf ignores actionType - LIST and REMOVE collide on one key",
+  "    function claimKeyOf(uint8 actionType, bytes32 contentHash, bytes32 metaHash, bytes32[] calldata topics)\n        public\n        pure\n        returns (bytes32)\n    {\n        return keccak256(abi.encode(actionType, contentHash, metaHash, topics));",
+  "    function claimKeyOf(uint8 actionType, bytes32 contentHash, bytes32 metaHash, bytes32[] calldata topics)\n        public\n        pure\n        returns (bytes32)\n    {\n        return keccak256(abi.encode(contentHash, metaHash, topics));"),
+
+ ("M55", "\u00a78.1/M2.10", "the fifth write never fires - a successful removal delists nothing",
+  "        if (c.actionType == uint8(ActionType.REMOVE) && verdict == uint8(Outcome.APPROVE)) {",
+  "        if (false) {"),
+
+ ("M56", "\u00a78.1/M2.10", "the fifth write fires on a FAILED removal too",
+  "        if (c.actionType == uint8(ActionType.REMOVE) && verdict == uint8(Outcome.APPROVE)) {",
+  "        if (c.actionType == uint8(ActionType.REMOVE)) {"),
+
+ ("M57", "\u00a72.4/M2.10", "the LIST reservation is not cleared - removed AND unresubmittable",
+  "            reservationOf[listKey] = Reservation.FREE;\n",
+  ""),
+
+ ("M58", "\u00a72.4/M2.10", "the removal clears the LIST key to PERMANENT instead of FREE",
+  "            reservationOf[listKey] = Reservation.FREE;",
+  "            reservationOf[listKey] = Reservation.PERMANENT;"),
+
+ ("M59", "D3-18/M2.10", "the liveness precondition is dropped - a removal may target unlisted content",
+  "            if (!index.isListed(listKey, topics[i])) revert NotListed();\n",
+  ""),
+
+ ("M60", "\u00a78.3/M2.10", "a removal opens no question - SUPER_SAFE stays true under a live takedown",
+  "        questionOpen[caseId] = true;\n        for (uint256 i; i < n; ++i) {\n            index.openQuestion(listKey, topics[i]);\n        }\n",
+  ""),
+
+ ("M61", "\u00a78.3/M2.10", "the removal opens its question against its OWN key, not the listing's",
+  "            index.openQuestion(listKey, topics[i]);",
+  "            index.openQuestion(claimKeyOf(uint8(ActionType.REMOVE), contentHash, metaHash, topics), topics[i]);"),
+
+ ("M62", "\u00a78.3/M2.10", "_questionKey ignores the action type - open and close disagree",
+  "        if (c.actionType == uint8(ActionType.REMOVE)) return _listClaimKey(caseId);\n",
+  ""),
+
+ ("M63", "\u00a78.3/M2.10", "_strict drops the actionType conjunct - a takedown reads certified-safe",
+  "        return c.actionType == uint8(ActionType.LIST) && c.verdict == uint8(Outcome.APPROVE)",
+  "        return c.verdict == uint8(Outcome.APPROVE)"),
+
+ ("M64", "\u00a78.2/M2.10", "the index is not told what the claim asked",
+  "            index.writeEntry(key, caseTopics[caseId][i], uint8(s), plur, strict, act);",
+  "            index.writeEntry(key, caseTopics[caseId][i], uint8(s), plur, strict, uint8(ActionType.LIST));"),
+
+ ("M65", "\u00a78.5/M2.10", "a removal is stamped as a LIST case",
+  "        c.actionType = actionType;\n",
+  ""),
 ]
 
 

@@ -557,3 +557,44 @@ The test asserts the bounds rather than the readings, because the point is the
 *shape* of the curve: a write and a delist must not grow with the topic, and a page
 must cost what it reads and not what it skips. A topic accumulates entries without
 limit, so an unpaged read is a contract that stops working at a size nobody chose.
+
+## v3 — the removal path (M2.10)
+
+Measured by `test_gas_report_removal`, 5 topics, against the real index.
+
+| call | gas | note |
+|---|---:|---|
+| `submitRemoval` (5 topics) | 378,146 | `submit` plus 5 `isListed` reads and 5 `openQuestion` writes |
+| `draw → REMOVED` (+ the 5th write) | 169,339 | the removal's own 5 entries, 5 `closeQuestion`, 5 `removeListing`, 5 swap-and-pops |
+
+**The removal's draw is cheap, and the reason is worth stating.** It touches more
+storage than `draw → FINALIZED` (458,640) — fifteen index calls against that
+transition's five — yet costs 37% of it. Everything a removal writes is **warm**:
+its own entries were written at the interim `TALLY`, and the `LIST` entries it
+removes were written by a case that already ran and were read again at
+`submitRemoval`. `draw → FINALIZED` is expensive because it *pushes five cold array
+slots*, which is what listing content costs; a removal **pops** them, and a pop
+refunds. The system's most expensive transition is still creating a listing, not
+ending one — which is the right way round for a mechanism whose open problem is that
+listings were permanent.
+
+`submitRemoval` at 378,146 sits below `submit` (434,600) for the same reason: it
+opens five questions on entries that already exist rather than creating five.
+
+### Size after M2.10
+
+| Contract | runtime | EIP-170 margin | of limit |
+|---|---:|---:|---:|
+| `Moderation` | 21,428 B | 3,148 B | 87.2% |
+| `StakeRegistry` | 10,065 B | 14,511 B | 41.0% |
+| `IndexRegistry` | 4,285 B | 20,291 B | 17.4% |
+
+`Moderation` grew 2,787 B for the removal case (18,641 → 21,428) and is the number
+to watch: **87.2% of EIP-170, with `RulesetGovernor` still unbuilt.** The growth is
+`submitRemoval`'s precondition loop, `_listClaimKey`'s memory-array rebuild, the
+second key derivation, and the fifth write's loop in `_finalize`. Note that a
+per-contract size is not a pure function of its own source under `via_ir`, so this
+is a measurement and not an accounting of four line items.
+
+`IndexRegistry` grew 257 B for `actionType` on the entry and the two guards that
+read it.

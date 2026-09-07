@@ -1470,7 +1470,7 @@ contract ModerationV3Test is Test {
 
         vm.prank(gov);
         mod.applyParams(_params()); // a new version
-        assertEq(mod.claimKeyOf(keccak256("content"), keccak256("meta"), topics), k0, "key unmoved");
+        assertEq(mod.claimKeyOf(0, keccak256("content"), keccak256("meta"), topics), k0, "key unmoved");
     }
 
     // =========================================================================
@@ -2211,5 +2211,246 @@ contract ModerationV3Test is Test {
         mod.challenge(id);
         assertEq(reg.liabilitiesOf(dissenter), uint256(LAMBDA) + CHALLENGE_BOND, "both claims stand");
         assertEq(reg.openClaimsOf(dissenter), 2);
+    }
+
+    // =========================================================================
+    // M2.10 / D3-15 — the removal case, and the circle it closes
+    // =========================================================================
+
+    uint8 internal constant ACT_LIST = 0;
+    uint8 internal constant ACT_REMOVE = 1;
+
+    function _listKey() internal view returns (bytes32) {
+        return mod.claimKeyOf(ACT_LIST, keccak256("content"), keccak256("meta"), topics);
+    }
+
+    function _removeKey() internal view returns (bytes32) {
+        return mod.claimKeyOf(ACT_REMOVE, keccak256("content"), keccak256("meta"), topics);
+    }
+
+    function _submitRemoval() internal returns (uint256 caseId) {
+        vm.prank(submitter);
+        caseId = mod.submitRemoval(keccak256("content"), keccak256("meta"), topics, FEE);
+    }
+
+    /// @dev Forces a verdict by searching for an entropy that produces it, rather
+    ///      than picking a tally and hoping. `decideAt` is the SAME `_decide` the
+    ///      draw runs, so this steers the draw without weakening it: the contract
+    ///      still computes the verdict from `blockhash(outcomeSeedBlock)`, and the
+    ///      assertion after `draw` is what proves the steer landed.
+    function _drawTo(uint256 caseId, uint8 wantVerdict, bool wantUnanimous) internal {
+        _rollToDraw(caseId);
+        uint256 sb = mod.caseInfo(caseId).outcomeSeedBlock;
+        for (uint256 i; i < 4096; ++i) {
+            bytes32 h = keccak256(abi.encode("entropy", caseId, i));
+            (uint8 v, uint8 tickets) = mod.decideAt(caseId, h);
+            if (v != wantVerdict) continue;
+            if (wantUnanimous && tickets != 0 && tickets != 3) continue;
+            vm.setBlockhash(sb, h);
+            mod.draw(caseId);
+            assertEq(mod.caseInfo(caseId).verdict, wantVerdict, "the steer landed");
+            return;
+        }
+        assertTrue(false, "no entropy produced the wanted verdict at this tally");
+    }
+
+    /// @dev A listed, SUPER_SAFE claim. `superQuorum` is 16, so `strict` needs 16
+    ///      unanimous reveals — the fixture pays that cost because a removal test
+    ///      asserting SUPER_SAFE goes false is worthless if it was false already.
+    function _listAndApprove() internal returns (uint256 id) {
+        id = _submit();
+        _toTally(id, 16, 0);
+        _drawTo(id, APPROVE, true);
+        assertTrue(idx.isListed(_listKey(), topics[0]), "listed");
+        assertTrue(idx.isSuperSafe(_listKey(), topics[0]), "SUPER_SAFE before any question");
+    }
+
+    /// ACCEPTANCE 2 — the circle, end to end and as ONE test.
+    ///
+    /// Before M2.10 this could not be written past line one: `claimKeyOf` hardcoded
+    /// `"LIST"`, so a removal case had no key to be created under, `removeListing`
+    /// was unreachable, and `APPROVED` stayed reserved forever. A listing was
+    /// permanent — not by rule, but because nothing could end it.
+    function test_s8_1_theCircleClosesFromListingToRemovalToResubmission() public {
+        bytes32 lk = _listKey();
+        uint256 listCase = _listAndApprove();
+
+        // --- the removal opens ------------------------------------------------
+        uint256 rm = _submitRemoval();
+        assertEq(idx.entryOf(lk, topics[0]).openQuestions, 1, "S8.3 - the question is against the LIST entry");
+        assertEq(idx.entryOf(lk, topics[1]).openQuestions, 1, "every topic the claim carries");
+        assertFalse(idx.isSuperSafe(lk, topics[0]), "SUPER_SAFE is false WHILE the question stands");
+        assertTrue(idx.isListed(lk, topics[0]), "still listed while the question is open - nothing softens early");
+
+        // --- the removal carries ----------------------------------------------
+        _toTally(rm, 4, 0);
+        _drawTo(rm, APPROVE, false);
+
+        assertEq(uint8(idx.entryOf(lk, topics[0]).status), uint8(IndexRegistry.Status.REMOVED), "LIST entry REMOVED");
+        assertEq(uint8(idx.entryOf(lk, topics[1]).status), uint8(IndexRegistry.Status.REMOVED), "on every topic");
+        assertFalse(idx.isListed(lk, topics[0]), "it has LEFT the topic listing");
+        assertFalse(idx.isListed(lk, topics[1]), "on every topic");
+        assertEq(idx.entryOf(lk, topics[0]).openQuestions, 0, "the terminal closed the question");
+        assertFalse(idx.isSuperSafe(lk, topics[0]), "and SUPER_SAFE STAYS false - strict was cleared, not just counted");
+
+        // --- and the content is resubmittable ---------------------------------
+        assertEq(uint8(mod.reservationOf(lk)), uint8(Moderation.Reservation.FREE), "S2.4 - the reservation cleared");
+        uint256 relist = _submit();
+        assertTrue(relist != listCase, "a NEW case, under the same claim key");
+
+        // The circle actually closes: the relisting can be approved and re-listed.
+        _toTally(relist, 4, 0);
+        _drawTo(relist, APPROVE, false);
+        assertTrue(idx.isListed(lk, topics[0]), "re-listed at the SAME entry key");
+    }
+
+    /// ACCEPTANCE 3 — the failing removal disturbs no LIST answer.
+    function test_s8_1_aFailedRemovalLeavesTheListingUntouched() public {
+        bytes32 lk = _listKey();
+        _listAndApprove();
+
+        uint256 rm = _submitRemoval();
+        _toTally(rm, 0, 4);
+        _drawTo(rm, REJECT, false);
+
+        assertEq(uint8(idx.entryOf(lk, topics[0]).status), uint8(IndexRegistry.Status.APPROVED), "untouched");
+        assertTrue(idx.isListed(lk, topics[0]), "still listed");
+        assertEq(idx.entryOf(lk, topics[0]).openQuestions, 0, "the question closed");
+        assertTrue(idx.isSuperSafe(lk, topics[0]), "SUPER_SAFE returns - the question was asked and answered KEEP");
+        assertEq(uint8(mod.reservationOf(lk)), uint8(Moderation.Reservation.LISTED), "still reserved while listed");
+
+        // "RETAINED" is this case's terminal, not a status any LIST entry took.
+        assertEq(mod.caseInfo(rm).terminal, uint8(Moderation.Terminal.REJECTED));
+    }
+
+    /// ACCEPTANCE 4 — key separation. The two questions about one piece of content
+    /// are different claims, and neither reservation binds the other.
+    ///
+    /// MUTATION: hardcode `"LIST"` in `claimKeyOf` again, or drop `actionType` from
+    ///           the encoding.
+    function test_s8_4_listAndRemoveEarnDifferentKeysAndDoNotBlockEachOther() public {
+        bytes32 lk = _listKey();
+        bytes32 rk = _removeKey();
+        assertTrue(lk != rk, "identical content, different question, different key");
+        assertTrue(
+            idx.entryKeyOf(lk, topics[0]) != idx.entryKeyOf(rk, topics[0]), "and therefore different entry keys"
+        );
+
+        _listAndApprove();
+        // The LIST key is RESERVED (`LISTED`) at this point. If the removal shared
+        // it, this call would revert `KeyReserved` — which is exactly the collision
+        // S8.5 warns about, in the direction that blocks recourse.
+        uint256 rm = _submitRemoval();
+        assertEq(mod.caseInfo(rm).claimKey, rk, "the removal case carries the REMOVE key");
+        assertEq(uint8(mod.reservationOf(rk)), uint8(Moderation.Reservation.LISTED), "reserved while live");
+        assertEq(uint8(mod.reservationOf(lk)), uint8(Moderation.Reservation.LISTED), "and the LIST key is untouched");
+
+        _toTally(rm, 0, 4);
+        _drawTo(rm, REJECT, false);
+        assertEq(uint8(mod.reservationOf(rk)), uint8(Moderation.Reservation.PERMANENT), "the failed removal reserves ITS key");
+        assertEq(uint8(mod.reservationOf(lk)), uint8(Moderation.Reservation.LISTED), "and STILL not the LIST key");
+    }
+
+    /// @dev The liveness guard, and the order's open question 3. Without it the fee
+    ///      is taken, a cohort votes, and `_finalize` reverts forever inside
+    ///      `removeListing` — an unfinalizable case with every bond stuck in it.
+    ///      See DEVIATIONS D3-18.
+    ///
+    /// MUTATION: drop the `isListed` loop from `submitRemoval`.
+    function test_s8_5_aRemovalAgainstUnlistedContentIsRefusedAtSubmission() public {
+        vm.prank(submitter);
+        vm.expectRevert(Moderation.NotListed.selector);
+        mod.submitRemoval(keccak256("content"), keccak256("meta"), topics, FEE);
+    }
+
+    /// @dev A REJECTED listing is an entry, but not a LISTED one, and a removal
+    ///      against it is meaningless — there is nothing to take down.
+    function test_s8_5_aRemovalAgainstARejectedListingIsRefused() public {
+        uint256 id = _submit();
+        _toTally(id, 0, 4);
+        _drawTo(id, REJECT, false);
+        assertEq(uint8(_idxStatus(id)), uint8(IndexRegistry.Status.REJECTED), "an entry exists");
+
+        vm.prank(submitter);
+        vm.expectRevert(Moderation.NotListed.selector);
+        mod.submitRemoval(keccak256("content"), keccak256("meta"), topics, FEE);
+    }
+
+    /// @dev The defect the order did not anticipate, and the reason `actionType`
+    ///      reached the index at all. `_syncListing` listed on `status == APPROVED`
+    ///      alone, which was accidentally right while every claim was a LIST claim.
+    ///      A removal that CARRIES writes `APPROVED` to its own entry — and under
+    ///      the one-conjunct predicate that entry joins the topic's listing, so the
+    ///      successful takedown publishes ITSELF as approved content.
+    ///
+    /// MUTATION: `shouldBeListed = (status == APPROVED)` in `_syncListing`.
+    function test_s8_2_aSuccessfulRemovalDoesNotListItself() public {
+        bytes32 lk = _listKey();
+        bytes32 rk = _removeKey();
+        _listAndApprove();
+        assertEq(idx.listedCount(topics[0]), 1, "one listed item");
+
+        uint256 rm = _submitRemoval();
+        _toTally(rm, 4, 0);
+        _drawTo(rm, APPROVE, false);
+
+        assertEq(uint8(idx.entryOf(rk, topics[0]).status), uint8(IndexRegistry.Status.APPROVED), "the removal carried");
+        assertFalse(idx.isListed(rk, topics[0]), "and it is NOT in the topic listing");
+        assertFalse(idx.isListed(lk, topics[0]), "nor is the content it removed");
+        assertEq(idx.listedCount(topics[0]), 0, "the topic is empty, not holding a takedown record");
+    }
+
+    /// @dev `strict` is SUPER_SAFE's static half. On a REMOVE claim `verdict ==
+    ///      APPROVE` means REMOVE IT, so without the `actionType` conjunct a
+    ///      unanimous successful takedown would stamp "certified safe" onto the
+    ///      record of the takedown.
+    ///
+    /// MUTATION: drop `actionType == LIST` from `_strict`.
+    function test_s8_3_aRemovalsOwnEntryIsNeverStrict() public {
+        bytes32 rk = _removeKey();
+        _listAndApprove();
+        uint256 rm = _submitRemoval();
+        _toTally(rm, 16, 0);
+        _drawTo(rm, APPROVE, true);
+
+        assertTrue(mod.caseInfo(rm).unanimousDraw, "unanimous, unchallenged, full-quorum - strict on every OTHER conjunct");
+        assertFalse(idx.entryOf(rk, topics[0]).strict, "but a removal is not a safety certificate");
+        assertFalse(idx.isSuperSafe(rk, topics[0]));
+    }
+
+    /// @dev The two contracts encode `actionType` independently — one as an enum,
+    ///      one as constants — and the index cannot recover it from the claim key
+    ///      it is handed. If they drifted, the listing predicate would silently
+    ///      classify every LIST entry as a REMOVE entry and no topic would ever
+    ///      list anything.
+    function test_s8_2_actionTypeConstantsAgreeWithModeration() public view {
+        assertEq(idx.ACTION_LIST(), ACT_LIST);
+        assertEq(idx.ACTION_REMOVE(), ACT_REMOVE);
+        assertTrue(idx.ACTION_LIST() != idx.ACTION_REMOVE());
+    }
+
+    /// @dev `_listClaimKey` recomputes the LIST key from a STORED case over a memory
+    ///      array, while `claimKeyOf` takes calldata. The fifth write targets
+    ///      whatever the first produces, so if the two encodings disagreed the
+    ///      removal would silently address an entry that does not exist.
+    function test_s8_4_memoryAndCalldataKeyDerivationsAgree() public {
+        bytes32 lk = _listKey();
+        _listAndApprove();
+        uint256 rm = _submitRemoval();
+        _toTally(rm, 4, 0);
+        _drawTo(rm, APPROVE, false);
+        // Reached only if the derived key addressed the real entry.
+        assertEq(uint8(idx.entryOf(lk, topics[0]).status), uint8(IndexRegistry.Status.REMOVED));
+    }
+
+    /// @dev S8.4 stays true with `actionType` in the key: a parameter change moves
+    ///      neither key.
+    function test_s8_4_bothKeysAreInvariantUnderAParameterChange() public {
+        bytes32 lk = _listKey();
+        bytes32 rk = _removeKey();
+        vm.prank(gov);
+        mod.applyParams(_params());
+        assertEq(_listKey(), lk, "LIST key unmoved");
+        assertEq(_removeKey(), rk, "REMOVE key unmoved");
     }
 }

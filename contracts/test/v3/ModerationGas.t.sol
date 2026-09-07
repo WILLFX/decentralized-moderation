@@ -185,6 +185,91 @@ contract ModerationGasTest is Test {
         console.log("withdrawRefund               ", g - gasleft());
     }
 
+    /// @dev M2.10's removal path. `submitRemoval` carries a `MAX_TOPICS` liveness
+    ///      check against the index that `submit` does not, and a removal that
+    ///      carries pays for `MAX_TOPICS` `removeListing` calls on top of the
+    ///      `MAX_TOPICS` `writeEntry` calls every terminal already makes — so the
+    ///      draw that ends a removal is the most expensive transition in the system
+    ///      and it is the one worth having a number for.
+    function test_gas_report_removal() public {
+        uint256 N = 6;
+        address[] memory who = new address[](N);
+        for (uint256 i; i < N; ++i) {
+            who[i] = _mod(i);
+        }
+        vm.warp(block.timestamp + MATURATION + 1);
+
+        vm.prank(submitter);
+        uint256 listCase = mod.submit(keccak256("c"), keccak256("m"), topics, FEE);
+        _drive(listCase, who, APPROVE);
+        _drawTo(listCase, APPROVE);
+        bytes32 lk = mod.caseInfo(listCase).claimKey;
+        require(idx.isListed(lk, topics[0]), "fixture: the listing must exist");
+
+        // Settle the listing's votes, or the same moderators carry its liabilities
+        // into the removal and fail the solvency test at `commit`.
+        for (uint256 i; i < N; ++i) {
+            mod.claim(listCase, who[i]);
+        }
+
+        uint256 g = gasleft();
+        vm.prank(submitter);
+        uint256 rm = mod.submitRemoval(keccak256("c"), keccak256("m"), topics, FEE);
+        console.log("submitRemoval (5 topics)     ", g - gasleft());
+
+        _drive(rm, who, APPROVE);
+        vm.roll(uint256(mod.caseInfo(rm).outcomeSeedBlock) + 1);
+        uint256 sb = mod.caseInfo(rm).outcomeSeedBlock;
+        for (uint256 i; i < 4096; ++i) {
+            bytes32 h = keccak256(abi.encode("g", i));
+            (uint8 v,) = mod.decideAt(rm, h);
+            if (v != APPROVE) continue;
+            vm.setBlockhash(sb, h);
+            break;
+        }
+        g = gasleft();
+        mod.draw(rm);
+        console.log("draw -> REMOVED (+5th write) ", g - gasleft());
+        require(!idx.isListed(lk, topics[0]), "fixture: the removal must have carried");
+    }
+
+    /// @dev Commit/reveal/close a case to `DRAW` with a uniform vote.
+    function _drive(uint256 id, address[] memory who, uint8 vote) internal {
+        vm.roll(block.number + SEED_LAG + 1);
+        Moderation.Case memory ci = mod.caseInfo(id);
+        for (uint256 i; i < who.length; ++i) {
+            // Hoisted: a call in the argument expression CONSUMES the prank, and
+            // the commit then lands as the test contract. Bitten three times.
+            bytes32 h = mod.commitHash(id, ci.round, ci.paramsVersion, who[i], vote, _salt(who[i]));
+            vm.prank(who[i]);
+            mod.commit(id, h);
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        for (uint256 i; i < who.length; ++i) {
+            vm.prank(who[i]);
+            mod.reveal(id, vote, _salt(who[i]));
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+    }
+
+    function _drawTo(uint256 id, uint8 want) internal {
+        vm.roll(uint256(mod.caseInfo(id).outcomeSeedBlock) + 1);
+        uint256 sb = mod.caseInfo(id).outcomeSeedBlock;
+        for (uint256 i; i < 4096; ++i) {
+            bytes32 h = keccak256(abi.encode("d", id, i));
+            (uint8 v,) = mod.decideAt(id, h);
+            if (v != want) continue;
+            vm.setBlockhash(sb, h);
+            mod.draw(id);
+            return;
+        }
+        revert("no entropy produced the wanted verdict");
+    }
+
     /// @dev The three `UNRESOLVED` terminals, and the non-reveal settlement branch.
     function test_gas_report_unresolved() public {
         // Stake and mature every participant up front, so no scenario below

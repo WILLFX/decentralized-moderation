@@ -97,7 +97,7 @@ contract V3InvariantTest is StdInvariant, Test {
 
         // Only the `h*` actions are fuzz targets. `init`, the views and the ghost
         // readers are not — a runner calling them would be testing the harness.
-        bytes4[] memory sels = new bytes4[](14);
+        bytes4[] memory sels = new bytes4[](15);
         sels[0] = SystemHandler.hStake.selector;
         sels[1] = SystemHandler.hPostBond.selector;
         sels[2] = SystemHandler.hSubmit.selector;
@@ -112,6 +112,7 @@ contract V3InvariantTest is StdInvariant, Test {
         sels[11] = SystemHandler.hSweep.selector;
         sels[12] = SystemHandler.hRefund.selector;
         sels[13] = SystemHandler.hRoll.selector;
+        sels[14] = SystemHandler.hSubmitRemoval.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sels}));
         targetContract(address(handler));
     }
@@ -366,6 +367,85 @@ contract V3InvariantTest is StdInvariant, Test {
         assertGt(handler.callsClaim(), 0, "settlement is reachable");
 
         // And every ledger invariant holds at the end of a real lifecycle.
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets());
+        assertTrue(reg.solvent());
+    }
+
+    /// @dev Drives a case in DRAW to a chosen verdict through the handler, by
+    ///      picking an entropy `decideAt` says produces it. The contract still does
+    ///      the deciding; this only chooses which block hash it reads.
+    function _pokeToVerdict(uint256 caseId, uint256 slot, uint8 want) internal {
+        uint256 sb = mod.caseInfo(caseId).outcomeSeedBlock;
+        for (uint256 i; i < 4096; ++i) {
+            bytes32 h = keccak256(abi.encode("inv-entropy", caseId, i));
+            (uint8 v,) = mod.decideAt(caseId, h);
+            if (v != want) continue;
+            vm.setBlockhash(sb, h);
+            handler.hPoke(slot);
+            return;
+        }
+        assertTrue(false, "no entropy produced the wanted verdict");
+    }
+
+    /// @dev M2.10. The stateful suite is only as good as what the handler can
+    ///      reach, and a removal case is reachable ONLY from an approved listing —
+    ///      several conditional steps deeper than anything else the handler does.
+    ///      This pins that the path is enterable, so the invariants above are
+    ///      actually being evaluated against removal cases rather than silently
+    ///      skipping them.
+    function test_handlerReachesTheRemovalCase() public {
+        handler.hSubmit(1);
+        uint256 listCase = handler.caseIds(0);
+        bytes32[] memory tp = handler.topicsOf();
+
+        _advance(3);
+        for (uint256 i; i < 6; ++i) {
+            handler.hCommit(i, 0, 1); // all Approve
+        }
+        _advance(240);
+        handler.hPoke(0);
+        for (uint256 i; i < 6; ++i) {
+            handler.hReveal(i, 0);
+        }
+        _advance(240);
+        handler.hPoke(0); // -> TALLY
+        _advance(8640);
+        handler.hPoke(0); // -> DRAW
+        _advance(600);
+        _pokeToVerdict(listCase, 0, uint8(Moderation.Outcome.APPROVE));
+
+        bytes32 lk = mod.caseInfo(listCase).claimKey;
+        assertTrue(idx.isListed(lk, tp[0]), "the listing exists, which is the precondition");
+
+        // Now the removal is reachable, and it is a REAL case in the same machine.
+        handler.hSubmitRemoval(2, 0);
+        assertEq(handler.callsRemoval(), 1, "the removal path is enterable from the handler");
+        assertEq(handler.caseCount(), 2, "and it is a case like any other");
+
+        uint256 rm = handler.caseIds(1);
+        assertEq(idx.entryOf(lk, tp[0]).openQuestions, 1, "S8.3 - the question is open against the listing");
+
+        _advance(3);
+        for (uint256 i; i < 6; ++i) {
+            handler.hCommit(i, 1, 1); // all Approve == REMOVE IT
+        }
+        _advance(240);
+        handler.hPoke(1);
+        for (uint256 i; i < 6; ++i) {
+            handler.hReveal(i, 1);
+        }
+        _advance(240);
+        handler.hPoke(1);
+        _advance(8640);
+        handler.hPoke(1);
+        _advance(600);
+        _pokeToVerdict(rm, 1, uint8(Moderation.Outcome.APPROVE));
+
+        assertEq(uint8(idx.entryOf(lk, tp[0]).status), uint8(IndexRegistry.Status.REMOVED), "the fifth write fired");
+        assertFalse(idx.isListed(lk, tp[0]), "and the listing is gone");
+        assertEq(uint8(mod.reservationOf(lk)), uint8(Moderation.Reservation.FREE), "resubmittable");
+
+        // The ledger invariants still hold across a path that only M2.10 opened.
         assertEq(token.balanceOf(address(reg)), reg.balanceBuckets());
         assertTrue(reg.solvent());
     }

@@ -53,8 +53,8 @@ MUTATIONS = [
   "        version = moderation.applyParams(p);"),
 
  ("M9", "§3", "the pending guidelines record survives execute",
-  "        delete pendingGuidelines;\n        emit GuidelinesExecuted",
-  "        emit GuidelinesExecuted"),
+  "        delete pendingGuidelines;\n\n        // M2.12 / D3-21",
+  "        // M2.12 / D3-21"),
 
  ("M10", "§3", "executeParams runs with nothing pending",
   "        if (!pp.exists) revert NoPendingProposal();\n        if (block.timestamp < pp.eta)",
@@ -62,20 +62,20 @@ MUTATIONS = [
 
  # --- binding (M2.6-F3) ------------------------------------------------------
  ("M11", "F3", "bind does not check that the binding is mutual",
-  "        if (m.governor() != address(this)) revert BindingNotMutual();\n",
-  ""),
+  "        if (m.governor() != address(this)) revert BindingNotMutual();\n        intendedModeration = m;\n        moderation = m;",
+  "        intendedModeration = m;\n        moderation = m;"),
 
  ("M12", "F3", "bind is not one-way",
-  "        if (address(moderation) != address(0)) revert AlreadyBound();\n",
-  ""),
+  "    function bindModeration(Moderation m) external onlyGovernance {\n        if (address(moderation) != address(0)) revert AlreadyBound();\n",
+  "    function bindModeration(Moderation m) external onlyGovernance {\n"),
 
  ("M13", "F3", "executeParams proceeds while unbound",
-  "        if (address(moderation) == address(0)) revert NotBound();\n",
-  ""),
+  "        if (address(moderation) == address(0)) revert NotBound();\n        if (retired) revert Retired();\n        Pending memory pp = pendingParams;",
+  "        Pending memory pp = pendingParams;"),
 
  ("M14", "F3", "bind accepts the zero address",
-  "        if (address(m) == address(0)) revert ZeroAddress();\n",
-  ""),
+  "        if (address(m) == address(0)) revert ZeroAddress();\n        if (m.governor() != address(this)) revert BindingNotMutual();",
+  "        if (m.governor() != address(this)) revert BindingNotMutual();"),
 
  # --- §4.1 guidelines --------------------------------------------------------
  ("M15", "§4.1", "guidelinesVersion is assigned rather than incremented",
@@ -194,6 +194,63 @@ MUTATIONS = [
  ("M42", "§3", "the pending hash is not derived from the parameters",
   "        bytes32 h = keccak256(abi.encode(p));",
   "        bytes32 h = keccak256(abi.encode(block.number));"),
+]
+
+
+# --- M2.12: the guidelines push, and the exit -------------------------------
+MUTATIONS += [
+ ("M43", "D3-21", "the version is allocated but never pushed to Moderation",
+  "        moderation.applyGuidelines(version);\n", ""),
+
+ ("M44", "D3-21", "an unbound governor may publish guidelines into nothing",
+  "        if (address(moderation) == address(0)) revert NotBound();\n        if (retired) revert Retired();\n        Pending memory pg = pendingGuidelines;",
+  "        Pending memory pg = pendingGuidelines;"),
+
+ ("M45", "D3-20", "a retired governor may still push parameters",
+  "        if (retired) revert Retired();\n        Pending memory pp = pendingParams;",
+  "        Pending memory pp = pendingParams;"),
+
+ ("M46", "D3-20", "reciprocity is not checked at the handover",
+  "        if (RulesetGovernor(next).intendedModeration() != moderation) {\n            revert SuccessorNotBoundToThisModeration();\n        }\n", ""),
+
+ ("M47", "D3-20", "the handover does not name the successor it executes",
+  "        if (keccak256(abi.encode(next)) != pc.hash) revert ProposalMismatch();\n", ""),
+
+ ("M48", "D3-20", "the handover ignores its own timelock",
+  "        if (block.timestamp < pc.eta) revert TimelockNotElapsed();\n", ""),
+
+ ("M49", "D3-20", "the successor is left UNBOUND after the handover - the pair bricks",
+  "        RulesetGovernor(next).adoptModeration();\n", ""),
+
+ ("M50", "D3-20", "the outgoing governor is not marked retired",
+  "        retired = true;\n\n        moderation.setGovernor(next);",
+  "        moderation.setGovernor(next);"),
+
+ ("M51", "D3-20", "the pending handover survives execution",
+  "        delete pendingGovernorChange;\n        retired = true;",
+  "        retired = true;"),
+
+ ("M52", "D3-20", "adopt does not check that the target names this governor",
+  "        if (m.governor() != address(this)) revert BindingNotMutual();\n        moderation = m;\n        emit ModerationBound(address(m));\n    }\n\n    // =========================================================================\n    // D3-20",
+  "        moderation = m;\n        emit ModerationBound(address(m));\n    }\n\n    // =========================================================================\n    // D3-20"),
+
+ ("M53", "D3-20", "adopt binds something other than the declared intent",
+  "        Moderation m = intendedModeration;\n        if (address(m) == address(0)) revert NotIntended();",
+  "        Moderation m = Moderation(msg.sender);\n        if (address(m) == address(0)) revert NotIntended();"),
+
+ ("M54", "D3-20", "intent may be redeclared, so the execute-time read is not stable",
+  "        if (address(intendedModeration) != address(0)) revert AlreadyIntended();\n", ""),
+
+ ("M55", "D3-20", "intendModeration is permissionless",
+  "    function intendModeration(Moderation m) external onlyGovernance {",
+  "    function intendModeration(Moderation m) external {"),
+
+ ("M56", "D3-20", "the exit is permissionless",
+  "    function executeGovernorChange(address next) external onlyGovernance {",
+  "    function executeGovernorChange(address next) external {"),
+
+ ("M57", "D3-20", "a governor may hand over to itself",
+  "        if (next == address(this)) revert SuccessorIsSelf();\n", ""),
 ]
 
 

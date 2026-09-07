@@ -282,6 +282,29 @@ MUTATIONS = [
  ("M65", "\u00a78.5/M2.10", "a removal is stamped as a LIST case",
   "        c.actionType = actionType;\n",
   ""),
+
+ # --- M2.12 / D3-21: the guidelines pin -------------------------------------
+ ("M66", "\u00a74.1/D3-21", "the guidelines version is not pinned at submission",
+  "        c.guidelinesVersion = currentGuidelinesVersion;\n", ""),
+
+ ("M67", "\u00a74.1/D3-21", "the pin is re-read live instead of at submission - a mid-case change moves it",
+  "        uint32 guidelinesVersion; // \u00a74.1 \u2014 pinned at submission, like `paramsVersion`",
+  "        uint32 guidelinesVersionUnused;"),
+
+ ("M68", "\u00a74.1/D3-21", "applyGuidelines is permissionless",
+  "    function applyGuidelines(uint32 v) external onlyGovernor {",
+  "    function applyGuidelines(uint32 v) external {"),
+
+ ("M69", "\u00a74.1/D3-21", "the pin may move backwards or reuse a version",
+  "        if (v <= currentGuidelinesVersion) revert GuidelinesNotMonotonic();\n", ""),
+
+ ("M70", "\u00a74.1/D3-21", "the version may be reused (>= rather than >)",
+  "        if (v <= currentGuidelinesVersion) revert GuidelinesNotMonotonic();",
+  "        if (v < currentGuidelinesVersion) revert GuidelinesNotMonotonic();"),
+
+ ("M71", "\u00a78.5/D3-21", "reopen RE-PINS the guidelines - one tally judged against two texts",
+  "        challengeSettled[caseId] = false;\n        c.eligSeedBlock = uint40(block.number + p.seedLag);",
+  "        challengeSettled[caseId] = false;\n        c.guidelinesVersion = currentGuidelinesVersion;\n        c.eligSeedBlock = uint40(block.number + p.seedLag);"),
 ]
 
 

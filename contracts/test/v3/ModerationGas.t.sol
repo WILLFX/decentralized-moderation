@@ -283,4 +283,48 @@ contract ModerationGasTest is Test {
         mod.claimChallenge(id);
         console.log("claimChallenge               ", g - gasleft());
     }
+    /// @dev §5.6.1's three new calls, for GAS_BUDGETS.md.
+    function test_gas_report_maintenance() public {
+        address m0 = _mod(700);
+        vm.warp(block.timestamp + MATURATION + 1);
+        vm.prank(submitter);
+        uint256 id = mod.submit(keccak256("gm"), keccak256("m"), topics, FEE);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id); // accrues maintenance + the retained claim bounty
+        m0;
+
+        uint256 g = gasleft();
+        uint256 swept = mod.sweepMaintenance();
+        console.log("sweepMaintenance (nonzero)   ", g - gasleft());
+        assertGt(swept, 0);
+
+        g = gasleft();
+        mod.sweepMaintenance();
+        console.log("sweepMaintenance (no-op)     ", g - gasleft());
+
+        token.mint(address(this), 100 * UNIT);
+        token.approve(address(reg), type(uint256).max);
+        g = gasleft();
+        reg.depositMaintenance(50 * UNIT);
+        console.log("depositMaintenance (warm)    ", g - gasleft());
+
+        vm.prank(gov);
+        g = gasleft();
+        reg.proposeMaintenanceWithdrawal(gov, 10 * UNIT);
+        console.log("proposeMaintenanceWithdrawal ", g - gasleft());
+
+        (,, uint256 eta,) = reg.pendingMaintenanceWithdrawal();
+        vm.warp(eta);
+        vm.prank(gov);
+        g = gasleft();
+        reg.executeMaintenanceWithdrawal();
+        console.log("executeMaintenanceWithdrawal ", g - gasleft());
+
+        vm.prank(gov);
+        reg.proposeMaintenanceWithdrawal(gov, 1 * UNIT);
+        vm.prank(gov);
+        g = gasleft();
+        reg.cancelMaintenanceWithdrawal();
+        console.log("cancelMaintenanceWithdrawal  ", g - gasleft());
+    }
 }

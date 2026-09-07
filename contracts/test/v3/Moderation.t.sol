@@ -46,6 +46,7 @@ contract ModerationV3Test is Test {
     address internal gov;
     address internal submitter;
     address internal poker;
+    address internal treasury;
 
     // Test fixture values. §1 leaves several of these open and this suite picks
     // numbers only so a case can run — see DEVIATIONS D3-6. None is a proposal.
@@ -83,6 +84,7 @@ contract ModerationV3Test is Test {
         gov = makeAddr("gov");
         submitter = makeAddr("submitter");
         poker = makeAddr("poker");
+        treasury = makeAddr("treasury");
 
         token = new MockBZZ();
         vm.prank(gov);
@@ -1946,6 +1948,114 @@ contract ModerationV3Test is Test {
             uint256(c.pot) + c.challengeReserve,
             "pot + reserve only: the draw bounty was earned, not refunded"
         );
+    }
+
+    // =========================================================================
+    // §5.6 / §5.6.1 — the sweep into the one reserve
+    // =========================================================================
+
+    /// MUTATION: zero `maintenanceAccrued` without forwarding it.
+    /// MUTATION: forward without zeroing (a second sweep would double-spend).
+    /// @dev §5.6 makes the registry's reserve the ONE pool; this contract's
+    ///      accumulator is a staging area, not a pool.
+    function test_s5_6_sweepForwardsTheAccrualIntoTheOneReserve() public {
+        uint256 id = _submit();
+        _matureAll();
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id); // NO_TURNOUT accrues maintenance + the claim bounty
+
+        uint256 accrued = mod.maintenanceAccrued();
+        assertGt(accrued, 0, "fixture: something accrued");
+        uint256 reserve0 = reg.maintenanceReserve();
+        uint256 modBal0 = token.balanceOf(address(mod));
+
+        vm.prank(poker); // permissionless
+        uint256 swept = mod.sweepMaintenance();
+
+        assertEq(swept, accrued);
+        assertEq(mod.maintenanceAccrued(), 0, "the accumulator is zeroed");
+        assertEq(reg.maintenanceReserve(), reserve0 + accrued, "and the reserve grew by exactly that");
+        assertEq(token.balanceOf(address(mod)), modBal0 - accrued, "value actually moved");
+        assertTrue(reg.solvent(), "the registry stays solvent");
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets(), "and exact");
+    }
+
+    /// @dev A sweep with nothing accrued is a NO-OP, not a revert — a permissionless
+    ///      housekeeping call must not fail on the common case.
+    function test_s5_6_sweepWithNothingAccruedIsANoOp() public {
+        assertEq(mod.maintenanceAccrued(), 0);
+        vm.prank(poker);
+        assertEq(mod.sweepMaintenance(), 0);
+
+        // ...and a second sweep straight after a real one is also a no-op.
+        uint256 id = _submit();
+        _matureAll();
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        vm.prank(poker);
+        mod.sweepMaintenance();
+        uint256 reserve = reg.maintenanceReserve();
+        vm.prank(poker);
+        assertEq(mod.sweepMaintenance(), 0, "nothing left to forward");
+        assertEq(reg.maintenanceReserve(), reserve, "and nothing double-counted");
+    }
+
+    /// @dev End to end, and the point of the whole order: a FEE paid into
+    ///      `Moderation` and a DEBIT taken in the registry both reach ONE reserve,
+    ///      and both can leave it by the one exit.
+    function test_s5_6_feeAndDebitReachOneReserveAndBothCanLeave() public {
+        uint256 id = _submit();
+        address[] memory who = _toTally(id, 3, 1);
+        _rollToDraw(id);
+        mod.draw(id);
+
+        // The incoherent voter's debit goes to the registry's reserve directly.
+        uint8 verdict = mod.caseInfo(id).verdict;
+        for (uint256 i; i < who.length; ++i) {
+            mod.claim(id, who[i]);
+        }
+        uint256 fromDebits = reg.maintenanceReserve();
+        assertGt(fromDebits, 0, "a debit reached the reserve without a sweep");
+
+        // The fee's maintenance component and the division remainder are staged in
+        // Moderation until swept.
+        uint256 fromFees = mod.maintenanceAccrued();
+        assertGt(fromFees, 0, "and the fee side is staged");
+
+        vm.prank(poker);
+        mod.sweepMaintenance();
+        assertEq(reg.maintenanceReserve(), fromDebits + fromFees, "ONE pool, both inflows");
+        assertEq(mod.maintenanceAccrued(), 0);
+
+        // Both leave by the one exit.
+        uint256 total = reg.maintenanceReserve();
+        uint256 stakeBond = reg.totalStake() + reg.totalBond();
+        vm.prank(gov);
+        reg.proposeMaintenanceWithdrawal(treasury, total);
+        (,, uint256 eta,) = reg.pendingMaintenanceWithdrawal();
+        vm.warp(eta);
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal();
+
+        assertEq(token.balanceOf(treasury), total, "fee revenue and debit revenue, together");
+        assertEq(reg.maintenanceReserve(), 0);
+        assertEq(reg.totalStake() + reg.totalBond(), stakeBond, "and no moderator paid for it");
+        assertTrue(reg.solvent());
+        verdict;
+    }
+
+    /// @dev The sweep needs no capability, and holds none it could misuse: it is the
+    ///      same permissionless deposit anyone may make.
+    function test_s5_6_sweepGrantsModerationNoNewPower() public {
+        uint256 id = _submit();
+        _matureAll();
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+
+        uint256 stakeBond = reg.totalStake() + reg.totalBond();
+        vm.prank(poker);
+        mod.sweepMaintenance();
+        assertEq(reg.totalStake() + reg.totalBond(), stakeBond, "a deposit moves no moderator's balance");
     }
 
     // =========================================================================

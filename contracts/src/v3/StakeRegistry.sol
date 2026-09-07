@@ -113,11 +113,14 @@ contract StakeRegistry {
     uint256 public totalStake;
     uint256 public totalBond;
 
-    /// @notice The named destination for every debit (§5.1, I21). Value removed
-    ///         from a bond lands here and never in another moderator's balance.
-    /// @dev Nothing in §2 or §5 gives this an exit. That is a gap in the spec, not
-    ///      a licence to invent a governance sweep into a custody contract; it is
-    ///      reported rather than filled in.
+    /// @notice The ONE maintenance reserve (§5.6). The named destination for every
+    ///         debit (§5.1, I21) — value removed from a bond lands here and never in
+    ///         another moderator's balance — and, through `depositMaintenance`, for
+    ///         `Moderation`'s fee and remainder accruals too.
+    /// @dev It lives here rather than in `Moderation` because §2.4 already makes the
+    ///      registry the authority on custody and solvency, and `balanceBuckets()`
+    ///      already accounts for it. A logic contract permanently holding protocol
+    ///      revenue would be holding value it has no rule for.
     uint256 public maintenanceReserve;
 
     struct PendingCap {
@@ -133,8 +136,16 @@ contract StakeRegistry {
         bool exists;
     }
 
+    struct PendingWithdrawal {
+        address to;
+        uint40 eta;
+        bool exists;
+        uint256 amount;
+    }
+
     PendingCap internal pendingCap;
     PendingCondemn internal pendingCondemn;
+    PendingWithdrawal internal pendingWithdrawal;
 
     // --- events ---------------------------------------------------------------
 
@@ -155,6 +166,10 @@ contract StakeRegistry {
     event CapProposed(address indexed logic, uint8 capBits, uint256 eta);
     event CapSet(address indexed logic, uint8 capBits);
     event CapProposalCancelled(address indexed logic);
+    event MaintenanceDeposited(address indexed from, uint256 amount);
+    event MaintenanceWithdrawalProposed(address indexed to, uint256 amount, uint256 eta);
+    event MaintenanceWithdrawalCancelled(address indexed to, uint256 amount);
+    event MaintenanceWithdrawn(address indexed to, uint256 amount);
     event CondemnProposed(address indexed logic, uint256 eta);
     event Condemned(address indexed logic);
     event CondemnProposalCancelled(address indexed logic);
@@ -182,6 +197,7 @@ contract StakeRegistry {
     error NoPendingProposal();
     error TimelockNotElapsed();
     error LogicHoldsClaims();
+    error ExceedsReserve();
     error BondUnderflow();
     error BadTrackDecay();
     error BadEnumeration();
@@ -529,6 +545,76 @@ contract StakeRegistry {
         caps[p.logic] = p.capBits;
         delete pendingCap;
         emit CapSet(p.logic, p.capBits);
+    }
+
+    // =========================================================================
+    // The maintenance reserve (§5.6, §5.6.1)
+    // =========================================================================
+
+    /// @notice Pay into the maintenance reserve. Permissionless.
+    /// @dev No capability bit. `MAY_CREATE` and `MAY_DISCHARGE` gate OBLIGATIONS ON
+    ///      A MODERATOR'S BOND; a deposit creates none — it hands the registry
+    ///      money. Anyone may donate and nobody is harmed by their doing so, so a
+    ///      third bit would be a governance surface bought for nothing.
+    ///
+    ///      The pull is not separable from the permissionlessness. `balanceBuckets()`
+    ///      is `totalStake + totalBond + maintenanceReserve` and `solvent()` compares
+    ///      it to the real balance (I21), so raising the counter without moving value
+    ///      would make the registry insolvent by exactly `amount` — through a
+    ///      function anyone may call. Pull first, then count.
+    function depositMaintenance(uint256 amount) external {
+        if (amount == 0) revert AmountZero();
+        address(token).safeTransferFrom(msg.sender, address(this), amount);
+        maintenanceReserve += amount;
+        emit MaintenanceDeposited(msg.sender, amount);
+    }
+
+    /// @dev Same shape as `proposeCaps` / `cancelCaps` / `executeCaps` and
+    ///      condemnation: one pending record, `eta = now + timelockDelay`,
+    ///      `onlyGovernance` on all three. A second timelock idiom in a contract
+    ///      that already has one would be a second thing to get right.
+    function proposeMaintenanceWithdrawal(address to, uint256 amount) external onlyGovernance {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert AmountZero();
+        uint256 eta = block.timestamp + timelockDelay;
+        pendingWithdrawal = PendingWithdrawal({to: to, eta: uint40(eta), exists: true, amount: amount});
+        emit MaintenanceWithdrawalProposed(to, amount, eta);
+    }
+
+    function cancelMaintenanceWithdrawal() external onlyGovernance {
+        PendingWithdrawal memory w = pendingWithdrawal;
+        if (!w.exists) revert NoPendingProposal();
+        delete pendingWithdrawal;
+        emit MaintenanceWithdrawalCancelled(w.to, w.amount);
+    }
+
+    /// @notice Take protocol revenue out of the reserve, after the timelock.
+    /// @dev **The single assertion this whole mechanism turns on: a maintenance
+    ///      withdrawal can never reduce `totalStake + totalBond`.** Governance may
+    ///      take protocol revenue; it may not take a moderator's stake or bond, and
+    ///      the cap at `maintenanceReserve` is the only thing enforcing that.
+    ///
+    ///      The cap is checked HERE and not at propose, because the reserve is live
+    ///      state and a proposal is not a lock on it: a withdrawal proposed while the
+    ///      reserve was large must fail if an earlier one has since drained it.
+    ///
+    ///      Solvency is preserved by construction — the transfer and the subtraction
+    ///      move the balance and the bucket by the same amount.
+    function executeMaintenanceWithdrawal() external onlyGovernance {
+        PendingWithdrawal memory w = pendingWithdrawal;
+        if (!w.exists) revert NoPendingProposal();
+        if (block.timestamp < w.eta) revert TimelockNotElapsed();
+        if (w.amount > maintenanceReserve) revert ExceedsReserve();
+
+        maintenanceReserve -= w.amount;
+        delete pendingWithdrawal;
+        address(token).safeTransfer(w.to, w.amount);
+        emit MaintenanceWithdrawn(w.to, w.amount);
+    }
+
+    function pendingMaintenanceWithdrawal() external view returns (address to, uint256 amount, uint256 eta, bool exists) {
+        PendingWithdrawal memory w = pendingWithdrawal;
+        return (w.to, w.amount, w.eta, w.exists);
     }
 
     // =========================================================================

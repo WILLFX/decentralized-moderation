@@ -739,3 +739,37 @@ timelock at this contract. Pinning still holds — a change cannot affect a live
 (I27) — so the exposure is limited to cases submitted after the change. It must be
 replaced by the governor before any deployment, and the standing constraint already
 forbids one.
+
+
+### D3-14. The maintenance exit — what §5.6.1 left open
+
+**Ruling context.** M2.8 implements §5.6.1 as specified. Three details it does not
+state, resolved here and reported rather than assumed.
+
+**The withdrawal names its recipient at propose, not at execute.** §5.6.1 writes
+`proposeMaintenanceWithdrawal(to, amount)` and `executeMaintenanceWithdrawal()` with
+no arguments, so `to` is pinned by the proposal and the timelock covers the
+recipient as well as the amount. That is the safer reading — a recipient swappable
+at execute would put the destination outside the delay — but §5.6.1 does not say so.
+
+**`executeMaintenanceWithdrawal` takes no argument, so it cannot re-name its
+proposal.** Condemnation names its logic again at execute specifically so a pending
+proposal cannot be swapped underneath the timelock (`M23`). The withdrawal has only
+one pending slot and a fresh propose overwrites it, exactly as `proposeCaps` does,
+so the same hazard exists in the same form for all three. It is not new here and is
+not fixed here; it is the existing idiom the order said to follow.
+
+**A deposit of zero reverts.** §5.6.1 does not say. `AmountZero` matches every other
+zero-amount path in the registry (`postBond`, `reward`), and a permissionless no-op
+that emits an event is worth refusing.
+
+**What is deliberately absent.** No forwarding path from `Moderation` at each
+terminal (§5.6.1 says lazy), no capability bit for the deposit (§5.6.1 says none),
+and no change to `CLAIM_BOUNTY`'s retention — this order moves the pool, it does not
+re-decide what enters it. `M47` still pins the retention.
+
+**Threat model.** The exit is the highest-risk surface either contract has: a
+governance-controlled withdrawal from a contract holding user funds. It is bounded
+by one comparison, `amount <= maintenanceReserve`, checked against live state at
+execute. Everything else about the mechanism is the timelock idiom the registry
+already had.

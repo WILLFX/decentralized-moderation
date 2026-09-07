@@ -481,3 +481,26 @@ its own transaction and its own failure domain.
   re-reviewer includes clearing any stragglers at ~64–94k each.
 - **Cold vs warm moderators.** `commit` is measured warm. A moderator's first
   interaction with the registry in a block pays cold-account costs on top.
+
+
+---
+
+## v3 — §5.6.1, the maintenance exit (M2.8)
+
+Measured with `gasleft()` around the call, so the 21,000-gas transaction base and
+calldata are excluded. Fixture: `test_gas_report_maintenance` in
+`test/v3/ModerationGas.t.sol`, five topics, warm storage.
+
+| call | gas | note |
+|---|---:|---|
+| `Moderation.sweepMaintenance()` (nonzero) | 55,630 | approve + cross-contract deposit + `transferFrom` |
+| `Moderation.sweepMaintenance()` (no-op) | 1,893 | one warm SLOAD and return — a sweep with nothing accrued must not revert |
+| `StakeRegistry.depositMaintenance()` (warm) | 5,781 | `transferFrom` + one warm SSTORE |
+| `StakeRegistry.proposeMaintenanceWithdrawal()` | 49,579 | cold write of the pending record |
+| `StakeRegistry.executeMaintenanceWithdrawal()` | 28,552 | clears the record, decrements the reserve, transfers |
+| `StakeRegistry.cancelMaintenanceWithdrawal()` | 3,976 | clears the record; refunds most of the propose write |
+
+**Why the sweep is lazy.** Forwarding at each terminal would add ~55k to every case
+that ends. `submit` is already the largest call in the system, and nothing reads the
+reserve between sweeps, so the cost is paid once per sweep rather than once per case
+(§5.6.1). The no-op figure is what makes permissionless safe to call speculatively.

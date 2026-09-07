@@ -230,11 +230,12 @@ contract Moderation is ReentrancyGuard {
     ///      everyone. See DEVIATIONS D3-3.
     mapping(uint256 => uint256) public refundOwed;
 
-    /// @notice Fee components this contract retains: `maintenance` from every
-    ///         terminal, the payment remainder (§5.3), and bounties nobody earned.
-    /// @dev This is NOT `StakeRegistry.maintenanceReserve`. §5.1 sends debits there;
-    ///      §1's fee split and §5.3's remainder land here, and no section says
-    ///      whether the two are one pool. Reported, not resolved.
+    /// @notice What this contract has accrued for the maintenance reserve since the
+    ///         last sweep: `maintenance` from the fee (§1), §5.3's division
+    ///         remainder, and `CLAIM_BOUNTY` retained on `UNRESOLVED` (§4.8).
+    /// @dev An ACCUMULATOR, not a pool. §5.6 makes the registry's reserve the one
+    ///      pool; `sweepMaintenance` forwards this into it. Nothing reads it between
+    ///      sweeps, which is why the forwarding is lazy rather than per-terminal.
     uint256 public maintenanceAccrued;
 
     // =========================================================================
@@ -255,6 +256,7 @@ contract Moderation is ReentrancyGuard {
     event Reopened(uint256 indexed caseId, address indexed by, uint256 fee);
     event BountyPaid(uint256 indexed caseId, address indexed to, uint256 amount);
     event Refunded(uint256 indexed caseId, address indexed to, uint256 amount);
+    event MaintenanceSwept(address indexed by, uint256 amount);
 
     // =========================================================================
     // Errors
@@ -1066,6 +1068,29 @@ contract Moderation is ReentrancyGuard {
         return c.terminal == uint8(Terminal.APPROVED) && c.challenger == address(0) && c.unanimousDraw
             && c.verdict == uint8(Outcome.APPROVE) && reveals >= superQuorum && c.pooledReject == 0
             && reveals == uint256(c.commitsThisRound);
+    }
+
+    /// @notice Forward everything accrued into the registry's maintenance reserve
+    ///         (§5.6.1). Permissionless.
+    /// @dev Lazy, not per-terminal: forwarding at each terminal would put a token
+    ///      transfer on the hot path of every case that ends, for no benefit —
+    ///      nothing reads the reserve between sweeps.
+    ///
+    ///      Permissionless is safe for the same reason the deposit is: the call
+    ///      moves value in exactly one direction, toward the pool it belongs in, and
+    ///      a griefer who calls it repeatedly pays gas to do the protocol's
+    ///      housekeeping.
+    ///
+    ///      A sweep with nothing accrued is a NO-OP, not a revert. Reverting would
+    ///      make a permissionless housekeeping call fail on the common case and put
+    ///      a state read on every caller before they may make it.
+    function sweepMaintenance() external nonReentrant returns (uint256 amount) {
+        amount = maintenanceAccrued;
+        if (amount == 0) return 0;
+        maintenanceAccrued = 0;
+        address(token).safeApprove(address(stakeReg), amount);
+        stakeReg.depositMaintenance(amount);
+        emit MaintenanceSwept(msg.sender, amount);
     }
 
     function setGovernor(address next) external onlyGovernor {

@@ -961,6 +961,249 @@ contract StakeRegistryV3Test is Test {
     }
 
     // =========================================================================
+    // §5.6 / §5.6.1 — the maintenance reserve and its exit
+    // =========================================================================
+
+    function _proposeWithdrawal(address to, uint256 amount) internal {
+        vm.prank(gov);
+        reg.proposeMaintenanceWithdrawal(to, amount);
+    }
+
+    /// @dev Warps to the pending proposal's own `eta` rather than adding `TIMELOCK`
+    ///      to `block.timestamp`, so a test with two propose/execute cycles cannot
+    ///      silently land before the second eta.
+    function _warpToEta() internal {
+        (,, uint256 eta,) = reg.pendingMaintenanceWithdrawal();
+        vm.warp(eta);
+    }
+
+    function _fillReserve(uint256 amount) internal {
+        token.mint(stranger, amount);
+        vm.startPrank(stranger);
+        token.approve(address(reg), type(uint256).max);
+        reg.depositMaintenance(amount);
+        vm.stopPrank();
+    }
+
+    /// MUTATION: increment `maintenanceReserve` without the `transferFrom`.
+    /// @dev §5.6.1 — the pull and the permissionlessness are ONE decision.
+    ///      `balanceBuckets()` is compared to the real balance by `solvent()` (I21),
+    ///      so a deposit that raised the counter without moving value would make the
+    ///      registry insolvent by exactly `amount`, through a function anyone may
+    ///      call.
+    function test_s5_6_depositPullsTheTokensAndIsPermissionless() public {
+        assertTrue(reg.solvent());
+        uint256 before = reg.maintenanceReserve();
+        uint256 bal = token.balanceOf(address(reg));
+
+        token.mint(stranger, 7 * UNIT);
+        vm.startPrank(stranger); // no capability, no stake, nothing
+        token.approve(address(reg), type(uint256).max);
+        reg.depositMaintenance(7 * UNIT);
+        vm.stopPrank();
+
+        assertEq(reg.maintenanceReserve(), before + 7 * UNIT, "counted");
+        assertEq(token.balanceOf(address(reg)), bal + 7 * UNIT, "and actually moved");
+        assertTrue(reg.solvent(), "solvent after deposit");
+        assertEq(reg.caps(stranger), 0, "the depositor needed no capability bit");
+    }
+
+    /// MUTATION: pull without incrementing.
+    /// @dev The mirror failure: value arrives and no bucket claims it, so it can
+    ///      never leave. That is the defect this whole order exists to remove.
+    function test_s5_6_depositThatDoesNotCountIsUnreachable() public {
+        _fillReserve(5 * UNIT);
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets(), "every held unit is in a named bucket");
+    }
+
+    /// @dev **The single assertion this mechanism turns on: a maintenance withdrawal
+    ///      can never reduce `totalStake + totalBond`.** Governance may take protocol
+    ///      revenue; it may not take a moderator's stake or bond.
+    ///
+    /// MUTATION: remove the cap; widen it to `balanceBuckets()`.
+    function test_s5_6_withdrawalCannotReachStakeOrBond() public {
+        _mature(alice, 100 * UNIT);
+        _mature(bob, 100 * UNIT);
+        logicA.createVote(alice, 1, LAMBDA);
+        logicA.debit(alice, 1, VOTE, LAMBDA); // the reserve's only inflow so far
+
+        uint256 stakeBond = reg.totalStake() + reg.totalBond();
+        uint256 reserve = reg.maintenanceReserve();
+        assertGt(stakeBond, reserve * 10, "fixture: stake+bond dwarfs the reserve");
+
+        // Governance asks for everything the contract holds.
+        _proposeWithdrawal(gov, token.balanceOf(address(reg)));
+        _warpToEta();
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
+        reg.executeMaintenanceWithdrawal();
+
+        // And for one unit more than the reserve.
+        _proposeWithdrawal(gov, reserve + 1);
+        _warpToEta();
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
+        reg.executeMaintenanceWithdrawal();
+
+        assertEq(reg.totalStake() + reg.totalBond(), stakeBond, "untouched");
+        assertEq(reg.bondOf(alice) + reg.bondOf(bob) + reg.totalStake(), stakeBond);
+    }
+
+    /// @dev Configuration 1 of §2.2's four: the reserve at zero.
+    function test_s5_6_withdrawalAtAZeroReserve() public {
+        assertEq(reg.maintenanceReserve(), 0);
+        _proposeWithdrawal(gov, 1);
+        _warpToEta();
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
+        reg.executeMaintenanceWithdrawal();
+    }
+
+    /// @dev Configuration 2: `amount` exactly equal to the reserve drains it to zero
+    ///      and leaves the contract solvent.
+    function test_s5_6_withdrawalOfExactlyTheReserve() public {
+        _mature(alice, 100 * UNIT);
+        _fillReserve(11 * UNIT);
+        uint256 reserve = reg.maintenanceReserve();
+        uint256 stakeBond = reg.totalStake() + reg.totalBond();
+
+        _proposeWithdrawal(carol, reserve);
+        vm.warp(block.timestamp + TIMELOCK);
+        assertTrue(reg.solvent(), "solvent before execute");
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal();
+
+        assertEq(token.balanceOf(carol), reserve, "paid in full");
+        assertEq(reg.maintenanceReserve(), 0, "drained exactly");
+        assertEq(reg.totalStake() + reg.totalBond(), stakeBond, "stake and bond untouched");
+        assertTrue(reg.solvent(), "solvent after execute");
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets(), "and exact");
+    }
+
+    /// @dev Configuration 3, and the reason the cap is checked at EXECUTE rather
+    ///      than at propose: a proposal is not a lock on the reserve. Proposed while
+    ///      the reserve was large, executed after an earlier withdrawal drained it.
+    function test_s5_6_aProposalIsNotALockOnTheReserve() public {
+        _fillReserve(20 * UNIT);
+
+        // Proposal A, for the full reserve.
+        _proposeWithdrawal(carol, 20 * UNIT);
+        _warpToEta();
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal();
+        assertEq(reg.maintenanceReserve(), 0);
+
+        // Proposal B was sized against the reserve as it stood; it must now fail.
+        _proposeWithdrawal(bob, 20 * UNIT);
+        _warpToEta();
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
+        reg.executeMaintenanceWithdrawal();
+        assertEq(token.balanceOf(bob), 0, "nothing paid against a stale proposal");
+    }
+
+    /// MUTATION: invert the timelock comparison.
+    function test_s5_6_withdrawalTimelockIsEnforced() public {
+        _fillReserve(5 * UNIT);
+        _proposeWithdrawal(carol, 5 * UNIT);
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
+        reg.executeMaintenanceWithdrawal();
+
+        vm.warp(block.timestamp + TIMELOCK - 1);
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
+        reg.executeMaintenanceWithdrawal();
+
+        vm.warp(block.timestamp + 1);
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal();
+        assertEq(token.balanceOf(carol), 5 * UNIT);
+    }
+
+    function test_s5_6_withdrawalIsGovernanceOnlyAtEveryStep() public {
+        _fillReserve(5 * UNIT);
+        vm.prank(stranger);
+        vm.expectRevert(StakeRegistry.NotGovernance.selector);
+        reg.proposeMaintenanceWithdrawal(stranger, 1);
+
+        _proposeWithdrawal(carol, 5 * UNIT);
+        vm.prank(stranger);
+        vm.expectRevert(StakeRegistry.NotGovernance.selector);
+        reg.cancelMaintenanceWithdrawal();
+
+        _warpToEta();
+        vm.prank(stranger);
+        vm.expectRevert(StakeRegistry.NotGovernance.selector);
+        reg.executeMaintenanceWithdrawal();
+    }
+
+    function test_s5_6_cancelClearsTheProposal() public {
+        _fillReserve(5 * UNIT);
+        _proposeWithdrawal(carol, 5 * UNIT);
+        assertTrue(reg.solvent(), "solvent while a proposal stands");
+
+        vm.prank(gov);
+        reg.cancelMaintenanceWithdrawal();
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.NoPendingProposal.selector);
+        reg.executeMaintenanceWithdrawal();
+        assertEq(reg.maintenanceReserve(), 5 * UNIT, "the reserve is untouched by a cancel");
+        assertTrue(reg.solvent(), "solvent after cancel");
+    }
+
+    /// @dev Solvency across the whole surface this order adds, plus the debit path
+    ///      that already fed the reserve.
+    function test_s5_6_solventAcrossEveryMaintenancePath() public {
+        assertTrue(reg.solvent(), "start");
+        _mature(alice, 100 * UNIT);
+        assertTrue(reg.solvent(), "after stake");
+
+        logicA.createVote(alice, 1, LAMBDA);
+        logicA.debit(alice, 1, VOTE, LAMBDA);
+        assertTrue(reg.solvent(), "after a debit");
+
+        _fillReserve(9 * UNIT);
+        assertTrue(reg.solvent(), "after deposit");
+
+        _proposeWithdrawal(carol, 3 * UNIT);
+        assertTrue(reg.solvent(), "after propose");
+        vm.prank(gov);
+        reg.cancelMaintenanceWithdrawal();
+        assertTrue(reg.solvent(), "after cancel");
+
+        _proposeWithdrawal(carol, 3 * UNIT);
+        _warpToEta();
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal();
+        assertTrue(reg.solvent(), "after execute");
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets(), "exact, not merely solvent");
+    }
+
+    /// @dev A debit reaches the one reserve and can leave it — the registry half of
+    ///      the end-to-end conservation the order asks for.
+    function test_s5_6_aDebitReachesTheReserveAndCanLeaveIt() public {
+        _mature(alice, 100 * UNIT);
+        logicA.createVote(alice, 1, LAMBDA);
+        logicA.debit(alice, 1, VOTE, LAMBDA);
+        assertEq(reg.maintenanceReserve(), LAMBDA, "the debit landed in the reserve");
+
+        _proposeWithdrawal(carol, LAMBDA);
+        _warpToEta();
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal();
+        assertEq(token.balanceOf(carol), LAMBDA, "and it left by the only exit");
+    }
+
+    function test_s5_6_depositOfZeroIsRefused() public {
+        vm.prank(stranger);
+        vm.expectRevert(StakeRegistry.AmountZero.selector);
+        reg.depositMaintenance(0);
+    }
+
+    // =========================================================================
     // §2.1 — the Claim record is one slot, and uint96 is wide enough
     // =========================================================================
 

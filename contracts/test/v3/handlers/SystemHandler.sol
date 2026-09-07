@@ -25,7 +25,8 @@ contract SystemHandler is Test {
     StakeRegistry public immutable reg;
     IndexRegistry public immutable idx;
     Moderation public immutable mod;
-    RulesetGovernor public immutable governor;
+    /// @dev NOT immutable: M2.12's handover replaces it mid-run.
+    RulesetGovernor public governor;
     address public immutable governance;
 
     uint256 internal constant UNIT = 1e16;
@@ -71,6 +72,11 @@ contract SystemHandler is Test {
     /// @dev Parameter changes landed. A governance action the fuzzer never performs
     ///      is a governance action nobody is testing against the invariants.
     uint256 public callsParamChange;
+
+    /// @dev Governor handovers performed. Bounded to one, because each deploys a
+    ///      contract and the point is that the invariants CROSS the swap, not that
+    ///      they cross it repeatedly.
+    uint256 public callsGovernorChange;
 
     /// @dev `paramsVersion -> the lambda that version was created with`. I27 says a
     ///      case computes every debit from the block it pinned; that is only
@@ -396,6 +402,7 @@ contract SystemHandler is Test {
     ///      value instead of the pinned one.
     function hChangeParams(uint256 seed) external {
         if (governor.moderation() != mod) return;
+        if (governor.retired()) return;
 
         Moderation.Params memory p = mod.paramsAt(mod.paramsVersion());
         // Stay inside the validator: a proposal that cannot be executed teaches
@@ -412,6 +419,34 @@ contract SystemHandler is Test {
                 callsParamChange++;
                 versionLambda[v] = next;
                 if (v > highestVersion) highestVersion = v;
+            } catch {}
+        } catch {}
+        vm.stopPrank();
+    }
+
+    /// @dev M2.12 / D3-20 — hand `Moderation` to a successor governor mid-run.
+    ///
+    ///      This is the sequence the stateful invariants should survive, and the one
+    ///      with the widest blast radius in the whole system: the contract holding
+    ///      parameter authority is replaced while cases are live. I27 is what should
+    ///      hold across it — a case pinned under the old governor's ruleset settles
+    ///      under that ruleset, whoever governs now — and so is the guidelines pin,
+    ///      because the successor continues the version sequence rather than
+    ///      restarting it.
+    function hRotateGovernor(uint256) external {
+        if (callsGovernorChange != 0) return; // once is the test; twice is waste
+        if (governor.moderation() != mod) return;
+
+        RulesetGovernor next = new RulesetGovernor(governance, 2 days);
+        vm.startPrank(governance);
+        try next.intendModeration(mod) {
+            try governor.proposeGovernorChange(address(next)) {
+                (, uint256 eta,) = governor.pendingGovernorChangeProposal();
+                vm.warp(eta);
+                try governor.executeGovernorChange(address(next)) {
+                    governor = next;
+                    callsGovernorChange++;
+                } catch {}
             } catch {}
         } catch {}
         vm.stopPrank();

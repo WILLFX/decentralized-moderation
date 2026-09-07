@@ -109,7 +109,7 @@ contract V3InvariantTest is StdInvariant, Test {
 
         // Only the `h*` actions are fuzz targets. `init`, the views and the ghost
         // readers are not — a runner calling them would be testing the harness.
-        bytes4[] memory sels = new bytes4[](16);
+        bytes4[] memory sels = new bytes4[](17);
         sels[0] = SystemHandler.hStake.selector;
         sels[1] = SystemHandler.hPostBond.selector;
         sels[2] = SystemHandler.hSubmit.selector;
@@ -126,6 +126,7 @@ contract V3InvariantTest is StdInvariant, Test {
         sels[13] = SystemHandler.hRoll.selector;
         sels[14] = SystemHandler.hSubmitRemoval.selector;
         sels[15] = SystemHandler.hChangeParams.selector;
+        sels[16] = SystemHandler.hRotateGovernor.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sels}));
         targetContract(address(handler));
     }
@@ -445,6 +446,28 @@ contract V3InvariantTest is StdInvariant, Test {
 
         // It went through the governor's timelock, not around it.
         assertEq(mod.governor(), address(governor));
+    }
+
+    /// @dev M2.12. The governor handover is the widest-blast-radius sequence in the
+    ///      system — the contract holding parameter authority is replaced while
+    ///      cases are live — so the invariants must be able to reach it.
+    function test_handlerReachesAGovernorHandover() public {
+        address before = mod.governor();
+        handler.hRotateGovernor(1);
+
+        assertEq(handler.callsGovernorChange(), 1, "the handover is reachable");
+        assertTrue(mod.governor() != before, "Moderation moved");
+        assertEq(address(handler.governor()), mod.governor(), "and the handler follows it");
+        assertEq(address(handler.governor().moderation()), address(mod), "the successor is bound");
+        assertTrue(governor.retired(), "the old one is retired");
+
+        // And the system still works through the new governor.
+        uint32 v = mod.paramsVersion();
+        handler.hChangeParams(999);
+        assertEq(mod.paramsVersion(), v + 1, "parameters still move, through the successor");
+
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets());
+        assertTrue(reg.solvent());
     }
 
     /// @dev M2.10. The stateful suite is only as good as what the handler can

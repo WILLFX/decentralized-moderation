@@ -40,6 +40,23 @@ contract RulesetGovernor {
     /// @notice The contract this governor governs. Bound once, never rebound.
     Moderation public moderation;
 
+    /// @notice The `Moderation` this governor is FOR, recorded before it can be
+    ///         bound. A successor governor declares this so the outgoing one can
+    ///         check, at execute, that it is handing over to something that will
+    ///         actually take the job.
+    /// @dev The chicken-and-egg this exists to break: `bindModeration` requires
+    ///      `m.governor() == address(this)`, so a successor CANNOT bind before the
+    ///      handover — the outgoing governor still holds the field. Intent is
+    ///      declarable at any time and binds nothing, so recording it is harmless;
+    ///      the real bind still runs the full reciprocity check, afterwards.
+    Moderation public intendedModeration;
+
+    /// @notice Set once this governor has handed `Moderation` to a successor.
+    /// @dev Without it, a retired governor's `executeParams` would revert out of
+    ///      `applyParams` with `NotGovernor` — correct, but from the wrong contract
+    ///      and after the whole timelock. This names the state instead.
+    bool public retired;
+
     address public governance;
     address public pendingGovernance;
 
@@ -62,6 +79,10 @@ contract RulesetGovernor {
 
     Pending public pendingParams;
     Pending public pendingGuidelines;
+
+    /// @dev D3-20's exit, on the same shape as the other two: a hash commitment
+    ///      plus an `eta`, and an execute that NAMES what it executes.
+    Pending public pendingGovernorChange;
 
     /// @notice §4.1's guidelines version, monotonic and never reused.
     /// @dev It lives HERE and not in `Moderation` because `Moderation` has no
@@ -104,6 +125,10 @@ contract RulesetGovernor {
     event GuidelinesExecuted(uint32 indexed version, bytes32 indexed hash, uint256 blockNumber);
 
     event ModerationBound(address indexed moderation);
+    event ModerationIntended(address indexed moderation);
+    event GovernorChangeProposed(address indexed next, uint256 eta);
+    event GovernorChangeCancelled(address indexed next);
+    event GovernorChanged(address indexed next);
     event GovernanceProposed(address indexed next);
     event GovernanceTransferred(address indexed next);
 
@@ -122,6 +147,11 @@ contract RulesetGovernor {
     error BindingNotMutual();
     error ZeroAddress();
     error ZeroHash();
+    error Retired();
+    error AlreadyIntended();
+    error NotIntended();
+    error SuccessorNotBoundToThisModeration();
+    error SuccessorIsSelf();
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
@@ -165,8 +195,117 @@ contract RulesetGovernor {
         if (address(moderation) != address(0)) revert AlreadyBound();
         if (address(m) == address(0)) revert ZeroAddress();
         if (m.governor() != address(this)) revert BindingNotMutual();
+        intendedModeration = m;
         moderation = m;
         emit ModerationBound(address(m));
+    }
+
+    /// @notice Declare which `Moderation` this governor is FOR, before it can be
+    ///         bound to it. The successor half of D3-20's exit.
+    /// @dev Records intent and nothing else. It grants no authority: this contract
+    ///      cannot act on `intendedModeration` until `adoptModeration` completes a
+    ///      real, reciprocity-checked bind.
+    ///
+    ///      It is `onlyGovernance` and one-shot not because a wrong value is
+    ///      dangerous here, but because the OUTGOING governor reads this field to
+    ///      decide whether a handover is safe. A value that could be changed
+    ///      between propose and execute would make that check meaningless — which
+    ///      is exactly the swap defence §3 of M2.11 exists for, in a second place.
+    function intendModeration(Moderation m) external onlyGovernance {
+        if (address(moderation) != address(0)) revert AlreadyBound();
+        if (address(intendedModeration) != address(0)) revert AlreadyIntended();
+        if (address(m) == address(0)) revert ZeroAddress();
+        intendedModeration = m;
+        emit ModerationIntended(address(m));
+    }
+
+    /// @notice Complete the bind to the intended `Moderation`, once it names this
+    ///         contract as its governor.
+    /// @dev **Permissionless, and that is safe here in a way `bindModeration` is
+    ///      not.** `bindModeration` picks the target, so leaving it open would let a
+    ///      racer bind one of several `Moderation`s that name this governor. This
+    ///      one cannot pick anything: the target was fixed by `intendModeration`,
+    ///      and the call succeeds only when that exact contract ALREADY names this
+    ///      one. It can complete a state the previous governor arranged; it cannot
+    ///      choose it.
+    ///
+    ///      Permissionless matters because `executeGovernorChange` calls it during
+    ///      the handover, and the successor's governance is a different party.
+    function adoptModeration() external {
+        if (address(moderation) != address(0)) revert AlreadyBound();
+        Moderation m = intendedModeration;
+        if (address(m) == address(0)) revert NotIntended();
+        if (m.governor() != address(this)) revert BindingNotMutual();
+        moderation = m;
+        emit ModerationBound(address(m));
+    }
+
+    // =========================================================================
+    // D3-20 — the exit
+    // =========================================================================
+
+    /// @notice Queue a handover of `Moderation.governor` to a successor governor.
+    ///
+    /// @dev **Why this exists at all.** `Moderation.setGovernor` is `onlyGovernor`,
+    ///      so after the bind the only caller that can move the field is this
+    ///      contract — and until M2.12 this contract exposed no path to it. The
+    ///      field was frozen because nobody wrote a caller. **Frozen by omission
+    ///      reads as deliberate to an auditor and was not**, and that is the reason
+    ///      to close it rather than document it: an auditor should be able to tell
+    ///      a decision from an oversight, and this one was indistinguishable.
+    ///
+    ///      The permanence D3-20 recorded is now a choice governance makes per
+    ///      handover, behind the same delay as every other governance act.
+    function proposeGovernorChange(address next) external onlyGovernance {
+        if (next == address(0)) revert ZeroAddress();
+        if (next == address(this)) revert SuccessorIsSelf();
+        uint40 eta = uint40(block.timestamp + timelockDelay);
+        pendingGovernorChange = Pending({hash: keccak256(abi.encode(next)), eta: eta, exists: true});
+        emit GovernorChangeProposed(next, eta);
+    }
+
+    function cancelGovernorChange() external onlyGovernance {
+        Pending memory pc = pendingGovernorChange;
+        if (!pc.exists) revert NoPendingProposal();
+        delete pendingGovernorChange;
+        emit GovernorChangeCancelled(address(0));
+    }
+
+    /// @notice Hand `Moderation.governor` to the successor, and leave it bound.
+    ///
+    /// @dev **Reciprocity is re-checked HERE, not at propose, and the distinction is
+    ///      the whole point.** A successor that does not target this same
+    ///      `Moderation` bricks the pair permanently: the field moves, the successor
+    ///      refuses to adopt, and nothing can move it back — `setGovernor` is
+    ///      `onlyGovernor` and the governor is now a contract that will not act on
+    ///      it. The interval between propose and execute is exactly when that could
+    ///      stop being true, so a check at propose proves nothing about the moment
+    ///      it matters.
+    ///
+    ///      **The handover is atomic.** `setGovernor` then `adoptModeration` in one
+    ///      transaction, so there is no window in which `Moderation` has a governor
+    ///      that is not bound to it. If the adopt reverts, the whole handover
+    ///      reverts and the field never moved.
+    function executeGovernorChange(address next) external onlyGovernance {
+        if (address(moderation) == address(0)) revert NotBound();
+        if (retired) revert Retired();
+        Pending memory pc = pendingGovernorChange;
+        if (!pc.exists) revert NoPendingProposal();
+        if (block.timestamp < pc.eta) revert TimelockNotElapsed();
+        if (keccak256(abi.encode(next)) != pc.hash) revert ProposalMismatch();
+
+        // Checked against LIVE state at the moment of the handover.
+        if (RulesetGovernor(next).intendedModeration() != moderation) {
+            revert SuccessorNotBoundToThisModeration();
+        }
+
+        delete pendingGovernorChange;
+        retired = true;
+
+        moderation.setGovernor(next);
+        RulesetGovernor(next).adoptModeration();
+
+        emit GovernorChanged(next);
     }
 
     // =========================================================================
@@ -199,6 +338,7 @@ contract RulesetGovernor {
     ///      a 33/33 mutation baseline. This is the pattern going forward.
     function executeParams(Moderation.Params calldata p) external onlyGovernance returns (uint32 version) {
         if (address(moderation) == address(0)) revert NotBound();
+        if (retired) revert Retired();
         Pending memory pp = pendingParams;
         if (!pp.exists) revert NoPendingProposal();
         if (block.timestamp < pp.eta) revert TimelockNotElapsed();
@@ -238,6 +378,8 @@ contract RulesetGovernor {
     ///      experiments and must not be pooled (`measurement/prior/README.md`); a
     ///      version that could be reused would silently merge two of them.
     function executeGuidelines(bytes32 hash) external onlyGovernance returns (uint32 version) {
+        if (address(moderation) == address(0)) revert NotBound();
+        if (retired) revert Retired();
         Pending memory pg = pendingGuidelines;
         if (!pg.exists) revert NoPendingProposal();
         if (block.timestamp < pg.eta) revert TimelockNotElapsed();
@@ -247,6 +389,13 @@ contract RulesetGovernor {
         guidelinesHashOf[version] = hash;
         guidelinesBlockOf[version] = uint40(block.number);
         delete pendingGuidelines;
+
+        // M2.12 / D3-21 — push the version so a case can PIN it. This contract
+        // keeps the version-to-hash-to-block record a reader needs; `Moderation`
+        // keeps the number a case is judged against. Both exist; only the pin is
+        // authoritative for a case.
+        moderation.applyGuidelines(version);
+
         emit GuidelinesExecuted(version, hash, block.number);
     }
 
@@ -340,6 +489,11 @@ contract RulesetGovernor {
     function pendingGuidelinesProposal() external view returns (bytes32 hash, uint256 eta, bool exists) {
         Pending memory pg = pendingGuidelines;
         return (pg.hash, pg.eta, pg.exists);
+    }
+
+    function pendingGovernorChangeProposal() external view returns (bytes32 hash, uint256 eta, bool exists) {
+        Pending memory pc = pendingGovernorChange;
+        return (pc.hash, pc.eta, pc.exists);
     }
 
     function paramsHash(Moderation.Params calldata p) external pure returns (bytes32) {

@@ -146,6 +146,64 @@ contract DeployV3Test is Test {
         script.verify(s);
     }
 
+    /// @dev M2.12 — a retired governor passes every OTHER check in `verify`: it
+    ///      still reports the right `moderation`, and `Moderation` still names it
+    ///      until the handover lands. This is the check that catches a stack whose
+    ///      governor has moved on.
+    function test_verifyNamesARetiredGovernor() public {
+        DeployV3.Stack memory s = _bringUp();
+
+        RulesetGovernor next = new RulesetGovernor(governance, TIMELOCK);
+        vm.startPrank(governance);
+        s.governor.acceptGovernance();
+        next.intendModeration(s.mod);
+        s.governor.proposeGovernorChange(address(next));
+        (, uint256 eta,) = s.governor.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        s.governor.executeGovernorChange(address(next));
+        vm.stopPrank();
+
+        // The stale Stack still names the old governor.
+        vm.expectRevert(abi.encodeWithSelector(DeployV3.NotWired.selector, "Moderation.governor"));
+        script.verify(s);
+
+        // Point it at the successor and the stack verifies again — including that
+        // the successor is not itself retired.
+        s.governor = next;
+        script.verify(s);
+        assertTrue(script.isWired(s));
+    }
+
+    /// @dev M2.12 / D3-21 — the guidelines push, exercised as part of a deployment.
+    function test_theFirstGuidelinesVersionPropagatesToModeration() public {
+        DeployV3.Stack memory s = _bringUp();
+        assertEq(s.mod.currentGuidelinesVersion(), 0, "none published is legal");
+        script.verify(s);
+
+        vm.startPrank(governance);
+        s.governor.acceptGovernance();
+        s.governor.proposeGuidelines(keccak256("v1"));
+        (, uint256 eta,) = s.governor.pendingGuidelinesProposal();
+        vm.warp(eta);
+        s.governor.executeGuidelines(keccak256("v1"));
+        vm.stopPrank();
+
+        assertEq(s.governor.guidelinesVersion(), 1);
+        assertEq(s.mod.currentGuidelinesVersion(), 1, "the push landed");
+        script.verify(s);
+
+        // And a case pins it.
+        address submitter = makeAddr("s2");
+        token.mint(submitter, 10_000 * UNIT);
+        vm.prank(submitter);
+        token.approve(address(s.mod), type(uint256).max);
+        bytes32[] memory topics = new bytes32[](1);
+        topics[0] = keccak256("topic");
+        vm.prank(submitter);
+        uint256 id = s.mod.submit(keccak256("c"), keccak256("m"), topics, 1000 * UNIT);
+        assertEq(s.mod.caseInfo(id).guidelinesVersion, 1);
+    }
+
     function test_deployRefusesAZeroTokenOrGovernance() public {
         DeployV3.Config memory c = _config();
         c.token = IERC20(address(0));

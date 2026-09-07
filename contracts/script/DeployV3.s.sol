@@ -149,6 +149,20 @@ contract DeployV3 is Script {
         // A ruleset must exist: `submit` reverts `BadParams` on version 0, so a
         // stack with no parameters is deployed, wired, and unusable.
         if (s.mod.paramsVersion() == 0) revert NotWired("Moderation.paramsVersion");
+
+        // M2.12 — the governor must not have retired out of this stack. A retired
+        // governor still reports the right `moderation`, so every check above
+        // passes while nothing it does can reach `Moderation` any more.
+        if (s.governor.retired()) revert NotWired("RulesetGovernor.retired");
+
+        // §4.1's pin. The two sides are allocated by the governor and stored by
+        // `Moderation`, so they can only diverge if a push was missed — and a
+        // reader consulting the governor's log would then get an answer no case
+        // agrees with. Guidelines are OPTIONAL at bring-up (version 0 is a legal
+        // "none published yet"), so this checks agreement, not presence.
+        if (s.mod.currentGuidelinesVersion() != s.governor.guidelinesVersion()) {
+            revert NotWired("guidelinesVersion divergence");
+        }
     }
 
     /// @notice Whether the stack is fully wired, as a bool rather than a revert.
@@ -170,5 +184,19 @@ contract DeployV3 is Script {
 
     function executeFirstRuleset(Stack memory s, Moderation.Params memory p) public {
         s.governor.executeParams(p);
+    }
+
+    /// @notice Publish the first guidelines version. Optional at bring-up.
+    /// @dev Version 0 is a legal "none published yet" — `submit` does not require
+    ///      one — so a stack may go live before any text exists. It is offered here
+    ///      because doing it through the script is the only way the push into
+    ///      `Moderation` is exercised as part of a deployment rather than as part
+    ///      of a test.
+    function proposeFirstGuidelines(Stack memory s, bytes32 hash) public {
+        s.governor.proposeGuidelines(hash);
+    }
+
+    function executeFirstGuidelines(Stack memory s, bytes32 hash) public {
+        s.governor.executeGuidelines(hash);
     }
 }

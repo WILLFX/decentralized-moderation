@@ -35,6 +35,7 @@ contract RulesetGovernorTest is Test {
     uint128 internal constant LAMBDA = 2 * uint128(UNIT);
     uint256 internal constant FEE = 1000 * UNIT;
     uint8 internal constant APPROVE = 1;
+    uint8 internal constant REJECT = 2;
 
     bytes32[] internal topics;
 
@@ -781,4 +782,485 @@ contract RulesetGovernorTest is Test {
         vm.expectRevert(RulesetGovernor.ZeroAddress.selector);
         new RulesetGovernor(address(0), TIMELOCK);
     }
+    // =========================================================================
+    // M2.12 / D3-21 — the pin, and why it is FAIRNESS and not bookkeeping
+    // =========================================================================
+
+    /// @dev Drives a case to a terminal with `nApprove` Approve and `nReject`
+    ///      Reject reveals, returning the cohort. Split so a guidelines change can
+    ///      be landed in the MIDDLE of the commit phase.
+    function _cohort(uint256 n, uint256 bond) internal returns (address[] memory who) {
+        who = new address[](n);
+        for (uint256 i; i < n; ++i) {
+            who[i] = _moderator(100 + i, bond);
+        }
+    }
+
+    /// @dev Forces a verdict by searching for an entropy that produces it. The
+    ///      contract still does the deciding; this only chooses which block hash it
+    ///      reads, and the assertion after `draw` proves the steer landed.
+    function _drawTo(uint256 caseId, uint8 want) internal {
+        vm.roll(uint256(mod.caseInfo(caseId).outcomeSeedBlock) + 1);
+        uint256 sb = mod.caseInfo(caseId).outcomeSeedBlock;
+        for (uint256 i; i < 4096; ++i) {
+            bytes32 h = keccak256(abi.encode("entropy", caseId, i));
+            (uint8 v,) = mod.decideAt(caseId, h);
+            if (v != want) continue;
+            vm.setBlockhash(sb, h);
+            mod.draw(caseId);
+            assertEq(mod.caseInfo(caseId).verdict, want, "the steer landed");
+            return;
+        }
+        assertTrue(false, "no entropy produced the wanted verdict");
+    }
+
+    function _commitVote(uint256 caseId, address a, uint8 v) internal {
+        Moderation.Case memory c = mod.caseInfo(caseId);
+        bytes32 h = mod.commitHash(caseId, c.round, c.paramsVersion, a, v, keccak256("s"));
+        vm.prank(a);
+        mod.commit(caseId, h);
+    }
+
+    /// ACCEPTANCE 2 — the pin as fairness.
+    ///
+    /// @dev The argument, in one sentence: `d` is charged for voting incoherently
+    ///      with the settled side (§5.1), so without a pin a guidelines change
+    ///      mid-case debits whichever side loses **for correctly applying the
+    ///      instructions it was given**. This test builds exactly that situation —
+    ///      one moderator commits before the change, one after — and asserts that
+    ///      both are judged, and one debited, against the SAME pinned version.
+    ///
+    ///      Reading the field back would not have tested this. The debit has to
+    ///      actually land, in a case whose pinned version differs from the live one.
+    ///
+    /// MUTATION: pin `currentGuidelinesVersion` at settlement rather than at
+    ///           submission; or drop `c.guidelinesVersion = ...` from `_submit`.
+    function test_s4_1_everyModeratorOnACaseIsJudgedAgainstTheVersionPinnedAtSubmission() public {
+        _publishGuidelines(keccak256("text-v1"));
+        assertEq(mod.currentGuidelinesVersion(), 1, "the push reached Moderation");
+
+        address[] memory who = _cohort(4, BOND_MIN + 200 * UNIT);
+        uint256 id = _submit("content");
+        assertEq(mod.caseInfo(id).guidelinesVersion, 1, "pinned at submission");
+
+        vm.roll(block.number + SEED_LAG + 1);
+
+        // Two commit under version 1.
+        _commitVote(id, who[0], APPROVE);
+        _commitVote(id, who[1], APPROVE);
+
+        // Governance changes the guidelines WHILE THE CASE IS LIVE.
+        _publishGuidelines(keccak256("text-v2"));
+        assertEq(mod.currentGuidelinesVersion(), 2, "the world moved on");
+        assertEq(mod.caseInfo(id).guidelinesVersion, 1, "the case did not");
+
+        // Two more commit afterwards. Without the pin these read a different text
+        // from the first two, and the losing side is debited for following it.
+        _commitVote(id, who[2], REJECT);
+        _commitVote(id, who[3], REJECT);
+
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        for (uint256 i; i < 4; ++i) {
+            vm.prank(who[i]);
+            mod.reveal(id, i < 2 ? APPROVE : REJECT, keccak256("s"));
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+        _drawTo(id, APPROVE);
+
+        // The debit lands, and it lands in a case pinned to version 1 while the
+        // live version is 2. That is the whole property.
+        assertEq(mod.caseInfo(id).guidelinesVersion, 1, "still pinned at the terminal");
+        assertEq(mod.currentGuidelinesVersion(), 2, "and still not the live one");
+
+        uint256 debitedBondBefore = reg.bondOf(who[2]);
+        mod.claim(id, who[2]); // revealed Reject against an Approve verdict
+        assertLt(reg.bondOf(who[2]), debitedBondBefore, "the incoherent voter IS debited");
+
+        // §5.3 pays into the registry bond, not out in tokens.
+        uint256 paidBefore = reg.bondOf(who[0]);
+        mod.claim(id, who[0]);
+        assertGt(reg.bondOf(who[0]), paidBefore, "and the coherent one is paid");
+
+        // Both were settled inside one case carrying one version. The early and
+        // late committers were never judged against different text.
+        assertEq(mod.caseInfo(id).guidelinesVersion, 1);
+    }
+
+    /// @dev `reopen` does NOT re-pin, and that is the same reasoning. A re-review
+    ///      reopens the claim IN PLACE (§8.5) and the pooled tally carries, so the
+    ///      earlier cohort's votes are evidence in the same question. Re-pinning
+    ///      would judge one tally against two texts — precisely the split the pin
+    ///      exists to prevent, reintroduced through the back door.
+    ///
+    ///      `paramsVersion` is not re-pinned either; this matches it deliberately.
+    ///
+    /// MUTATION: set `c.guidelinesVersion = currentGuidelinesVersion` in `reopen`.
+    function test_s4_1_aReopenDoesNotRePinTheGuidelines() public {
+        _publishGuidelines(keccak256("text-v1"));
+
+        address[] memory who = _cohort(4, BOND_MIN + 200 * UNIT);
+        uint256 id = _submit("content");
+        vm.roll(block.number + SEED_LAG + 1);
+        for (uint256 i; i < 4; ++i) {
+            _commitVote(id, who[i], REJECT);
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        for (uint256 i; i < 4; ++i) {
+            vm.prank(who[i]);
+            mod.reveal(id, REJECT, keccak256("s"));
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+        _drawTo(id, REJECT);
+        for (uint256 i; i < 4; ++i) {
+            mod.claim(id, who[i]);
+        }
+
+        _publishGuidelines(keccak256("text-v2"));
+        assertEq(mod.currentGuidelinesVersion(), 2);
+
+        vm.prank(submitter);
+        mod.reopen(id, FEE);
+
+        assertEq(mod.caseInfo(id).guidelinesVersion, 1, "the reopened claim keeps its original text");
+        assertEq(mod.caseInfo(id).paramsVersion, 1, "exactly as paramsVersion does");
+    }
+
+    /// MUTATION: drop the monotonicity check in `Moderation.applyGuidelines`.
+    function test_s4_1_theModerationSidePinIsMonotonicAndGovernorOnly() public {
+        _publishGuidelines(keccak256("a"));
+        _publishGuidelines(keccak256("b"));
+        assertEq(mod.currentGuidelinesVersion(), 2);
+
+        // Only the governor may push at all.
+        vm.prank(stranger);
+        vm.expectRevert(Moderation.NotGovernor.selector);
+        mod.applyGuidelines(3);
+
+        vm.prank(owner);
+        vm.expectRevert(Moderation.NotGovernor.selector);
+        mod.applyGuidelines(3);
+
+        // And even the governor cannot move it backwards or reuse a number.
+        vm.prank(address(gov));
+        vm.expectRevert(Moderation.GuidelinesNotMonotonic.selector);
+        mod.applyGuidelines(2);
+
+        vm.prank(address(gov));
+        vm.expectRevert(Moderation.GuidelinesNotMonotonic.selector);
+        mod.applyGuidelines(1);
+    }
+
+    /// MUTATION: drop `moderation.applyGuidelines(version)` from executeGuidelines.
+    ///
+    /// @dev The governor allocates and `Moderation` pins. If the push is dropped the
+    ///      governor's record advances while every case keeps pinning the stale
+    ///      number — the two diverge silently, and a reader consulting the log gets
+    ///      an answer no case agrees with.
+    function test_s4_1_theGovernorRecordAndTheModerationPinStayInStep() public {
+        for (uint32 v = 1; v <= 3; ++v) {
+            _publishGuidelines(keccak256(abi.encode("text", v)));
+            assertEq(gov.guidelinesVersion(), v, "the governor allocated it");
+            assertEq(mod.currentGuidelinesVersion(), v, "and Moderation took it");
+        }
+
+        uint256 id = _submit("content");
+        assertEq(mod.caseInfo(id).guidelinesVersion, 3);
+        // The hash a reader recovers for that version is the governor's record.
+        assertEq(gov.guidelinesHashOf(3), keccak256(abi.encode("text", uint32(3))));
+    }
+
+    /// @dev An unbound governor cannot publish guidelines, because there is nothing
+    ///      to push the version into. Better to refuse than to advance a record
+    ///      that no `Moderation` will ever agree with.
+    function test_s4_1_anUnboundGovernorCannotPublishGuidelines() public {
+        RulesetGovernor fresh = new RulesetGovernor(owner, TIMELOCK);
+        vm.prank(owner);
+        fresh.proposeGuidelines(keccak256("t"));
+        (, uint256 eta,) = fresh.pendingGuidelinesProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.NotBound.selector);
+        fresh.executeGuidelines(keccak256("t"));
+    }
+
+    // =========================================================================
+    // M2.12 / D3-20 — the governor's exit
+    // =========================================================================
+
+    /// @dev Builds a successor that has DECLARED this Moderation but cannot yet be
+    ///      bound to it — the chicken-and-egg the intent field exists to break.
+    function _successor() internal returns (RulesetGovernor next) {
+        next = new RulesetGovernor(owner, TIMELOCK);
+        vm.prank(owner);
+        next.intendModeration(mod);
+    }
+
+    function _handOverTo(RulesetGovernor next) internal {
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(next));
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        gov.executeGovernorChange(address(next));
+    }
+
+    /// ACCEPTANCE 3a — the exit works, and leaves the pair bound.
+    ///
+    /// @dev D3-20 recorded this as frozen by omission: `setGovernor` is
+    ///      `onlyGovernor` and no caller existed. Frozen by omission reads as
+    ///      deliberate and was not.
+    function test_d3_20_theGovernorCanHandOverAndTheSuccessorIsBound() public {
+        RulesetGovernor next = _successor();
+        assertEq(address(next.moderation()), address(0), "not bound - it cannot be, yet");
+
+        _handOverTo(next);
+
+        assertEq(mod.governor(), address(next), "Moderation moved");
+        assertEq(address(next.moderation()), address(mod), "and the successor is bound, atomically");
+        assertTrue(gov.retired(), "the outgoing one is retired");
+
+        // The successor governs for real.
+        Moderation.Params memory p = _params(7 * LAMBDA);
+        vm.prank(owner);
+        next.proposeParams(p);
+        (, uint256 eta,) = next.pendingParamsProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        uint32 v = next.executeParams(p);
+        assertEq(mod.paramsAt(v).lambda, 7 * LAMBDA);
+    }
+
+    /// @dev And the retired one is out, by name rather than by a revert from
+    ///      somewhere else. Without `retired` this fails as `NotGovernor` out of
+    ///      `Moderation`, after the full timelock.
+    function test_d3_20_aRetiredGovernorIsRefusedByName() public {
+        RulesetGovernor next = _successor();
+        _handOverTo(next);
+
+        Moderation.Params memory p = _params(5 * LAMBDA);
+        vm.prank(owner);
+        gov.proposeParams(p);
+        (, uint256 eta,) = gov.pendingParamsProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.Retired.selector);
+        gov.executeParams(p);
+
+        vm.prank(owner);
+        gov.proposeGuidelines(keccak256("t"));
+        (, uint256 geta,) = gov.pendingGuidelinesProposal();
+        vm.warp(geta);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.Retired.selector);
+        gov.executeGuidelines(keccak256("t"));
+    }
+
+    /// ACCEPTANCE 3b — reciprocity, checked at EXECUTE against live state.
+    ///
+    /// MUTATION: drop the `intendedModeration() != moderation` check, or move it
+    ///           to `proposeGovernorChange`.
+    function test_d3_20_aSuccessorThatDoesNotTargetThisModerationIsRefused() public {
+        // Declares nothing at all.
+        RulesetGovernor blank = new RulesetGovernor(owner, TIMELOCK);
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(blank));
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.SuccessorNotBoundToThisModeration.selector);
+        gov.executeGovernorChange(address(blank));
+
+        assertEq(mod.governor(), address(gov), "the field never moved");
+        assertFalse(gov.retired());
+    }
+
+    /// @dev A successor that targets a DIFFERENT Moderation. This is the one that
+    ///      bricks the pair if it lands: the field moves, the successor refuses to
+    ///      adopt, and nothing can move it back.
+    function test_d3_20_aSuccessorTargetingAnotherModerationIsRefused() public {
+        RulesetGovernor other = new RulesetGovernor(owner, TIMELOCK);
+        Moderation otherMod =
+            new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), address(other));
+        vm.prank(owner);
+        other.intendModeration(otherMod);
+
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(other));
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.SuccessorNotBoundToThisModeration.selector);
+        gov.executeGovernorChange(address(other));
+
+        assertEq(mod.governor(), address(gov), "still ours, and still usable");
+    }
+
+    /// @dev The state the order asks about — correct at propose, wrong at execute —
+    ///      is UNREACHABLE by construction, and it is worth saying why rather than
+    ///      writing a test that cannot fail. `intendModeration` is one-shot and has
+    ///      no unset, so a successor's target cannot move after it is declared.
+    ///
+    ///      What IS reachable is the opposite order: intent declared only after the
+    ///      propose. Checking at execute accepts it; checking at propose would have
+    ///      rejected a handover that is perfectly safe by the time it lands. That is
+    ///      a second, independent reason the check belongs at execute.
+    function test_d3_20_intentDeclaredAfterTheProposeIsStillAccepted() public {
+        RulesetGovernor next = new RulesetGovernor(owner, TIMELOCK);
+
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(next)); // nothing declared yet
+
+        vm.prank(owner);
+        next.intendModeration(mod); // declared during the delay
+
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        gov.executeGovernorChange(address(next));
+        assertEq(mod.governor(), address(next));
+
+        // And it cannot be redeclared afterwards, which is what makes the
+        // execute-time read stable.
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.AlreadyBound.selector);
+        next.intendModeration(mod);
+    }
+
+    /// MUTATION: drop the argument match in executeGovernorChange.
+    function test_d3_20_executeNamesTheSuccessorItExecutes() public {
+        RulesetGovernor a = _successor();
+        RulesetGovernor b = new RulesetGovernor(owner, TIMELOCK);
+        vm.prank(owner);
+        b.intendModeration(mod);
+
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(a));
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+
+        // `b` is a perfectly valid successor — it just is not the one approved.
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.ProposalMismatch.selector);
+        gov.executeGovernorChange(address(b));
+
+        vm.prank(owner);
+        gov.executeGovernorChange(address(a));
+        assertEq(mod.governor(), address(a));
+    }
+
+    /// @dev A replacement resets the eta, same as the other two paths.
+    function test_d3_20_theHandoverIsTimelockedAndCancellable() public {
+        RulesetGovernor next = _successor();
+
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(next));
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+
+        vm.warp(eta - 1);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.TimelockNotElapsed.selector);
+        gov.executeGovernorChange(address(next));
+
+        vm.prank(owner);
+        gov.cancelGovernorChange();
+        vm.warp(eta);
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.NoPendingProposal.selector);
+        gov.executeGovernorChange(address(next));
+        assertEq(mod.governor(), address(gov), "nothing happened");
+    }
+
+    /// @dev Handing the governorship to an EOA would brick parameter governance:
+    ///      `Moderation` would accept `applyParams` from it, but nothing would ever
+    ///      publish a guidelines version or honour a timelock, and there would be no
+    ///      way back. The `intendedModeration()` read refuses anything without that
+    ///      surface, which makes the mistake unrepresentable rather than merely
+    ///      discouraged.
+    function test_d3_20_theGovernorshipCannotBeHandedToAnEOA() public {
+        vm.prank(owner);
+        gov.proposeGovernorChange(stranger);
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        vm.prank(owner);
+        vm.expectRevert();
+        gov.executeGovernorChange(stranger);
+        assertEq(mod.governor(), address(gov));
+    }
+
+    /// MUTATION: drop `onlyGovernance` from any exit path; allow `next == this`.
+    function test_d3_20_theExitIsGovernanceOnlyAndRefusesSelf() public {
+        RulesetGovernor next = _successor();
+
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        gov.proposeGovernorChange(address(next));
+
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.SuccessorIsSelf.selector);
+        gov.proposeGovernorChange(address(gov));
+
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.ZeroAddress.selector);
+        gov.proposeGovernorChange(address(0));
+
+        vm.prank(owner);
+        gov.proposeGovernorChange(address(next));
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        gov.cancelGovernorChange();
+
+        (, uint256 eta,) = gov.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        gov.executeGovernorChange(address(next));
+    }
+
+    /// MUTATION: make `adoptModeration` bind something other than the intent, or
+    ///           drop its reciprocity check.
+    function test_d3_20_adoptIsPermissionlessButCannotChooseItsTarget() public {
+        RulesetGovernor next = _successor();
+
+        // Before the handover the reciprocity is false, so anyone calling it fails.
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.BindingNotMutual.selector);
+        next.adoptModeration();
+
+        _handOverTo(next);
+        assertEq(address(next.moderation()), address(mod));
+
+        // And it is one-way afterwards.
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.AlreadyBound.selector);
+        next.adoptModeration();
+    }
+
+    /// MUTATION: allow `intendModeration` after a bind, or twice.
+    function test_d3_20_intentIsOneShot() public {
+        RulesetGovernor next = new RulesetGovernor(owner, TIMELOCK);
+        vm.prank(owner);
+        next.intendModeration(mod);
+
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.AlreadyIntended.selector);
+        next.intendModeration(mod);
+
+        // A bound governor has no intent to declare.
+        vm.prank(owner);
+        vm.expectRevert(RulesetGovernor.AlreadyBound.selector);
+        gov.intendModeration(mod);
+
+        vm.prank(stranger);
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        next.intendModeration(mod);
+    }
+
 }

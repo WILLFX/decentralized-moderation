@@ -219,6 +219,7 @@ contract Moderation is ReentrancyGuard {
         address submitter;
         uint8 topicCount;
         uint8 actionType; // §8.5 — LIST or REMOVE; a term in `claimKey`
+        uint32 guidelinesVersion; // §4.1 — pinned at submission, like `paramsVersion`
     }
 
     // =========================================================================
@@ -232,7 +233,35 @@ contract Moderation is ReentrancyGuard {
     address public governor;
 
     uint32 public paramsVersion;
+
+    /// @notice §4.1's guidelines version currently in force. A case pins it at
+    ///         submission and is judged against that pin for its whole life.
+    /// @dev **The deciding argument is FAIRNESS, not measurement.** `d` is charged
+    ///      for voting incoherently with the settled side (§5.1). Without a pin, a
+    ///      guidelines change mid-case means moderators who committed before read
+    ///      one text and those after read another — and whichever side loses is
+    ///      debited for correctly applying the instructions it was given. That is
+    ///      I27's own argument applied to what a moderator is ASKED rather than to
+    ///      what they are paid, and it is a stronger case for pinning than
+    ///      parameters ever had.
+    ///
+    ///      The mid-case question therefore dissolves rather than being answered:
+    ///      every moderator on a case reads the version pinned at its submission,
+    ///      whatever governance does meanwhile.
+    ///
+    ///      **The version only, never the text.** The governor's log carries the
+    ///      hash and the effective block; this carries which one applied. The
+    ///      governor's height join remains the right tool for a READER recovering
+    ///      text, and is not the authority for what a CASE was judged under.
+    ///      **Declared here, beside `paramsVersion`, deliberately.** Two `uint32`s
+    ///      share one slot. Placed after `paramBlocks` instead, it takes a slot of
+    ///      its own AND shifts every storage slot below it — including the `cases`
+    ///      mapping, whose slot number `DrawProperties.t.sol` writes tallies
+    ///      through. That test's "did the write land" assertion caught the shift,
+    ///      which is what it was put there for.
+    uint32 public currentGuidelinesVersion;
     mapping(uint32 => Params) internal paramBlocks;
+
 
     uint256 public nextCaseId = 1;
     mapping(uint256 => Case) internal cases;
@@ -279,6 +308,10 @@ contract Moderation is ReentrancyGuard {
     // =========================================================================
 
     event ParamsApplied(uint32 indexed version);
+
+    /// @dev The governor allocates the version and pushes it here. `Moderation`
+    ///      stores no text and no hash — only which version is in force.
+    event GuidelinesApplied(uint32 indexed version);
     event Submitted(uint256 indexed caseId, address indexed submitter, bytes32 indexed claimKey, uint256 fee);
 
     /// @notice A removal carried and the LIST claim's entries left the index.
@@ -327,6 +360,7 @@ contract Moderation is ReentrancyGuard {
     error TooManyTopics();
     error ZeroTopic();
     error BadParams();
+    error GuidelinesNotMonotonic();
     error CommitWindowExceedsSeedHorizon();
     error NotReopenable();
     error ClaimsOutstanding();
@@ -377,6 +411,31 @@ contract Moderation is ReentrancyGuard {
 
     function paramsAt(uint32 v) external view returns (Params memory) {
         return paramBlocks[v];
+    }
+
+    /// @notice §4.1 — record the guidelines version now in force.
+    /// @dev The governor ALLOCATES the version (it owns the version-to-hash record
+    ///      and the effective-block map) and pushes the number here. Two reasons it
+    ///      is a push and not a pull:
+    ///
+    ///      A pull would put an external call on the `submit` path, on every case,
+    ///      to read a number that changes only by governance action. It would also
+    ///      make `Moderation` depend on the governor's ABI, so a `governor` that is
+    ///      a plain address — which is every test fixture that does not need
+    ///      governance, and any future governor with a different surface — would
+    ///      revert every submission.
+    ///
+    ///      **Monotonic, enforced here and not only upstream.** The governor is the
+    ///      allocator today; this contract still refuses to move backwards, because
+    ///      a pinned version that could be reused would let two different guideline
+    ///      texts share a number and silently merge the cases decided under them.
+    ///      The check also makes divergence one-directional: this contract can lag
+    ///      the governor only if a push reverted, and a reverting push reverts the
+    ///      whole `executeGuidelines`.
+    function applyGuidelines(uint32 v) external onlyGovernor {
+        if (v <= currentGuidelinesVersion) revert GuidelinesNotMonotonic();
+        currentGuidelinesVersion = v;
+        emit GuidelinesApplied(v);
     }
 
     function _p(uint256 caseId) internal view returns (Params storage) {
@@ -487,6 +546,12 @@ contract Moderation is ReentrancyGuard {
         c.submitter = msg.sender;
         c.topicCount = uint8(n);
         c.actionType = actionType;
+        // §4.1 — pinned here and nowhere else, exactly like `paramsVersion`.
+        // NOT re-pinned by `reopen`: a re-review reopens the claim IN PLACE
+        // (§8.5), the pooled tally carries, and the earlier cohort's votes are
+        // evidence in the same question. Re-pinning would judge one tally against
+        // two texts, which is the split this field exists to prevent.
+        c.guidelinesVersion = currentGuidelinesVersion;
         for (uint256 i; i < n; ++i) {
             caseTopics[caseId][i] = topics[i];
         }

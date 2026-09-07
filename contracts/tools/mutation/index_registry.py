@@ -24,9 +24,14 @@ MUTATIONS = [
  ("M6","§8.2b","the moved element's position is not rewritten after swap-and-pop",
   "            arr[idx] = moved;\n            posPlusOne[topicKey][moved] = idx + 1;",
   "            arr[idx] = moved;"),
- ("M7","§8.2b","the entry key is not content-derived (a per-call counter)",
+ # entryKeyOf is `pure`, so a mutation reading chain state has to relax the
+ # mutability too or it does not compile and never runs. See README, INVALID.
+ ("M7","§8.2b","the entry key is not content-derived (it varies per block)",
+  "    function entryKeyOf(bytes32 claimKey, bytes32 topicKey) public pure returns (bytes32) {\n        return keccak256(abi.encode(claimKey, topicKey));",
+  "    function entryKeyOf(bytes32 claimKey, bytes32 topicKey) public view returns (bytes32) {\n        return keccak256(abi.encode(claimKey, topicKey, block.number));"),
+ ("M7b","§8.2b","the entry key ignores topicKey — two topics collide on one entry",
   "        return keccak256(abi.encode(claimKey, topicKey));",
-  "        return keccak256(abi.encode(claimKey, topicKey, block.number));"),
+  "        return keccak256(abi.encode(claimKey));"),
  ("M8","§8.1","removeListing deletes the entry instead of setting REMOVED",
   "        e.status = uint8(Status.REMOVED);\n        _syncListing(topicKey, entryKey, uint8(Status.REMOVED));",
   "        delete entries[entryKey];\n        _syncListing(topicKey, entryKey, uint8(Status.NONE));"),
@@ -86,8 +91,12 @@ def run():
         return None  # the mutation never ran — not a kill
     return sorted(set(re.findall(r"\[FAIL[^\]]*\]\s+(\w+)\(", out)))
 
+# MUTANTS=M7,M7b runs only those, for re-checking a single mutation.
+ONLY = set(filter(None, os.environ.get("MUTANTS", "").split(",")))
+
 results=[]
 for mid,inv,desc,old,new in MUTATIONS:
+    if ONLY and mid not in ONLY: continue
     if ORIG.count(old)!=1:
         print(f"{mid}: ANCHOR {ORIG.count(old)}x -- {desc}",flush=True); results.append((mid,"ANCHOR",desc)); continue
     open(SRC,"w").write(ORIG.replace(old,new,1))

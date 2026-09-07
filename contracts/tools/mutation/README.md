@@ -15,6 +15,9 @@ Run them **one at a time**. All three mutate files in the same working tree and
 invoke `forge` in the same directory, so concurrent runs contaminate each other.
 Each harness restores the original source after every mutation and again on exit.
 
+`MUTANTS=M7,M7b` restricts a run to those ids, for re-checking one mutation
+without a full campaign.
+
 ## Scoring
 
 Three outcomes, and the distinction matters:
@@ -32,6 +35,13 @@ Any mutation that failed to compile was silently inflating the score. The class
 of bug is easy to reintroduce: `run()` must distinguish *no failures* from *no
 run*, so it returns `None` for a compile failure and a (possibly empty) list
 otherwise.
+
+Two mutations were caught by that fix, and both had the same shape: a mutation
+that reads chain state inside a function declared `pure`. `Moderation` M41
+(`claimKeyOf`) and `IndexRegistry` M7 (`entryKeyOf`) had each been scored as a
+kill without ever compiling. Both now relax the mutability alongside the body so
+the mutant actually runs. When a mutation targets a `pure` or `view` function,
+check that the mutant compiles before trusting its verdict.
 
 A mutation whose anchor text is not found exactly once is reported
 (`PATTERN-MISS` / `ANCHOR`) rather than applied — a silently un-applied mutation

@@ -148,8 +148,13 @@ def run():
     return (m.groups() if m else None), failed
 
 
+# MUTANTS=M7,M12 runs only those, for re-checking a single mutation.
+ONLY = set(filter(None, os.environ.get("MUTANTS", "").split(",")))
+
 results = []
 for mid, inv, desc, old, new in MUTATIONS:
+    if ONLY and mid not in ONLY:
+        continue
     if old not in ORIG:
         print(f"{mid}: PATTERN NOT FOUND — mutation not applied", file=sys.stderr)
         results.append((mid, inv, desc, "PATTERN-MISS", []))

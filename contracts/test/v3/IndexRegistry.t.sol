@@ -533,4 +533,73 @@ contract IndexRegistryTest is Test {
         idx.acceptGovernance();
         assertEq(idx.governance(), stranger);
     }
+
+    // =========================================================================
+    // M2.10 — actionType on the entry, and what the fifth write may reach
+    // =========================================================================
+
+    /// @dev These two properties are UNREACHABLE through `Moderation`, which only
+    ///      ever calls `removeListing` with a key it derived as `ActionType.LIST`.
+    ///      That is exactly why they belong here: the index is a standalone contract
+    ///      with its own writer capability, and a second logic contract — or a later
+    ///      replacement for `Moderation` — is not bound by the caller discipline the
+    ///      current one happens to keep. A guard that only holds because today's
+    ///      only caller is well-behaved is not a guard.
+    ///
+    ///      Both survived the M2.10 campaign (M29, M30) with no test naming them.
+
+    /// MUTATION: drop `if (e.actionType != ACTION_LIST) revert NotAListEntry();`
+    function test_s8_1_theFifthWriteRefusesToRetargetARemoveEntry() public {
+        bytes32 rk = _claimKey("REMOVE");
+        logicA.writeAs(rk, TOPIC_A, APPROVED, 0, false, idx.ACTION_REMOVE());
+
+        // A removal case's own record is not a listing, and marking it REMOVED
+        // would let one removal overwrite another's answer.
+        vm.expectRevert(IndexRegistry.NotAListEntry.selector);
+        logicA.remove(rk, TOPIC_A);
+
+        assertEq(uint8(idx.entryOf(rk, TOPIC_A).status), APPROVED, "untouched");
+    }
+
+    /// MUTATION: drop `e.actionType = actionType;` from `writeEntry`.
+    ///
+    /// @dev The default for the field is 0, which IS `ACTION_LIST` — so a dropped
+    ///      write does not fail loudly, it silently reclassifies every REMOVE entry
+    ///      as a listing answer. That is the shape of defect that survives a suite
+    ///      asserting only on happy paths.
+    function test_s8_2_theEntryRecordsWhatItsClaimAsked() public {
+        bytes32 lk = _claimKey("LIST");
+        bytes32 rk = _claimKey("REMOVE");
+
+        logicA.write(lk, TOPIC_A, APPROVED, 0, false);
+        logicA.writeAs(rk, TOPIC_A, APPROVED, 0, false, idx.ACTION_REMOVE());
+
+        assertEq(idx.entryOf(lk, TOPIC_A).actionType, idx.ACTION_LIST(), "a listing says so");
+        assertEq(idx.entryOf(rk, TOPIC_A).actionType, idx.ACTION_REMOVE(), "and a removal says so");
+
+        // And the classification is what the fifth write's guard reads, so the two
+        // entries are not interchangeable to it.
+        logicA.remove(lk, TOPIC_A);
+        vm.expectRevert(IndexRegistry.NotAListEntry.selector);
+        logicA.remove(rk, TOPIC_A);
+    }
+
+    /// @dev The listing predicate, at the index's own level rather than through a
+    ///      whole case. `Moderation` cannot write an APPROVED REMOVE entry to a
+    ///      topic that has no listing, but a writer can.
+    ///
+    /// MUTATION: drop the `actionType == ACTION_LIST` conjunct in `_syncListing`.
+    function test_s8_2_anApprovedRemoveEntryIsNeverListed() public {
+        bytes32 rk = _claimKey("REMOVE");
+        logicA.writeAs(rk, TOPIC_A, APPROVED, 0, false, idx.ACTION_REMOVE());
+
+        assertFalse(idx.isListed(rk, TOPIC_A), "a takedown record is not content");
+        assertEq(idx.listedCount(TOPIC_A), 0, "and the topic stays empty");
+    }
+
+    /// MUTATION: drop `if (actionType > ACTION_REMOVE) revert BadActionType();`
+    function test_s8_2_anUnknownActionTypeIsRefused() public {
+        vm.expectRevert(IndexRegistry.BadActionType.selector);
+        logicA.writeAs(_claimKey("LIST"), TOPIC_A, APPROVED, 0, false, 2);
+    }
 }

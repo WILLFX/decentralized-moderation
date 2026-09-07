@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation, IIndexRegistry} from "../../src/v3/Moderation.sol";
 import {StakeRegistry} from "../../src/v3/StakeRegistry.sol";
 import {IndexRegistry} from "../../src/v3/IndexRegistry.sol";
+import {RulesetGovernor} from "../../src/v3/RulesetGovernor.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
 import {SystemHandler} from "./handlers/SystemHandler.sol";
 
@@ -25,6 +26,7 @@ contract V3InvariantTest is StdInvariant, Test {
     StakeRegistry internal reg;
     IndexRegistry internal idx;
     Moderation internal mod;
+    RulesetGovernor internal governor;
     SystemHandler internal handler;
 
     address internal gov;
@@ -42,7 +44,12 @@ contract V3InvariantTest is StdInvariant, Test {
         );
         vm.prank(gov);
         idx = new IndexRegistry(TIMELOCK);
-        mod = new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), gov);
+        // M2.11 — Moderation's governor is the RulesetGovernor, exactly as deployed.
+        vm.prank(gov);
+        governor = new RulesetGovernor(gov, TIMELOCK);
+        mod = new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), address(governor));
+        vm.prank(gov);
+        governor.bindModeration(mod);
 
         // The real wiring, through the real timelocks — this is also the only place
         // the deployment order is exercised end to end.
@@ -83,21 +90,26 @@ contract V3InvariantTest is StdInvariant, Test {
         p.feeBase = uint128(100 * UNIT);
         p.feePerTopic = uint128(10 * UNIT);
         p.threshold = type(uint256).max; // everyone eligible: this suite is not about §3.3
+        // Through the governor and its timelock, like every later change.
         vm.prank(gov);
-        mod.applyParams(p);
+        governor.proposeParams(p);
+        (, uint256 pEta,) = governor.pendingParamsProposal();
+        vm.warp(pEta);
+        vm.prank(gov);
+        governor.executeParams(p);
 
         address[] memory actors = new address[](6);
         for (uint256 i; i < 6; ++i) {
             actors[i] = makeAddr(string(abi.encodePacked("actor", vm.toString(i))));
         }
 
-        handler = new SystemHandler(token, reg, idx, mod, actors);
+        handler = new SystemHandler(token, reg, idx, mod, governor, gov, actors);
         vm.roll(1000);
         handler.init();
 
         // Only the `h*` actions are fuzz targets. `init`, the views and the ghost
         // readers are not — a runner calling them would be testing the harness.
-        bytes4[] memory sels = new bytes4[](15);
+        bytes4[] memory sels = new bytes4[](16);
         sels[0] = SystemHandler.hStake.selector;
         sels[1] = SystemHandler.hPostBond.selector;
         sels[2] = SystemHandler.hSubmit.selector;
@@ -113,6 +125,7 @@ contract V3InvariantTest is StdInvariant, Test {
         sels[12] = SystemHandler.hRefund.selector;
         sels[13] = SystemHandler.hRoll.selector;
         sels[14] = SystemHandler.hSubmitRemoval.selector;
+        sels[15] = SystemHandler.hChangeParams.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sels}));
         targetContract(address(handler));
     }
@@ -371,6 +384,38 @@ contract V3InvariantTest is StdInvariant, Test {
         assertTrue(reg.solvent());
     }
 
+    /// @notice I27 — a pinned parameter block is IMMUTABLE.
+    ///
+    /// @dev The invariant I27 actually rests on, and the one a stateful runner can
+    ///      falsify where a unit test cannot. "Every debit is computed from the block
+    ///      pinned at submission" is worth nothing if that block can be rewritten
+    ///      afterwards — a governance change that mutated version 1 in place would
+    ///      satisfy every per-case assertion in the other suites while silently
+    ///      re-pricing every live case.
+    ///
+    ///      The handler changes `lambda` through the real governor mid-run, so this
+    ///      is checked against sequences where a change actually landed between a
+    ///      case's submission and its settlement.
+    function invariant_i27_aPinnedParameterBlockIsImmutable() public view {
+        uint32 top = handler.highestVersion();
+        for (uint32 v = 1; v <= top; ++v) {
+            uint128 recorded = handler.versionLambda(v);
+            if (recorded == 0) continue; // not a version this handler created
+            assertEq(mod.paramsAt(v).lambda, recorded, "a pinned parameter block moved under a live case");
+        }
+    }
+
+    /// @notice Every case pins a version that exists and is not the future.
+    function invariant_i27_everyCasePinsARealVersion() public view {
+        uint256 n = handler.caseCount();
+        uint32 live = mod.paramsVersion();
+        for (uint256 i; i < n; ++i) {
+            uint32 pinned = mod.caseInfo(handler.caseIds(i)).paramsVersion;
+            assertGt(pinned, 0, "a case with no pinned version");
+            assertLe(pinned, live, "a case pinned a version that does not exist yet");
+        }
+    }
+
     /// @dev Drives a case in DRAW to a chosen verdict through the handler, by
     ///      picking an entropy `decideAt` says produces it. The contract still does
     ///      the deciding; this only chooses which block hash it reads.
@@ -385,6 +430,21 @@ contract V3InvariantTest is StdInvariant, Test {
             return;
         }
         assertTrue(false, "no entropy produced the wanted verdict");
+    }
+
+    /// @dev M2.11. A governance action the fuzzer never performs is a governance
+    ///      action nobody is testing the invariants against, so the reachability of
+    ///      `hChangeParams` is pinned here rather than assumed from a call count.
+    function test_handlerReachesAParameterChange() public {
+        uint32 before = mod.paramsVersion();
+        handler.hChangeParams(12345);
+
+        assertEq(handler.callsParamChange(), 1, "a parameter change is reachable from the handler");
+        assertEq(mod.paramsVersion(), before + 1, "and it landed in Moderation");
+        assertGt(handler.versionLambda(before + 1), 0, "with the ghost recording what it landed as");
+
+        // It went through the governor's timelock, not around it.
+        assertEq(mod.governor(), address(governor));
     }
 
     /// @dev M2.10. The stateful suite is only as good as what the handler can

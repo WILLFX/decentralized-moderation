@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation, IIndexRegistry} from "../../../src/v3/Moderation.sol";
 import {StakeRegistry} from "../../../src/v3/StakeRegistry.sol";
 import {IndexRegistry} from "../../../src/v3/IndexRegistry.sol";
+import {RulesetGovernor} from "../../../src/v3/RulesetGovernor.sol";
 import {MockBZZ} from "../../mocks/MockBZZ.sol";
 
 /// @notice Drives the three REAL v3 contracts under the invariant runner.
@@ -24,6 +25,8 @@ contract SystemHandler is Test {
     StakeRegistry public immutable reg;
     IndexRegistry public immutable idx;
     Moderation public immutable mod;
+    RulesetGovernor public immutable governor;
+    address public immutable governance;
 
     uint256 internal constant UNIT = 1e16;
     uint256 public constant MIN_STAKE = 10 * UNIT;
@@ -64,6 +67,17 @@ contract SystemHandler is Test {
     /// @dev Removal cases actually created. Read by the reachability test — a
     ///      removal path the fuzzer never enters is a path nobody is testing.
     uint256 public callsRemoval;
+
+    /// @dev Parameter changes landed. A governance action the fuzzer never performs
+    ///      is a governance action nobody is testing against the invariants.
+    uint256 public callsParamChange;
+
+    /// @dev `paramsVersion -> the lambda that version was created with`. I27 says a
+    ///      case computes every debit from the block it pinned; that is only
+    ///      meaningful if a pinned block is IMMUTABLE. This ghost is what lets the
+    ///      invariant check that no version ever changes under a live case.
+    mapping(uint32 => uint128) public versionLambda;
+    uint32 public highestVersion;
     mapping(uint256 => bool) public ghostTerminated;
 
     /// @dev What each actor actually committed, so a reveal can match its own
@@ -80,11 +94,21 @@ contract SystemHandler is Test {
     uint256 public callsChallenge;
     uint256 public callsWithdraw;
 
-    constructor(MockBZZ _token, StakeRegistry _reg, IndexRegistry _idx, Moderation _mod, address[] memory _actors) {
+    constructor(
+        MockBZZ _token,
+        StakeRegistry _reg,
+        IndexRegistry _idx,
+        Moderation _mod,
+        RulesetGovernor _governor,
+        address _governance,
+        address[] memory _actors
+    ) {
         token = _token;
         reg = _reg;
         idx = _idx;
         mod = _mod;
+        governor = _governor;
+        governance = _governance;
         for (uint256 i; i < _actors.length; ++i) {
             actors.push(_actors[i]);
         }
@@ -358,6 +382,41 @@ contract SystemHandler is Test {
 
     /// @dev Time is an input to this system, not a background fact: every phase
     ///      guard is a block-height comparison and maturation is a timestamp one.
+    /// @dev M2.11 — a parameter change mid-run, through the real governor and its
+    ///      real timelock. This is the sequence the stateful invariants should
+    ///      survive and I27 is the one that should hold across it: cases already
+    ///      submitted keep settling under the block they pinned, while new ones
+    ///      take the new block, and the ledger invariants must not notice.
+    ///
+    ///      `lambda` is what moves, because it is the parameter with the largest
+    ///      blast radius on the registry's accounting — it is the liability every
+    ///      commit takes, so a change to it puts two different per-commit amounts
+    ///      in flight at once. That is exactly the state I23 (`liabilities == the
+    ///      sum of open claims`) would fail in if a release ever used the live
+    ///      value instead of the pinned one.
+    function hChangeParams(uint256 seed) external {
+        if (governor.moderation() != mod) return;
+
+        Moderation.Params memory p = mod.paramsAt(mod.paramsVersion());
+        // Stay inside the validator: a proposal that cannot be executed teaches
+        // the invariants nothing.
+        uint128 next = uint128(bound(seed, uint256(LAMBDA) / 2, uint256(LAMBDA) * 3));
+        if (next == 0) return;
+        p.lambda = next;
+
+        vm.startPrank(governance);
+        try governor.proposeParams(p) {
+            (, uint256 eta,) = governor.pendingParamsProposal();
+            vm.warp(eta);
+            try governor.executeParams(p) returns (uint32 v) {
+                callsParamChange++;
+                versionLambda[v] = next;
+                if (v > highestVersion) highestVersion = v;
+            } catch {}
+        } catch {}
+        vm.stopPrank();
+    }
+
     function hRoll(uint256 seed) external {
         uint256 blocks = 1 + (seed % 80);
         vm.roll(block.number + blocks);

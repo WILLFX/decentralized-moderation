@@ -901,3 +901,80 @@ raised the question, which under-incentivises correcting a false approval — th
 failure mode the M2.10 order calls the one a safe-search index exists to prevent.
 That asymmetry is the substance of the open question and it is not neutral: the
 current pricing makes catching a bad listing cost the same as making one.
+
+### D3-20. The governor is unreplaceable, and that is what buys back F3's guarantee
+
+**What.** `RulesetGovernor` exposes no path to `Moderation.setGovernor`. Once
+`Moderation.governor` is the governor, the field can never move again.
+
+**Why.** M2.6-F3 makes `bindModeration` check that the binding is *mutual* — that
+the `Moderation` being bound already names this governor. In v1 that check was a
+**permanent** guarantee because `Moderation.governor` was `immutable`: neither side
+could move after the bind returned. **v3 made it mutable**, through a `setGovernor`
+that is `onlyGovernor`. So the v1 argument does not carry over as written, and this
+deviation is what replaces it.
+
+The reasoning is a reachability argument, not a promise. `setGovernor` is
+`onlyGovernor`; after the bind, the only address that satisfies `onlyGovernor` is
+this contract; this contract has no function that calls `setGovernor`. **The field
+is frozen by omission**, so the bind-time check is permanent again — for the same
+reason as v1, reached differently.
+
+**Threat model, and it cuts both ways.** The gain is that a wired stack cannot be
+silently unwired: no governance action, hostile or mistaken, can point `Moderation`
+at a different governor and strand every pending proposal. The cost is that a defect
+in **this** contract cannot be routed around — parameter and guidelines governance
+for that `Moderation` is whatever this contract implements, permanently.
+
+The migration path is `proposeGovernance`: the governor contract stays, its owner
+moves. That is the same shape v1 had, and it covers a compromised or lost *owner*.
+It does **not** cover a defect in the governor's own logic, and nothing here does.
+`Moderation` itself is not upgradeable either, so this adds no new class of
+permanence — it declines to add an escape hatch that `Moderation` does not have.
+
+**The alternative, and why not.** A timelocked `proposeModerationGovernor` passthrough
+would make the governor replaceable, at the cost of making the F3 check a snapshot
+rather than a guarantee — recoverable by re-checking reciprocity at every execute.
+That is a defensible design and it is **not** what M2.11 scoped, so it is recorded
+rather than built. If it is wanted, it is a small change and the re-check is one
+external call.
+
+### D3-21. §4.1's per-case guidelines pin is not implemented, and the governor
+### substitutes a log join for it
+
+**What.** §4.1's `Case` ends with `// content, metadata, topics, ruleset/guidelines
+versions: as v2`. v3's `Moderation.Case` carries `paramsVersion` — the ruleset
+version — but **no `guidelinesVersion`**. Nothing in `Moderation` reads, writes or
+stores one. `RulesetGovernor` owns the version, its text hash, and the block it took
+effect; a case's guidelines version is recovered by joining the case's submission
+block against `guidelinesBlockOf`.
+
+**Why it was not fixed here.** M2.11 §2 sets `Moderation`'s delta at zero and says
+to stop and report if the contract needs editing for more than an address type or a
+comment. Adding a field to `Case` is more than that. It is also not free: `Case` is
+already seven slots and the last one (`submitter`, `topicCount`, `actionType`) has
+9 bytes spare, so a `uint32` would fit — but the write is on the `submit` path, and
+every case pays for it.
+
+**What the substitute does and does not give.** `guidelinesVersionAt(block)` and the
+`GuidelinesExecuted(version, hash, blockNumber)` log make the partition
+`measurement/prior` needs computable, on chain and from logs alike, and
+`test_s4_1_aReaderRecoversTheGuidelinesACaseWasDecidedUnderFromLogsAlone` holds it.
+What it does **not** give is a *pinned* value. The join is a derivation, so it is
+only as good as the reader's block accounting, and it is answered by "what was in
+force at that height" rather than by "what this case recorded". Two consequences
+worth naming:
+
+- A case submitted in the **same block** as a guidelines change is ambiguous by
+  block height alone; resolving it needs log-index ordering within the block. A
+  pinned field would not need that.
+- The version in force at **submission** is what the join returns, which matches
+  §4.1's "pinned at submit". If the quantity a measurement actually wants is the
+  text moderators read while *voting*, neither the join nor §4.1's pin answers it,
+  because a guidelines change can land mid-case. **That is a spec question, not an
+  implementation one**, and it is the sharper half of this deviation.
+
+**Threat model.** No safety consequence — nothing in the protocol reads
+`guidelinesVersion`; §8.4 already establishes that a version bump does not reopen
+rejections, and it does not enter any key. The consequence is entirely on the
+measurement, which is where §10 says the binding constraint already is.

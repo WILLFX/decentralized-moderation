@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {Test, StdInvariant} from "forge-std/Test.sol";
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {Moderation, IIndexRegistry} from "../../src/v3/Moderation.sol";
+import {StakeRegistry} from "../../src/v3/StakeRegistry.sol";
+import {IndexRegistry} from "../../src/v3/IndexRegistry.sol";
+import {MockBZZ} from "../mocks/MockBZZ.sol";
+import {SystemHandler} from "./handlers/SystemHandler.sol";
+
+/// @title v3 — stateful invariants across all three real contracts
+/// @notice The other suites assert properties at moments someone chose. This one
+///         asserts them after EVERY reachable sequence the runner can build, with
+///         no mocks anywhere: real `StakeRegistry`, real `Moderation`, real
+///         `IndexRegistry`, wired the way a deployment would wire them.
+///
+/// @dev What this is for, stated plainly: a unit test finds the bug you suspected.
+///      A stateful invariant finds the ordering nobody imagined — which is the
+///      class this codebase has repeatedly been bitten by (M2.6-F2's second door,
+///      the I26 key release across a re-review, the I3 allowance across rounds).
+///      Each of those was an ORDER of operations, not a single call.
+contract V3InvariantTest is StdInvariant, Test {
+    MockBZZ internal token;
+    StakeRegistry internal reg;
+    IndexRegistry internal idx;
+    Moderation internal mod;
+    SystemHandler internal handler;
+
+    address internal gov;
+
+    uint256 internal constant UNIT = 1e16;
+    uint256 internal constant TIMELOCK = 2 days;
+
+    function setUp() public {
+        gov = makeAddr("gov");
+        token = new MockBZZ();
+
+        vm.prank(gov);
+        reg = new StakeRegistry(
+            IERC20(address(token)), 10 * UNIT, 5 * UNIT, 3 days, 7 days, TIMELOCK, 0.5e18
+        );
+        vm.prank(gov);
+        idx = new IndexRegistry(TIMELOCK);
+        mod = new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), gov);
+
+        // The real wiring, through the real timelocks — this is also the only place
+        // the deployment order is exercised end to end.
+        uint8 bits = reg.MAY_CREATE() | reg.MAY_DISCHARGE();
+        vm.prank(gov);
+        reg.proposeCaps(address(mod), bits);
+        vm.warp(block.timestamp + TIMELOCK);
+        vm.prank(gov);
+        reg.executeCaps();
+
+        vm.prank(gov);
+        idx.proposeWriter(address(mod), true);
+        (,, uint256 eta,) = idx.pendingWriterProposal();
+        vm.warp(eta);
+        vm.prank(gov);
+        idx.executeWriter();
+
+        Moderation.Params memory p;
+        p.blockTime = 5;
+        p.commitWindow = 1200;
+        p.revealWindow = 1200;
+        p.challengeWindow = 43_200;
+        p.lateWidenAt = 720;
+        p.seedLag = 2;
+        p.blockhashHorizon = 256;
+        p.retryCooldown = 1 days;
+        p.superQuorum = 16;
+        p.lateWidenFactorBps = 15_000;
+        p.drawBountyBps = 50;
+        p.claimBountyBps = 100;
+        p.reserveBps = 2000;
+        p.maintenanceBps = 1000;
+        p.lambda = 2 * uint128(UNIT);
+        p.revealBond = 2 * uint128(UNIT);
+        p.penaltyDebit = uint128(UNIT);
+        p.challengeBond = 3 * uint128(UNIT);
+        p.trackDecay = 0.95e18;
+        p.feeBase = uint128(100 * UNIT);
+        p.feePerTopic = uint128(10 * UNIT);
+        p.threshold = type(uint256).max; // everyone eligible: this suite is not about §3.3
+        vm.prank(gov);
+        mod.applyParams(p);
+
+        address[] memory actors = new address[](6);
+        for (uint256 i; i < 6; ++i) {
+            actors[i] = makeAddr(string(abi.encodePacked("actor", vm.toString(i))));
+        }
+
+        handler = new SystemHandler(token, reg, idx, mod, actors);
+        vm.roll(1000);
+        handler.init();
+
+        // Only the `h*` actions are fuzz targets. `init`, the views and the ghost
+        // readers are not — a runner calling them would be testing the harness.
+        bytes4[] memory sels = new bytes4[](14);
+        sels[0] = SystemHandler.hStake.selector;
+        sels[1] = SystemHandler.hPostBond.selector;
+        sels[2] = SystemHandler.hSubmit.selector;
+        sels[3] = SystemHandler.hCommit.selector;
+        sels[4] = SystemHandler.hReveal.selector;
+        sels[5] = SystemHandler.hChallenge.selector;
+        sels[6] = SystemHandler.hPoke.selector;
+        sels[7] = SystemHandler.hClaim.selector;
+        sels[8] = SystemHandler.hClaimChallenge.selector;
+        sels[9] = SystemHandler.hRequestExit.selector;
+        sels[10] = SystemHandler.hWithdraw.selector;
+        sels[11] = SystemHandler.hSweep.selector;
+        sels[12] = SystemHandler.hRefund.selector;
+        sels[13] = SystemHandler.hRoll.selector;
+        targetSelector(FuzzSelector({addr: address(handler), selectors: sels}));
+        targetContract(address(handler));
+    }
+
+    // =========================================================================
+    // I21 — every unit the registry holds is in a named bucket
+    // =========================================================================
+
+    /// @dev Exact, not `>=`. The registry's ledger and its balance must agree after
+    ///      any sequence: stake, bond, debits into the reserve, rewards paid in by
+    ///      `Moderation`, maintenance swept in, withdrawals out. A single path that
+    ///      moves value without moving a bucket breaks this and nothing else does.
+    function invariant_registryLedgerEqualsItsBalance() public view {
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets(), "registry ledger drifted from its balance");
+    }
+
+    function invariant_registryIsSolvent() public view {
+        assertTrue(reg.solvent(), "registry insolvent");
+    }
+
+    /// @dev `totalStake` and `totalBond` are running sums maintained by hand at
+    ///      seven call sites. This is the only thing that checks they still equal
+    ///      the sum they claim to be.
+    function invariant_registryTotalsEqualTheSumOfBalances() public view {
+        uint256 n = handler.actorCount();
+        uint256 stakeSum;
+        uint256 bondSum;
+        for (uint256 i; i < n; ++i) {
+            address a = handler.actors(i);
+            (uint256 stk, uint256 bond,,,,,,) = reg.moderatorInfo(a);
+            stakeSum += stk;
+            bondSum += bond;
+        }
+        assertEq(reg.totalStake(), stakeSum, "totalStake drifted");
+        assertEq(reg.totalBond(), bondSum, "totalBond drifted");
+    }
+
+    // =========================================================================
+    // I23 — liabilities == the sum of that moderator's open claim records
+    // =========================================================================
+
+    /// @dev The identity the registry cannot check alone, because it keeps a COUNT
+    ///      and not an enumeration. The handler holds the list; `liabilitiesMatch`
+    ///      refuses a list that is incomplete or repeats, so a drifting ghost fails
+    ///      loudly rather than quietly agreeing.
+    function invariant_I23_liabilitiesEqualTheSumOfClaims() public view {
+        uint256 n = handler.actorCount();
+        for (uint256 i; i < n; ++i) {
+            address a = handler.actors(i);
+            (uint256[] memory ids, uint8[] memory kinds) = handler.openClaimsOf(a);
+            (bool ok, uint256 sum) = reg.liabilitiesMatch(a, ids, kinds);
+            assertTrue(ok, "I23: liabilities != sum of claim records");
+            assertEq(sum, reg.liabilitiesOf(a), "I23: sum disagrees with the accumulator");
+        }
+    }
+
+    /// @dev The registry's own per-logic counter, against the same ghost. `Moderation`
+    ///      is the only writer, so its open claims are exactly the claims the handler
+    ///      believes are open.
+    function invariant_openClaimsCounterMatchesTheLedger() public view {
+        uint256 n = handler.actorCount();
+        uint256 total;
+        for (uint256 i; i < n; ++i) {
+            (uint256[] memory ids,) = handler.openClaimsOf(handler.actors(i));
+            total += ids.length;
+        }
+        assertEq(reg.openClaims(address(mod)), total, "openClaims drifted from the open set");
+    }
+
+    // =========================================================================
+    // I13 — withdrawal implies no outstanding liability
+    // =========================================================================
+
+    /// @dev A moderator who has left holds nothing and owes nothing. If a withdrawal
+    ///      could ever complete with a claim standing, this is where it shows —
+    ///      including via an ordering where the claim was created after the exit
+    ///      request.
+    function invariant_I13_anExitedModeratorOwesNothing() public view {
+        uint256 n = handler.actorCount();
+        for (uint256 i; i < n; ++i) {
+            address a = handler.actors(i);
+            if (reg.stateOf(a) != StakeRegistry.State.NONE) continue;
+            assertEq(reg.liabilitiesOf(a), 0, "I13: a departed moderator still owes");
+            assertEq(reg.bondOf(a), 0, "a departed moderator still holds bond");
+        }
+    }
+
+    // =========================================================================
+    // I16 — the §2.2 state predicates are mutually exclusive
+    // =========================================================================
+
+    /// @dev Evaluated from the raw fields rather than through `stateOf`, which is an
+    ///      if-else chain and so exclusive by construction. Checked here after every
+    ///      sequence rather than at the handful of transitions a unit test visits.
+    function invariant_I16_exactlyOneStateHolds() public view {
+        uint256 n = handler.actorCount();
+        for (uint256 i; i < n; ++i) {
+            (uint256 stk,,,,, uint256 maturesAt, uint256 exitAt,) = reg.moderatorInfo(handler.actors(i));
+            bool none = stk == 0;
+            bool pending = stk > 0 && exitAt == 0 && block.timestamp < maturesAt;
+            bool active = stk > 0 && exitAt == 0 && block.timestamp >= maturesAt;
+            bool exiting = stk > 0 && exitAt != 0;
+            uint256 held = (none ? 1 : 0) + (pending ? 1 : 0) + (active ? 1 : 0) + (exiting ? 1 : 0);
+            assertEq(held, 1, "I16: not exactly one state");
+        }
+    }
+
+    // =========================================================================
+    // I15 / §8.1 — the index is written at the terminal, never later
+    // =========================================================================
+
+    /// @dev Finality is independent of payout: a reader must be able to see a result
+    ///      without waiting for any moderator to settle. So a case with a terminal
+    ///      has an index entry for every topic, and it has it NOW — not once
+    ///      settlement completes, which §5.5 says may never happen.
+    function invariant_I15_everyTerminatedCaseIsInTheIndex() public view {
+        uint256 n = handler.caseCount();
+        bytes32[] memory topics = handler.topicsOf();
+        for (uint256 i; i < n; ++i) {
+            uint256 id = handler.caseIds(i);
+            Moderation.Case memory c = mod.caseInfo(id);
+            if (c.terminal == uint8(Moderation.Terminal.NONE)) continue;
+            for (uint256 t; t < topics.length; ++t) {
+                assertTrue(
+                    idx.statusOf(c.claimKey, topics[t]) != uint8(IndexRegistry.Status.NONE),
+                    "I15: a terminated case is invisible to a reader"
+                );
+            }
+        }
+    }
+
+    /// @dev §8.2's listing membership is exactly `APPROVED`, maintained across every
+    ///      write and every delist. A drift here is a safe-search client showing
+    ///      content the protocol rejected.
+    function invariant_s8_2_onlyApprovedContentIsListed() public view {
+        uint256 n = handler.caseCount();
+        bytes32[] memory topics = handler.topicsOf();
+        for (uint256 i; i < n; ++i) {
+            Moderation.Case memory c = mod.caseInfo(handler.caseIds(i));
+            for (uint256 t; t < topics.length; ++t) {
+                uint8 st = idx.statusOf(c.claimKey, topics[t]);
+                bool listed = idx.isListed(c.claimKey, topics[t]);
+                assertEq(listed, st == uint8(IndexRegistry.Status.APPROVED), "listing disagrees with status");
+            }
+        }
+    }
+
+    // =========================================================================
+    // Value conservation across the whole system
+    // =========================================================================
+
+    /// @dev Nothing is created and nothing is destroyed. Every unit ever minted into
+    ///      the system is either still held by one of the three contracts, or sits
+    ///      in an actor's wallet. This is the invariant that would catch a payment
+    ///      path paying twice, or a refund paid from the wrong pocket.
+    function invariant_valueIsConserved() public view {
+        uint256 held = token.balanceOf(address(reg)) + token.balanceOf(address(mod)) + token.balanceOf(address(idx));
+        uint256 inWallets;
+        uint256 n = handler.actorCount();
+        for (uint256 i; i < n; ++i) {
+            inWallets += token.balanceOf(handler.actors(i));
+        }
+        assertEq(held + inWallets, handler.ghostPaidIn(), "value was created or destroyed");
+    }
+
+    /// @dev `Moderation` is logic, not custody. What it holds is escrow for live
+    ///      cases plus maintenance not yet swept — never a moderator's stake or bond,
+    ///      which is the boundary §2.4 draws and I14 depends on.
+    function invariant_moderationHoldsNoModeratorFunds() public view {
+        uint256 n = handler.actorCount();
+        for (uint256 i; i < n; ++i) {
+            address a = handler.actors(i);
+            (uint256 stk, uint256 bond,,,,,,) = reg.moderatorInfo(a);
+            // A moderator's balances live in the registry's buckets, and the
+            // registry's balance covers them, so Moderation cannot be holding them.
+            assertLe(stk + bond, reg.balanceBuckets(), "a moderator's funds are outside the registry");
+        }
+    }
+
+    // =========================================================================
+    // The run actually exercised something
+    // =========================================================================
+
+    /// @dev An invariant suite that never reaches an interesting state passes
+    ///      VACUOUSLY, and a green vacuous suite is worse than none.
+    ///
+    ///      `afterInvariant` runs once per RUN, so asserting "this run settled a
+    ///      claim" would be a coin flip on the runner's choices, not a property.
+    ///      It checks only what the seeded cohort guarantees; the reachability of
+    ///      the deep states is proved deterministically below instead.
+    function afterInvariant() public view {
+        assertGt(handler.callsStake(), 0, "the cohort was never seeded");
+    }
+
+    /// @dev Time moves directly here. `hRoll` caps at 80 blocks so the fuzz runner
+    ///      cannot leap a 240-block commit window in a single step; crossing a
+    ///      12-hour challenge window that way would take 108 external calls, which
+    ///      is a fine constraint on the RUNNER and a pointless one on a scripted
+    ///      reachability proof.
+    function _advance(uint256 blocks) internal {
+        vm.roll(block.number + blocks);
+        vm.warp(block.timestamp + blocks * 5);
+    }
+
+    /// @notice Proof that the handler CAN reach the states the invariants care
+    ///         about — driven deterministically, so it cannot flake.
+    /// @dev Without this the suite could be green because the runner never got past
+    ///      `submit`, and nobody would know. This is the coverage claim, made once
+    ///      and checked, rather than assumed from 16,384 calls of unknown shape.
+    function test_handlerReachesCommitRevealDrawAndSettlement() public {
+        handler.hSubmit(1);
+        assertEq(handler.caseCount(), 1, "a case exists");
+        uint256 id = handler.caseIds(0);
+
+        _advance(3); // past the eligibility seed block
+        for (uint256 i; i < 6; ++i) {
+            handler.hCommit(i, 0, i);
+        }
+        assertGt(handler.callsCommit(), 0, "commits are reachable");
+
+        _advance(240);
+        handler.hPoke(0);
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.REVEAL), "COMMIT -> REVEAL");
+        for (uint256 i; i < 6; ++i) {
+            handler.hReveal(i, 0);
+        }
+        assertGt(handler.callsReveal(), 0, "reveals are reachable");
+
+        _advance(240);
+        handler.hPoke(0);
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.TALLY), "REVEAL -> TALLY");
+
+        _advance(8640);
+        handler.hPoke(0);
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.DRAW), "TALLY -> DRAW");
+
+        _advance(600); // past outcomeSeedBlock, inside the horizon
+        handler.hPoke(0);
+        assertTrue(mod.caseInfo(id).terminal != uint8(Moderation.Terminal.NONE), "a terminal is reachable");
+        assertGt(handler.callsPoke(), 0);
+
+        // The index carries it before anybody settles (§8.1).
+        bytes32[] memory tp = handler.topicsOf();
+        assertTrue(
+            idx.statusOf(mod.caseInfo(id).claimKey, tp[0]) != uint8(IndexRegistry.Status.NONE),
+            "the reader sees a result without waiting for settlement"
+        );
+
+        for (uint256 i; i < 6; ++i) {
+            handler.hClaim(i, 0);
+        }
+        assertGt(handler.callsClaim(), 0, "settlement is reachable");
+
+        // And every ledger invariant holds at the end of a real lifecycle.
+        assertEq(token.balanceOf(address(reg)), reg.balanceBuckets());
+        assertTrue(reg.solvent());
+    }
+
+}

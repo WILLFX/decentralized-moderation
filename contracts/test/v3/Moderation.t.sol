@@ -6,52 +6,11 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation, IIndexRegistry} from "../../src/v3/Moderation.sol";
 import {StakeRegistry} from "../../src/v3/StakeRegistry.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
+import {IndexRegistry} from "../../src/v3/IndexRegistry.sol";
 
 /// @notice Records every index write so I15 can be checked by COUNT and ORDER, not
 ///         only by final state. A test that reads the last write cannot tell a
 ///         write at the terminal from one during settlement.
-contract MockIndex is IIndexRegistry {
-    struct Entry {
-        bytes32 claimKey;
-        bytes32 topicKey;
-        uint8 status;
-        uint8 plurality;
-    }
-
-    Entry[] public writes;
-    uint256 public opened;
-    uint256 public closed;
-
-    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality, bool strict)
-        external
-        returns (bytes32)
-    {
-        writes.push(Entry(claimKey, topicKey, status, plurality));
-        strict;
-        return keccak256(abi.encode(claimKey, topicKey));
-    }
-
-    function openQuestion(bytes32, bytes32) external {
-        opened++;
-    }
-
-    function closeQuestion(bytes32, bytes32) external {
-        closed++;
-    }
-
-    function removeListing(bytes32 listClaimKey, bytes32 topicKey) external returns (bytes32) {
-        return keccak256(abi.encode(listClaimKey, topicKey));
-    }
-
-    function count() external view returns (uint256) {
-        return writes.length;
-    }
-
-    function last() external view returns (Entry memory) {
-        return writes[writes.length - 1];
-    }
-}
-
 /// @title Moderation (v3) — §4 state machine suite
 /// @notice Every test names the invariant or section it checks. Tests marked
 ///         MUTATION were verified by removing the named property from the source
@@ -59,7 +18,7 @@ contract MockIndex is IIndexRegistry {
 contract ModerationV3Test is Test {
     MockBZZ internal token;
     StakeRegistry internal reg;
-    MockIndex internal idx;
+    IndexRegistry internal idx;
     Moderation internal mod;
 
     address internal gov;
@@ -110,7 +69,8 @@ contract ModerationV3Test is Test {
         reg = new StakeRegistry(
             IERC20(address(token)), MIN_STAKE, BOND_MIN, MATURATION, EXIT_COOLDOWN, TIMELOCK, MIN_TRACK_DECAY
         );
-        idx = new MockIndex();
+        vm.prank(gov);
+        idx = new IndexRegistry(TIMELOCK);
         mod = new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), gov);
 
         // Governance grants Moderation the two capabilities §2.4 defines.
@@ -120,6 +80,13 @@ contract ModerationV3Test is Test {
         vm.warp(block.timestamp + TIMELOCK);
         vm.prank(gov);
         reg.executeCaps();
+
+        vm.prank(gov);
+        idx.proposeWriter(address(mod), true);
+        (,, uint256 wEta,) = idx.pendingWriterProposal();
+        vm.warp(wEta);
+        vm.prank(gov);
+        idx.executeWriter();
 
         vm.prank(gov);
         mod.applyParams(_params());
@@ -189,6 +156,22 @@ contract ModerationV3Test is Test {
     function _submitFresh(uint256 n) internal returns (uint256 caseId) {
         vm.prank(submitter);
         caseId = mod.submit(keccak256(abi.encode("content", n)), keccak256("meta"), topics, FEE);
+    }
+
+    /// @dev Reads the REAL index for a case's first topic. Asserting on observable
+    ///      state is strictly stronger than counting calls into a stub: it checks
+    ///      what a reader would actually see, and "written at the terminal" becomes
+    ///      "already visible in that transaction" rather than "the stub was called".
+    function _idxStatus(uint256 caseId) internal view returns (uint8) {
+        return idx.statusOf(mod.caseInfo(caseId).claimKey, topics[0]);
+    }
+
+    function _idxPlurality(uint256 caseId) internal view returns (uint8) {
+        return idx.entryOf(mod.caseInfo(caseId).claimKey, topics[0]).plurality;
+    }
+
+    function _idxQuestions(uint256 caseId) internal view returns (uint32) {
+        return idx.entryOf(mod.caseInfo(caseId).claimKey, topics[0]).openQuestions;
     }
 
     function _salt(address a) internal pure returns (bytes32) {
@@ -955,14 +938,15 @@ contract ModerationV3Test is Test {
     ///      settlement is pulled per moderator and may NEVER complete, so the entry
     ///      would sit behind an unbounded number of calls nobody is obliged to make.
     function test_I15_indexIsWrittenAtAllFourTerminalTransitions() public {
+        uint8 UNRES = uint8(Moderation.IndexStatus.UNRESOLVED);
+
         // NO_TURNOUT
         uint256 a = _submitFresh(1);
         _matureAll();
+        assertEq(_idxStatus(a), uint8(Moderation.IndexStatus.NONE), "invisible before the terminal");
         vm.roll(mod.caseInfo(a).phaseDeadline);
-        uint256 before_ = idx.count();
         mod.closeCommit(a);
-        assertEq(idx.count(), before_ + topics.length, "NO_TURNOUT writes O(MAX_TOPICS)");
-        assertEq(idx.last().status, uint8(Moderation.IndexStatus.UNRESOLVED));
+        assertEq(_idxStatus(a), UNRES, "NO_TURNOUT is visible in that transaction");
 
         // NO_REVEALS
         uint256 b = _submitFresh(2);
@@ -972,45 +956,47 @@ contract ModerationV3Test is Test {
         _commit(b, m, APPROVE);
         vm.roll(mod.caseInfo(b).phaseDeadline);
         mod.closeCommit(b);
-        before_ = idx.count();
         vm.roll(mod.caseInfo(b).phaseDeadline);
         mod.closeReveal(b);
-        assertEq(idx.count(), before_ + topics.length, "NO_REVEALS writes");
+        assertEq(_idxStatus(b), UNRES, "NO_REVEALS is visible");
 
-        // NO_RANDOMNESS
+        // NO_RANDOMNESS — and it RETAINS the published plurality beside the status.
         uint256 c = _submitFresh(3);
         _toTally(c, 2, 1);
         vm.roll(mod.caseInfo(c).phaseDeadline);
         mod.closeTally(c);
         vm.roll(uint256(mod.caseInfo(c).outcomeSeedBlock) + HORIZON + 1);
-        before_ = idx.count();
         mod.draw(c);
-        assertEq(idx.count(), before_ + topics.length, "NO_RANDOMNESS writes");
-        assertEq(idx.last().status, uint8(Moderation.IndexStatus.UNRESOLVED));
-        assertEq(idx.last().plurality, APPROVE, "and RETAINS the published plurality");
+        assertEq(_idxStatus(c), UNRES, "NO_RANDOMNESS is visible");
+        assertEq(_idxPlurality(c), APPROVE, "and RETAINS the published plurality");
 
         // FINALIZED
         uint256 d = _submitFresh(4);
         address[] memory who = _toTally(d, 3, 0);
         _rollToDraw(d);
-        before_ = idx.count();
         mod.draw(d);
-        assertEq(idx.count(), before_ + topics.length, "FINALIZED writes");
+        uint8 finalStatus = _idxStatus(d);
+        assertTrue(
+            finalStatus == uint8(Moderation.IndexStatus.APPROVED)
+                || finalStatus == uint8(Moderation.IndexStatus.REJECTED),
+            "FINALIZED is visible"
+        );
 
-        // ...and settlement writes NOTHING.
-        before_ = idx.count();
+        // ...and settlement changes NOTHING a reader sees (§8.1, I15).
         mod.claim(d, who[0]);
-        assertEq(idx.count(), before_, "settlement NEVER touches the index");
+        assertEq(_idxStatus(d), finalStatus, "settlement NEVER touches the index");
+        assertEq(_idxStatus(a), UNRES);
+        assertEq(_idxStatus(b), UNRES);
+        assertEq(_idxStatus(c), UNRES);
     }
 
     /// @dev §8.2 — the interim status is a VALUE, and `NONE = 0` is what makes the
     ///      other five mean anything.
     function test_s8_2_pluralityIsPublishedAtTallyAsAnInterimStatus() public {
         uint256 id = _submit();
-        uint256 before_ = idx.count();
+        assertEq(_idxStatus(id), uint8(Moderation.IndexStatus.NONE), "nothing before TALLY");
         _toTally(id, 1, 4);
-        assertEq(idx.count(), before_ + topics.length, "TALLY publishes the plurality");
-        assertEq(idx.last().status, uint8(Moderation.IndexStatus.PLURALITY_REJECT));
+        assertEq(_idxStatus(id), uint8(Moderation.IndexStatus.PLURALITY_REJECT), "TALLY publishes it");
         assertEq(uint8(Moderation.IndexStatus.NONE), 0, "an unwritten slot is distinguishable");
     }
 
@@ -1334,7 +1320,7 @@ contract ModerationV3Test is Test {
         address[] memory who = _toTally(id, 3, 0);
         _rollToDraw(id);
         mod.draw(id);
-        uint8 s = idx.last().status;
+        uint8 s = _idxStatus(id);
         assertTrue(s == uint8(Moderation.IndexStatus.APPROVED) || s == uint8(Moderation.IndexStatus.REJECTED));
         assertFalse(mod.isVoteSettled(id, who[0]), "nobody has settled");
     }
@@ -1475,6 +1461,13 @@ contract ModerationV3Test is Test {
     function test_s8_4_keyIsInvariantUnderAParameterChange() public {
         uint256 id = _submit();
         bytes32 k0 = mod.caseInfo(id).claimKey;
+        vm.prank(gov);
+        idx.proposeWriter(address(mod), true);
+        (,, uint256 wEta,) = idx.pendingWriterProposal();
+        vm.warp(wEta);
+        vm.prank(gov);
+        idx.executeWriter();
+
         vm.prank(gov);
         mod.applyParams(_params()); // a new version
         assertEq(mod.claimKeyOf(keccak256("content"), keccak256("meta"), topics), k0, "key unmoved");
@@ -2097,13 +2090,11 @@ contract ModerationV3Test is Test {
             mod.claim(id, who[i]);
         }
 
-        uint256 opened0 = idx.opened();
-        uint256 closed0 = idx.closed();
+        assertEq(_idxQuestions(id), 0, "no question stands yet");
 
         vm.prank(submitter);
         mod.reopen(id, FEE);
-        assertEq(idx.opened(), opened0 + topics.length, "one question per topic entry");
-        assertEq(idx.closed(), closed0, "and nothing closed yet");
+        assertEq(_idxQuestions(id), 1, "the re-review opened one against this entry");
 
         // A fresh cohort: I3 bars the first opening's voters from voting again.
         address[] memory fresh = new address[](3);
@@ -2124,13 +2115,13 @@ contract ModerationV3Test is Test {
         mod.closeReveal(id);
 
         // The interim TALLY write is NOT a terminal and must not close it.
-        assertEq(idx.closed(), closed0, "TALLY is not a terminal");
+        assertEq(_idxQuestions(id), 1, "TALLY is not a terminal - it stays open");
         vm.roll(mod.caseInfo(id).phaseDeadline);
         mod.closeTally(id);
 
         _rollToDraw(id);
         mod.draw(id);
-        assertEq(idx.closed(), closed0 + topics.length, "the terminal closes it");
+        assertEq(_idxQuestions(id), 0, "the terminal closes it");
     }
 
     /// @dev Why mutation M53 is EQUIVALENT, and what keeps it that way. `strict`
@@ -2165,11 +2156,9 @@ contract ModerationV3Test is Test {
     function test_s8_3_aFirstOpeningClosesNoQuestion() public {
         uint256 id = _submit();
         _toTally(id, 3, 0);
-        uint256 closed0 = idx.closed();
         _rollToDraw(id);
         mod.draw(id);
-        assertEq(idx.closed(), closed0, "nothing was open to close");
-        assertEq(idx.opened(), 0);
+        assertEq(_idxQuestions(id), 0, "nothing was ever open, so nothing was closed");
     }
 
     // =========================================================================

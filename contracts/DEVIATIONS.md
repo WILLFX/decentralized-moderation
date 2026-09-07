@@ -493,7 +493,7 @@ the source of truth; these are implementation resolutions, not new mechanism. Wh
 §4 was silent or self-contradicting, the entry says so and the question is carried
 into the M2.7 report rather than settled here.
 
-### D3-1. `IIndexRegistry` is declared by `Moderation`, not imported
+### D3-1. `IIndexRegistry` is declared by `Moderation`, not imported — **CLOSED at M2.9**
 
 **What.** `IndexRegistry` has not been ported to v3 (§Scope classifies it "survives
 with edits" and it is not in this order's scope), so `Moderation` declares the
@@ -504,10 +504,15 @@ minimum surface §8 requires of it:
 `NO_RANDOMNESS` to retain the published plurality *beside* the `UNRESOLVED` status.
 Neither is expressible through a single status byte, so the interface carries both.
 
-**Threat model.** None on its own — the mock in the suite counts writes so I15 can
-be checked by count and order rather than by final state. The real risk is that the
-v3 `IndexRegistry` is written to a different shape later; the interface is one
-declaration and the port must reconcile it.
+**Resolution (M2.9).** `IndexRegistry` is built and the interface is the real one:
+`writeEntry` gained `strict`, and `openQuestion` / `closeQuestion` / `removeListing`
+were added for §8.3's split and §8.1's fifth write. The risk this entry named — that
+the index would be written to a different shape — is the one that materialised, and
+the reconciliation was made deliberately rather than by default.
+
+**Threat model.** Closed. `Moderation` still *declares* the interface rather than
+importing it, which is ordinary Solidity practice and keeps the dependency
+one-directional.
 
 ### D3-2. `Case` carries seven fields §4.1 does not list
 
@@ -773,3 +778,60 @@ governance-controlled withdrawal from a contract holding user funds. It is bound
 by one comparison, `amount <= maintenanceReserve`, checked against live state at
 execute. Everything else about the mechanism is the timelock idiom the registry
 already had.
+
+
+### D3-15. §8.1's fifth write and half of §8.3's counter are unreachable from `Moderation`
+
+**What.** `IndexRegistry.removeListing` — §8.1's fifth write — is implemented,
+capability-gated and tested, but no `Moderation` path calls it. `openQuestion` is
+called from `reopen` only, never from a removal case.
+
+**Why.** Both presuppose a case with `actionType == REMOVE`. §8.4 keys a claim as
+`H(actionType, contentHash, metadataHash, canonicalTopics)` and §8.5 fixes
+`actionType ∈ {LIST, REMOVE}`, but `Moderation.claimKeyOf` hardcodes `"LIST"` and
+`submit` takes no action type. §8.5 says a removal case *"runs the same engine"*, so
+supplying one is a `Moderation` change — and M2.9 §5 scopes that contract to the
+real interface plus the `openQuestions` wiring, *"nothing else"*, while forbidding
+re-opening §4.
+
+**Threat model.** Nothing is broken and nothing is unsafe. The effect is that a
+listed entry currently has **no recourse**: §8.4 gives `APPROVED` no re-review path
+(that is deliberate — `reopen` refuses an `APPROVED` case, and the recourse §8.5
+names is a removal case), and the removal case cannot be created. So content that is
+listed and later found unfit stays listed. That is a **liveness gap in the
+architecture, not a defect in either contract**, and it is the largest thing
+standing between this and a four-contract audit.
+
+**Reported, not resolved.** It needs either a `Moderation` order adding
+`actionType`, or a §8 amendment saying who may drive the fifth write. Both entry
+keys are content-derived (§8.2b), so no stored pointer is needed either way — the
+index side is ready for whichever it is.
+
+### D3-16. `SUPER_QUORUM` moved from a call argument to a pinned parameter
+
+**What.** `Moderation.superSafe(caseId, superQuorum)` is gone. The static half of
+§8.3 is computed at the terminal from `Params.superQuorum` and stored on the entry
+as one bit; the query lives on `IndexRegistry`.
+
+**Why.** §8.3 says `SUPER_SAFE` is a query and not a status, and that a value
+computed from `Moderation` would make a reader consult two contracts to answer the
+one question the index exists to answer. A caller-supplied quorum also let two
+readers disagree about the same entry. `SUPER_QUORUM` remains open (§1, §10) — it is
+a governance parameter with no default, pinned per case like every other (I27).
+
+**Threat model.** Narrower. A reader can no longer pass a quorum of their choosing
+and obtain a `SUPER_SAFE` answer the protocol did not make.
+
+### D3-17. The 3/3 conjunct is implemented as §8.3 states it
+
+**What.** `_strict` includes `unanimousDraw`.
+
+**Why.** §10 has it open — §8.3 argues in its own headline that the clause is
+arbitrary rather than meaningful, since under a unanimous tally the three tickets are
+iid and 3/3 versus 2/1 carries no information about the content. M2.9 §6 says to
+implement it as stated and leave the decision upstream, so that is what this does.
+
+**Threat model.** The label is strictly *narrower* than the argument justifies, so
+the error is conservative: some entries that could defensibly read `SUPER_SAFE` do
+not. Dropping it later loosens a published assurance label, which is why it is not
+being done incidentally.

@@ -6,11 +6,18 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {StakeRegistry} from "./StakeRegistry.sol";
 
-/// @notice The index this contract publishes to (§8.1, §8.2).
-/// @dev `IndexRegistry` has not been ported to v3 yet, so this is the minimum
-///      surface §8 requires of it. Recorded in DEVIATIONS.md as D3-1.
+/// @notice The index this contract publishes to (§8.1, §8.2, §8.3).
+/// @dev The real `IndexRegistry` surface as of M2.9. This was an improvised
+///      four-argument stub (D3-1) while the index was unported; `strict` and the
+///      two question calls are §8.3's split, and `removeListing` is §8.1's fifth
+///      write. Only `removeListing` is unreachable from here — see D3-15.
 interface IIndexRegistry {
-    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality) external;
+    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality, bool strict)
+        external
+        returns (bytes32);
+    function openQuestion(bytes32 claimKey, bytes32 topicKey) external;
+    function closeQuestion(bytes32 claimKey, bytes32 topicKey) external;
+    function removeListing(bytes32 listClaimKey, bytes32 topicKey) external returns (bytes32);
 }
 
 /// @title Moderation (v3) — the case state machine
@@ -132,6 +139,7 @@ contract Moderation is ReentrancyGuard {
         uint32 seedLag; // blocks
         uint32 blockhashHorizon; // blocks
         uint32 retryCooldown; // seconds (§8.4; open — §4.8c)
+        uint32 superQuorum; // §8.3; open (§1, §10) — no default, governance-set
         uint16 lateWidenFactorBps; // §3.3, 1.5x == 15_000
         uint16 drawBountyBps;
         uint16 claimBountyBps;
@@ -215,6 +223,11 @@ contract Moderation is ReentrancyGuard {
     mapping(uint256 => mapping(address => uint8)) internal revealedVote; // Outcome
     mapping(uint256 => mapping(address => bool)) internal voteSettled;
     mapping(uint256 => bool) internal challengeSettled;
+
+    /// @dev §8.3 — whether this case currently holds an open question against its
+    ///      own index entries. A re-review OPENS one; its terminal CLOSES it. Not a
+    ///      §4.1 field: it is index bookkeeping, not case state.
+    mapping(uint256 => bool) internal questionOpen;
 
     /// @dev Open vote claims this contract holds against a case. §8.5 assumes prior
     ///      voters are settled before a re-review; settlement is pull-based and may
@@ -807,9 +820,34 @@ contract Moderation is ReentrancyGuard {
         uint256 n = c.topicCount;
         bytes32 key = c.claimKey;
         uint8 plur = c.plurality;
+        bool strict = (s == IndexStatus.APPROVED) && _strict(caseId);
         for (uint256 i; i < n; ++i) {
-            index.writeEntry(key, caseTopics[caseId][i], uint8(s), plur);
+            index.writeEntry(key, caseTopics[caseId][i], uint8(s), plur, strict);
         }
+
+        // §8.3 — the question this re-review opened is resolved at its terminal.
+        // Guarded by `s`, because the interim TALLY write is not a terminal.
+        if (questionOpen[caseId] && s != IndexStatus.PLURALITY_APPROVE && s != IndexStatus.PLURALITY_REJECT) {
+            questionOpen[caseId] = false;
+            for (uint256 i; i < n; ++i) {
+                index.closeQuestion(key, caseTopics[caseId][i]);
+            }
+        }
+    }
+
+    /// @dev §8.3's STATIC half — every conjunct is a tally fact, all known at the
+    ///      terminal, so the bit can never go stale. The live half (`openQuestions`)
+    ///      is the index's, maintained from `reopen` and its terminal.
+    ///
+    ///      `SUPER_QUORUM` is open (§1, §10), so it is a governance parameter pinned
+    ///      per case like every other. The 3/3 conjunct is included as §8.3 states
+    ///      it; §10 has whether it should be there at all, and this order does not
+    ///      decide it.
+    function _strict(uint256 caseId) internal view returns (bool) {
+        Case storage c = cases[caseId];
+        uint256 reveals = uint256(c.pooledApprove) + c.pooledReject;
+        return c.verdict == uint8(Outcome.APPROVE) && c.challenger == address(0) && c.unanimousDraw
+            && reveals >= _p(caseId).superQuorum && c.pooledReject == 0 && reveals == uint256(c.commitsThisRound);
     }
 
     /// @dev Bounties were carved from the fee at submission and `pot` never held
@@ -1032,6 +1070,14 @@ contract Moderation is ReentrancyGuard {
         c.eligSeedBlock = uint40(block.number + p.seedLag);
         c.phaseDeadline = uint40(block.number + c.commitBlocks);
 
+        // §8.3 — a re-review is an open question against the entries this claim
+        // already wrote, and SUPER_SAFE must stop reading true while it stands.
+        questionOpen[caseId] = true;
+        uint256 nt = c.topicCount;
+        for (uint256 i; i < nt; ++i) {
+            index.openQuestion(c.claimKey, caseTopics[caseId][i]);
+        }
+
         emit Reopened(caseId, msg.sender, fee);
         emit PhaseChanged(caseId, uint8(Phase.NONE), uint8(Phase.COMMIT), 0);
     }
@@ -1058,16 +1104,6 @@ contract Moderation is ReentrancyGuard {
 
     function isVoteSettled(uint256 caseId, address m) external view returns (bool) {
         return voteSettled[caseId][m];
-    }
-
-    /// @notice §8.3. `SUPER_QUORUM` is open (§1), so it is supplied by the caller
-    ///         rather than pinned here.
-    function superSafe(uint256 caseId, uint256 superQuorum) external view returns (bool) {
-        Case storage c = cases[caseId];
-        uint256 reveals = uint256(c.pooledApprove) + c.pooledReject;
-        return c.terminal == uint8(Terminal.APPROVED) && c.challenger == address(0) && c.unanimousDraw
-            && c.verdict == uint8(Outcome.APPROVE) && reveals >= superQuorum && c.pooledReject == 0
-            && reveals == uint256(c.commitsThisRound);
     }
 
     /// @notice Forward everything accrued into the registry's maintenance reserve

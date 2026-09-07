@@ -19,9 +19,28 @@ contract MockIndex is IIndexRegistry {
     }
 
     Entry[] public writes;
+    uint256 public opened;
+    uint256 public closed;
 
-    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality) external {
+    function writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status, uint8 plurality, bool strict)
+        external
+        returns (bytes32)
+    {
         writes.push(Entry(claimKey, topicKey, status, plurality));
+        strict;
+        return keccak256(abi.encode(claimKey, topicKey));
+    }
+
+    function openQuestion(bytes32, bytes32) external {
+        opened++;
+    }
+
+    function closeQuestion(bytes32, bytes32) external {
+        closed++;
+    }
+
+    function removeListing(bytes32 listClaimKey, bytes32 topicKey) external returns (bytes32) {
+        return keccak256(abi.encode(listClaimKey, topicKey));
     }
 
     function count() external view returns (uint256) {
@@ -124,6 +143,7 @@ contract ModerationV3Test is Test {
         p.seedLag = SEED_LAG;
         p.blockhashHorizon = HORIZON;
         p.retryCooldown = 1 days;
+        p.superQuorum = 16;
         p.lateWidenFactorBps = 15_000;
         p.drawBountyBps = 50;
         p.claimBountyBps = 100;
@@ -2056,6 +2076,100 @@ contract ModerationV3Test is Test {
         vm.prank(poker);
         mod.sweepMaintenance();
         assertEq(reg.totalStake() + reg.totalBond(), stakeBond, "a deposit moves no moderator's balance");
+    }
+
+    // =========================================================================
+    // §8.3 — the openQuestions wiring (M2.9)
+    // =========================================================================
+
+    /// MUTATION: drop the `openQuestion` loop from `reopen`.
+    /// MUTATION: drop the `closeQuestion` loop from `_writeIndex`.
+    /// @dev §8.3's live half. A re-review is an open question against the entries
+    ///      this claim already wrote, and `SUPER_SAFE` must stop reading true while
+    ///      it stands — then resume at the re-review's terminal, not before.
+    function test_s8_3_aReReviewOpensAQuestionAndItsTerminalClosesIt() public {
+        uint256 id = _submit();
+        address[] memory who = _toTally(id, 0, 5);
+        _rollToDraw(id);
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).terminal, uint8(Moderation.Terminal.REJECTED));
+        for (uint256 i; i < who.length; ++i) {
+            mod.claim(id, who[i]);
+        }
+
+        uint256 opened0 = idx.opened();
+        uint256 closed0 = idx.closed();
+
+        vm.prank(submitter);
+        mod.reopen(id, FEE);
+        assertEq(idx.opened(), opened0 + topics.length, "one question per topic entry");
+        assertEq(idx.closed(), closed0, "and nothing closed yet");
+
+        // A fresh cohort: I3 bars the first opening's voters from voting again.
+        address[] memory fresh = new address[](3);
+        for (uint256 i; i < 3; ++i) {
+            fresh[i] = _moderator(770 + i);
+        }
+        _matureAll();
+        vm.roll(block.number + SEED_LAG + 1);
+        for (uint256 i; i < 3; ++i) {
+            _commit(id, fresh[i], APPROVE);
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeCommit(id);
+        for (uint256 i; i < 3; ++i) {
+            _reveal(id, fresh[i], APPROVE);
+        }
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeReveal(id);
+
+        // The interim TALLY write is NOT a terminal and must not close it.
+        assertEq(idx.closed(), closed0, "TALLY is not a terminal");
+        vm.roll(mod.caseInfo(id).phaseDeadline);
+        mod.closeTally(id);
+
+        _rollToDraw(id);
+        mod.draw(id);
+        assertEq(idx.closed(), closed0 + topics.length, "the terminal closes it");
+    }
+
+    /// @dev Why mutation M53 is EQUIVALENT, and what keeps it that way. `strict`
+    ///      can only be true when `verdict == APPROVE` (`_strict` requires it), and
+    ///      no path writes a non-`APPROVED` status while that holds: an `APPROVED`
+    ///      case is not reopenable at all — §8.4 makes re-review the recourse from
+    ///      `REJECTED` and `NO_RANDOMNESS`, and a listed entry's recourse is a
+    ///      REMOVAL case, which is a different claim key. So the `s == APPROVED`
+    ///      guard is redundancy, not a rule, and this is the reachability fact it
+    ///      rests on.
+    function test_s8_4_anApprovedCaseIsNotReopenable() public {
+        uint256 id = _submit();
+        address[] memory who = _toTally(id, 4, 0);
+        _rollToDraw(id);
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).terminal, uint8(Moderation.Terminal.APPROVED));
+        for (uint256 i; i < who.length; ++i) {
+            mod.claim(id, who[i]);
+        }
+
+        vm.prank(submitter);
+        vm.expectRevert(Moderation.NotReopenable.selector);
+        mod.reopen(id, FEE);
+
+        // And the two that ARE reopenable never held an Approve verdict: REJECTED
+        // holds Reject, NO_RANDOMNESS holds none. So `strict` is false at every
+        // non-APPROVED write by construction, not by the guard.
+        assertEq(mod.caseInfo(id).verdict, APPROVE, "the one status that can be strict");
+    }
+
+    /// @dev A case that was never reopened closes no question it did not open.
+    function test_s8_3_aFirstOpeningClosesNoQuestion() public {
+        uint256 id = _submit();
+        _toTally(id, 3, 0);
+        uint256 closed0 = idx.closed();
+        _rollToDraw(id);
+        mod.draw(id);
+        assertEq(idx.closed(), closed0, "nothing was open to close");
+        assertEq(idx.opened(), 0);
     }
 
     // =========================================================================

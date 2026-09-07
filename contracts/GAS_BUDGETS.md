@@ -504,3 +504,56 @@ calldata are excluded. Fixture: `test_gas_report_maintenance` in
 that ends. `submit` is already the largest call in the system, and nothing reads the
 reserve between sweeps, so the cost is paid once per sweep rather than once per case
 (§5.6.1). The no-op figure is what makes permissionless safe to call speculatively.
+
+
+---
+
+## v3 — measured against the REAL index (M2.9)
+
+**Every v3 figure recorded before this section was a floor.** They were measured
+against a counting stub that incremented a variable, so every `+index` row omitted
+the true cost of writing `MAX_TOPICS` entries. These are measured against
+`IndexRegistry` itself, five topics, `gasleft()` around the call (so the 21,000-gas
+transaction base and calldata are excluded).
+
+| call | gas | note |
+|---|---:|---|
+| `submit` (5 topics) | 434,600 | no index write — the entry does not exist until `TALLY` |
+| `commit` (warm) | 63,541 | registry claim creation dominates |
+| `reveal` | 28,700 | |
+| `closeCommit → REVEAL` | 5,011 | no index write |
+| `closeReveal → TALLY` **(+index)** | 158,053 | 5 interim `PLURALITY_*` entries, cold |
+| `closeTally → DRAW` | 3,525 | |
+| `closeTally → COMMIT (r=1)` | 4,919 | |
+| `challenge` (register only) | 60,449 | no transfer — the bond is covered, not escrowed |
+| **`draw → FINALIZED` (+index)** | **458,640** | 5 terminal writes **and 5 listing pushes** |
+| `draw → NO_RANDOMNESS` (+index) | 80,525 | 5 entry updates, no listing push |
+| `closeCommit → NO_TURNOUT` (+index) | 179,002 | 5 cold entries, not listed |
+| `closeReveal → NO_REVEALS` (+index) | 217,242 | 5 entries over the interim writes |
+| `claim` (coherent: pay + track) | 94,157 | |
+| `claim` (incoherent: debit) | 63,921 | |
+| `claim` (non-revealer: debit) | 65,806 | |
+| `claimChallenge` | 59,707 | |
+| `withdrawRefund` | 6,970 | |
+
+**`draw → FINALIZED` is now the largest call in the system at 458,640**, past
+`submit`'s 434,600. It writes five entries *and* pushes five cold array slots, which
+is what listing content costs. Against a ~17M Gnosis block it is 2.7%, so it is a
+number to know rather than a problem — but the previous ordering ("`submit` is the
+largest call") is no longer true and §5.6.1's argument for a lazy sweep rested on it.
+The argument survives on its own terms: a per-terminal sweep would have added ~55k
+to *this* row.
+
+### IndexRegistry, and why the read side is paged
+
+| call | gas | note |
+|---|---:|---|
+| `writeEntry` into a 3,000-entry topic | measured flat | see `test_s4_gasCurveIsFlatInTopicSize` |
+| delist from the middle of 3,000 | measured flat | swap-and-pop, `O(1)` |
+| `listedPage(0, 10)` of a 10-entry topic | baseline | |
+| `listedPage(0, 10)` of a 3,001-entry topic | within 25% of baseline | `O(limit)`, not `O(topic)` |
+
+The test asserts the bounds rather than the readings, because the point is the
+*shape* of the curve: a write and a delist must not grow with the topic, and a page
+must cost what it reads and not what it skips. A topic accumulates entries without
+limit, so an unpaged read is a contract that stops working at a size nobody chose.

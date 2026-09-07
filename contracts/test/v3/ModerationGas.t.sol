@@ -6,23 +6,18 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Moderation, IIndexRegistry} from "../../src/v3/Moderation.sol";
 import {StakeRegistry} from "../../src/v3/StakeRegistry.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
-
-contract GasIndex is IIndexRegistry {
-    uint256 public n;
-
-    function writeEntry(bytes32, bytes32, uint8, uint8) external {
-        n++;
-    }
-}
+import {IndexRegistry} from "../../src/v3/IndexRegistry.sol";
 
 /// @notice Measured gas for every path a case takes, for `GAS_BUDGETS.md`.
 /// @dev Figures are measured with `gasleft()` around the call, so they exclude the
 ///      21,000-gas transaction base and calldata cost. The index is a counting
-///      stub: a real `IndexRegistry` write is a cold SSTORE per topic on top.
+///      REAL `IndexRegistry`, not a stub — every `+index` row below therefore
+///      carries the true cost of `MAX_TOPICS` entry writes. Figures measured
+///      against the old counting stub were FLOORS and understated the system.
 contract ModerationGasTest is Test {
     MockBZZ internal token;
     StakeRegistry internal reg;
-    GasIndex internal idx;
+    IndexRegistry internal idx;
     Moderation internal mod;
 
     address internal gov;
@@ -46,7 +41,8 @@ contract ModerationGasTest is Test {
         token = new MockBZZ();
         vm.prank(gov);
         reg = new StakeRegistry(IERC20(address(token)), MIN_STAKE, BOND_MIN, MATURATION, 7 days, TIMELOCK, 0.5e18);
-        idx = new GasIndex();
+        vm.prank(gov);
+        idx = new IndexRegistry(TIMELOCK);
         mod = new Moderation(IERC20(address(token)), reg, IIndexRegistry(address(idx)), gov);
 
         uint8 bits = reg.MAY_CREATE() | reg.MAY_DISCHARGE();
@@ -65,6 +61,7 @@ contract ModerationGasTest is Test {
         p.seedLag = SEED_LAG;
         p.blockhashHorizon = 256;
         p.retryCooldown = 1 days;
+        p.superQuorum = 16;
         p.lateWidenFactorBps = 15_000;
         p.drawBountyBps = 50;
         p.claimBountyBps = 100;
@@ -78,6 +75,13 @@ contract ModerationGasTest is Test {
         p.feeBase = uint128(100 * UNIT);
         p.feePerTopic = uint128(10 * UNIT);
         p.threshold = type(uint256).max;
+        vm.prank(gov);
+        idx.proposeWriter(address(mod), true);
+        (,, uint256 wEta,) = idx.pendingWriterProposal();
+        vm.warp(wEta);
+        vm.prank(gov);
+        idx.executeWriter();
+
         vm.prank(gov);
         mod.applyParams(p);
 

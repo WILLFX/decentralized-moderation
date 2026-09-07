@@ -3107,6 +3107,34 @@ rule's cost is real, and it stays blocked. **`measurement/prior/` is not a
 nice-to-have that would improve a parameter; it is the thing that decides whether
 this architecture is deployable at all.**
 
+> **The removal case does not exist, and until it does a listing is permanent.**
+> Found by the M2.9 implementation (D3-15). `Moderation.claimKeyOf` hardcodes
+> `"LIST"` and `submit` takes no `actionType`, so the case type this paragraph
+> describes **cannot be created**. §8.4 withholds re-review from `APPROVED`
+> deliberately — the removal case is what serves instead — and the removal case is
+> unreachable. `APPROVED` is `reserved while listed` (§8.4), so the content cannot
+> be resubmitted either, and the reservation clears only when the entry becomes
+> `REMOVED`, which nothing can make it. **The circle closes with no exit.**
+>
+> **This is worse than the permanence §8.6 calls decisive, on every axis.** §8.6
+> measures irrecoverable *false rejection* at 22.8% (`prior` 0.665) falling to 0.7%
+> (0.95), and says that number decides whether the architecture is deployable.
+> Permanent *false approval* is `FINDINGS-v3` §A's table, and it is worse:
+>
+> ```
+> P(unsafe content approved)     q=0     q=0.10   q=0.30
+>              prior 0.665      0.286     0.388    0.600
+>              prior 0.950      0.013     0.090    0.336
+> ```
+>
+> At `prior` 0.665 with **no attacker at all**, 28.6% of unsafe content is listed
+> and can never be removed. False rejection has partial recourse (18–95% reachable
+> by re-review); this has none. And it is the failure a safe-search index exists to
+> prevent — a wrong rejection withholds something that should have been shown, a
+> wrong approval shows something that should not have been.
+>
+> **P0, and it outranks the fourth contract.** §10 carries it.
+
 **Correction is a separate claim. Re-review is not.** A *removal* case asks a
 different question about the same content — is a listed entry still fit to be
 listed — so it runs the same engine, produces `REMOVED` or `RETAINED`, and earns
@@ -3220,6 +3248,7 @@ property.
 | The plug-in residual in `f(â)` | §4.5. `f(â)` sits above the exact posterior predictive `E[f(θ)] = (A+1)(A+2)(3N−2A+6)/((N+2)(N+3)(N+4))` at every tally but the tie — 4.1 points at `N = 1`, 0.15 at `N = 40`. Kept deliberately: three ticket comparisons are the senior reviewer's rule and the shape §4.5's argument is written in, and the exact form would be a third change to the core verdict arithmetic in one revision. **Every figure derived from `f` in either document inherits the over-claim** and is labelled with the estimator per I33. Re-openable on evidence, and the closed form is recorded in §4.5 so nobody derives it twice |
 | Re-review cooldown | §8.5. Reopening a claim is structurally deterred — no re-roll, monotone in the tally, self-defeating under repetition — so the cooldown is not what stops an attacker; it is what stops a *burst* from consuming cohort attention, which FINDINGS §D shows is the scarce resource at launch registry sizes. It prices the same thing `CHALLENGE_BOND` prices and should probably be set beside it. **Open, and the one number §8.4's permanence argument now depends on** |
 | ~~The maintenance reserve has no exit~~ | **CLOSED at `c2d4407`.** Was this list's only P0, surfaced by the M2.7 implementation and not by review — *"there is no exit"* is not a failing assertion, so neither suite could have caught it. §5.6/§5.6.1 decided one pool in the registry with a timelocked withdrawal; M2.8 implemented it. `StakeRegistry` 33/33 mutations killed on a **combined** baseline (the original 25 re-run plus 8 for the new surface), 10,065 B. The `executeMaintenanceWithdrawal` body names `maintenanceReserve` and nothing else — `totalStake` and `totalBond` do not appear in it, so there is no arithmetic to subvert, only the cap to evade, and that is checked against live state at execute |
+| **A listing is permanent — the removal case cannot be created** | **P0, and it outranks `RulesetGovernor`.** Surfaced by the M2.9 implementation (D3-15). §8.4 keys claims on `actionType` and §8.5 fixes it to `{LIST, REMOVE}`, but `Moderation.claimKeyOf` hardcodes `"LIST"` and `submit` takes no action type — so the case type §8.5 names as the recourse for a listed entry is unreachable, while §8.4 withholds re-review from `APPROVED` on the assumption that it exists. `APPROVED` is reserved while listed, so resubmission is closed too, and the reservation clears only on `REMOVED`, which nothing can produce. **Worse than the permanence §8.6 calls decisive**: 28.6% of unsafe content is listed at `prior` 0.665 with *zero* attackers (60% at `q = 0.30`), against §8.6's 22.8% irrecoverable false rejection — and unlike rejection it has no partial recourse. §8.1's fifth write and half of §8.3's `openQuestions` already exist in `IndexRegistry` and are unreachable until this closes |
 | **`execute*()` takes no argument, so a pending proposal can be swapped under an approver** | **Low, inherited, and not introduced by M2.8.** `executeCaps()` and `executeMaintenanceWithdrawal()` both execute *whatever is pending*, while `executeCondemn(logic)` names its target. Inside a multisig that means one signer can queue a withdrawal, a second replace it, and an approval given for the first execute the second. **The timelock defuses it rather than the signature does**: a replacement calls `propose*` again, which sets a fresh `eta`, so the swapped proposal waits the full delay in the open before it can execute. The fix — take the parameters at execute and require they match the pending record — is small but touches `executeCaps`, which is inside the original mutation baseline, so it is recorded rather than bundled into M2.8 |
 | `CLAIM_BOUNTY` on `UNRESOLVED` | **Surfaced by the M2.7 implementation, not by review.** §4.8 retains the finalization bounty on all three `UNRESOLVED` rows, but every terminal transition is permissionless and somebody paid gas to poke it — and `DRAW_BOUNTY` is *paid* to exactly that poker on `NO_RANDOMNESS`. Either the two bounties are treated alike or §4.8 must say why not. Deliberately **not** decided when the pot and draw-bounty rows were corrected: those were contradictions, this is a fee-schedule change, and the two should not ride together |
 | `RETRY_COOLDOWN` | §8.4, and **now for `NO_REVEALS` alone.** It has lost both of its earlier jobs rather than been tuned for them: poke-refusal went to §7.3's debit, and the submitter's escape went to I26's reservation. What it still prices is the party who holds every commit on a case and withholds them all — a delay long enough that reaching `NO_REVEALS` deliberately is not worth the `REVEAL_BOND` it costs. **One knob, one attacker, for the first time in this document.** **Its required value rose with §4.8b and has not been recomputed:** the sizing assumed sixteen bonds because `MIN_COMMITS` was 16, and the gate is gone (§4.8c), so the same deterrence now has to come from delay alone against a single bond. §4.8c measures the exposure at 7.1% of cases at registry 100 and 0.33% at 250 — small, but it was **zero** before, so this row is no longer a tuning question that can be deferred with the others |

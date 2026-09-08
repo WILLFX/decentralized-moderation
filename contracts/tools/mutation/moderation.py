@@ -287,9 +287,11 @@ MUTATIONS = [
  ("M66", "\u00a74.1/D3-21", "the guidelines version is not pinned at submission",
   "        c.guidelinesVersion = currentGuidelinesVersion;\n", ""),
 
- ("M67", "\u00a74.1/D3-21", "the pin is re-read live instead of at submission - a mid-case change moves it",
-  "        uint32 guidelinesVersion; // \u00a74.1 \u2014 pinned at submission, like `paramsVersion`",
-  "        uint32 guidelinesVersionUnused;"),
+ # M67 previously renamed the struct field, which breaks every reference to it and
+ # therefore never compiled — the pure/view trap in another costume: a mutation
+ # that cannot build is INVALID, never a kill. Re-anchored to a change that runs.
+ ("M67", "\u00a74.1/D3-21", "applyGuidelines accepts the version but never stores it",
+  "        currentGuidelinesVersion = v;\n", ""),
 
  ("M68", "\u00a74.1/D3-21", "applyGuidelines is permissionless",
   "    function applyGuidelines(uint32 v) external onlyGovernor {",
@@ -309,7 +311,13 @@ MUTATIONS = [
 
 
 def run():
-    r = subprocess.run([FORGE, "test", "--match-path", "test/v3/Moderation.t.sol"],
+    # `test/v3/*`, NOT `test/v3/Moderation.t.sol`. This harness was the only one of
+    # the four narrowed to a single file, and the narrowing silently excluded every
+    # other v3 suite — the stateful invariants, the draw properties, the governor
+    # suite and the deploy suite. A mutation those kill and this file does not was
+    # scored SURVIVED and then argued about as if the whole suite had had its
+    # chance. See README.
+    r = subprocess.run([FORGE, "test", "--match-path", "test/v3/*"],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
     if "Compiler run failed" in out:

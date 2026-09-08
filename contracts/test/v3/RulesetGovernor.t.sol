@@ -1027,6 +1027,12 @@ contract RulesetGovernorTest is Test {
         assertEq(address(next.moderation()), address(mod), "and the successor is bound, atomically");
         assertTrue(gov.retired(), "the outgoing one is retired");
 
+        // The pending record is cleared. A replay is already refused by `retired`,
+        // so this is not about safety — it is that a governance reader would
+        // otherwise be shown a pending handover that can never execute.
+        (,, bool stillPending) = gov.pendingGovernorChangeProposal();
+        assertFalse(stillPending, "the executed handover leaves no pending record");
+
         // The successor governs for real.
         Moderation.Params memory p = _params(7 * LAMBDA);
         vm.prank(owner);

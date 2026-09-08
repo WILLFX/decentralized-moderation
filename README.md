@@ -74,7 +74,15 @@ Anyone becomes a moderator by staking **10 xBZZ** — a flat amount, the same fo
 
 Stake is never destroyed or transferred to another moderator; every debit goes to the maintenance reserve (principle 2).
 
-**One stake, one vote, and concurrency is priced rather than capped.** There is no seat, no reservation, and no cap on how many cases a moderator may be voting in at once. What bounds it is solvency: each open vote accrues a liability against the bond, so a moderator can hold as many open votes as they can back. That replaced v2's risk units — a *price* where the earlier design used a *reservation* — and it is what makes the queue unfloodable while keeping per-case consequence bounded.
+**One stake, one vote, and concurrency is capped by solvency.** Every open vote accrues a liability of `LAMBDA` against the bond, and a moderator may commit only while
+
+```
+bond  ≥  BOND_MIN + liabilities + LAMBDA
+```
+
+so the number of cases they can be voting in at once is **bounded by `(bond − BOND_MIN) / LAMBDA`** — exactly that, where every open case carries the same `λ`, and otherwise however many open votes the bond covers, since `LAMBDA(c)` is pinned per case at submission. There is no seat and nothing is reserved, but concurrency is not unlimited and the design does not claim it is: unlimited simultaneous votes and a bounded per-vote debit cannot coexist, because *n* votes that can each cost `d` are a liability of `n·d` however the accounting is phrased.
+
+What changed from v2 is the *shape* of the bound, not its existence. v2 divided the stake into `K = stake / UNIT_STAKE` discrete risk units, **reserved** one per commit, and **froze** it on a loss. v3 accrues a continuous liability, **debits** it on a loss, and never freezes anything. Accrual rather than reservation is what stops capacity being stranded — nothing is set aside for cases a moderator never commits to, so what limits them is the risk they are actually carrying — and a debit rather than a freeze is what makes the penalty commute (principle 5). Neither is what makes the queue unfloodable; that is principle 3, and it is a separate property.
 
 Staking more than the minimum buys nothing. Voting power is flat per identity, so influence is bought by running more moderator identities, each costing its own 10 xBZZ — which means influence still costs capital linearly, but no single account accumulates a large voice. Identities are cheap to create and, by design, expensive to *replace*: a fresh identity carries no track record (principle 6) and cannot vote until its stake matures, so abandoning a penalised identity for a new one costs both the waiting period and the accumulated standing.
 

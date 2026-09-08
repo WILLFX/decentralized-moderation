@@ -978,3 +978,116 @@ worth naming:
 `guidelinesVersion`; §8.4 already establishes that a version bump does not reopen
 rejections, and it does not enter any key. The consequence is entirely on the
 measurement, which is where §10 says the binding constraint already is.
+
+### D3-19 (closed at M2.13). Removal economics: no refund, no cooldown
+
+**Decided, and the refund answer inverts the obvious one.**
+
+**No refund on a successful removal.** Refunding looks like paying whoever
+corrects a protocol error, which is why it is the reading that suggests itself
+first. It is wrong, and the reason is that a removal is judged by *the same engine
+at the same accuracy* as a listing. So a removal brought against legitimately
+listed content carries at the **false-approval rate** — 60% at `prior` 0.665,
+`q = 0.30` (FINDINGS §A). Refund-on-success therefore makes a censorship attempt
+**free in the majority of attempts** at the accuracy this design is obliged to
+assume. The fee is the only thing pricing that attempt, and it must be paid
+whether the removal carries or not.
+
+The party who catches a genuine bad listing is uncompensated under this rule.
+That is a real cost and it is accepted: the alternative subsidises the attacker
+more than it subsidises the corrector, because the attacker succeeds more often
+than the accuracy figures would suggest is safe.
+
+**No cooldown between removal attempts.** Repetition is already bounded, and by a
+mechanism this implementation got for free by not forking the engine: a failed
+removal is an ordinary `REJECTED` claim, so §8.4 **permanently reserves the
+`REMOVE` key**. A second identical removal is refused outright. The only recourse
+is `reopen`, which carries the tally forward and is self-defeating for exactly the
+reason §8.5 gives — every failed attempt makes the next one harder.
+
+A cooldown would therefore price something that cannot happen. What remains
+unbounded is removals against *different* `(content, metadata, topics)` tuples,
+which are different claims and are priced by their own fees.
+
+### D3-22. §8.3's 3/3 conjunct is dropped, and `unanimousDraw` with it
+
+**What.** `SUPER_SAFE` no longer requires the three tickets to agree. Every other
+conjunct is unchanged. `Case.unanimousDraw` is removed.
+
+**Why it is not a weakening.** Under a unanimous tally the three tickets are three
+draws of the same coin — `f(â)` is one number and each ticket tests it
+independently — so 3/3 versus 2/1 carries **no information about the content**.
+The conjunct therefore published a random subsample of what qualified: 7% of
+qualifying content excluded at `N = 40`, 16% at `N = 16`. `SUPER_SAFE` meant "met
+the real criteria, then won a coin flip", and the label did not say so. Dropping
+it stops the label lying about its own selectivity.
+
+Every conjunct that remains is a **tally fact** — `actionType == LIST`, verdict
+Approve, no challenger, reveals at or above `SUPER_QUORUM`, zero Reject reveals,
+every committer revealed. Nothing enters `SUPER_SAFE` that a unanimous,
+fully-revealed, super-quorum cohort did not approve.
+
+**Threat model.** The label becomes *more* inclusive, so this loosens a published
+assurance. That is the direction that needs justifying, and the justification is
+that the excluded set was selected at random rather than by any property of the
+content: no reader was protected from anything by the exclusions, because the
+excluded entries are drawn from the same distribution as the included ones.
+
+**Size.** `unanimousDraw` sat in `Case` slot 0 beside `phase`, `round`,
+`terminal`, `unresolvedReason`, `paramsVersion`, three `uint40` heights,
+`plurality` and `verdict` — 26 of 32 bytes used. Removing one byte leaves 25 and
+changes no packing, so the size movement is code, not layout.
+
+### D3-23. `CLAIM_BOUNTY` is paid on every `UNRESOLVED` row
+
+**What.** `_settleBounties` pays `CLAIM_BOUNTY` to whoever poked the terminal
+transition, on `NO_TURNOUT`, `NO_REVEALS` and `NO_RANDOMNESS` alike. It was
+previously retained into `maintenanceAccrued` on all three.
+
+**Why the earlier classification was wrong.** This was carried in §10 as a
+fee-schedule change, to be decided separately from the contradictions M2.7 fixed.
+That was a misreading of §4.8's own rule, which is *"a bounty is refunded where
+the transition it pays for cannot occur, and paid where that transition was
+performed"*. On every `UNRESOLVED` row the transition **was** performed —
+permissionlessly, by someone paying gas. Retention was not a different question;
+it was the same rule applied inconsistently.
+
+**Why retention was actively harmful, not merely untidy.** `NO_RANDOMNESS` has a
+party who gains from poking it regardless of the bounty: §7.3's debit on the
+plurality-losing revealers makes poking dominant for a party guaranteed to exist
+and to be watching. **`NO_TURNOUT` and `NO_REVEALS` have no such party.** Nobody's
+position improves by closing them. So an unpaid poke left a transition that
+somebody must perform and nobody is funded to perform — on the two rows a thin
+registry reaches most often (FINDINGS §D).
+
+**Threat model.** The submitter's refund is unchanged; `CLAIM_BOUNTY` was carved
+from the fee at submission and never belonged to the pot. What changes is that it
+reaches the poker instead of the maintenance reserve, so the reserve accrues
+slightly less. That is the intended transfer: it pays for work that is now
+reliably done rather than hoped for.
+
+### D3-24. `StakeRegistry`'s two `execute*()` calls now name their arguments
+
+**What.** `executeCaps(address logic, uint8 capBits)` and
+`executeMaintenanceWithdrawal(address to, uint256 amount)` compare against the
+pending record and revert `ProposalMismatch` on any difference.
+
+**Why it stopped being deferrable.** §10 recorded this as low and inherited, and
+M2.8 declined to bundle it because `executeCaps` sits inside a mutation baseline
+that was expensive to re-establish. That was the right trade while the baseline
+was the only evidence available. It is not any more: the harnesses work, they
+report `INVALID` correctly, and a re-run is a known cost. Leaving a known
+governance hazard in place so a number stays undisturbed is the wrong trade, and
+"deferred" is not something an auditor should have to discover.
+
+**What the hazard is.** Both executed *whatever was pending*, so inside a multisig
+one signer could queue a change, a second replace it, and an approval given for
+the first execute the second. The timelock defused it rather than the signature
+did — a replacement calls `propose*` again, resetting the `eta`, so the swap waits
+the full delay in the open. But the capability path can hand out `MAY_DISCHARGE`,
+and the withdrawal path moves value to an address the approver never saw.
+
+**Shape.** Direct field comparison rather than the governor's hash comparison,
+because these carry two fields rather than a 21-field struct. `RulesetGovernor`
+hashes because hashing a wide struct is cheaper and cannot silently omit a field
+somebody adds later; neither consideration applies to two.

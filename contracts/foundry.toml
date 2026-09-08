@@ -21,7 +21,9 @@ optimizer_runs = 200
 via_ir = true
 
 # Differential vectors are read from disk (M2-8, D10).
-fs_permissions = [{ access = "read", path = "./test/vectors" }]
+# Differential vectors are read from disk (M2-8, D10), and M2.13 §5 WRITES the
+# draw vectors the Python differential consumes.
+fs_permissions = [{ access = "read-write", path = "./test/vectors" }]
 
 # Integer-only accounting contract: no unchecked surprises we didn't write.
 # Deterministic test RNG so distribution/statistical tests are reproducible.

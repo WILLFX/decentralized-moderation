@@ -11,9 +11,9 @@
 This is the **Schelling focal point** of the whole protocol. Moderators are not
 paid to enforce their personal taste; they are paid to predict *the reading any
 other honest moderator would give this same document*. Coherence with the final
-outcome earns fees; incoherence earns a freeze. The profitable long-run strategy
-is therefore to judge exactly the way a neutral reader of these guidelines would
-— nothing more, nothing less.
+verdict earns a share of the fee; incoherence costs a fixed debit from your bond.
+The profitable long-run strategy is therefore to judge exactly the way a neutral
+reader of these guidelines would — nothing more, nothing less.
 
 Because coherence is what is rewarded, this document is **as load-bearing as the
 contract**. Its keccak-256 hash is recorded on-chain, and the contract pins the
@@ -101,42 +101,65 @@ question specific to removals:
 
 > **Should this entry no longer be in the index?**
 
-Vote to **remove** (i.e. coherent with the removal request) if the entry now
-fails any part of the test — for example the content has been shown to be
-unsafe, the metadata has been shown to be bait, or the underlying Swarm content
-is gone so the entry points at nothing. Vote to **keep** (coherent with
-rejecting the removal request) if the entry still passes. A removal request is
-not a mechanism for re-litigating a sound approval; frivolous removals fund the
-moderators who correctly vote to keep, exactly as frivolous submissions do.
+**Read the ballot carefully, because a removal inverts what a vote means.** A
+removal case asks *"should this be removed"*, so an **Approve** vote on a removal
+case means **take it out of the index**, and a **Reject** vote means **leave it
+listed**. It is the same ballot as any other case; only the question changes.
+
+Vote to remove if the entry now fails any part of the test — the content has been
+shown to be unsafe, the metadata has been shown to be bait, or the underlying
+Swarm content is gone so the entry points at nothing. Vote to keep if the entry
+still passes.
+
+A removal is not a mechanism for re-litigating a sound approval, and it is priced
+so that it cannot be used as one: **the fee is paid whether the removal succeeds
+or fails**, so a speculative removal costs its submitter every time. Frivolous
+removals fund the moderators who correctly vote to keep, exactly as frivolous
+submissions do.
 
 ## 4. Practical notes for moderators
 
 - **Fetch before you vote.** Both the content chunk and the metadata JSON are
   content-addressed (CAC), so what you fetch is exactly what was submitted and
   exactly what stays approved. Never vote on the metadata alone.
-- **Borderline cases will occur.** On a genuinely borderline judgment you may
-  lose the probabilistic draw and be frozen for a period; this is an
-  inconvenience, not a material loss (design principle 1). Judge honestly
-  regardless — over many cases, honest judgment is the only strategy that is
-  profitable in the long run.
-- **Challenge incorrect outcomes.** If you believe a provisional outcome is wrong
-  and you are eligible for the next round, you can challenge it. Challenging is
-  itself a vote against the standing verdict: you post no bond and pay no fee, but
-  your own stake carries the risk, and if the verdict survives you are frozen like
-  any other moderator who ended up on the losing side. An incorrect outcome that
-  nobody challenges will simply stand.
+- **Reveal what you committed.** Committing costs you nothing up front, but a
+  commitment you never reveal is debited `REVEAL_BOND` at settlement. Withholding
+  is never worth it: your vote can only help the side you actually hold, and
+  removing it strictly lowers that side's chances (`state-machine-v3` §5.2).
+- **Borderline cases will occur.** On a genuinely borderline judgment you may end
+  up incoherent with the verdict and pay the debit `d`. It is a bounded, one-off
+  amount set as a small multiple of what a case pays — an inconvenience, not a
+  material loss, and it never touches your 10 xBZZ stake (design principle 1).
+  Judge honestly regardless: over many cases, honest judgment is the only strategy
+  that is profitable in the long run.
+- **Challenge incorrect outcomes, and understand what a challenge is.** At about
+  one hour the contract publishes the **plurality** — which side has more revealed
+  votes. That is a fact about the votes and **not a verdict**; no randomness has
+  been drawn yet. During the challenge window that follows, any active moderator
+  may register a challenge by posting `CHALLENGE_BOND`.
 
-  (This replaces the earlier bonded-appeal path, where a challenger posted an
-  escalating bond and a correct appeal was reimbursed with a bonus. That mechanism
-  belongs to the first architecture — see `specs/state-machine.md`. The current
-  design is in README §3.4.)
+  Three things about it are easy to get wrong:
+
+  - **A challenge is not a vote and does not say which side you are on.** It buys
+    a second round; it does not state a position in it. You commit inside that
+    round like everyone else, hidden (`state-machine-v3` §3.5).
+  - **The bond is a price, not a bet.** It is debited whichever way the case ends.
+    You are not refunded for being right, and you are not charged extra for being
+    wrong — so there is nothing to steer (§4.6).
+  - **You need no eligibility to challenge.** Any active moderator may. But you do
+    need eligibility to *vote* in the round you bought, like anyone else.
+
+  Votes from both rounds are **pooled** into one tally, and the single random draw
+  happens after everything closes. So a challenge that brings no new votes returns
+  the identical verdict — the only way to change the answer is to change the
+  evidence. An incorrect outcome that nobody challenges will simply stand.
 - **Use a fresh address per moderator identity.** Addresses are permanently
   linked on-chain to the decisions they make. Treat moderator addresses as
   disposable identities, not as your primary wallet. (Open question in the
-  README; recommended practice here.) Note the trade-off: track record — and
-  the freezing power it confers — accrues per address and does not transfer, so
-  rotating an address resets you to a newcomer's freezing power. Each moderator
-  weighs privacy against the standing they have built.
+  README; recommended practice here.) Note the trade-off: your **track record**
+  accrues per address and does not transfer, so rotating an address resets it to
+  a newcomer's. Each moderator weighs privacy against the standing they have
+  built.
 
 ---
 
@@ -157,3 +180,21 @@ moderators who correctly vote to keep, exactly as frivolous submissions do.
 - **v1** — Initial version. Three-question test (safe / honest metadata /
   fitting topics), the "Would Google SafeSearch return this?" safety line,
   removal-request handling, and moderator practical notes.
+
+  **Corrected in place, before first use, and deliberately not cut as v2.** The
+  §4 practical notes and the §3 removal text described the *v2* mechanism —
+  challenges as unbonded public votes, penalties as identity freezes, "freezing
+  power" — all of which `specs/state-machine-v3.md` replaced with a bonded
+  challenge that discloses no direction (§3.5), a fixed balance debit (§5.1), and
+  a `track` record that no longer sets any freeze length. The three-question test
+  itself is unchanged; only the descriptions of consequence were wrong.
+
+  **Why this is not a version bump.** The change-control rule below cuts a new
+  version when a *disputed case* shows the text is ambiguous. No case has ever
+  been judged under v1 — it has never been pinned to a submission, so there is
+  nothing whose judgment this could retroactively alter, which is the only harm
+  the rule exists to prevent. Correcting it now is free; correcting it after a
+  testnet begins would split `measurement/prior`'s dataset along
+  `guidelinesVersion` and leave two underpowered samples instead of one usable
+  one (`measurement/prior/README.md`). **A version bump becomes mandatory the
+  moment the first case is submitted.**

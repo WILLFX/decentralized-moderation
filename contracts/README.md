@@ -1,15 +1,82 @@
-# Moderation contract (M2)
+# Moderation contracts
+
+**This directory holds two complete implementations of two different
+architectures.** Read this section before anything else, because everything below
+it describes the older one.
+
+| | directory | spec | status |
+|---|---|---|---|
+| **v3 — current** | `src/v3/` | `specs/state-machine-v3.md` | **the architecture under review** |
+| v1 — historical | `src/` | `specs/state-machine.md` | complete, audited, superseded |
+
+---
+
+## v3 — the current architecture
+
+Solidity implementation of **`specs/state-machine-v3.md`**, which is normative.
+Where `specs/design-v3.md` disagrees with it, the state machine wins.
+
+Four contracts, all inside EIP-170:
+
+| File | Role | Runtime |
+|---|---|---|
+| `src/v3/Moderation.sol` | The **case state machine** — §4 end to end, plus the parts of §5, §7 and §8 a case reaches. A *logic* contract in the registry's sense: it drives moderator accounting through `StakeRegistry` and never touches a bond directly. | 21,786 B (88.6%) |
+| `src/v3/StakeRegistry.sol` | **Permanent** custody of stake and bond, the claim ledger (§2.4), capability grants and the one maintenance reserve (§5.6). | 10,338 B (42.1%) |
+| `src/v3/RulesetGovernor.sol` | Timelocked parameter and guidelines governance. `Moderation` is its **target**, not its host — the pending record and `eta` live here, which is why adding governance cost `Moderation` nothing. | 6,386 B (26.0%) |
+| `src/v3/IndexRegistry.sol` | **Permanent** topic → entry index — what a reader actually consults (§8). | 4,285 B (17.4%) |
+
+**Deployment:** `script/DeployV3.s.sol`, exercised by `test/v3/DeployV3.t.sol`.
+`verify()` is the real deliverable: every link in the stack fails *silently and
+late* — a missing `MAY_DISCHARGE` reverts at settlement, after bonds are
+committed — so `verify` names the first broken one instead.
+
+### How v3 is checked
+
+**266 tests across 9 suites**, and the four kinds are not interchangeable:
+
+| Suite | What it is for |
+|---|---|
+| `Moderation.t.sol`, `StakeRegistry.t.sol`, `IndexRegistry.t.sol`, `RulesetGovernor.t.sol` | Per-contract properties, each test naming the invariant or § it checks |
+| `Invariant.t.sol` + `handlers/SystemHandler.sol` | **Stateful** invariants over all four *real* contracts under the fuzzer — 11 properties the machine tries to break, rather than sequences we thought of |
+| `DrawProperties.t.sol` | The draw swept rather than sampled — 2,600 exact monotonicity comparisons, I12 at every unanimous tally |
+| `DrawVectors.t.sol` + `simulation/v3/check_draw_vectors.py` | A **two-implementation differential** on the draw. The contract emits vectors; a Python derivation reproduces `u[0..2]`, tickets and verdict independently |
+| `ModerationGas.t.sol` | Measured figures for `GAS_BUDGETS.md` |
+
+**Mutation testing** (`tools/mutation/`) is the acceptance bar, not a metric:
+`StakeRegistry` 37/37, `RulesetGovernor` 57/57, `IndexRegistry` 33/33,
+`Moderation` 70/75 with five survivors argued as equivalent mutants and
+**reachability asserted by test rather than by prose**. A compile failure is
+reported `INVALID`, never scored as a kill — that rule exists because it was
+violated twice before it was written down.
+
+The differential is **KAT-gated**: `simulation/v3/keccak.py` validates itself
+against `hashlib.sha3_256` and published Keccak-256 vectors at import, and raises
+rather than returning numbers if either fails. The checker also breaks its own
+derivation and requires the comparison to notice, so an agreement is evidence
+rather than a coincidence.
+
+### What v3 leaves open
+
+`contracts/DEVIATIONS.md` D3-1…D3-22 is the complete list — every place the
+implementation departed from, refined, or pinned something the spec left open,
+with what, why, and threat-model impact. `specs/state-machine-v3.md` §10 carries
+the parameters that are still open and the reasons they cannot be closed from
+inside the design.
+
+---
+
+## v1 (M2) — the first architecture, kept for reference
 
 Solidity implementation of `specs/state-machine.md`, built and tested with
 Foundry. Work order: `specs/m2-work-order.md`.
 
-> **This implements the FIRST architecture.** Panels are drawn, drawn moderators
-> are obligated to serve, appeals are bond-funded, and deeper rounds supersede
-> shallower ones. README §3 describes the architecture the project is now building
-> (M2.5) — no draw, no obligation, hash-based eligibility, pooled tallies — and
-> README §8 lists what carries forward from this code and what it replaces. Nothing
-> below is stale about *this* codebase; it simply describes the reference
-> implementation rather than the current design.
+> **This implements the FIRST architecture and is superseded.** Panels are drawn,
+> drawn moderators are obligated to serve, appeals are bond-funded, and deeper
+> rounds supersede shallower ones. It is kept because it is complete, audited, and
+> because building it is what produced the finding that motivated everything
+> since: **assigning moderators to cases creates a resource an attacker can
+> exhaust.** Nothing below is stale about *this* codebase; it simply describes a
+> design the project no longer builds on.
 
 > Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
 > independently verified and eight blocking regressions were found in items marked

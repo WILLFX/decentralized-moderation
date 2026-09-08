@@ -2,13 +2,35 @@
 
 *A staking-based moderation market and safe-search index for [Swarm](https://www.ethswarm.org/), governed entirely by a smart contract.*
 
-Content publishers pay a fee to be moderated. Staked moderators (human or AI) judge submissions in a Schelling game: for each case a random subset of moderators becomes eligible to vote, outcomes are drawn with probability proportional to the votes behind each side, and anyone who disagrees can challenge — putting their own stake behind the objection and adding a fresh cohort of voters to the tally. Approved content is recorded in an on-chain, topic-indexed registry that powers safe search — with no company in the middle.
+Content publishers pay a fee to be moderated. Staked moderators (human or AI) judge submissions in a Schelling game: for each case a random subset of moderators becomes eligible to vote, the verdict is drawn as a majority of three tickets against a posterior estimate of the tally, and anyone who disagrees can challenge — posting a bond that buys a second round of voters whose votes pool with the first. Approved content is recorded in an on-chain, topic-indexed registry that powers safe search — with no company in the middle.
 
 This document sums up the aim of the project, the problems we are solving, and how we intend to solve them; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, cohort sizes, periods, fees) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
 
-> **Implementation status.** Section 3 describes the protocol as currently designed; `specs/design-v2.md` carries the full mechanism and its arithmetic, including the payout derivation. The Solidity in `contracts/` implements an *earlier* architecture — one where panels were actively drawn and drawn moderators were obligated to serve. It is complete, tested and audited, and it is the reason the current design exists: building it is what exposed the capacity problem section 3.6 now opens with. See §8 for what carries forward and what it replaces.
+> **Implementation status — v3, and it is built.** Section 3 describes the
+> protocol as it now stands. **`specs/state-machine-v3.md` is normative**;
+> `specs/design-v3.md` carries the derivations, and where the two disagree the
+> state machine wins.
+>
+> Four contracts implement it in `contracts/src/v3/` — `Moderation`,
+> `StakeRegistry`, `RulesetGovernor`, `IndexRegistry` — with 266 tests, stateful
+> invariants over the real contracts, a two-implementation differential on the
+> verdict draw, and mutation campaigns as the acceptance bar. `contracts/README.md`
+> is the map. **It has not yet had an independent external review**, and the
+> standing constraint below is unchanged until it does.
+>
+> `contracts/src/` (unprefixed) is the **first** architecture — drawn panels,
+> obligated moderators, bonded appeals. It is complete and audited and it is kept
+> because building it produced the finding everything since rests on: assigning
+> moderators to cases creates a resource an attacker can exhaust (§3.6).
+> `specs/state-machine-v2.md` and `design-v2.md` are the intermediate design, also
+> superseded. Neither describes what the code now does.
 
-> **Open divergence — concurrency and penalties.** This README and `specs/state-machine-v2.md` currently describe **two incompatible rules**, and neither has been retired. This document describes unlimited concurrency with stacking time-freezes (§3.1, §3.5). The specification describes **risk units**: `K = stake / UNIT_STAKE` units, one reserved per commit, frozen individually on a loss (§3.3b, §5.1). Risk units were adopted in spec revision v2.1 to close P0-1, P0-4, P0-6 and §4.10 of the external review; the senior reviewer has since ruled per-case reservation out, which reopens all four. Until that is settled, **treat neither passage as authoritative** and read `specs/v2-audit-checklist.md` for the live score. `specs/design-v3.md` carries the direction this is moving in — a one-hour *provisional* result from a three-ticket majority verdict, then a single 12-hour challenge round — which section 3 below does not yet describe; `specs/state-machine-v3.md` specifies it normatively. **Principle 4 below is superseded by that document's §5**: the whole pot now goes to voters coherent with the verdict, so expected cash is no longer independent of direction. The premium attaches to the majority rather than to Approve, so no rule-level bias toward listing exists, but a conformity premium does. The paragraphs affected are marked inline.
+> **Standing constraint.** No deployment with material funds, and the index is not
+> presented as reliable safe-search certification, until `prior` is measured
+> (`measurement/prior/`) and an independent re-audit of the four-contract
+> architecture passes against a named commit. **`prior` — how often a moderator's
+> judgment matches the truth — is unmeasured, and §7 explains why it decides
+> whether any of this is deployable at all.**
 
 ## 1. Why this exists
 
@@ -34,23 +56,27 @@ What is missing is a mechanism where **the people who want to publish pay a grou
 
 ### Design principles
 
-Five principles, made explicit because every rule below follows from them:
+Six principles, made explicit because every rule below follows from them:
 
-1. **Safe for moderators.** Voting never risks capital — the worst case for an honest moderator on the losing side of a genuinely borderline call is being frozen for a while. Hard cases exist; judging them must not be financially ruinous, or nobody sane moderates.
-2. **Zero internal attack profit.** Stake is never slashed or redistributed between moderators. A redistribution rule would let a majority attacker farm honest minorities (stake 200 moderators against 100, win, harvest their stakes) — the mechanism itself would mint the attack's reward. Here, all rewards are *external* money: submission fees. An attacker's only possible prize is the listing itself.
+1. **Safe for moderators.** Voting never risks the stake. The worst case for an honest moderator on the losing side of a genuinely borderline call is a **fixed debit `d` from their working bond** — a small multiple of what a case pays, bounded and one-off. The 10 xBZZ identity stake is never touched. Hard cases exist; judging them must not be financially ruinous, or nobody sane moderates.
+2. **Zero internal attack profit.** Stake is never slashed or redistributed between moderators. A redistribution rule would let a majority attacker farm honest minorities (stake 200 moderators against 100, win, harvest their stakes) — the mechanism itself would mint the attack's reward. Every debit goes to a **maintenance reserve**, never to another moderator. All rewards are *external* money: submission fees. An attacker's only possible prize is the listing itself.
 3. **Nobody is conscripted.** No moderator is ever assigned to a case, bound to one, or penalised for ignoring one. Eligibility is an opportunity, never a duty. This is what makes the queue unfloodable, and it is why there is no no-show penalty anywhere in the design: there is no show to fail to make.
-4. **The verdict never moves the *cash*.** A moderator is paid the same for judging a case whichever way the case goes. Money whose existence depends on the verdict must never reach the people choosing the verdict — otherwise the mechanism buys the answer it pays for. (Coherence still matters: voters coherent with the final outcome are paid and incoherent ones are frozen. What must not vary is *approve versus reject*.) **This holds for the payment and not yet for the penalty.** Suspension length scales with the winning side's track record (§3.5), so voting against a well-established bloc costs more in expectation than voting against newcomers — total utility is direction-dependent even where cash is not. That is a known gap between the principle and the mechanism, not a property the design has earned; `specs/v2-audit-triage.md` D4 carries the decision.
-5. **Trust is earned, not bought.** A track record of coherent participation is what makes a moderator identity worth keeping — it drives freezing power, and it is what a moderator forfeits by abandoning an identity to escape a penalty. Fresh capital has none.
+4. **No party can steer the *terminal class* of a case.** The earlier form of this principle — *the verdict never moves the cash* — was retired, because v3 pays the whole pot to voters coherent with the verdict, so expected cash is no longer independent of direction. What replaced it is stronger and is enforced rather than hoped for: **the premium attaches to the majority, not to Approve**, so no rule-level bias toward listing exists; and no party can change which *kind* of outcome a case reaches by anything they do or decline to do (`state-machine-v3` I24). A conformity premium remains, and is stated rather than denied.
+5. **Penalties are money, never time.** v2 froze identities and stacked the freezes. That made the cost of a vote depend on how many other cases a moderator was in, and made penalties **settlement-order-dependent** — the same three losses cost 24 days or 19 depending on the order they settled in. A debit from a balance commutes; an interval added to a deadline does not. The debit-to-pay ratio is now a chosen constant rather than an emergent one.
+6. **Trust is earned, not bought.** A track record of coherent participation accrues per identity and does not transfer, so abandoning an identity abandons its standing. Fresh capital has none.
 
 ### 3.1 Moderators and staking
 
-Anyone becomes a moderator by staking **10 xBZZ** — a flat amount, the same for everyone. Stake exists in three states: **free** (withdrawable after an exit cooldown of ~7 days, so pending judgments always settle first), **committed** (backing votes in open cases), and **frozen** (locked as a penalty, see 3.5). Stake is never destroyed or transferred away — principle 2.
+Anyone becomes a moderator by staking **10 xBZZ** — a flat amount, the same for everyone — and posting a **bond**, which is separate working capital. The two do different jobs and this is the change that removed freezes entirely:
 
-**One stake, one vote, unlimited concurrent cases.** A moderator's stake is not divided between the cases they are judging. It backs all of them at once, and there is no cap on how many cases a moderator may be voting in simultaneously. The scarce resource is the moderator's attention, which the protocol has no business rationing.
+- **stake** is the identity floor. It is never debited, and it is withdrawable after an exit cooldown of ~7 days so pending judgments always settle first.
+- **bond** is what a vote is backed by. Penalties consume it; rewards replenish it. A moderator may commit while their bond covers their **accrued liabilities** — one `LAMBDA` per open vote — and no further.
 
-> **Contradicted by the specification.** `specs/state-machine-v2.md` §3.3b caps concurrency at `K = stake / UNIT_STAKE` risk units. See the divergence note at the top of this file. The open question is not whether concurrency is capped but whether a per-commit **price** is admissible where a per-commit **reservation** is not — the reviewer's own analysis concedes that unlimited simultaneous votes and bounded per-case consequence cannot coexist without one or the other.
+Stake is never destroyed or transferred to another moderator; every debit goes to the maintenance reserve (principle 2).
 
-Staking more than the minimum buys nothing. Voting power is flat per identity, so influence is bought by running more moderator identities, each costing its own 10 xBZZ — which means influence still costs capital linearly, but no single account accumulates a large voice. Identities are cheap to create and, by design, expensive to *replace*: a fresh identity carries no track record (principle 5) and cannot vote until its stake matures, so abandoning a frozen identity for a new one costs both the waiting period and the accumulated standing.
+**One stake, one vote, and concurrency is priced rather than capped.** There is no seat, no reservation, and no cap on how many cases a moderator may be voting in at once. What bounds it is solvency: each open vote accrues a liability against the bond, so a moderator can hold as many open votes as they can back. That replaced v2's risk units — a *price* where the earlier design used a *reservation* — and it is what makes the queue unfloodable while keeping per-case consequence bounded.
+
+Staking more than the minimum buys nothing. Voting power is flat per identity, so influence is bought by running more moderator identities, each costing its own 10 xBZZ — which means influence still costs capital linearly, but no single account accumulates a large voice. Identities are cheap to create and, by design, expensive to *replace*: a fresh identity carries no track record (principle 6) and cannot vote until its stake matures, so abandoning a penalised identity for a new one costs both the waiting period and the accumulated standing.
 
 ### 3.2 Submissions
 
@@ -74,46 +100,67 @@ H(moderator, caseId, round, caseSeed) < T
 
 which every moderator can check for themselves, off-chain, for free. The contract verifies the same inequality when a vote arrives. Nothing is enumerated, no panel is assembled, and no transaction is needed to decide who may participate — **the selection costs zero contract interactions**, which matters because a call nobody is paid to make is a call nobody makes.
 
-The threshold `T` is read from live state as `MAX / totalModerators × targetCohort`, so the number of eligible moderators stays near its target (working value: **32**) however large the moderator set grows. `caseSeed` is a blockhash from a few blocks after submission, realized lazily by the first vote and re-armed if it ages out — so the eligible set is unknowable when the case is submitted, and a submitter cannot grind the case id to select a friendly cohort.
+The threshold `T` is **static**, calibrated so the expected eligible set is `TARGET_COHORT` (working value: **40**) at a calibration registry size. It is deliberately *not* read from a live moderator count: maintaining one on chain would require every stake and exit to update a global, and `state-machine-v3` §3.6 rules that out. The cost is that the realized cohort scales with the registry rather than staying fixed, which is a known trade recorded in §10 of that document.
 
-**Everyone eligible may vote, within a fixed window.** Voting is not first-come: the window is a fixed **commit-reveal** period (working values: 24h commit, 24h reveal), every eligible moderator may participate for its whole duration, and votes are counted regardless of arrival order. This matters more than it looks — if only the first *n* votes counted, an attacker holding a minority of the cohort could decide cases by being fast, and speed is the one advantage a well-resourced attacker always has. A fixed window makes it worthless.
+`caseSeed` is a blockhash from a few blocks after the round opens — so the eligible set is unknowable when the case is submitted, and a submitter cannot grind the case id to select a friendly cohort.
 
-Eligible moderators who do not vote are not penalised in any way. They are simply not paid.
+**Everyone eligible may vote, within a fixed window.** Voting is not first-come: the window is a fixed **commit-reveal** period (working values: 20 min commit, 20 min reveal), every eligible moderator may participate for its whole duration, and votes are counted regardless of arrival order. This matters more than it looks — if only the first *n* votes counted, an attacker holding a minority of the cohort could decide cases by being fast, and speed is the one advantage a well-resourced attacker always has. A fixed window makes it worthless.
 
-**A quiet case widens itself.** `T` grows slowly with the age of an unresolved case, so the eligible set expands until somebody judges it. There is no re-draw, no extra transaction, and no widening logic — just a threshold that is a function of time. High-fee cases attract voters immediately; a case nobody finds worth judging waits, gradually offering itself to more of the network, and the submitter can reclaim the fee if it never attracts anyone.
+**No phase ever closes early**, and that is a safety property rather than a convenience. Closing on "everyone revealed" would hand the last actor a free choice between two outcome seeds; closing on "everyone eligible has acted" is not computable. Early termination is either useless or unsafe.
+
+Eligible moderators who do not vote are not penalised in any way. They are simply not paid. A moderator who *commits* and then does not reveal is debited `REVEAL_BOND` — that is a different thing, and it exists because withholding a revealed vote would otherwise be a free way to shrink a tally.
+
+**There is no quorum gate.** A round proceeds on whatever turnout it attracts, down to a single commit. An earlier revision required 16 commits and failed 92% of cases at a launch-size registry; measurement showed the gate was inert wherever the registry was large and destructive wherever it was not (`simulation/v3/FINDINGS-adaptive.md`). What stops a thin tally from deciding a case outright is not a floor but the estimator in §3.4.
 
 ### 3.4 Probabilistic outcomes and challenges
 
-The revealed votes are tallied, and the round's outcome is **drawn with probability proportional to the votes on each side**: if approve-votes are twice reject-votes, approve wins with 2/3 probability. A unanimous round needs no luck — one side holds every vote. Equivalently, and more intuitively: *the verdict is one revealed vote, picked at random.*
+At about **one hour** the contract publishes the **plurality** — which side has more revealed votes. That is a *fact about the votes*, not a verdict: **no randomness has been drawn yet**, and none exists until every window has closed. Publishing a drawn provisional result instead would hand every party the exact number of votes needed to flip the case, twelve hours before they had to decide whether to challenge.
 
-The result is preliminary. A **challenge window** follows (working value: 3 days; the first window 4 days, so long holiday weekends cannot decide outcomes). During it, any moderator eligible for the next round may open a **challenge**, which is simply a vote against the preliminary verdict, cast in public. No bond is posted and no fee is paid — the challenger's own stake is the stake, and it rides on the outcome: if the verdict is upheld, the challenger is frozen like any other incoherent voter. Opening a challenge while *agreeing* with the verdict is not possible, since a challenge is by definition a vote against it.
+**The verdict is a majority of three tickets.** When all voting has closed, three uniform values are drawn once and compared against
 
-That is the whole disincentive against frivolous challenges, and it is enough. A challenge you expect to lose costs you a freeze; a challenge you expect to win is free and pays.
+```
+â  = (approve + 1) / (N + 2)          -- NOT approve / N
+verdict = Approve if at least two of the three tickets fall below â
+```
+
+so `P(Approve) = f(â) = 3â² − 2â³`. Two things follow that a plain proportional lottery does not give:
+
+- **`â` is a posterior, not a sample proportion.** Feeding `f` the raw ratio would claim certainty from however many votes happened to arrive — at one revealed vote, `f(1) = 1` and a single voter decides the case outright. The add-one estimator makes confidence a function of turnout rather than an assumption about it: a unanimous cohort is still overruled 25.9% of the time at one vote, 2.8% at eight, 0.17% at forty. **This is what replaced the quorum gate.**
+- **The majority is amplified rather than sampled.** `f` suppresses minorities — which is a benefit exactly while the honest side *is* the majority of revealed votes, and a cost the moment it is not. §3.6 is explicit about where that crossover sits.
+
+The result is not final. A **challenge window** follows (working value: 12 hours). During it, **any active moderator** may register a challenge by posting `CHALLENGE_BOND`. Three properties matter and each replaced a v2 rule:
+
+- **A challenge is not a vote and discloses no direction.** It buys a second commit–reveal round; the challenger commits inside it, hidden, like everyone else. v2 made the challenge itself a public vote and accepted the disclosure as unavoidable — under v3 the constraint dissolves.
+- **The bond is a price, not a bet.** It is debited unconditionally at settlement, whichever way the case ends, and goes to maintenance. There is no branch, so there is nothing for a challenger to steer — and a challenger who supplies evidence that *confirms* the plurality has told the system something real and is paid for their vote on the same terms as everyone else.
+- **No eligibility test to challenge.** An eligibility gate here would filter honest dissenters, not attackers, since deterrence is structural rather than priced.
 
 **Votes accumulate; rounds do not replace each other.** The challenge opens a fresh commit-reveal period for a fresh cohort — a different eligible set, drawn from the same population by the same hash with the round number mixed in. When it closes, **every revealed vote from every round of the case is pooled into a single tally**, and the verdict is drawn from that pool.
 
 This is the most important structural decision in the design, and it exists to defeat retry. If each challenge round *replaced* the last, every challenge would be a fresh roll of the dice at unchanged odds, and an attacker holding 30% of the network would need only to keep challenging: four attempts reach 76%, ten reach 97%. Probabilistic defence would become a formality. With a cumulative tally, an attacker's share of the pool stays at their share of the network no matter how many rounds happen. **The dice cannot be re-rolled.**
 
+**v3 makes that structural rather than statistical.** The three tickets are drawn **once per claim**, after every window has closed, and the comparison is monotone in the tally. So a challenge that adds no votes returns the *identical* verdict — by arithmetic, not by probability — and a challenge that adds votes can only move the verdict toward the side it added. The only way to change the answer is to change the evidence, which is what the round is for. Measured against a lost round of 10 approve to 22 reject, the median number of Approve votes needed to flip it is 22; under a fresh per-round draw the attacker would need **zero** extra votes for a 24.6% chance.
+
 It also produces the behaviour you would want anyway: a 30–2 first round cannot be overturned by one more cohort, while a 17–15 first round flips easily. Challenge power is proportional to how genuinely contestable the verdict was, and the process self-terminates — once the pooled tally is lopsided, another round cannot move it and nobody bothers to try.
 
 For the same reason, cohorts stay the **same size** each round rather than escalating. Equal cohorts dilute each round's influence naturally, which is what makes the tally converge instead of swing.
 
-If a window closes with no challenge, the case **finalizes**. Clear-cut content is decided in about two days plus one quiet window.
+If a window closes with no challenge, the case **finalizes**. Clear-cut content is decided in **about an hour to a published plurality, and about thirteen hours to a final verdict** — a challenged case takes one more round.
 
-### 3.5 Settlement — the fee to the coherent, freezing for the rest
+### 3.5 Settlement — the fee to the coherent, a debit for the rest
 
-Finalization is triggered by a **claim** transaction anyone may send after the last window (earning a small bounty from the pot). Then, across all rounds of the case:
+Settlement is **pulled per moderator**, not swept per case: `claim(caseId, m)` settles one moderator's claim, is permissionless, is paid for by the party it settles, and is order-independent. There is no batch, no cursor, and nothing that walks a committer list — because the committer count is unbounded and a sweep funded by a fixed fraction of a fixed fee stops being payable past a crossover, at which point **nobody settles anybody**.
 
-- **The pot — the submission fee — is split among voters coherent with the final outcome**, credited as bookkeeping to their in-contract stake balances. No per-moderator transfers: the money already sits in the contract, so the token balance always equals stakes plus open pots, and gas stays flat. The share is the same whichever way the verdict went (principle 4), and it is the same for a first-round voter and a challenge-round voter. **Precisely: for a given final tally, expected payment is `pot / turnout` whichever way you vote** — proved in `specs/design-v2.md` §4.2. That is a statement about the cash, holding the final pool fixed. It does not cover how a vote changes whether a challenge opens, how many rounds run, or how large the final pool becomes, and it does not cover the suspension cost, which is not direction-neutral (principle 4).
-- **Voters incoherent with the final outcome are frozen.** Freeze duration scales with the **freezing power** of the winning side: a base week, multiplied up to a cap by the winners' track record — a decayed, capped count of past coherent participations. A newcomer that wins a round freezes honest veterans only briefly, while veterans who defeat an attack lock its capital up for a long time.
+Anyone may settle anyone. That is deliberate and load-bearing: a re-review requires every prior voter to be settled first, and if only the moderator could settle themselves, a single abandoned identity would block every re-review of that claim forever.
 
-**Freezes stack.** A moderator penalised in three cases sits out the sum of the three terms, not the longest of them. This is what makes the penalty proportional under unlimited concurrency: since one stake backs any number of cases, a penalty that could only be served once would be diluted to nothing by an attacker voting in many cases at once. Time is the currency that does not dilute.
+For each moderator's revealed vote:
 
-> **Contradicted by the specification, and known-defective on its own terms.** `specs/state-machine-v2.md` §5.1 freezes the *unit* that backed the vote, not the identity. Summing terms across cases is also what made penalties settlement-order-dependent (P0-6: the same three losses cost 24 days or 19 depending on the order they settle in), which per-unit expiry fixed. Whatever replaces risk units must keep that fix. The property to preserve is that **penalties commute** — a quantity debited from a balance does, an interval added to a deadline does not.
+- **Coherent with the verdict → paid a share of the pot.** `share = floor(P / W)` where `W` is the number of votes matching the verdict, from either round. The remainder goes to maintenance, never to a moderator.
+- **Incoherent → debited `d` from the bond.** A fixed amount, a small multiple of expected pay, the same whichever direction the case went. It goes to the maintenance reserve — never to the other side, which is what makes punishment-farming impossible by construction.
+- **Committed but never revealed → debited `REVEAL_BOND`.**
 
-While frozen, a moderator is ineligible for new cases — but **votes already cast still count**, and cases already joined run to completion normally. The freeze removes future participation, never past judgment.
+**The debits commute.** Three losses cost the same total whatever order they settle in, because a quantity subtracted from a balance is order-independent where an interval added to a deadline is not. That was v2's P0-6 defect and removing time as the penalty currency is what fixed it (principle 5).
 
-No stake moves from loser to winner — freezing is pure deterrence by locked funds, never a bounty. That is what makes "attack anyway and farm the punishment" impossible by construction.
+Nothing is ever frozen, and no moderator is ever made ineligible by a penalty. A moderator whose bond can no longer cover a new vote simply cannot open one until they top it up — which is a solvency condition, not a punishment, and it removes future participation only for as long as the shortfall lasts.
 
 ### 3.6 Design rationale — how attacks are priced
 
@@ -127,11 +174,11 @@ The mechanism above survived several adversarial redesigns and two external audi
 
 **What a larger cohort does, and what it does not.** Under a proportional lottery, an attacker holding fraction *q* of the network wins any single round with probability *q* — and that is true whether the cohort is 5 or 32 or 200. Larger cohorts do **not** amplify the majority's judgment the way majority voting does; there is no Condorcet effect here, and it would be dishonest to imply one. What they do buy is the collapse of *complete* capture (the chance an attacker holds every revealed vote falls as *qⁿ*), much lower variance, and a far better chance that both readings of a borderline case are actually represented. Accuracy comes from the guidelines being a clear Schelling point, not from cohort size.
 
-**Where does the attack cost actually live?** Three places. **Retry is closed**: pooled tallies mean a second challenge does not reset the odds, so an attacker cannot convert a 30% chance into a certainty by paying repeatedly — the property that a per-round-replacement design would have handed them. The **freeze drag**: every lost round locks the attacker's identity, losing to established honest moderators locks it for a long time, and penalties from concurrent cases stack rather than overlap. The **absence of prize**: winning pays the attacker nothing from the mechanism — the only upside is the listing itself, and a listing bought through visible challenge wars is exactly the kind an honest challenger re-litigates.
+**Where does the attack cost actually live?** Three places. **Retry is closed**: pooled tallies mean a second challenge does not reset the odds, so an attacker cannot convert a 30% chance into a certainty by paying repeatedly — the property that a per-round-replacement design would have handed them. The **debit drag**: every lost round costs `d` from the attacker's bond, once per losing vote per case, and an attacker running many identities pays it on every one of them. The **absence of prize**: winning pays the attacker nothing from the mechanism — the only upside is the listing itself, and a listing bought through visible challenge wars is exactly the kind an honest challenger re-litigates.
 
-**Why identity churn does not defeat the freeze.** Freezing an identity is only a punishment if replacing it is expensive. A fresh identity costs the 10 xBZZ minimum, which alone would be a poor deterrent — so two things make replacement costly rather than cheap: new stake cannot vote until it matures (at least as long as the minimum freeze, so churning buys nothing a wait would not), and track record does not transfer (principle 5), so an abandoned identity abandons its earning power with it. This makes reputation load-bearing rather than decorative, and the exact weight is a simulation deliverable (§7).
+**Why identity churn does not defeat the penalty.** Abandoning an identity is only unattractive if replacing it costs something. A fresh identity costs the 10 xBZZ minimum plus a bond, which alone would be a poor deterrent — so two things make replacement costly: new stake cannot vote until it matures, and track record does not transfer (principle 6), so an abandoned identity abandons its standing with it. Note what churn does *not* escape: `d` is debited from the bond at settlement, so walking away from an identity does not avoid a penalty already incurred — it only avoids future ones, which a fresh identity would have to earn its way back into anyway.
 
-**What does an honest moderator's life look like?** Judge clearly-safe and clearly-unsafe content: earn fees, essentially risk-free (unanimous rounds have no lottery, unchallenged results just finalize). Judge borderline content honestly and lose the draw: frozen for a while — annoying, never ruinous (principle 1). Spot a wrong outcome: challenge it, and if the pooled tally moves your way you are paid rather than frozen. Ignore a case entirely: nothing happens to you at all. The profitable long-run strategy is judging the way any other honest reader of the guidelines would — a Schelling point on honest judgment.
+**What does an honest moderator's life look like?** Judge clearly-safe and clearly-unsafe content: earn fees, essentially risk-free (unanimous rounds have no lottery, unchallenged results just finalize). Judge borderline content honestly and lose the draw: a fixed debit `d` — annoying, never ruinous, and it never touches the stake (principle 1). Spot a wrong outcome: challenge it, and if the pooled tally moves your way you are paid rather than debited. Ignore a case entirely: nothing happens to you at all. The profitable long-run strategy is judging the way any other honest reader of the guidelines would — a Schelling point on honest judgment.
 
 ### 3.7 Randomness
 
@@ -141,20 +188,61 @@ MVP: `blockhash` of a snapshot block a few blocks past the relevant phase bounda
 
 Search has an easy way and a hard way; **we take the easy way first to reach an MVP**, and optimize later.
 
-**Easy way (MVP):** when a case **settles** as an approval, its entry is written to an **in-contract map: topic → vector of approved entries** (writing at settlement rather than at the first round's tally is what lets an approval *won on challenge* be indexed at all, and keeps provisional entries out of the index entirely). Each entry carries the content hash, the metadata hash, the **time of approval**, and two booleans: **`uncontested`** and **`fullQuorum`**.
+**Easy way (MVP):** the entry is written **at the transition that establishes a
+terminal**, not at settlement — because settlement is pulled per moderator and may
+never complete, so an index write bundled into it would sit behind an unbounded
+number of calls nobody is obliged to make. A reader must never wait on moderator
+payouts to see a result.
 
-`uncontested` is `true` **iff no `Reject` vote was ever revealed, in any round of the case**. Since a challenge *is* a reject vote, a challenged entry is never uncontested — which is simpler than the previous rule, where an appeal could be filed without any vote behind it. The flag marks entries *no dissenting voter ever opposed*, and a unanimous tally involves no probabilistic draw to get lucky in.
+**Status is a value, not an absence**, and the zero slot is what makes the rest
+mean anything:
 
-`fullQuorum` is `true` iff the pooled tally reached at least `MIN_REVEALS` votes. Because voting power is flat and one identity casts one vote, distinct votes are distinct moderators by construction — the old caveat about a multi-seat voter satisfying quorum alone no longer applies. If a challenge ends in rejection, the entry is removed at settlement. A submission with multiple topics costs proportionally more, since more contract storage is written. The search dapp then serves queries entirely from **contract view functions against the latest state** — no scraping of historical logs, no off-chain indexer infrastructure.
+```
+NONE = 0 | PLURALITY_APPROVE | PLURALITY_REJECT | APPROVED | REJECTED
+         | UNRESOLVED | REMOVED
+```
 
-**Two views of the index.** The system has probabilistic outcomes, and a safe-search product must be honest about that. The extra fields split the index into:
+Without `NONE`, an unwritten slot and a case whose plurality leans Approve would
+read identically — in the one place where "not yet decided" and "never submitted"
+must be distinguishable. Every identifier the index exposes is **derived from
+content**, never from a counter or insertion order, so a replacement contract
+re-derives the same address for the same entry instead of colliding with what its
+predecessor wrote.
 
-- the **superset** — everything currently approved by the system, including entries that won contested, probabilistic draws; and
-- the **unopposed subset** — the cautious mode: `uncontested && fullQuorum && now − approvalTime ≥ 96h`. No `Reject` vote was ever revealed against it in any round, the pooled tally cleared `MIN_REVEALS`, and it has stood approved for 96 hours — the length of the first challenge window, so an approval that was going to be overturned has, in the ordinary case, already been overturned and removed.
+Entries carry the status, the plurality where one was established, and the counts.
+A case that ends `UNRESOLVED` after a full cohort judged it keeps its published
+plurality beside that status; one that ended before any tally carries `UNRESOLVED`
+alone. **Nothing is listed in any of them**, which is the only property a
+safe-search client needs — the distinction is for the reader who wants to know why.
 
-  **Read that definition literally, because the earlier name for it did not.** `fullQuorum` means the pooled tally reached `MIN_REVEALS` — a working value of **five** — not that a full 32-moderator cohort turned out. Five unanimous votes from one operator satisfy both flags. This subset is *unopposed at minimum quorum*, which is a useful filter and is not a certificate; it was previously called "supersafe" and described as close to certainty, which the definition does not support. Clients that need a real assurance bar should require an absolute vote count and turnout rate of their own choosing, from the fields below.
+**Two views of the index.** The system has probabilistic outcomes, and a
+safe-search product must be honest about that:
 
-The voting system stays meaningful for everything contested; the unopposed view gives cautious front ends (a default startpage, a kids-mode client) a subset in which no dissent was ever recorded. It is a floor to build on, not a safety guarantee — a client aiming at children's use should layer its own absolute thresholds on the counts.
+- the **superset** — everything currently approved, including entries that won
+  contested draws; and
+- **`SUPER_SAFE`** — the cautious mode, and it is a **live query rather than a
+  stored flag**, because a re-review or removal opened years later must revoke it:
+
+```
+SUPER_SAFE  =  verdict is Approve            -- all tally facts, fixed at the
+           AND no challenge was opened          terminal that wrote the entry
+           AND revealCount >= SUPER_QUORUM
+           AND pooledReject == 0
+           AND reveals == commits            -- nobody withheld
+           AND no removal or re-review is currently open
+```
+
+**Read it literally, and note what it is not.** Every conjunct is a fact about the
+*tally*; none is a fact about the *draw*. An earlier version also required the
+three tickets to fall unanimously, which sounds stronger and was not: under a
+unanimous tally the tickets are independent, so that clause excluded a random 7–16%
+of otherwise-qualifying content while carrying no information about it. It was
+dropped, because a label that publishes a random subsample is lying about its own
+selectivity.
+
+`SUPER_QUORUM` is an open parameter. Until it is set from measurement, **this is a
+filter and not a certificate** — a client aiming at children's use should layer its
+own absolute thresholds on the published counts rather than trusting the label.
 
 **Hard way (later):** publishing the index into Swarm feeds for a more economical, chain-light structure once the MVP proves the mechanism — without changing the moderation game.
 
@@ -174,8 +262,8 @@ Making the money flows explicit, since this is the heart of the design:
 
 | # | Component | Description | Tech |
 |---|-----------|-------------|------|
-| 1 | **Moderation contract** | Staking, hash-based eligibility, commit-reveal voting, probabilistic outcomes over pooled tallies, challenges, track-record bookkeeping, freeze accounting, fee pots, topic → approvals index | Solidity on Gnosis Chain |
-| 2 | **Moderator interface** | Web GUI making contract interaction easy for working moderators: cases you are eligible for, content/metadata fetch from Swarm, commit/reveal voting, challenging, claiming, stake and freeze status | Rust → WebAssembly |
+| 1 | **Moderation contract** | Four contracts (§ status note): the case state machine, permanent stake custody and the claim ledger, the permanent topic index, and timelocked governance | Solidity on Gnosis Chain |
+| 2 | **Moderator interface** | Web GUI making contract interaction easy for working moderators: cases you are eligible for, content/metadata fetch from Swarm, commit/reveal voting, challenging, claiming, stake and bond status | Rust → WebAssembly |
 | 3 | **Submit interface** | Web GUI for content creators: compose submission (content hash, metadata JSON validated against the schema, topics), pay fee, track status, resubmit | Rust → WebAssembly |
 | 4 | **Search dapp** | Safe-search front end: query the approved index by topic via contract view functions; unopposed startpage mode (§3.8) and full superset view; ranking and presentation live client-side and are replaceable | Rust → WebAssembly |
 
@@ -189,41 +277,139 @@ On **Rust → WebAssembly**: the plan that extracts the most value from this cho
 
 Reviewed by the design owner and delegated to implementation discretion; treated as working decisions unless flagged.
 
-**P1 — Removal requests.** Approvals must not be irrevocable: content can later prove illegal, metadata can turn out to be bait, Swarm storage can lapse. Anyone may submit a *removal request* targeting an existing index entry — same fee, same eligibility, outcomes and challenges; if removal wins, the entry is deleted from the index.
+**P1 — Removal requests.** *Implemented (v3).* Approvals must not be
+irrevocable: content can later prove illegal, metadata can turn out to be bait,
+Swarm storage can lapse. A removal is an ordinary case with `actionType = REMOVE`
+— **the same engine, the same cohort, the same three tickets, the same challenge
+round** — carrying its own claim key so it never collides with the listing it
+targets. On the removal question an Approve vote means *take it out*; a successful
+removal sets the original entry to `REMOVED`, drops it from the topic's listing,
+and frees the content's reservation so it can be submitted again.
 
-**A removal costs its own fee, and we know this is the weak point.** A challenge says *this decision was wrong when it was made*, and the original fee can pay for it because it is a dispute about a judgment someone already bought. A removal says *this was fine and the situation has changed* — new law, a lapsed host, a rights claim — and no earlier fee anticipated it. Charging the requester keeps the mechanism neutral and stops removal spam, but it means removals are undersupplied: they are in nobody's private interest, and approving bad content and failing to remove bad content leave the index in the same state while only the first is an action the protocol can price. Funding removals from the original submission fee was considered and rejected — a standing pot attached to every entry is a target to farm. This is an accepted limitation with an open design question behind it (§7), not a solved problem.
+**The fee is paid whichever way it goes, and that is load-bearing rather than
+tidy.** Refunding a *successful* removal looks like paying whoever corrects a
+protocol error — but a removal is judged by the same engine at the same accuracy,
+so a removal against legitimately listed content carries at the false-approval
+rate, which is 60% at `prior` 0.665. Refund-on-success would make censorship free
+in the majority of attempts at the accuracy this design must assume. **The fee is
+the only thing pricing a censorship attempt.**
 
-There are two routes, differing only in how the target is named. `submitRemoval(targetCaseId)` names a case this game contract adjudicated, and removes that submission from every topic it was indexed under. `submitLegacyRemoval(globalEntryId)` names a single entry by its permanent registry id, and exists because the index outlives the game: after a logic upgrade the replacement contract holds no case record for anything its predecessor approved, so without an id-addressed route every inherited entry would be permanently unadjudicable. Either way the payload and topics come from stored state rather than the caller, so what a client displays is what settlement acts on, and a winning removal frees the content's deduplication reservation so it can be submitted again.
+Repetition needs no extra cooldown: a failed removal permanently reserves its
+`REMOVE` key, so an identical retry is refused outright, and the only recourse is
+re-review, which carries the tally forward and is self-defeating.
+
+**What remains open is supply, not mechanism.** Removals are in nobody's private
+interest, and approving bad content and failing to remove it leave the index in the
+same state while only the first is an action the protocol can price. Funding
+removals from the original submission fee was considered and rejected — a standing
+pot attached to every entry is a target to farm. See §7.
 
 **P2 — Topic hygiene and a gas-safety cap.** Topics are normalized (lowercase, trimmed, NFC) and stored as keccak keys; a `TopicCreated(string)` event lets UIs autocomplete existing topics so "Biology" and "biology " don't fragment the index. Junk topics die by ranking (the search UI orders topics by approved-entry count), and moderation criteria include "the topics are accurate and themselves acceptable." Topics per submission are capped (~5, with the fee scaling per topic) — also because settlement loops over topics, and an unbounded loop can exceed the block gas limit, making a case *unfinalizable with its pot stranded*. That failure mode must be tested explicitly.
 
-**P3 — Deduplication.** A submission key `H(contentHash, metadataHash, topicKey)` that already exists is rejected. Same content in genuinely different topics remains possible — each costs a separate fee, so spam self-limits. The reservation is held by the permanent index registry, not by the game contract, so it is exactly as permanent as the index entry it protects: replacing the logic contract does not reset it, and content already live in the index cannot be re-submitted by a new version. A reservation is released only by the case that took it — when that case is rejected, voided, or its entry is removed.
+**P3 — Deduplication.** A claim key derived from `(actionType, contentHash,
+metadataHash, topics)` that is already reserved is refused. `policyVersion` is
+deliberately **excluded**, so a reservation survives a ruleset change. Every
+identifier is content-derived and none is a counter, so replacing the logic
+contract re-derives the same keys rather than colliding with what its predecessor
+wrote — a lesson v1 paid a CRITICAL to learn.
+
+Reservation follows the terminal: `APPROVED` holds it while listed, `REJECTED`
+holds it permanently, an empty round releases it, and a thin one reserves it for a
+cooldown. **Once a claim has been tallied, no reachable terminal releases its key**
+— including a re-review that attracts nobody, which is a hole the implementation
+found and closed.
 
 **P4 — Metadata schema v1.** A versioned JSON schema (`/specs/metadata-v1.json`) defining type, title, description, topics, language, content type — written before any frontend, validated in the submit interface, checked by moderators ("metadata matches content").
 
 **P5 — Moderation guidelines as the Schelling focal point.** Version 1 is deliberately one line: **"Would Google SafeSearch return this?"** — plus "the metadata honestly describes the content, and the topics fit." It lives in a versioned `MODERATION_GUIDELINES.md` whose hash is referenced on-chain; each case is judged per the version active at submission time, and the document grows only as real disputed cases show where one line isn't enough. Under coherence rewards, this document is what moderators are paid to predict the reading of — as load-bearing as the contract, and more so now that cohort size buys no accuracy of its own (§3.6).
 
-**P6 — Governance, minimal and honest.** Core logic immutable; only bounded numeric parameters (cohort target, vote counts, windows, freeze base and cap, track-record decay, fee floor) adjustable behind a multisig with a timelock; withdrawals can never be paused. A "decentralized moderation" contract with an admin backdoor would be a contradiction, so the trust assumptions are stated rather than hidden.
+**P6 — Governance, minimal and honest.** Core logic immutable; only bounded numeric parameters (cohort target, windows, the debit `d`, track-record decay, fee floor) adjustable behind a multisig with a timelock — and every parameter block is **pinned per case at submission**, so a change can never alter how an already-submitted case is judged or settled; withdrawals can never be paused. A "decentralized moderation" contract with an admin backdoor would be a contradiction, so the trust assumptions are stated rather than hidden.
 
-**P7 — Latency honesty and optimistic display.** Unchallenged content finalizes in about two days plus one challenge window — days, not minutes. That suits durable content (posts, videos, articles, anything where SEO matters) and does not suit real-time chat. Deep disputes take longer, but they are rare and self-funding. Optimistic display falls out of the index fields directly (3.8): entries younger than 96 hours or contested render as *provisional*; entries passing the unopposed filter render with the settled badge — settled, not certified.
+**P7 — Latency honesty and optimistic display.** A published plurality arrives in about an hour; an unchallenged case finalizes in about thirteen, and a challenged one takes one more round. Hours, not minutes — which suits durable content (posts, videos, articles, anything where SEO matters) and does not suit real-time chat. Optimistic display falls out of the index status directly (§3.8): a `PLURALITY_*` entry renders as *provisional*, `APPROVED` as settled, and only `SUPER_SAFE` as the cautious filter — **settled is not certified**, and until `SUPER_QUORUM` is set from measurement the label is a filter rather than an assurance.
 
 **P8 — Fee floor and a natural priority market.** The contract enforces `minFee = base + perTopic × nTopics`, covering storage and minimum voter pay across a full cohort. Submitters may overpay; moderators see fees and rationally prioritize high-fee cases — a priority market with zero extra protocol, and the mechanism by which a flood of minimum-fee junk gets judged last rather than blocking anything.
 
 ## 7. Open questions
 
-**Parameters are simulation output, not opinions.** The cohort target and its threshold curve, the age-widening rate, `MIN_REVEALS`, the freeze base and cap, the track-record formula (decay rate, saturation, anti-farming), commit and reveal windows, and the fee floor — all working values until simulation validates them against the attack scenarios.
+### `prior` decides whether any of this is deployable
 
-**How much reputation should be worth.** This is the most load-bearing open number in the design. Track record carries three jobs at once: it sets freezing power (§3.5), it makes abandoning a frozen identity expensive (§3.6), and it makes running one well-regarded identity better than running several anonymous ones. Too weak and the freeze stops deterring anything; too strong and the system ossifies around incumbents. Needs adversarial simulation, not a guess.
+**This is not one open question among several. It is the one that decides the
+rest**, and it is unmeasured.
 
-**Track-record farming.** Freezing power derives from participation history, and history can be manufactured: self-submit innocuous content, judge it honestly, repeat. The cap and decay bound the damage, and farming costs real fees the honest side collects — but the exact formula needs adversarial simulation before it's trusted.
+`prior` is how often a moderator's judgment matches the truth. Every safety figure
+in the design turns out to be a function of `q + (1 − q)(1 − prior)` — the *effective*
+wrong-side share — and **not** of the attacker share `q` alone, because an honest
+moderator who misjudges the content votes with the attacker and the tally cannot
+tell them apart. Two consequences neither the mechanism nor a parameter can repair:
 
-**Turnout under self-selection.** Nobody is obligated to vote, so the cohort that actually votes is the subset that chose to. If honest moderators are apathetic while attackers are always motivated, the voting population skews toward whoever cares most — and the verdict is drawn from votes cast, not votes possible. The counterweight is that voting pays; whether it pays enough, reliably enough, is exactly what the fee-level simulation has to establish.
+| `prior` | consequence |
+|---|---|
+| **≈ 0.95** | With no attacker at all, ~1.3% of unsafe content is approved and ~1.7% of safe content rejected. The design works, permanence is defensible, and grinding a listing by resubmission costs ~229 fees. |
+| **≈ 0.665** | With **zero attackers**, ~29% of safe content is rejected — 22.8% of it with no recourse that can reach it — and ~29% of unsafe content approved. That is not a search index, and no state machine repairs it. |
 
-**Removal supply.** Charging the requester keeps removals neutral and unspammable but leaves them undersupplied, since nobody's private interest is served by cleaning the index (P1). The open question is whether removal needs a *role* rather than a price — someone paid from a pool to look for removable content — and where that pool comes from without reintroducing a farmable target.
+`measurement/prior/` specifies how to measure it, and the instrument is the
+**testnet**: it supplies independent votes for free, bands cases by difficulty
+using the tally itself, and samples the real submission mix — which is the part a
+hand-built corpus cannot fix at any budget, because `prior` is a property of
+readers *and* of what they are shown. What must be supplied from outside is ground
+truth, on a stratified sample.
 
-**Repeated submission of rejected content.** A rejected case releases its deduplication reservation, so identical content can be resubmitted for a fresh base fee. Pooled tallies close retry *within* a case; they do not close it *across* cases. Persisting per-content review history in the permanent index — attempt counts, last outcome, escalating fees or cooldowns for unchanged content — is the likely answer and is not yet designed.
+**Write the guidelines you intend to ship before the testnet starts.** A rewrite
+partway through fragments the data along `guidelinesVersion` — which is pinned per
+case — and yields two underpowered samples instead of one usable one.
 
-Also open: long-term topic-namespace governance; who maintains the guidelines document and how updates are adopted; repository license and organizational ownership; moderator privacy (addresses are permanently linked to controversial decisions — the guidelines should recommend fresh addresses per moderator identity, which interacts with reputation weight above); and the migration path from the in-contract index to a Swarm-feed-published index.
+### The parameters that are still open
+
+`BOND_MIN`, `CHALLENGE_BOND`, `GAS_ALLOWANCE`, `MATURATION`, `SUPER_QUORUM`,
+`RETRY_COOLDOWN`, and `DRAW_BOUNTY`'s sizing. `specs/state-machine-v3.md` §10
+carries each with the argument that constrains it. Two are worth naming here:
+
+- **`BOND_MIN`** is what Sybil resistance actually costs, and several safety
+  arguments inherit their strength from it.
+- **`RETRY_COOLDOWN`** stopped being deferrable when the quorum gate was removed:
+  it is now the only thing pricing a censor who holds every commit on a case and
+  withholds them all (§4.8c).
+
+### Structural questions with no measurement pending
+
+**Reliability weighting is the largest unexploited lever, and its sign is
+unknown.** Weighting votes by measured reliability rather than counting them
+equally is worth 15–32 points of false approval at `prior` 0.665 — the largest
+improvement anything measured here produces, and it pays *most* exactly where the
+design is weakest. But the signal is farmable: an attacker never has to dodge a
+known-answer case, because he can answer everything honestly except the one he is
+attacking. Above a measured crossover (0.797 at `prior` 0.665) the same mechanism
+runs in reverse at comparable magnitude, and no weight cap removes it.
+`simulation/v3/FINDINGS-weighted.md` has the full result. **Deliberately not in the
+spec** until the crossover is measured.
+
+**Cost of corruption is not stated.** An attacker's prize — the listing — is
+external and unbounded, while a moderator's reward is a slice of a submission fee.
+The design has no published cap on the value it will secure, and both the weighting
+crossover and the pricing of any bond are really the same missing number.
+
+**Removal supply.** Removals now exist as a real case type, and a removal is paid
+for whichever way it goes so it cannot be used as free censorship. But nobody's
+private interest is served by cleaning the index, so removals are undersupplied.
+Whether removal needs a *role* rather than a price — someone paid from a pool to
+look for removable content — is open, along with where that pool comes from without
+reintroducing a farmable target.
+
+**Repeated submission of rejected content.** A rejected case reserves its claim key
+permanently, and re-review is the recourse — but the key binds *bytes*, not
+*meaning*, so a trivially altered resubmission is a different claim. Pooled tallies
+close retry *within* a claim; they do not close it across near-duplicates.
+
+**Turnout under self-selection.** Nobody is obligated to vote, so the cohort that
+votes is the subset that chose to. If honest moderators are apathetic while
+attackers are always motivated, the population skews toward whoever cares most.
+The counterweight is that voting pays; whether it pays enough, reliably enough, is
+a fee-level question the testnet answers alongside `prior`.
+
+Also open: long-term topic-namespace governance; who maintains the guidelines
+document and how updates are ratified; repository license and organizational
+ownership; moderator privacy; and the migration from the in-contract index to a
+Swarm-feed-published one.
 
 ## 8. Roadmap
 
@@ -235,7 +421,32 @@ Two external audits and a substantial internal remediation pass ran against it. 
 
 **What carries forward:** the permanent stake and index registries and their migration model; the probabilistic verdict; commit-reveal with domain-separated commitments; the settlement solvency ordering; the index fields and the unopposed view; the deduplication model; governance. **What it replaces:** the seat draw, the duty pool and no-show penalties, obligation accounting, escalating panel sizes, and bonded appeals.
 
-**M2.5 — Contract (current architecture).** Implementing §3: hash eligibility, fixed-window voting with no assignment, pooled tallies across challenge rounds, stake-backed challenges, serial freezes, flat stake. The design and its arithmetic are in **`specs/design-v2.md`**, and the normative state machine in **`specs/state-machine-v2.md`** — including the proof that a moderator's expected payout is the same whichever way a verdict goes, the corollary that this forces the lottery to stay linear, and the order-independent reputation update. A normative state-machine specification follows that document; Solidity follows the specification.
+**M2.5 / M2.6 — Contract (second architecture).** Hash eligibility, fixed-window
+voting with no assignment, pooled tallies, risk units, serial freezes. Specified in
+`specs/design-v2.md` and `specs/state-machine-v2.md`. **Superseded before it was
+completed**: freezes made penalties settlement-order-dependent, and risk units
+priced concurrency with a reservation the design could not justify.
+
+**M2.7–M2.13 — Contract (v3, current).** *Built.* Four contracts in
+`contracts/src/v3/`, specified normatively by `specs/state-machine-v3.md`:
+
+| | what it replaced |
+|---|---|
+| Three-ticket majority against `â = (A+1)/(N+2)` | the proportional lottery, and the quorum gate with it |
+| One randomness per claim, drawn last | per-round draws, which made a challenge a free re-roll |
+| Balance debits | identity freezes, which did not commute |
+| Bonded challenge, no eligibility test, no disclosed direction | the challenge-as-public-vote |
+| Pull settlement per moderator | the per-case sweep, whose cost was unbounded and whose funding was not |
+| Removal cases (`actionType`) | nothing — a listed entry previously had **no recourse at all** |
+
+Checked by 266 tests: per-contract suites, **stateful invariants over all four real
+contracts under a fuzzer**, the draw swept rather than sampled, a **two-implementation
+differential** on the verdict derivation, and mutation campaigns as the acceptance
+bar rather than a metric. `contracts/DEVIATIONS.md` catalogues every place the
+implementation departed from, refined, or pinned something the spec left open.
+
+**Not yet independently reviewed.** That is the next step and the standing
+constraint holds until it passes.
 
 **M3 — Interfaces.** The three web apps on a shared Rust/WASM core, in dependency order: moderator interface first (without moderators nothing gets approved), then the submit interface (creators feed the pipeline), then the search dapp (proves the end-to-end value) — plus the client library for AI moderators.
 

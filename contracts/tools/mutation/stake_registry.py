@@ -132,8 +132,23 @@ MUTATIONS = [
   "        delete pendingWithdrawal;"),
 
  ("M33", "§5.6.1", "the exit is permissionless",
-  "    function executeMaintenanceWithdrawal() external onlyGovernance {",
-  "    function executeMaintenanceWithdrawal() external {"),
+  "    function executeMaintenanceWithdrawal(address to, uint256 amount) external onlyGovernance {",
+  "    function executeMaintenanceWithdrawal(address to, uint256 amount) external {"),
+
+ # --- M2.13 §4: execute NAMES what it executes -----------------------------
+ ("M34", "\u00a72.4/M2.13", "executeCaps grants whatever is pending, ignoring its arguments",
+  "        if (p.logic != logic || p.capBits != capBits) revert ProposalMismatch();\n", ""),
+
+ ("M35", "\u00a72.4/M2.13", "executeCaps checks the logic but not the bits",
+  "        if (p.logic != logic || p.capBits != capBits) revert ProposalMismatch();",
+  "        if (p.logic != logic) revert ProposalMismatch();"),
+
+ ("M36", "\u00a75.6.1/M2.13", "executeMaintenanceWithdrawal pays whatever is pending",
+  "        if (w.to != to || w.amount != amount) revert ProposalMismatch();\n", ""),
+
+ ("M37", "\u00a75.6.1/M2.13", "the withdrawal checks the amount but not the recipient",
+  "        if (w.to != to || w.amount != amount) revert ProposalMismatch();",
+  "        if (w.amount != amount) revert ProposalMismatch();"),
 ]
 
 

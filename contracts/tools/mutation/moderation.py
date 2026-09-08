@@ -42,9 +42,12 @@ MUTATIONS = [
   "        uint256 sb = c.outcomeSeedBlock;",
   "        if (uint256(c.pooledApprove) + c.pooledReject == 0) revert WrongPhase();\n        uint256 sb = c.outcomeSeedBlock;"),
 
- ("M8", "§8.3", "unanimousDraw set on a 2/1 draw",
-  "        c.unanimousDraw = (tickets == 0 || tickets == 3);",
-  "        c.unanimousDraw = (tickets >= 2);"),
+ # M2.13 §1 — the 3/3 conjunct is gone, so M8's target no longer exists. It is
+ # re-anchored to the property that REPLACED it: SUPER_SAFE must not read the
+ # ticket count at all. Reinstating a draw-dependent conjunct is the regression.
+ ("M8", "§8.3/M2.13", "SUPER_SAFE reads the ticket draw again",
+  "        return c.actionType == uint8(ActionType.LIST) && c.verdict == uint8(Outcome.APPROVE)\n            && c.challenger == address(0) && reveals >= _p(caseId).superQuorum && c.pooledReject == 0\n            && reveals == uint256(c.commitsThisRound);",
+  "        (, uint8 tk) = _decide(caseId, c.outcomeEntropy);\n        return c.actionType == uint8(ActionType.LIST) && c.verdict == uint8(Outcome.APPROVE)\n            && c.challenger == address(0) && (tk == 0 || tk == 3)\n            && reveals >= _p(caseId).superQuorum && c.pooledReject == 0\n            && reveals == uint256(c.commitsThisRound);"),
 
  # --- the guards (§4.3, I18, I29) ----------------------------------------
  ("M9", "I29/§3.1", "eligibility head guard replaced by a hash observation",
@@ -55,16 +58,16 @@ MUTATIONS = [
   "        if (block.number > sb + p.blockhashHorizon) revert SeedExpired();\n", ""),
 
  ("M11", "I29/§7.3", "draw guard replaced by a hash observation",
-  "        if (block.number > sb + p.blockhashHorizon) {\n            _payBounty(caseId, false, msg.sender);\n            _toUnresolved(caseId, Reason.NO_RANDOMNESS);\n            return;\n        }\n        if (block.number <= sb) revert SeedNotYet();",
-  "        if (blockhash(sb) == bytes32(0)) {\n            _payBounty(caseId, false, msg.sender);\n            _toUnresolved(caseId, Reason.NO_RANDOMNESS);\n            return;\n        }"),
+  "        if (block.number > sb + p.blockhashHorizon) {\n            _payBounty(caseId, false, msg.sender);\n            _toUnresolved(caseId, Reason.NO_RANDOMNESS, msg.sender);\n            return;\n        }\n        if (block.number <= sb) revert SeedNotYet();",
+  "        if (blockhash(sb) == bytes32(0)) {\n            _payBounty(caseId, false, msg.sender);\n            _toUnresolved(caseId, Reason.NO_RANDOMNESS, msg.sender);\n            return;\n        }"),
 
  ("M12", "§4.8b", "a quorum gate restored at round-0 commit close",
   "        if (c.round == 0 && c.commitsThisRound == 0) {",
   "        if (c.round == 0 && c.commitsThisRound < 16) {"),
 
  ("M13", "§4.9", "a quorum gate added to round 1",
-  "        if (c.round == 0 && c.commitsThisRound == 0) {\n            _toUnresolved(caseId, Reason.NO_TURNOUT);\n            return;\n        }",
-  "        if (c.commitsThisRound == 0) {\n            _toUnresolved(caseId, Reason.NO_TURNOUT);\n            return;\n        }"),
+  "        if (c.round == 0 && c.commitsThisRound == 0) {\n            _toUnresolved(caseId, Reason.NO_TURNOUT, msg.sender);\n            return;\n        }",
+  "        if (c.commitsThisRound == 0) {\n            _toUnresolved(caseId, Reason.NO_TURNOUT, msg.sender);\n            return;\n        }"),
 
  ("M14", "§4.4", "reveal closes early once everyone has revealed",
   "        if (c.phase != uint8(Phase.REVEAL)) revert WrongPhase();\n        if (block.number < c.phaseDeadline) revert DeadlineNotReached();",
@@ -140,7 +143,7 @@ MUTATIONS = [
 
  # --- §8.1 / I15 index ---------------------------------------------------
  ("M32", "I15/§8.1", "the UNRESOLVED index write moved out of the terminal",
-  "        _settleBounties(caseId);\n        _writeIndex(caseId, IndexStatus.UNRESOLVED);\n", "        _settleBounties(caseId);\n"),
+  "        _settleBounties(caseId, poker);\n        _writeIndex(caseId, IndexStatus.UNRESOLVED);\n", "        _settleBounties(caseId, poker);\n"),
 
  ("M33", "I15/§8.1", "the FINALIZED index write removed",
   "        _writeIndex(caseId, verdict == uint8(Outcome.APPROVE) ? IndexStatus.APPROVED : IndexStatus.REJECTED);\n", ""),
@@ -198,9 +201,20 @@ MUTATIONS = [
   "        refundOwed[caseId] += c.drawBounty;\n        c.drawBounty = 0;",
   "        maintenanceAccrued += c.drawBounty;\n        c.drawBounty = 0;"),
 
- ("M47", "§4.8/§10", "CLAIM_BOUNTY refunded too — the change §10 says must not ride along",
-  "        maintenanceAccrued += c.claimBounty;\n        c.claimBounty = 0;",
-  "        refundOwed[caseId] += c.claimBounty;\n        c.claimBounty = 0;"),
+ # M2.13 §2 — the property this pins CHANGED rather than went away, so the
+ # mutation moves with it. It used to pin retention into maintenance; it now
+ # pins payment to the poker.
+ ("M47", "§4.8/M2.13", "CLAIM_BOUNTY retained into maintenance instead of paid to the poker",
+  "        if (claimB != 0) {\n            address(token).safeTransfer(poker, claimB);\n            emit BountyPaid(caseId, poker, claimB);\n        }",
+  "        maintenanceAccrued += claimB;"),
+
+ ("M47b", "§4.8/M2.13", "CLAIM_BOUNTY refunded to the submitter rather than paid to the poker",
+  "        if (claimB != 0) {\n            address(token).safeTransfer(poker, claimB);\n            emit BountyPaid(caseId, poker, claimB);\n        }",
+  "        refundOwed[caseId] += claimB;"),
+
+ ("M47c", "§4.8/M2.13", "the poker is the submitter, not whoever performed the transition",
+  "        _settleBounties(caseId, poker);",
+  "        _settleBounties(caseId, c.submitter);"),
 
  ("M48", "§5.6.1", "the sweep zeroes the accumulator without forwarding it",
   "        maintenanceAccrued = 0;\n        address(token).safeApprove(address(stakeReg), amount);\n        stakeReg.depositMaintenance(amount);",

@@ -2159,9 +2159,29 @@ new until they post more bond or their open votes settle. This is the whole of w
 
 ### 5.5 Settlement is pulled per moderator, not swept per case
 
-**Decision.** `claim(caseId)` settles **one moderator's** claim on one case. There
-is no sweep, no batch cursor, and nothing that has to walk the committer list. Each
-call is permissionless and each is paid for by the party it settles.
+**Decision.** `claim(caseId, m)` settles **one moderator's** claim on one case.
+There is no sweep, no batch cursor, and nothing that has to walk the committer
+list. Each call is permissionless and each is paid for by the party it settles.
+
+**Anyone may settle anyone, and that is stronger than "permissionless".** This
+paragraph read `claim(caseId)` — settle *your own*, without asking — through six
+implementation orders, and the finer question went unstated: may a third party
+settle a moderator who has not bothered? The M2.12 report raised it as an
+unratified guess (its item 6) and it is ratified here as **yes**, because a
+decision already taken depends on it.
+
+**§8.5's reopen precondition is what depends on it.** A re-review requires every
+prior voter to be settled, and that requirement was accepted *specifically* on the
+grounds that `claim` is permissionless so anyone wanting the reopen can clear the
+stragglers themselves. Restrict `claim` to the moderator and a single unsettled
+voter — including one who has abandoned the identity — blocks every re-review of
+that claim forever, which is the griefing vector §8.5 was told it did not have.
+
+So the two are one decision seen twice: **`claim(caseId, m)` taking `m` is what
+makes §8.5's precondition satisfiable by the party who wants it satisfied.**
+Settling someone else is never adverse — it pays them what they are owed or takes
+a debit they already incurred, on a verdict fixed at `FINALIZED` — so there is
+nothing for a hostile settler to steer.
 
 Order-independence is unchanged and is what makes this safe: debits commute (§5.1)
 and `verdict` is fixed at `FINALIZED`, so no interleaving of claims produces a
@@ -3279,6 +3299,7 @@ property.
 | ~~The maintenance reserve has no exit~~ | **CLOSED at `c2d4407`.** Was this list's only P0, surfaced by the M2.7 implementation and not by review — *"there is no exit"* is not a failing assertion, so neither suite could have caught it. §5.6/§5.6.1 decided one pool in the registry with a timelocked withdrawal; M2.8 implemented it. `StakeRegistry` 33/33 mutations killed on a **combined** baseline (the original 25 re-run plus 8 for the new surface), 10,065 B. The `executeMaintenanceWithdrawal` body names `maintenanceReserve` and nothing else — `totalStake` and `totalBond` do not appear in it, so there is no arithmetic to subvert, only the cap to evade, and that is checked against live state at execute |
 | **A listing is permanent — the removal case cannot be created** | **P0, and it outranks `RulesetGovernor`.** Surfaced by the M2.9 implementation (D3-15). §8.4 keys claims on `actionType` and §8.5 fixes it to `{LIST, REMOVE}`, but `Moderation.claimKeyOf` hardcodes `"LIST"` and `submit` takes no action type — so the case type §8.5 names as the recourse for a listed entry is unreachable, while §8.4 withholds re-review from `APPROVED` on the assumption that it exists. `APPROVED` is reserved while listed, so resubmission is closed too, and the reservation clears only on `REMOVED`, which nothing can produce. **Worse than the permanence §8.6 calls decisive**: 28.6% of unsafe content is listed at `prior` 0.665 with *zero* attackers (60% at `q = 0.30`), against §8.6's 22.8% irrecoverable false rejection — and unlike rejection it has no partial recourse. §8.1's fifth write and half of §8.3's `openQuestions` already exist in `IndexRegistry` and are unreachable until this closes |
 | ~~`guidelinesVersion` is not pinned~~ | **DECIDED at this commit; implementation open (D3-21).** §4.1 declared no field and the M2.11 governor substituted a height join. Ruled a **pin**, on fairness rather than measurement: `d` is charged for incoherence with the settled side, so a mid-case guidelines change debits whichever half of the cohort loses **for correctly applying the instructions it was given** — I27's own argument, applied to what the moderator is *asked* rather than what they are paid. Under a pin the mid-case question dissolves instead of needing an answer. Costs one `uint32` on `Case` and `Moderation` has 3,148 B; if it does not fit, that is a finding and not a licence to keep the join |
+| ~~Governor handover: one-shot intent, and no EOA successor~~ | **RATIFIED, both, from the M2.12 report's items 11 and 12.** `intendModeration` is **one-shot**: a successor declares its target once and cannot retarget. That makes the "correct at propose, wrong at execute" drift M2.12 §2 asked to be tested *unreachable* — the hazard is prevented rather than detected, which is the better outcome and worth saying, because a test for it would be a test that cannot fail. **A successor must be a contract**, since reciprocity is read by calling `intendedModeration()` on it. That forecloses governance by a multisig with no governor contract, and it is a **choice, not a consequence**: the reciprocity check is what makes an unbindable successor impossible to install, and a bare multisig cannot answer it. If direct-multisig governance is ever wanted, the way in is a thin governor the multisig owns — not relaxing the check |
 | **The governor is unreplaceable, and by omission rather than by decision** | **D3-20.** v1's F3 rested on `Moderation.governor` being `immutable`; v3 made it mutable via `setGovernor`, which is `onlyGovernor` — and the governor exposes no path to it, so the field is frozen because nobody wrote the caller. A defect in the governor's own logic then has no route around it. **Frozen by omission reads as deliberate to an auditor and was not**, which is the reason to close it rather than document it. The fix is governor-side only (`RulesetGovernor` has 20,249 B spare, `Moderation` delta zero) and must re-check reciprocity at execute — an incoming governor not already bound to the same `Moderation` bricks the pair |
 | **The two contracts have different governance postures, and nobody chose that** | **This is what `RulesetGovernor` is actually for**, and it is narrower than the rows above imply now that the `BLOCK_TIME` bound is validated in `Moderation`. `StakeRegistry` timelocks everything a governor can do — caps, condemnation, maintenance withdrawal — behind `propose`/`cancel`/`execute`. `Moderation.applyParams` is `onlyGovernor` and **takes effect immediately**: no pending record, no `eta`, nothing for anyone to observe or exit ahead of. I27 pins parameters per case at submission, so **live cases are safe and only future ones move** — which is why this is a governance-risk asymmetry rather than a correctness defect. The asymmetry was never decided; it is where the two contracts happened to land. Closing it is the fourth contract's job |
 | **`execute*()` takes no argument, so a pending proposal can be swapped under an approver** | **Low, inherited, and not introduced by M2.8.** `executeCaps()` and `executeMaintenanceWithdrawal()` both execute *whatever is pending*, while `executeCondemn(logic)` names its target. Inside a multisig that means one signer can queue a withdrawal, a second replace it, and an approval given for the first execute the second. **The timelock defuses it rather than the signature does**: a replacement calls `propose*` again, which sets a fresh `eta`, so the swapped proposal waits the full delay in the open before it can execute. The fix — take the parameters at execute and require they match the pending record — is small but touches `executeCaps`, which is inside the original mutation baseline, so it is recorded rather than bundled into M2.8 |

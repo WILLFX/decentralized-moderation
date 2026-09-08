@@ -50,7 +50,7 @@ contract ModerationGasTest is Test {
         reg.proposeCaps(address(mod), bits);
         vm.warp(block.timestamp + TIMELOCK);
         vm.prank(gov);
-        reg.executeCaps();
+        reg.executeCaps(address(mod), bits);
 
         Moderation.Params memory p;
         p.blockTime = 5;
@@ -404,9 +404,10 @@ contract ModerationGasTest is Test {
 
         (,, uint256 eta,) = reg.pendingMaintenanceWithdrawal();
         vm.warp(eta);
+        (address wTo, uint256 wAmt,,) = reg.pendingMaintenanceWithdrawal();
         vm.prank(gov);
         g = gasleft();
-        reg.executeMaintenanceWithdrawal();
+        reg.executeMaintenanceWithdrawal(wTo, wAmt);
         console.log("executeMaintenanceWithdrawal ", g - gasleft());
 
         vm.prank(gov);

@@ -114,7 +114,7 @@ contract DeployV3 is Script {
 
     /// @notice Execute both capability grants. Callable only once the delay has run.
     function executeGrants(Stack memory s) public {
-        s.reg.executeCaps();
+        s.reg.executeCaps(address(s.mod), s.reg.MAY_CREATE() | s.reg.MAY_DISCHARGE());
         s.idx.executeWriter();
     }
 

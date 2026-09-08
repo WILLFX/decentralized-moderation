@@ -79,7 +79,7 @@ contract ModerationV3Test is Test {
         reg.proposeCaps(address(mod), bits);
         vm.warp(block.timestamp + TIMELOCK);
         vm.prank(gov);
-        reg.executeCaps();
+        reg.executeCaps(address(mod), bits);
 
         vm.prank(gov);
         idx.proposeWriter(address(mod), true);
@@ -1716,32 +1716,53 @@ contract ModerationV3Test is Test {
         mod.commit(id, h);
     }
 
-    /// MUTATION M8: set `unanimousDraw` on any 2-of-3 draw.
-    /// @dev §8.3 reads this flag and nothing else reads `u` back. The entropy is
-    ///      chosen with `vm.setBlockhash` so both a split and a unanimous draw are
-    ///      exercised deterministically.
-    function test_s8_3_unanimousDrawRecordsWhetherAllThreeTicketsAgreed() public {
+    /// @dev M2.13 §1 — SUPER_SAFE no longer depends on the ticket draw, and this
+    ///      is the test that says so rather than a note that it was removed.
+    ///
+    ///      The 3/3 conjunct required all three tickets to agree. Under a unanimous
+    ///      tally those tickets are three draws of the SAME coin, carrying no
+    ///      information about the content — so the label published a random
+    ///      subsample of what qualified: 7% of qualifying content excluded at
+    ///      `N = 40`, 16% at `N = 16`. Dropping it stops SUPER_SAFE lying about its
+    ///      own selectivity.
+    ///
+    ///      The property tested is the one that matters: two cases identical in
+    ///      every TALLY fact, differing only in how the coin landed, must now agree.
+    ///
+    /// MUTATION: reinstate `&& c.unanimousDraw`-equivalent — any conjunct in
+    ///           `_strict` that reads the ticket count rather than the tally.
+    function test_s8_3_superSafeNoLongerDependsOnHowTheCoinLanded() public {
         bool sawSplit;
         bool sawUnanimous;
-        for (uint256 k; k < 12 && !(sawSplit && sawUnanimous); ++k) {
+
+        for (uint256 k; k < 24 && !(sawSplit && sawUnanimous); ++k) {
             uint256 id = _submitFresh(700 + k);
-            _toTally(id, 3, 3); // â = 1/2: the split-likeliest tally
-            vm.roll(mod.caseInfo(id).phaseDeadline);
-            mod.closeTally(id);
+            // Every SUPER_SAFE conjunct satisfied: unanimous Approve tally, no
+            // challenger, every committer revealed, at the super-quorum.
+            _toTally(id, 16, 0);
+            _rollToDraw(id);
 
             uint256 sb = mod.caseInfo(id).outcomeSeedBlock;
-            vm.roll(sb + 1);
             vm.setBlockhash(sb, keccak256(abi.encode("draw", k)));
             mod.draw(id);
 
             Moderation.Case memory c = mod.caseInfo(id);
+            if (c.verdict != uint8(Moderation.Outcome.APPROVE)) continue;
             (, uint8 tickets) = mod.decideAt(id, c.outcomeEntropy);
-            assertEq(c.unanimousDraw, tickets == 0 || tickets == 3, "the flag is 3/3 or 0/3, not a majority");
-            if (tickets == 1 || tickets == 2) sawSplit = true;
-            else sawUnanimous = true;
+
+            assertTrue(
+                idx.isSuperSafe(c.claimKey, topics[0]),
+                "a qualifying tally is SUPER_SAFE however the tickets fell"
+            );
+
+            if (tickets == 2) sawSplit = true;
+            if (tickets == 3) sawUnanimous = true;
         }
-        assertTrue(sawSplit, "a split draw was exercised");
-        assertTrue(sawUnanimous, "and a unanimous one");
+
+        // Both branches were actually reached, so the assertion above was not
+        // vacuously true on one side of the coin.
+        assertTrue(sawSplit, "a 2-of-3 draw was exercised");
+        assertTrue(sawUnanimous, "and a 3-of-3 one");
     }
 
     /// MUTATION M6: delete the stored-entropy shortcut from `draw`.
@@ -1915,20 +1936,25 @@ contract ModerationV3Test is Test {
         uint256 id = _submit();
         _matureAll();
         vm.roll(mod.caseInfo(id).phaseDeadline);
-        mod.closeCommit(id);
 
-        Moderation.Case memory c = mod.caseInfo(id);
         uint256 drawB = (FEE * 50) / 10_000;
         uint256 claimB = (FEE * 100) / 10_000;
 
+        // M2.13 §2 — CLAIM_BOUNTY is PAID to whoever poked, on this row too.
+        uint256 p0 = token.balanceOf(poker);
+        vm.prank(poker);
+        mod.closeCommit(id);
+        assertEq(token.balanceOf(poker) - p0, claimB, "CLAIM_BOUNTY paid: the transition WAS performed");
+
+        Moderation.Case memory c = mod.caseInfo(id);
         assertEq(
             mod.refundOwed(id),
             uint256(c.pot) + c.challengeReserve + drawB,
             "pot + reserve + DRAW_BOUNTY: the draw is unreachable from here"
         );
         assertEq(c.drawBounty, 0, "moved to the refund, not retained");
-        assertEq(c.claimBounty, 0, "and CLAIM_BOUNTY was retained - open in s10");
-        assertEq(mod.maintenanceAccrued(), (FEE * 1000) / 10_000 + claimB, "maintenance + the retained claim bounty");
+        assertEq(c.claimBounty, 0, "and CLAIM_BOUNTY is spent, not retained");
+        assertEq(mod.maintenanceAccrued(), (FEE * 1000) / 10_000, "maintenance ONLY - no retained bounty");
 
         uint256 b0 = token.balanceOf(submitter);
         mod.withdrawRefund(id);
@@ -1947,7 +1973,12 @@ contract ModerationV3Test is Test {
         vm.roll(mod.caseInfo(id).phaseDeadline);
         mod.closeCommit(id);
         vm.roll(mod.caseInfo(id).phaseDeadline);
+
+        uint256 claimB = (FEE * 100) / 10_000;
+        uint256 p0 = token.balanceOf(poker);
+        vm.prank(poker);
         mod.closeReveal(id);
+        assertEq(token.balanceOf(poker) - p0, claimB, "CLAIM_BOUNTY paid on this row too");
 
         Moderation.Case memory c = mod.caseInfo(id);
         uint256 drawB = (FEE * 50) / 10_000;
@@ -1958,6 +1989,7 @@ contract ModerationV3Test is Test {
             "reserve + DRAW_BOUNTY, and NOT the pot"
         );
         assertEq(c.drawBounty, 0);
+        assertEq(c.claimBounty, 0);
     }
 
     /// @dev And `NO_RANDOMNESS` PAYS it, to whoever poked the expiry — so nothing
@@ -1976,8 +2008,14 @@ contract ModerationV3Test is Test {
 
         Moderation.Case memory c = mod.caseInfo(id);
         uint256 drawB = (FEE * 50) / 10_000;
-        assertEq(token.balanceOf(poker) - p0, drawB, "paid, because the transition WAS performed");
+        uint256 claimB = (FEE * 100) / 10_000;
+        assertEq(
+            token.balanceOf(poker) - p0,
+            drawB + claimB,
+            "BOTH bounties paid, because the transition WAS performed"
+        );
         assertEq(c.drawBounty, 0);
+        assertEq(c.claimBounty, 0);
         assertEq(
             mod.refundOwed(id),
             uint256(c.pot) + c.challengeReserve,
@@ -2069,8 +2107,9 @@ contract ModerationV3Test is Test {
         reg.proposeMaintenanceWithdrawal(treasury, total);
         (,, uint256 eta,) = reg.pendingMaintenanceWithdrawal();
         vm.warp(eta);
+        (address wTo, uint256 wAmt,,) = reg.pendingMaintenanceWithdrawal();
         vm.prank(gov);
-        reg.executeMaintenanceWithdrawal();
+        reg.executeMaintenanceWithdrawal(wTo, wAmt);
 
         assertEq(token.balanceOf(treasury), total, "fee revenue and debit revenue, together");
         assertEq(reg.maintenanceReserve(), 0);
@@ -2435,7 +2474,12 @@ contract ModerationV3Test is Test {
         _toTally(rm, 16, 0);
         _drawTo(rm, APPROVE, true);
 
-        assertTrue(mod.caseInfo(rm).unanimousDraw, "unanimous, unchallenged, full-quorum - strict on every OTHER conjunct");
+        // Unanimous tally, unchallenged, at the super-quorum, every committer
+        // revealed — strict on every OTHER conjunct.
+        Moderation.Case memory rc = mod.caseInfo(rm);
+        assertEq(rc.pooledReject, 0);
+        assertEq(rc.challenger, address(0));
+        assertEq(uint256(rc.pooledApprove), uint256(rc.commitsThisRound));
         assertFalse(idx.entryOf(rk, topics[0]).strict, "but a removal is not a safety certificate");
         assertFalse(idx.isSuperSafe(rk, topics[0]));
     }

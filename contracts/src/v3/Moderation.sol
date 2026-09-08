@@ -192,7 +192,6 @@ contract Moderation is ReentrancyGuard {
         uint40 outcomeSeedBlock; // armed at submission, from the SCHEDULED heights
         uint8 plurality; // which side led at round-0 close; a FACT
         uint8 verdict; // written once, at the binding draw
-        bool unanimousDraw; // §8.3 reads this; nothing reads `u` back
         // --- slot boundary ---
         uint128 pot; // NEVER grows: the reserve is added at settlement
         uint128 challengeReserve; // escrowed throughout
@@ -780,7 +779,7 @@ contract Moderation is ReentrancyGuard {
         if (block.number < c.phaseDeadline) revert DeadlineNotReached();
 
         if (c.round == 0 && c.commitsThisRound == 0) {
-            _toUnresolved(caseId, Reason.NO_TURNOUT);
+            _toUnresolved(caseId, Reason.NO_TURNOUT, msg.sender);
             return;
         }
 
@@ -809,7 +808,7 @@ contract Moderation is ReentrancyGuard {
         }
 
         if (pooled == 0) {
-            _toUnresolved(caseId, Reason.NO_REVEALS);
+            _toUnresolved(caseId, Reason.NO_REVEALS, msg.sender);
             return;
         }
 
@@ -886,7 +885,7 @@ contract Moderation is ReentrancyGuard {
         uint256 sb = c.outcomeSeedBlock;
         if (block.number > sb + p.blockhashHorizon) {
             _payBounty(caseId, false, msg.sender);
-            _toUnresolved(caseId, Reason.NO_RANDOMNESS);
+            _toUnresolved(caseId, Reason.NO_RANDOMNESS, msg.sender);
             return;
         }
         if (block.number <= sb) revert SeedNotYet();
@@ -902,7 +901,6 @@ contract Moderation is ReentrancyGuard {
         (uint8 verdict, uint8 tickets) = _decide(caseId, entropy);
 
         c.verdict = verdict;
-        c.unanimousDraw = (tickets == 0 || tickets == 3);
         c.terminal = verdict == uint8(Outcome.APPROVE) ? uint8(Terminal.APPROVED) : uint8(Terminal.REJECTED);
         c.phase = uint8(Phase.FINALIZED);
         c.finalizedAt = uint40(block.timestamp); // a record, never compared
@@ -990,7 +988,7 @@ contract Moderation is ReentrancyGuard {
     ///      `O(MAX_TOPICS)` — never at settlement (§8.1, I15) — for all three
     ///      reasons, because a reader must distinguish "judged, undrawn" from
     ///      "never submitted".
-    function _toUnresolved(uint256 caseId, Reason r) internal {
+    function _toUnresolved(uint256 caseId, Reason r, address poker) internal {
         Case storage c = cases[caseId];
         c.terminal = uint8(Terminal.UNRESOLVED);
         c.unresolvedReason = uint8(r);
@@ -1031,7 +1029,7 @@ contract Moderation is ReentrancyGuard {
             reservationOf[key] = Reservation.PERMANENT;
         }
 
-        _settleBounties(caseId);
+        _settleBounties(caseId, poker);
         _writeIndex(caseId, IndexStatus.UNRESOLVED);
 
         emit Terminated(caseId, uint8(Terminal.UNRESOLVED), uint8(r));
@@ -1070,9 +1068,21 @@ contract Moderation is ReentrancyGuard {
     ///      is the index's, maintained from `reopen` and its terminal.
     ///
     ///      `SUPER_QUORUM` is open (§1, §10), so it is a governance parameter pinned
-    ///      per case like every other. The 3/3 conjunct is included as §8.3 states
-    ///      it; §10 has whether it should be there at all, and this order does not
-    ///      decide it.
+    ///      per case like every other.
+    ///
+    ///      **The 3/3 conjunct is GONE (M2.13 §1), and its removal is not a
+    ///      weakening.** It required the three tickets to agree, which under a
+    ///      unanimous tally is three draws of the same coin — it carried no
+    ///      information about the content. So the label published a random
+    ///      subsample of what qualified: 7% of qualifying content excluded at
+    ///      `N = 40`, 16% at `N = 16`, on a coin flip. Dropping it stops
+    ///      `SUPER_SAFE` lying about its own selectivity.
+    ///
+    ///      Every conjunct that remains is a TALLY FACT, so nothing enters
+    ///      `SUPER_SAFE` that a unanimous, fully-revealed, super-quorum cohort did
+    ///      not approve. `unanimousDraw` was stored for this conjunct and this
+    ///      conjunct only, and the field went with it.
+    ///
     ///      The `actionType` conjunct is not redundant with `verdict == APPROVE`.
     ///      On a REMOVE claim, Approve means *remove it*, so without it a unanimous
     ///      successful removal would stamp SUPER_SAFE onto the removal's own entry —
@@ -1081,8 +1091,8 @@ contract Moderation is ReentrancyGuard {
         Case storage c = cases[caseId];
         uint256 reveals = uint256(c.pooledApprove) + c.pooledReject;
         return c.actionType == uint8(ActionType.LIST) && c.verdict == uint8(Outcome.APPROVE)
-            && c.challenger == address(0) && c.unanimousDraw
-            && reveals >= _p(caseId).superQuorum && c.pooledReject == 0 && reveals == uint256(c.commitsThisRound);
+            && c.challenger == address(0) && reveals >= _p(caseId).superQuorum && c.pooledReject == 0
+            && reveals == uint256(c.commitsThisRound);
     }
 
     /// @dev Bounties were carved from the fee at submission and `pot` never held
@@ -1114,17 +1124,31 @@ contract Moderation is ReentrancyGuard {
     ///      the submitter for a transition that cannot happen, on rows §4.8 calls
     ///      unsteerable and refunds in full.
     ///
-    ///      `CLAIM_BOUNTY` is retained, and that is deliberate rather than an
-    ///      oversight: the same argument applies to it, because every terminal
-    ///      transition is permissionless and somebody paid gas to poke it. §10
-    ///      carries that as an open question — it is a fee-schedule change rather
-    ///      than a contradiction, and the two must not ride together.
-    function _settleBounties(uint256 caseId) internal {
+    ///      **`CLAIM_BOUNTY` is now PAID on all three rows (M2.13 §2), to whoever
+    ///      poked the transition.** It was retained here and carried in §10 as a
+    ///      fee-schedule question. That classification was wrong: the rule above is
+    ///      "paid where that transition was performed", and on every `UNRESOLVED`
+    ///      row it WAS performed — permissionlessly, by someone paying gas.
+    ///      Retention was the same rule applied inconsistently, not a different
+    ///      question.
+    ///
+    ///      And retention was worse than untidy. `NO_TURNOUT` and `NO_REVEALS` have
+    ///      no party who gains from poking them — unlike `NO_RANDOMNESS`, where
+    ///      §7.3's debit on the plurality-losing revealers makes poking dominant for
+    ///      a party guaranteed to exist. So an unpaid poke left a transition nobody
+    ///      was funded to make, on the two rows a thin registry reaches most often
+    ///      (FINDINGS §D).
+    function _settleBounties(uint256 caseId, address poker) internal {
         Case storage c = cases[caseId];
         refundOwed[caseId] += c.drawBounty;
         c.drawBounty = 0;
-        maintenanceAccrued += c.claimBounty;
+
+        uint256 claimB = c.claimBounty;
         c.claimBounty = 0;
+        if (claimB != 0) {
+            address(token).safeTransfer(poker, claimB);
+            emit BountyPaid(caseId, poker, claimB);
+        }
     }
 
     // =========================================================================

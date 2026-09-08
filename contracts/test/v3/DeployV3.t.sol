@@ -115,8 +115,11 @@ contract DeployV3Test is Test {
     function test_verifyNamesAMissingWriterCapability() public {
         DeployV3.Stack memory s = script.deployAndPropose(_config());
         vm.warp(block.timestamp + TIMELOCK);
+        // Read the cap bits BEFORE the prank: a call in the argument expression
+        // consumes it, and the execute then lands as the test contract.
+        uint8 capBits = s.reg.MAY_CREATE() | s.reg.MAY_DISCHARGE();
         vm.prank(address(script)); // the deployer still holds registry governance
-        s.reg.executeCaps(); // registry granted, index NOT
+        s.reg.executeCaps(address(s.mod), capBits); // registry granted, index NOT
 
         vm.expectRevert(abi.encodeWithSelector(DeployV3.NotWired.selector, "IndexRegistry.writer"));
         script.verify(s);

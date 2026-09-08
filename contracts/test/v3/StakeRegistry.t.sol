@@ -79,6 +79,41 @@ contract StakeRegistryV3Test is Test {
     uint8 internal VOTE;
     uint8 internal CHALLENGE;
 
+    /// @dev M2.13 §4 — `execute*` now names what it executes. Tests below are about
+    ///      other properties, so they read the pending record and pass it; the
+    ///      argument-match property has its own dedicated tests.
+    ///      The read happens BEFORE the prank, deliberately: a `vm.prank` is
+    ///      consumed by the next external call, so reading the pending record
+    ///      inside a pranked helper spends the prank on the view and the execute
+    ///      lands unpranked. This suite has been bitten by that three times.
+    function _execPendingWithdrawal(address who) internal {
+        (address to, uint256 amount,,) = reg.pendingMaintenanceWithdrawal();
+        vm.prank(who);
+        reg.executeMaintenanceWithdrawal(to, amount);
+    }
+
+    function _execPendingCaps(address who) internal {
+        (address logic, uint8 capBits,,) = reg.pendingCapProposal();
+        vm.prank(who);
+        reg.executeCaps(logic, capBits);
+    }
+
+    /// @dev The `expectRevert` variants: the cheatcode must be armed after the
+    ///      record is read, or it catches the view instead.
+    function _execPendingWithdrawalExpectRevert(address who, bytes4 err) internal {
+        (address to, uint256 amount,,) = reg.pendingMaintenanceWithdrawal();
+        vm.prank(who);
+        vm.expectRevert(err);
+        reg.executeMaintenanceWithdrawal(to, amount);
+    }
+
+    function _execPendingCapsExpectRevert(address who, bytes4 err) internal {
+        (address logic, uint8 capBits,,) = reg.pendingCapProposal();
+        vm.prank(who);
+        vm.expectRevert(err);
+        reg.executeCaps(logic, capBits);
+    }
+
     function setUp() public {
         gov = makeAddr("gov");
         alice = makeAddr("alice");
@@ -109,8 +144,7 @@ contract StakeRegistryV3Test is Test {
         vm.prank(gov);
         reg.proposeCaps(logic, bits);
         vm.warp(block.timestamp + TIMELOCK);
-        vm.prank(gov);
-        reg.executeCaps();
+        _execPendingCaps(gov);
     }
 
     /// @dev Stakes `who` with `extraBond` on top of `BOND_MIN` and matures them.
@@ -644,14 +678,11 @@ contract StakeRegistryV3Test is Test {
         vm.prank(gov);
         reg.proposeCaps(address(logicA), 0);
         vm.warp(block.timestamp + TIMELOCK);
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.LogicHoldsClaims.selector);
-        reg.executeCaps();
+        _execPendingCapsExpectRevert(gov, StakeRegistry.LogicHoldsClaims.selector);
 
         // Settle, and the revocation goes through.
         logicA.discharge(alice, 1, VOTE);
-        vm.prank(gov);
-        reg.executeCaps();
+        _execPendingCaps(gov);
         assertEq(reg.caps(address(logicA)), 0);
     }
 
@@ -672,9 +703,7 @@ contract StakeRegistryV3Test is Test {
     function test_caps_timelockIsEnforced() public {
         vm.prank(gov);
         reg.proposeCaps(address(0xDEAD), 3);
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
-        reg.executeCaps();
+        _execPendingCapsExpectRevert(gov, StakeRegistry.TimelockNotElapsed.selector);
     }
 
     function test_caps_onlyGovernanceMayPropose() public {
@@ -1034,16 +1063,12 @@ contract StakeRegistryV3Test is Test {
         // Governance asks for everything the contract holds.
         _proposeWithdrawal(gov, token.balanceOf(address(reg)));
         _warpToEta();
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.ExceedsReserve.selector);
 
         // And for one unit more than the reserve.
         _proposeWithdrawal(gov, reserve + 1);
         _warpToEta();
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.ExceedsReserve.selector);
 
         assertEq(reg.totalStake() + reg.totalBond(), stakeBond, "untouched");
         assertEq(reg.bondOf(alice) + reg.bondOf(bob) + reg.totalStake(), stakeBond);
@@ -1054,9 +1079,7 @@ contract StakeRegistryV3Test is Test {
         assertEq(reg.maintenanceReserve(), 0);
         _proposeWithdrawal(gov, 1);
         _warpToEta();
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.ExceedsReserve.selector);
     }
 
     /// @dev Configuration 2: `amount` exactly equal to the reserve drains it to zero
@@ -1070,8 +1093,7 @@ contract StakeRegistryV3Test is Test {
         _proposeWithdrawal(carol, reserve);
         vm.warp(block.timestamp + TIMELOCK);
         assertTrue(reg.solvent(), "solvent before execute");
-        vm.prank(gov);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawal(gov);
 
         assertEq(token.balanceOf(carol), reserve, "paid in full");
         assertEq(reg.maintenanceReserve(), 0, "drained exactly");
@@ -1089,16 +1111,13 @@ contract StakeRegistryV3Test is Test {
         // Proposal A, for the full reserve.
         _proposeWithdrawal(carol, 20 * UNIT);
         _warpToEta();
-        vm.prank(gov);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawal(gov);
         assertEq(reg.maintenanceReserve(), 0);
 
         // Proposal B was sized against the reserve as it stood; it must now fail.
         _proposeWithdrawal(bob, 20 * UNIT);
         _warpToEta();
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.ExceedsReserve.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.ExceedsReserve.selector);
         assertEq(token.balanceOf(bob), 0, "nothing paid against a stale proposal");
     }
 
@@ -1106,18 +1125,13 @@ contract StakeRegistryV3Test is Test {
     function test_s5_6_withdrawalTimelockIsEnforced() public {
         _fillReserve(5 * UNIT);
         _proposeWithdrawal(carol, 5 * UNIT);
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.TimelockNotElapsed.selector);
 
         vm.warp(block.timestamp + TIMELOCK - 1);
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.TimelockNotElapsed.selector);
 
         vm.warp(block.timestamp + 1);
-        vm.prank(gov);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawal(gov);
         assertEq(token.balanceOf(carol), 5 * UNIT);
     }
 
@@ -1133,9 +1147,7 @@ contract StakeRegistryV3Test is Test {
         reg.cancelMaintenanceWithdrawal();
 
         _warpToEta();
-        vm.prank(stranger);
-        vm.expectRevert(StakeRegistry.NotGovernance.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(stranger, StakeRegistry.NotGovernance.selector);
     }
 
     function test_s5_6_cancelClearsTheProposal() public {
@@ -1147,9 +1159,7 @@ contract StakeRegistryV3Test is Test {
         reg.cancelMaintenanceWithdrawal();
 
         vm.warp(block.timestamp + TIMELOCK + 1);
-        vm.prank(gov);
-        vm.expectRevert(StakeRegistry.NoPendingProposal.selector);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawalExpectRevert(gov, StakeRegistry.NoPendingProposal.selector);
         assertEq(reg.maintenanceReserve(), 5 * UNIT, "the reserve is untouched by a cancel");
         assertTrue(reg.solvent(), "solvent after cancel");
     }
@@ -1176,8 +1186,7 @@ contract StakeRegistryV3Test is Test {
 
         _proposeWithdrawal(carol, 3 * UNIT);
         _warpToEta();
-        vm.prank(gov);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawal(gov);
         assertTrue(reg.solvent(), "after execute");
         assertEq(token.balanceOf(address(reg)), reg.balanceBuckets(), "exact, not merely solvent");
     }
@@ -1192,8 +1201,7 @@ contract StakeRegistryV3Test is Test {
 
         _proposeWithdrawal(carol, LAMBDA);
         _warpToEta();
-        vm.prank(gov);
-        reg.executeMaintenanceWithdrawal();
+        _execPendingWithdrawal(gov);
         assertEq(token.balanceOf(carol), LAMBDA, "and it left by the only exit");
     }
 
@@ -1241,4 +1249,114 @@ contract StakeRegistryV3Test is Test {
         vm.expectRevert(StakeRegistry.AmountZero.selector);
         logicA.createVote(alice, 1, uint256(type(uint96).max) + 1);
     }
+    // =========================================================================
+    // M2.13 §4 — execute NAMES what it executes
+    // =========================================================================
+
+    /// @dev The retrofit. `executeCaps()` used to execute whatever was pending, so
+    ///      inside a multisig one signer could queue a grant, a second replace it,
+    ///      and an approval given for the first execute the second. The timelock
+    ///      defused it rather than the signature did — a replacement resets the
+    ///      `eta`, so the swap waits the full delay in the open — but "defused by a
+    ///      different mechanism" is not "cannot happen", and this is a CAPABILITY
+    ///      GRANT: the swap could hand `MAY_DISCHARGE` to a logic nobody approved.
+    ///
+    /// MUTATION: drop the `p.logic != logic || p.capBits != capBits` check.
+    function test_s2_4_executeCapsRefusesAGrantThatIsNotTheOnePending() public {
+        // Fresh addresses: `logicA`/`logicB` already hold caps from setUp, so a
+        // test asserting "granted nothing" against them asserts nothing.
+        address newLogic = makeAddr("newLogic");
+        address otherLogic = makeAddr("otherLogic");
+        uint8 create = reg.MAY_CREATE();
+        uint8 both = create | reg.MAY_DISCHARGE();
+
+        vm.prank(gov);
+        reg.proposeCaps(newLogic, create);
+        vm.warp(block.timestamp + TIMELOCK);
+
+        // Right logic, wrong bits — the swap that matters, because it is the one
+        // that hands out MAY_DISCHARGE.
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ProposalMismatch.selector);
+        reg.executeCaps(newLogic, both);
+
+        // Right bits, wrong logic.
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ProposalMismatch.selector);
+        reg.executeCaps(otherLogic, create);
+
+        assertEq(reg.caps(newLogic), 0, "nothing granted by either");
+        assertEq(reg.caps(otherLogic), 0);
+
+        // And the one actually pending still works, so the check discriminates
+        // rather than merely refusing.
+        vm.prank(gov);
+        reg.executeCaps(newLogic, create);
+        assertEq(reg.caps(newLogic), create);
+    }
+
+    /// @dev The full multisig scenario: A queues X, B replaces it with Y, and an
+    ///      approval that named X must not execute Y. Two independent properties —
+    ///      the eta resets, AND the execute refuses the replaced argument.
+    function test_s2_4_aReplacedCapProposalResetsTheEtaAndCannotRunUnderTheOldApproval() public {
+        address logicX = makeAddr("logicX");
+        address logicY = makeAddr("logicY");
+        uint8 create = reg.MAY_CREATE();
+        uint8 both = create | reg.MAY_DISCHARGE();
+
+        vm.prank(gov);
+        reg.proposeCaps(logicX, create);
+        (,, uint256 etaX,) = reg.pendingCapProposal();
+
+        vm.warp(block.timestamp + TIMELOCK / 2);
+        vm.prank(gov);
+        reg.proposeCaps(logicY, both);
+        (address pl, uint8 pb, uint256 etaY,) = reg.pendingCapProposal();
+
+        assertEq(pl, logicY);
+        assertEq(pb, both);
+        assertGt(etaY, etaX, "the replacement did not inherit the elapsed time");
+
+        // At X's original eta, Y is still inert.
+        vm.warp(etaX);
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.TimelockNotElapsed.selector);
+        reg.executeCaps(logicY, both);
+
+        // And after Y's eta, an approval that named X still cannot execute Y.
+        vm.warp(etaY);
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ProposalMismatch.selector);
+        reg.executeCaps(logicX, create);
+        assertEq(reg.caps(logicX), 0, "the approval that named X granted nothing");
+        assertEq(reg.caps(logicY), 0, "and Y is not granted by an approval for X");
+    }
+
+    /// MUTATION: drop the `w.to != to || w.amount != amount` check.
+    /// @dev This one moves value, so the swap an approver could not see would move
+    ///      it to an address they did not approve.
+    function test_s5_6_executeWithdrawalRefusesAnythingButThePendingRecord() public {
+        _fillReserve(10 * UNIT);
+
+        vm.prank(gov);
+        reg.proposeMaintenanceWithdrawal(carol, 4 * UNIT);
+        (,, uint256 eta,) = reg.pendingMaintenanceWithdrawal();
+        vm.warp(eta);
+
+        // Wrong recipient.
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ProposalMismatch.selector);
+        reg.executeMaintenanceWithdrawal(stranger, 4 * UNIT);
+
+        // Wrong amount, right recipient.
+        vm.prank(gov);
+        vm.expectRevert(StakeRegistry.ProposalMismatch.selector);
+        reg.executeMaintenanceWithdrawal(carol, 10 * UNIT);
+
+        uint256 b0 = token.balanceOf(carol);
+        vm.prank(gov);
+        reg.executeMaintenanceWithdrawal(carol, 4 * UNIT);
+        assertEq(token.balanceOf(carol) - b0, 4 * UNIT, "and the approved one lands");
+    }
+
 }

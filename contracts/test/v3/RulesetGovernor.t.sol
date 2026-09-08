@@ -69,7 +69,7 @@ contract RulesetGovernorTest is Test {
         reg.proposeCaps(address(mod), bits);
         vm.warp(block.timestamp + TIMELOCK);
         vm.prank(owner);
-        reg.executeCaps();
+        reg.executeCaps(address(mod), bits);
 
         vm.prank(owner);
         idx.proposeWriter(address(mod), true);

@@ -195,6 +195,7 @@ contract StakeRegistry {
     error CooldownActive();
     error OutstandingLiabilities();
     error NoPendingProposal();
+    error ProposalMismatch();
     error TimelockNotElapsed();
     error LogicHoldsClaims();
     error ExceedsReserve();
@@ -535,9 +536,23 @@ contract StakeRegistry {
     ///      voted under it. The registry knows the count, so this is a comparison
     ///      rather than a governance discipline. Nothing in this contract excepts
     ///      it — condemnation adds a discharge path and removes none.
-    function executeCaps() external onlyGovernance {
+    /// @notice Execute the pending capability grant. **Takes what it executes.**
+    /// @dev M2.13 §4 — `executeCaps()` used to execute whatever was pending. Inside
+    ///      a multisig that means one signer can queue a grant, a second replace it,
+    ///      and an approval given for the first execute the second. The timelock
+    ///      defused it rather than the signature did: a replacement calls
+    ///      `proposeCaps` again, which sets a fresh `eta`, so the swap waits the
+    ///      full delay in the open. But "defused by a different mechanism" is not
+    ///      "cannot happen", and this is a capability grant — the swap could hand
+    ///      `MAY_DISCHARGE` to a logic nobody approved.
+    ///
+    ///      Same shape as `RulesetGovernor.executeParams`: name the arguments,
+    ///      compare against the pending record. Two fields here rather than a wide
+    ///      struct, so the comparison is direct rather than hashed.
+    function executeCaps(address logic, uint8 capBits) external onlyGovernance {
         PendingCap memory p = pendingCap;
         if (!p.exists) revert NoPendingProposal();
+        if (p.logic != logic || p.capBits != capBits) revert ProposalMismatch();
         if (block.timestamp < p.eta) revert TimelockNotElapsed();
         if (caps[p.logic] & MAY_DISCHARGE != 0 && p.capBits & MAY_DISCHARGE == 0) {
             if (openClaims[p.logic] != 0) revert LogicHoldsClaims();
@@ -600,9 +615,13 @@ contract StakeRegistry {
     ///
     ///      Solvency is preserved by construction — the transfer and the subtraction
     ///      move the balance and the bucket by the same amount.
-    function executeMaintenanceWithdrawal() external onlyGovernance {
+    /// @notice Execute the pending withdrawal. **Takes what it executes** — see
+    ///         `executeCaps`. This one moves value, so the swap an approver could
+    ///         not see would move it to an address they did not approve.
+    function executeMaintenanceWithdrawal(address to, uint256 amount) external onlyGovernance {
         PendingWithdrawal memory w = pendingWithdrawal;
         if (!w.exists) revert NoPendingProposal();
+        if (w.to != to || w.amount != amount) revert ProposalMismatch();
         if (block.timestamp < w.eta) revert TimelockNotElapsed();
         if (w.amount > maintenanceReserve) revert ExceedsReserve();
 
@@ -610,6 +629,11 @@ contract StakeRegistry {
         delete pendingWithdrawal;
         address(token).safeTransfer(w.to, w.amount);
         emit MaintenanceWithdrawn(w.to, w.amount);
+    }
+
+    function pendingCapProposal() external view returns (address logic, uint8 capBits, uint256 eta, bool exists) {
+        PendingCap memory p = pendingCap;
+        return (p.logic, p.capBits, p.eta, p.exists);
     }
 
     function pendingMaintenanceWithdrawal() external view returns (address to, uint256 amount, uint256 eta, bool exists) {

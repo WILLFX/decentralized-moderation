@@ -58,7 +58,7 @@ contract V3InvariantTest is StdInvariant, Test {
         reg.proposeCaps(address(mod), bits);
         vm.warp(block.timestamp + TIMELOCK);
         vm.prank(gov);
-        reg.executeCaps();
+        reg.executeCaps(address(mod), bits);
 
         vm.prank(gov);
         idx.proposeWriter(address(mod), true);
@@ -289,6 +289,10 @@ contract V3InvariantTest is StdInvariant, Test {
         for (uint256 i; i < n; ++i) {
             inWallets += token.balanceOf(handler.actors(i));
         }
+        // The handler pokes terminal transitions in its own name, so since M2.13 §2
+        // it is a bounty recipient like any other poker. Omitting it made this
+        // invariant read as if CLAIM_BOUNTY had been destroyed.
+        inWallets += token.balanceOf(address(handler));
         assertEq(held + inWallets, handler.ghostPaidIn(), "value was created or destroyed");
     }
 

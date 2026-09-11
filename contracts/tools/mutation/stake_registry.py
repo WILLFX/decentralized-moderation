@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation campaign for src/v3/StakeRegistry.sol.
+"""Mutation campaign for src/StakeRegistry.sol.
 
 For each mutation: remove one invariant's enforcement from the source, run the
 v3 suite, and record which tests fail. A mutation that kills NOTHING is a
@@ -9,7 +9,7 @@ import subprocess, sys, re, os
 
 FORGE = os.environ.get("FORGE", "forge")
 
-SRC = "src/v3/StakeRegistry.sol"
+SRC = "src/StakeRegistry.sol"
 ORIG = open(SRC).read()
 
 # (id, invariant, description, old, new)
@@ -153,7 +153,7 @@ MUTATIONS = [
 
 
 def run():
-    r = subprocess.run([FORGE, "test", "--match-path", "test/v3/*"],
+    r = subprocess.run([FORGE, "test", "--match-path", "test/*"],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
     if "Compiler run failed" in out or "Error (" in out:

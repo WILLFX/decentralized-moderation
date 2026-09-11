@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation campaign for src/v3/RulesetGovernor.sol.
+"""Mutation campaign for src/RulesetGovernor.sol.
 
 For each mutation: remove one property's enforcement from the source, run the
 v3 suite, and record which tests fail. A mutation that kills NOTHING is a
@@ -13,7 +13,7 @@ both times on a mutation that introduced a state read into a `pure` function.
 import subprocess, sys, re, os
 
 FORGE = os.environ.get("FORGE", "forge")
-SRC = "src/v3/RulesetGovernor.sol"
+SRC = "src/RulesetGovernor.sol"
 ORIG = open(SRC).read()
 
 # (id, property, description, old, new)
@@ -255,7 +255,7 @@ MUTATIONS += [
 
 
 def run():
-    r = subprocess.run([FORGE, "test", "--match-path", "test/v3/*"],
+    r = subprocess.run([FORGE, "test", "--match-path", "test/*"],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
     if "Compiler run failed" in out or "Error (" in out:

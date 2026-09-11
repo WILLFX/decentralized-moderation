@@ -6,24 +6,25 @@ Content publishers pay a fee to be moderated. Staked moderators (human or AI) ju
 
 This document sums up the aim of the project, the problems we are solving, and how we intend to solve them; section 3.6 documents the attack analysis that shaped it. All concrete numbers (stakes, cohort sizes, periods, fees) are current working values, not final protocol parameters — fixing them is what the simulation milestone is for.
 
-> **Implementation status — v3, and it is built.** Section 3 describes the
-> protocol as it now stands. **`specs/state-machine-v3.md` is normative**;
-> `specs/design-v3.md` carries the derivations, and where the two disagree the
-> state machine wins.
+> **One design, one logic.** `main` carries the current protocol and nothing
+> else. `specs/protocol.md` is normative; four contracts implement it in
+> `contracts/src/` — `Moderation`, `StakeRegistry`, `RulesetGovernor`,
+> `IndexRegistry` — with 266 tests, stateful invariants over the real contracts,
+> a two-implementation differential on the verdict draw, and mutation campaigns
+> as the acceptance bar. `contracts/README.md` is the map.
 >
-> Four contracts implement it in `contracts/src/v3/` — `Moderation`,
-> `StakeRegistry`, `RulesetGovernor`, `IndexRegistry` — with 266 tests, stateful
-> invariants over the real contracts, a two-implementation differential on the
-> verdict draw, and mutation campaigns as the acceptance bar. `contracts/README.md`
-> is the map. **It has not yet had an independent external review**, and the
-> standing constraint below is unchanged until it does.
+> The earlier architectures (drawn panels with obligated moderators; the v2
+> risk-unit design) and the full work-order history are on the
+> **`archive/v1-v2-and-design-history`** branch. They are not on `main` because a
+> reader cannot tell which of three state machines is the system.
 >
-> `contracts/src/` (unprefixed) is the **first** architecture — drawn panels,
-> obligated moderators, bonded appeals. It is complete and audited and it is kept
-> because building it produced the finding everything since rests on: assigning
-> moderators to cases creates a resource an attacker can exhaust (§3.6).
-> `specs/state-machine-v2.md` and `design-v2.md` are the intermediate design, also
-> superseded. Neither describes what the code now does.
+> **Two decisions are open and the code does not yet reflect either.**
+> `simulation/FINDINGS-staged.md` measured a proposed staged two-committee
+> lifecycle and found it four times worse per attempt than the single committee
+> at equal review effort — so that proposal is not adopted. The same run found
+> that publishing a running tally before voting closes costs 10–29 points, and
+> the contract currently publishes one. **It has not had an independent external
+> review.**
 
 > **Standing constraint.** No deployment with material funds, and the index is not
 > presented as reliable safe-search certification, until `prior` is measured
@@ -61,7 +62,7 @@ Six principles, made explicit because every rule below follows from them:
 1. **Safe for moderators.** Voting never risks the stake. The worst case for an honest moderator on the losing side of a genuinely borderline call is a **fixed debit `d` from their working bond** — a small multiple of what a case pays, bounded and one-off. The 10 xBZZ identity stake is never touched. Hard cases exist; judging them must not be financially ruinous, or nobody sane moderates.
 2. **Zero internal attack profit.** Stake is never slashed or redistributed between moderators. A redistribution rule would let a majority attacker farm honest minorities (stake 200 moderators against 100, win, harvest their stakes) — the mechanism itself would mint the attack's reward. Every debit goes to a **maintenance reserve**, never to another moderator. All rewards are *external* money: submission fees. An attacker's only possible prize is the listing itself.
 3. **Nobody is conscripted.** No moderator is ever assigned to a case, bound to one, or penalised for ignoring one. Eligibility is an opportunity, never a duty. This is what makes the queue unfloodable, and it is why there is no no-show penalty anywhere in the design: there is no show to fail to make.
-4. **No party can steer the *terminal class* of a case.** The earlier form of this principle — *the verdict never moves the cash* — was retired, because v3 pays the whole pot to voters coherent with the verdict, so expected cash is no longer independent of direction. What replaced it is stronger and is enforced rather than hoped for: **the premium attaches to the majority, not to Approve**, so no rule-level bias toward listing exists; and no party can change which *kind* of outcome a case reaches by anything they do or decline to do (`state-machine-v3` I24). A conformity premium remains, and is stated rather than denied.
+4. **No party can steer the *terminal class* of a case.** The earlier form of this principle — *the verdict never moves the cash* — was retired, because v3 pays the whole pot to voters coherent with the verdict, so expected cash is no longer independent of direction. What replaced it is stronger and is enforced rather than hoped for: **the premium attaches to the majority, not to Approve**, so no rule-level bias toward listing exists; and no party can change which *kind* of outcome a case reaches by anything they do or decline to do (`specs/protocol.md` I24). A conformity premium remains, and is stated rather than denied.
 5. **Penalties are money, never time.** v2 froze identities and stacked the freezes. That made the cost of a vote depend on how many other cases a moderator was in, and made penalties **settlement-order-dependent** — the same three losses cost 24 days or 19 depending on the order they settled in. A debit from a balance commutes; an interval added to a deadline does not. The debit-to-pay ratio is now a chosen constant rather than an emergent one.
 6. **Trust is earned, not bought.** A track record of coherent participation accrues per identity and does not transfer, so abandoning an identity abandons its standing. Fresh capital has none.
 
@@ -108,7 +109,7 @@ H(moderator, caseId, round, caseSeed) < T
 
 which every moderator can check for themselves, off-chain, for free. The contract verifies the same inequality when a vote arrives. Nothing is enumerated, no panel is assembled, and no transaction is needed to decide who may participate — **the selection costs zero contract interactions**, which matters because a call nobody is paid to make is a call nobody makes.
 
-The threshold `T` is **static**, calibrated so the expected eligible set is `TARGET_COHORT` (working value: **40**) at a calibration registry size. It is deliberately *not* read from a live moderator count: maintaining one on chain would require every stake and exit to update a global, and `state-machine-v3` §3.6 rules that out. The cost is that the realized cohort scales with the registry rather than staying fixed, which is a known trade recorded in §10 of that document.
+The threshold `T` is **static**, calibrated so the expected eligible set is `TARGET_COHORT` (working value: **40**) at a calibration registry size. It is deliberately *not* read from a live moderator count: maintaining one on chain would require every stake and exit to update a global, and `specs/protocol.md` §3.6 rules that out. The cost is that the realized cohort scales with the registry rather than staying fixed, which is a known trade recorded in §10 of that document.
 
 `caseSeed` is a blockhash from a few blocks after the round opens — so the eligible set is unknowable when the case is submitted, and a submitter cannot grind the case id to select a friendly cohort.
 
@@ -118,7 +119,7 @@ The threshold `T` is **static**, calibrated so the expected eligible set is `TAR
 
 Eligible moderators who do not vote are not penalised in any way. They are simply not paid. A moderator who *commits* and then does not reveal is debited `REVEAL_BOND` — that is a different thing, and it exists because withholding a revealed vote would otherwise be a free way to shrink a tally.
 
-**There is no quorum gate.** A round proceeds on whatever turnout it attracts, down to a single commit. An earlier revision required 16 commits and failed 92% of cases at a launch-size registry; measurement showed the gate was inert wherever the registry was large and destructive wherever it was not (`simulation/v3/FINDINGS-adaptive.md`). What stops a thin tally from deciding a case outright is not a floor but the estimator in §3.4.
+**There is no quorum gate.** A round proceeds on whatever turnout it attracts, down to a single commit. An earlier revision required 16 commits and failed 92% of cases at a launch-size registry; measurement showed the gate was inert wherever the registry was large and destructive wherever it was not (`simulation/FINDINGS-adaptive.md`). What stops a thin tally from deciding a case outright is not a floor but the estimator in §3.4.
 
 ### 3.4 Probabilistic outcomes and challenges
 
@@ -369,7 +370,7 @@ case — and yields two underpowered samples instead of one usable one.
 ### The parameters that are still open
 
 `BOND_MIN`, `CHALLENGE_BOND`, `GAS_ALLOWANCE`, `MATURATION`, `SUPER_QUORUM`,
-`RETRY_COOLDOWN`, and `DRAW_BOUNTY`'s sizing. `specs/state-machine-v3.md` §10
+`RETRY_COOLDOWN`, and `DRAW_BOUNTY`'s sizing. `specs/protocol.md` §10
 carries each with the argument that constrains it. Two are worth naming here:
 
 - **`BOND_MIN`** is what Sybil resistance actually costs, and several safety
@@ -388,7 +389,7 @@ design is weakest. But the signal is farmable: an attacker never has to dodge a
 known-answer case, because he can answer everything honestly except the one he is
 attacking. Above a measured crossover (0.797 at `prior` 0.665) the same mechanism
 runs in reverse at comparable magnitude, and no weight cap removes it.
-`simulation/v3/FINDINGS-weighted.md` has the full result. **Deliberately not in the
+`simulation/FINDINGS-weighted.md` has the full result. **Deliberately not in the
 spec** until the crossover is measured.
 
 **Cost of corruption is not stated.** An attacker's prize — the listing — is
@@ -431,12 +432,12 @@ Two external audits and a substantial internal remediation pass ran against it. 
 
 **M2.5 / M2.6 — Contract (second architecture).** Hash eligibility, fixed-window
 voting with no assignment, pooled tallies, risk units, serial freezes. Specified in
-`specs/design-v2.md` and `specs/state-machine-v2.md`. **Superseded before it was
+the `archive/v1-v2-and-design-history` branch. **Superseded before it was
 completed**: freezes made penalties settlement-order-dependent, and risk units
 priced concurrency with a reservation the design could not justify.
 
 **M2.7–M2.13 — Contract (v3, current).** *Built.* Four contracts in
-`contracts/src/v3/`, specified normatively by `specs/state-machine-v3.md`:
+`contracts/src/`, specified normatively by `specs/protocol.md`:
 
 | | what it replaced |
 |---|---|

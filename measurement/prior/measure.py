@@ -8,7 +8,7 @@
 tally is composed of independent judgments. `v2-audit-checklist.md` P1-4 and §5.6
 have carried "AI identities are not independent moderators" as DEFERRED since the
 first audit. `rho` is that quantity: at `rho = 0` a cohort of 32 is 32 opinions,
-at `rho = 1` it is one opinion sampled 32 times, and `simulation/v3/correlated.py`
+at `rho = 1` it is one opinion sampled 32 times, and `simulation/correlated.py`
 turns the pair into the design's numbers.
 
 A **configuration** is what an operator actually runs: a model, a prompt, a
@@ -180,7 +180,7 @@ def rho(res: Result, items: Sequence[Item]) -> float:
 
 
 #: Above this, reliability weighting stops helping and starts helping the
-#: attacker. Measured in `simulation/v3/FINDINGS-weighted.md` §3 at 8,000 trials:
+#: attacker. Measured in `simulation/FINDINGS-weighted.md` §3 at 8,000 trials:
 #: 0.797 at `prior` 0.665, 0.967 at `prior` 0.95. The bar is not the mean plus a
 #: constant — it tracks how heavy the honest cohort's left tail is — so it must be
 #: read against the band's own `prior`, not against a single number.
@@ -295,5 +295,5 @@ def report(res: Result, items: Sequence[Item]) -> None:
     print("    p95 is biased UP on thin data (winner's curse) — read it as an")
     print("    upper bound on an upper bound until items/rater is well past 30.")
 
-    print("\nFeed rho into simulation/v3/correlated.py, and the spread into")
-    print("simulation/v3/run_weighted.py (concentration, attacker_gold_accuracy).")
+    print("\nFeed rho into simulation/correlated.py, and the spread into")
+    print("simulation/run_weighted.py (concentration, attacker_gold_accuracy).")

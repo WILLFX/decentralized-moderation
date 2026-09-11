@@ -483,9 +483,9 @@ widen and VOID handling.
 
 ---
 
-# v3 implementation deviations from `specs/state-machine-v3.md`
+# v3 implementation deviations from `specs/protocol.md`
 
-M2.7, `contracts/src/v3/Moderation.sol`. The `D3-` prefix marks the v3 port; the
+M2.7, `contracts/src/Moderation.sol`. The `D3-` prefix marks the v3 port; the
 `D-` entries above are M2/M2.5/M2.6 against the v1 spec and are untouched.
 
 Every entry: **what**, **why**, **threat-model impact**. The state machine remains

@@ -425,7 +425,7 @@ documented, not load-bearing. Full per-test gas is in `contracts/.gas-snapshot`.
 
 # v3 gas — `Moderation` (M2.7)
 
-Measured with `gasleft()` around each call in `test/v3/ModerationGas.t.sol`, so the
+Measured with `gasleft()` around each call in `test/ModerationGas.t.sol`, so the
 figures exclude the 21,000-gas transaction base and calldata cost. Cohort of 34 —
 the size §4.5's verdict figures are quoted at — with `MAX_TOPICS = 5`, the worst
 case for the index write.
@@ -489,7 +489,7 @@ its own transaction and its own failure domain.
 
 Measured with `gasleft()` around the call, so the 21,000-gas transaction base and
 calldata are excluded. Fixture: `test_gas_report_maintenance` in
-`test/v3/ModerationGas.t.sol`, five topics, warm storage.
+`test/ModerationGas.t.sol`, five topics, warm storage.
 
 | call | gas | note |
 |---|---:|---|

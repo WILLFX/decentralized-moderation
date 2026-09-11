@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Mutation campaign for src/v3/IndexRegistry.sol."""
+"""Mutation campaign for src/IndexRegistry.sol."""
 import subprocess, sys, re, os
 
 FORGE = os.environ.get("FORGE", "forge")
-SRC = "src/v3/IndexRegistry.sol"
+SRC = "src/IndexRegistry.sol"
 ORIG = open(SRC).read()
 
 MUTATIONS = [
@@ -104,7 +104,7 @@ MUTATIONS = [
 ]
 
 def run():
-    r = subprocess.run([FORGE,"test","--match-path","test/v3/*"],capture_output=True,text=True)
+    r = subprocess.run([FORGE,"test","--match-path","test/*"],capture_output=True,text=True)
     out = r.stdout + r.stderr
     if "Compiler run failed" in out or "Error (" in out:
         return None  # the mutation never ran — not a kill

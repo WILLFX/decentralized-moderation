@@ -3,7 +3,7 @@
 > **This directory describes the M1 simulation of the FIRST architecture** —
 > stake-weighted draws, a proportional lottery, bonded appeals, freeze-based
 > settlement. It is kept as the record of how the working values were first
-> derived. **The current simulation is `simulation/v3/`**, which models the
+> derived. **The current simulation is `simulation/`**, which models the
 > three-ticket verdict against `â`, one randomness per claim, and balance debits;
 > its results are in `FINDINGS-v3.md`, `FINDINGS-adaptive.md` and
 > `FINDINGS-weighted.md`. Nothing in v2's or v1's findings carries over — the

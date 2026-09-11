@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation campaign for src/v3/Moderation.sol.
+"""Mutation campaign for src/Moderation.sol.
 
 The acceptance bar: for each invariant, a test that FAILS if the invariant is
 removed. Each mutation deletes one property from the source; the suite must go
@@ -9,7 +9,7 @@ import subprocess, sys, re, os
 
 FORGE = os.environ.get("FORGE", "forge")
 
-SRC = "src/v3/Moderation.sol"
+SRC = "src/Moderation.sol"
 ORIG = open(SRC).read()
 
 MUTATIONS = [
@@ -325,13 +325,13 @@ MUTATIONS = [
 
 
 def run():
-    # `test/v3/*`, NOT `test/v3/Moderation.t.sol`. This harness was the only one of
+    # `test/*`, NOT `test/Moderation.t.sol`. This harness was the only one of
     # the four narrowed to a single file, and the narrowing silently excluded every
     # other v3 suite — the stateful invariants, the draw properties, the governor
     # suite and the deploy suite. A mutation those kill and this file does not was
     # scored SURVIVED and then argued about as if the whole suite had had its
     # chance. See README.
-    r = subprocess.run([FORGE, "test", "--match-path", "test/v3/*"],
+    r = subprocess.run([FORGE, "test", "--match-path", "test/*"],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
     if "Compiler run failed" in out:

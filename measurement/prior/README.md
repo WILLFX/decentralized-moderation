@@ -4,7 +4,7 @@ Two numbers decide whether the rest of this project is worth deploying, and
 neither has been measured.
 
 - **`prior`** — how often a moderator's judgment agrees with the truth.
-  `simulation/v3/FINDINGS-v3.md` shows every safety figure in the design is a
+  `simulation/FINDINGS-v3.md` shows every safety figure in the design is a
   function of `q + (1−q)(1−prior)`, not of `q`: a moderator who misjudges the
   content votes with the attacker and the tally cannot tell them apart.
 - **`rho`** — how correlated those errors are. `f(â) = 3â² − 2â³` is the CDF of the
@@ -71,7 +71,7 @@ Nothing the design does not already produce, with one requirement worth stating
 because it is easy to omit:
 
 - **Per-moderator revealed votes**, not only the pooled counts. `reveal()` must
-  emit the moderator and their vote. `state-machine-v3` §4.1 stores only
+  emit the moderator and their vote. `specs/protocol.md` §4.1 stores only
   `pooledApprove` / `pooledReject`, which is correct for the contract and
   insufficient for this. **This one requirement now carries three measurements
   rather than one** — `rho`, and both halves of the reliability spread below — so
@@ -137,7 +137,7 @@ already keyed `(rater, item)` for `rho`'s sake — and it answers a question the
 cannot:
 
 - **`sd`** — whether reliability weighting is worth having.
-  `simulation/v3/FINDINGS-weighted.md` §1 measures the gain as a function of this
+  `simulation/FINDINGS-weighted.md` §1 measures the gain as a function of this
   and finds it **exactly zero at zero spread**. If moderators are uniform there is
   nothing to sort. At `sd = 0.157` weighting is worth 15 points of false approval;
   at 0.273, 32 points. Nothing else measured in this project moves that number.
@@ -163,14 +163,14 @@ it captures whoever got lucky as well as whoever is good. At 30 items a genuinel
 quantile being reported. `min_items = 30` is a floor, not a target, and a `p95`
 from thin data is an upper bound on an upper bound.
 
-Then feed `rho` into `simulation/v3/correlated.py`, and the spread into
-`simulation/v3/run_weighted.py` as `concentration` and `attacker_gold_accuracy`.
+Then feed `rho` into `simulation/correlated.py`, and the spread into
+`simulation/run_weighted.py` as `concentration` and `attacker_gold_accuracy`.
 
 ## What the answer decides
 
 | `prior` | consequence |
 |---|---|
-| **≈ 0.95+** | False rejection ~1.7% at `rho = 0`, and `simulation/v3/FINDINGS-v3.md` §H puts the irrecoverable share at 0.7%. §8.6's permanence is defensible, `SUPER_SAFE` is reachable, and grinding a listing by resubmission costs ~229 fees. |
+| **≈ 0.95+** | False rejection ~1.7% at `rho = 0`, and `simulation/FINDINGS-v3.md` §H puts the irrecoverable share at 0.7%. §8.6's permanence is defensible, `SUPER_SAFE` is reachable, and grinding a listing by resubmission costs ~229 fees. |
 | **≈ 0.665** | With *zero attackers*, ~29% of safe content is rejected — 22.8% of it with no recourse that can reach it (§H) — and ~29% of unsafe content approved, with 9 resubmissions enough to list anything. That is not a search index, and no state machine repairs it. |
 
 And one row the spread decides on its own:

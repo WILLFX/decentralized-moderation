@@ -4,391 +4,267 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Deploy} from "../script/Deploy.s.sol";
-import {Moderation} from "../src/Moderation.sol";
+import {Moderation, IIndexRegistry} from "../src/Moderation.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {RulesetGovernor} from "../src/RulesetGovernor.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 
-/// M2.6-item-9. **This test is the artefact; the script is what it tests.**
-///
-/// A deploy script nothing exercises is documentation that compiles. So this drives
-/// every phase through the timelock, asserts each invariant `verify` claims, and —
-/// crucially — asserts that `verify` REJECTS each broken stack, because a checker
-/// that passes everything is the same gap one file further on.
-///
-/// It runs against the production contracts, not the harnesses. That is deliberate:
-/// the rest of the suite deploys through `StackDeployer`, which cannot catch a
-/// mistake in how a real deployment is ordered because it makes the same choices
-/// every time.
+/// @title Deploy — the bring-up sequence, executed as a unit
+/// @notice The wiring order lived only as `setUp()` in four test files, each of
+///         which happened to get it right. This runs it once, as the script a
+///         deployment would use, and then asserts every link — including by
+///         breaking each one and checking `verify` names it.
 contract DeployTest is Test {
-    uint256 internal constant XBZZ = 1e16;
-
     Deploy internal script;
-    MockBZZ internal bzz;
-    Deploy.Config internal cfg;
+    MockBZZ internal token;
+    address internal governance;
 
-    address internal multisig = makeAddr("multisig");
+    uint256 internal constant UNIT = 1e16;
+    uint256 internal constant TIMELOCK = 2 days;
 
     function setUp() public {
         script = new Deploy();
-        bzz = new MockBZZ();
-        cfg = Deploy.Config({
-            token: address(bzz),
-            registryTimelock: 7 days,
-            minStake: 10 * XBZZ,
-            activationDelay: 7 days,
-            exitCooldown: 7 days,
-            riskPerSeat: 10 * XBZZ,
-            epochBlocks: 256,
-            minTrackDecay: (1e18 * 9) / 10,
-            governorTimelock: 7 days,
-            governanceOwner: address(0)
-        });
+        token = new MockBZZ();
+        governance = makeAddr("governance");
+        vm.warp(1_000_000);
+        vm.roll(1000);
     }
 
-    /// Deploy through the script, exactly as an operator would: phase 1, wait, phase 2.
-    function _deployThroughScript() internal returns (Deploy.Stack memory s) {
-        s = script.deployCore(cfg);
-        script.proposeAuthorization(s);
-        vm.warp(vm.getBlockTimestamp() + cfg.registryTimelock);
-        script.executeAuthorization(s);
+    function _config() internal view returns (Deploy.Config memory c) {
+        c.token = IERC20(address(token));
+        c.governance = governance;
+        c.minStake = 10 * UNIT;
+        c.bondMin = 5 * UNIT;
+        c.maturation = 3 days;
+        c.exitCooldown = 7 days;
+        c.timelockDelay = TIMELOCK;
+        c.minTrackDecay = 0.5e18;
     }
 
-    // --- the ordering the constructors force -----------------------------------
-
-    /// Step 3 before step 5, and it is not a style preference: `Moderation.governor`
-    /// is immutable, so the governor must exist at construction. The circularity
-    /// resolves only because `RulesetGovernor` is built without a `Moderation` and
-    /// binds afterward.
-    function test_moderation_cannot_be_deployed_before_its_governor() public {
-        StakeRegistry sr = new StakeRegistry(
-            IERC20(address(bzz)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256, (1e18 * 9) / 10
-        );
-        IndexRegistry ir = new IndexRegistry(7 days);
-        vm.expectRevert(Moderation.ZeroGovernor.selector);
-        new Moderation(IERC20(address(bzz)), sr, ir, address(0));
+    function _params() internal pure returns (Moderation.Params memory p) {
+        p.blockTime = 5;
+        p.commitWindow = 1200;
+        p.revealWindow = 1200;
+        p.challengeWindow = 43_200;
+        p.lateWidenAt = 720;
+        p.seedLag = 2;
+        p.blockhashHorizon = 256;
+        p.retryCooldown = 1 days;
+        p.superQuorum = 16;
+        p.lateWidenFactorBps = 15_000;
+        p.drawBountyBps = 50;
+        p.claimBountyBps = 100;
+        p.reserveBps = 2000;
+        p.maintenanceBps = 1000;
+        p.lambda = 2 * uint128(UNIT);
+        p.revealBond = 2 * uint128(UNIT);
+        p.penaltyDebit = uint128(UNIT);
+        p.challengeBond = 3 * uint128(UNIT);
+        p.trackDecay = 0.95e18;
+        p.feeBase = uint128(100 * UNIT);
+        p.feePerTopic = uint128(10 * UNIT);
+        p.threshold = type(uint256).max;
     }
 
-    /// Item 4's constructor check, reached through the deployment path rather than
-    /// asserted in isolation — a foreign token is a plausible config error, not an
-    /// exotic one.
-    function test_a_foreign_token_fails_the_deployment_not_the_first_case() public {
-        MockBZZ other = new MockBZZ();
-        Deploy.Config memory bad = cfg;
-        bad.token = address(other);
-        // The registry is built on the foreign token, `Moderation` on the real one:
-        // the mismatch is between the two constructor arguments, which is exactly
-        // how it would arise from a copy-pasted address.
-        StakeRegistry sr = new StakeRegistry(
-            IERC20(address(other)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256, (1e18 * 9) / 10
-        );
-        IndexRegistry ir = new IndexRegistry(7 days);
-        RulesetGovernor g = new RulesetGovernor(address(this), 7 days);
-        vm.expectRevert(Moderation.TokenMismatch.selector);
-        new Moderation(IERC20(address(bzz)), sr, ir, address(g));
+    /// @dev The whole sequence, and the three separate waits it actually needs.
+    function _bringUp() internal returns (Deploy.Stack memory s) {
+        s = script.deployAndPropose(_config());
+
+        // Both capability grants wait their own timelock.
+        vm.warp(block.timestamp + TIMELOCK);
+        script.executeGrants(s);
+
+        // The governor's timelock is a DIFFERENT one, and the first ruleset waits
+        // it too. A deployment that assumed one wait covered both would fail here
+        // with everything else already live.
+        script.applyFirstRuleset(s, _params());
+        (, uint256 eta,) = s.governor.pendingParamsProposal();
+        vm.warp(eta);
+        script.executeFirstRuleset(s, _params());
+
+        // And only then does the deployer hand over.
+        script.handOverGovernance(s, governance);
     }
 
-    // --- the window the timelock opens -----------------------------------------
+    // =========================================================================
 
-    /// **Not one transaction.** Between propose and execute every contract exists and
-    /// none is authorized. `submit` must refuse: a case opened then would take a fee
-    /// it could never settle, and the refusal is P0-5's `_requireOpen` doing its job
-    /// rather than an accident of ordering.
-    function test_submit_refuses_during_the_authorization_window() public {
-        Deploy.Stack memory s = script.deployCore(cfg);
-        script.proposeAuthorization(s);
+    function test_theBringUpSequenceRunsAsAUnitAndVerifies() public {
+        Deploy.Stack memory s = _bringUp();
+        script.verify(s); // reverts naming the first broken link
+        assertTrue(script.isWired(s));
+
+        assertEq(address(s.mod.stakeReg()), address(s.reg));
+        assertEq(address(s.mod.index()), address(s.idx));
+        assertEq(s.mod.governor(), address(s.governor));
+        assertEq(address(s.governor.moderation()), address(s.mod));
+        assertEq(s.mod.paramsVersion(), 1, "a ruleset exists");
+    }
+
+    /// @dev The point of the script: a stack that is deployed but not granted is
+    ///      not detectably broken until somebody's transaction reverts. Here it is
+    ///      detectable at deploy time, by name.
+    function test_verifyNamesAMissingCapability() public {
+        Deploy.Stack memory s = script.deployAndPropose(_config());
+        // Grants proposed but never executed.
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "StakeRegistry.MAY_CREATE"));
+        script.verify(s);
+        assertFalse(script.isWired(s));
+    }
+
+    function test_verifyNamesAMissingWriterCapability() public {
+        Deploy.Stack memory s = script.deployAndPropose(_config());
+        vm.warp(block.timestamp + TIMELOCK);
+        // Read the cap bits BEFORE the prank: a call in the argument expression
+        // consumes it, and the execute then lands as the test contract.
+        uint8 capBits = s.reg.MAY_CREATE() | s.reg.MAY_DISCHARGE();
+        vm.prank(address(script)); // the deployer still holds registry governance
+        s.reg.executeCaps(address(s.mod), capBits); // registry granted, index NOT
+
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "IndexRegistry.writer"));
+        script.verify(s);
+    }
+
+    /// @dev A fully wired stack with no ruleset. Every call into it reverts
+    ///      `BadParams` at `submit`, which reads as a broken contract rather than
+    ///      an incomplete deployment.
+    function test_verifyNamesAMissingRuleset() public {
+        Deploy.Stack memory s = script.deployAndPropose(_config());
+        vm.warp(block.timestamp + TIMELOCK);
+        script.executeGrants(s);
+
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "Moderation.paramsVersion"));
+        script.verify(s);
+    }
+
+    /// @dev Both directions of the bind, because M2.6-F3's finding was exactly that
+    ///      one held while the other did not.
+    function test_verifyNamesAnUnboundGovernor() public {
+        Deploy.Stack memory s = _bringUp();
+        // A governor that governs a different Moderation.
+        RulesetGovernor other = new RulesetGovernor(governance, TIMELOCK);
+        s.governor = other;
+
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "Moderation.governor"));
+        script.verify(s);
+    }
+
+    /// @dev M2.12 — a retired governor passes every OTHER check in `verify`: it
+    ///      still reports the right `moderation`, and `Moderation` still names it
+    ///      until the handover lands. This is the check that catches a stack whose
+    ///      governor has moved on.
+    function test_verifyNamesARetiredGovernor() public {
+        Deploy.Stack memory s = _bringUp();
+
+        RulesetGovernor next = new RulesetGovernor(governance, TIMELOCK);
+        vm.startPrank(governance);
+        s.governor.acceptGovernance();
+        next.intendModeration(s.mod);
+        s.governor.proposeGovernorChange(address(next));
+        (, uint256 eta,) = s.governor.pendingGovernorChangeProposal();
+        vm.warp(eta);
+        s.governor.executeGovernorChange(address(next));
+        vm.stopPrank();
+
+        // The stale Stack still names the old governor.
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "Moderation.governor"));
+        script.verify(s);
+
+        // Point it at the successor and the stack verifies again — including that
+        // the successor is not itself retired.
+        s.governor = next;
+        script.verify(s);
+        assertTrue(script.isWired(s));
+    }
+
+    /// @dev M2.12 / D3-21 — the guidelines push, exercised as part of a deployment.
+    function test_theFirstGuidelinesVersionPropagatesToModeration() public {
+        Deploy.Stack memory s = _bringUp();
+        assertEq(s.mod.currentGuidelinesVersion(), 0, "none published is legal");
+        script.verify(s);
+
+        vm.startPrank(governance);
+        s.governor.acceptGovernance();
+        s.governor.proposeGuidelines(keccak256("v1"));
+        (, uint256 eta,) = s.governor.pendingGuidelinesProposal();
+        vm.warp(eta);
+        s.governor.executeGuidelines(keccak256("v1"));
+        vm.stopPrank();
+
+        assertEq(s.governor.guidelinesVersion(), 1);
+        assertEq(s.mod.currentGuidelinesVersion(), 1, "the push landed");
+        script.verify(s);
+
+        // And a case pins it.
+        address submitter = makeAddr("s2");
+        token.mint(submitter, 10_000 * UNIT);
+        vm.prank(submitter);
+        token.approve(address(s.mod), type(uint256).max);
+        bytes32[] memory topics = new bytes32[](1);
+        topics[0] = keccak256("topic");
+        vm.prank(submitter);
+        uint256 id = s.mod.submit(keccak256("c"), keccak256("m"), topics, 1000 * UNIT);
+        assertEq(s.mod.caseInfo(id).guidelinesVersion, 1);
+    }
+
+    function test_deployRefusesAZeroTokenOrGovernance() public {
+        Deploy.Config memory c = _config();
+        c.token = IERC20(address(0));
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "token"));
+        script.deployAndPropose(c);
+
+        c = _config();
+        c.governance = address(0);
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotWired.selector, "governance"));
+        script.deployAndPropose(c);
+    }
+
+    /// @dev The stack the script builds is not merely wired — it runs. A case
+    ///      submitted against it reaches COMMIT, which is the first thing that
+    ///      touches all four contracts at once.
+    function test_theDeployedStackAcceptsARealCase() public {
+        Deploy.Stack memory s = _bringUp();
+
+        address submitter = makeAddr("submitter");
+        token.mint(submitter, 10_000 * UNIT);
+        vm.prank(submitter);
+        token.approve(address(s.mod), type(uint256).max);
 
         bytes32[] memory topics = new bytes32[](1);
-        topics[0] = keccak256("marine biology");
-        uint256 fee = s.moderation.minFee(1);
-        bzz.mint(address(this), fee);
-        bzz.approve(address(s.moderation), type(uint256).max);
+        topics[0] = keccak256("topic");
 
-        vm.expectRevert(Moderation.NotAcceptingSubmissions.selector);
-        s.moderation.submit(Moderation.Kind.SUBMISSION, keccak256("c"), keccak256("m"), topics, 0, fee);
+        vm.prank(submitter);
+        uint256 caseId = s.mod.submit(keccak256("content"), keccak256("meta"), topics, 1000 * UNIT);
 
-        // And it opens the moment the timelock elapses and both registries execute.
-        vm.warp(vm.getBlockTimestamp() + cfg.registryTimelock);
-        script.executeAuthorization(s);
-        s.moderation.submit(Moderation.Kind.SUBMISSION, keccak256("c"), keccak256("m"), topics, 0, fee);
+        assertEq(s.mod.caseInfo(caseId).phase, uint8(Moderation.Phase.COMMIT));
+        assertEq(s.mod.caseInfo(caseId).paramsVersion, 1);
     }
 
-    // --- verify accepts a good stack -------------------------------------------
+    /// @dev Governance ends up where the config said, not with the deployer.
+    function test_governanceLandsWithTheConfiguredOwner() public {
+        Deploy.Stack memory s = _bringUp();
 
-    function test_verify_passes_a_correctly_deployed_stack() public {
-        Deploy.Stack memory s = _deployThroughScript();
-        script.verify(s, cfg, address(0));
+        // All three use propose/accept, so the owner must claim them — which is
+        // what proves the address is controlled before it holds authority.
+        assertEq(s.reg.pendingGovernance(), governance);
+        assertEq(s.idx.pendingGovernance(), governance);
+        assertEq(s.governor.pendingGovernance(), governance);
 
-        // The individual claims, spelled out — `verify` reverting is a weaker
-        // statement than each condition actually holding.
-        assertEq(address(s.moderation.token()), address(s.stakeReg.token()), "one asset");
-        assertEq(
-            uint256(s.stakeReg.logicState(address(s.moderation))),
-            uint256(StakeRegistry.LogicState.OPEN_AND_SETTLE),
-            "authorized stake-side"
-        );
-        assertEq(
-            uint256(s.indexReg.logicState(address(s.moderation))),
-            uint256(IndexRegistry.LogicState.OPEN_AND_SETTLE),
-            "authorized index-side"
-        );
-        assertEq(s.moderation.governor(), address(s.governor), "governor bound from the game's side");
-        assertEq(address(s.governor.moderation()), address(s.moderation), "and from the governor's");
-        assertGe(s.stakeReg.riskPerSeat(), s.moderation.getParams().riskPerSeat, "duty unit covers a seat");
-    }
+        assertEq(s.governor.governance(), address(script), "not handed over until claimed");
 
-    // --- verify rejects every stack that would fail later -----------------------
-
-    /// Authorized stake-side only. Desynchronised authorization is its own failure:
-    /// the case opens, seats draw, and settlement fails at the index write.
-    function test_verify_rejects_authorization_on_only_one_registry() public {
-        Deploy.Stack memory s = script.deployCore(cfg);
-        script.proposeAuthorization(s);
-        vm.warp(vm.getBlockTimestamp() + cfg.registryTimelock);
-        // Governance is the SCRIPT — `deployCore` ran as it — so the half-execution
-        // has to be driven as the script would drive it.
-        vm.prank(address(script));
-        s.stakeReg.executeLogic(); // index-side deliberately skipped
-
-        vm.expectRevert(Deploy.NotAuthorizedOnIndexRegistry.selector);
-        script.verify(s, cfg, address(0));
-    }
-
-    /// The reverse, so the check is not passing on one registry by accident.
-    function test_verify_rejects_the_other_one_registry_case() public {
-        Deploy.Stack memory s = script.deployCore(cfg);
-        script.proposeAuthorization(s);
-        vm.warp(vm.getBlockTimestamp() + cfg.registryTimelock);
-        vm.prank(address(script));
-        s.indexReg.executeLogic(); // stake-side deliberately skipped
-
-        vm.expectRevert(Deploy.NotAuthorizedOnStakeRegistry.selector);
-        script.verify(s, cfg, address(0));
-    }
-
-    /// **Step 6 is the one that cannot be undone.** A `Moderation` bound to a
-    /// governor that was never pointed back at it is permanently ungovernable:
-    /// `Moderation.governor` is immutable and `bindModeration` is one-way, so
-    /// M2.6-F4. A zero `timelockDelay` is ACCEPTED at construction — all three are
-    /// immutable and unchecked, deliberately, because a floor compiled into a
-    /// permanent registry is a governance opinion you cannot revise without
-    /// migrating every staker. See `DEVIATIONS.md` D-16 for the full acceptance:
-    /// the property, why it is not enforced in-contract, and what holds instead.
-    ///
-    /// The third thing that holds instead is this check, and an acceptance whose
-    /// only protection is a script is worth exactly what the script's tests are
-    /// worth. So the script is pinned here, on all three contracts, since the hole
-    /// is in all three and the registries are where it gates the logic repoint.
-    function test_verify_rejects_a_zero_timelock() public {
-        // Governor at zero.
-        Deploy.Config memory bad = cfg;
-        bad.governorTimelock = 0;
-        Deploy.Stack memory s = script.deployCore(bad);
-        script.proposeAuthorization(s);
-        vm.warp(vm.getBlockTimestamp() + bad.registryTimelock);
-        script.executeAuthorization(s);
-        vm.expectRevert(Deploy.ZeroTimelock.selector);
-        script.verify(s, bad, address(0));
-
-        // Both registries at zero — where it gates the logic repoint, the trust root.
-        bad = cfg;
-        bad.registryTimelock = 0;
-        s = script.deployCore(bad);
-        script.proposeAuthorization(s);
-        script.executeAuthorization(s); // no wait needed: that is the defect
-        vm.expectRevert(Deploy.ZeroTimelock.selector);
-        script.verify(s, bad, address(0));
-
-        // And the shipped config passes, so the check is a floor and not a wall.
-        Deploy.Stack memory good = _deployThroughScript();
-        script.verify(good, cfg, address(0));
-    }
-
-    /// neither side can be repaired. This is the error the script exists to catch
-    /// before it is written to a chain.
-    function test_verify_rejects_a_governor_that_was_never_bound() public {
-        // Everything except the bind.
-        StakeRegistry sr = new StakeRegistry(
-            IERC20(address(bzz)), 7 days, 10 * XBZZ, 7 days, 7 days, 10 * XBZZ, 256, (1e18 * 9) / 10
-        );
-        IndexRegistry ir = new IndexRegistry(7 days);
-        RulesetGovernor g = new RulesetGovernor(address(this), 7 days);
-        Moderation m = new Moderation(IERC20(address(bzz)), sr, ir, address(g));
-
-        sr.proposeLogic(address(m));
-        ir.proposeLogic(address(m));
-        vm.warp(vm.getBlockTimestamp() + 7 days);
-        sr.executeLogic();
-        ir.executeLogic();
-
-        Deploy.Stack memory s = Deploy.Stack({stakeReg: sr, indexReg: ir, governor: g, moderation: m});
-        vm.expectRevert(Deploy.ModerationNotBound.selector);
-        script.verify(s, cfg, address(0));
-    }
-
-    /// A ruleset locking more per seat than a duty unit is worth seats panels on
-    /// collateral that cannot cover them (D-13). Reachable from config alone: a
-    /// registry deployed with a smaller unit than the game's default.
-    function test_verify_rejects_a_registry_whose_duty_unit_is_too_small() public {
-        Deploy.Config memory small = cfg;
-        small.riskPerSeat = 1 * XBZZ; // below Moderation's default 10 xBZZ per seat
-        // The Moderation constructor refuses this outright, which is the primary
-        // guard; `verify` is the second, for a stack assembled some other way.
-        vm.expectRevert(Moderation.RiskPerSeatExceedsDutyUnit.selector);
-        script.deployCore(small);
-    }
-
-    /// The explicit-link path: an address that holds no code, and one that holds the
-    /// wrong code, must both fail.
-    function test_verify_rejects_a_settlement_address_that_is_wrong() public {
-        Deploy.Stack memory s = _deployThroughScript();
-
-        vm.expectRevert(Deploy.SettlementNotDeployed.selector);
-        script.verify(s, cfg, makeAddr("nothing deployed here"));
-
-        vm.expectRevert(Deploy.SettlementWrongCode.selector);
-        script.verify(s, cfg, address(bzz)); // real code, wrong contract
-    }
-
-    // --- the linking, proven the only way it can be ----------------------------
-
-    /// **`Settlement` is linked, and this is the assertion that shows it.**
-    ///
-    /// No in-script check can: the library address is baked into `Moderation`'s
-    /// bytecode at link time and Solidity cannot read its own link table. So the
-    /// proof is behavioural — settle a case, which delegatecalls the library. If the
-    /// link were missing or wrong, `claim` is where it would surface, and that is
-    /// exactly the "fails on the first case" outcome the script exists to prevent.
-    ///
-    /// It doubles as the end-to-end smoke test: a stack assembled by the script, with
-    /// no harness anywhere, carries a case from `submit` to `SETTLED`.
-    function test_a_script_deployed_stack_settles_a_real_case() public {
-        Deploy.Stack memory s = _deployThroughScript();
-
-        address[] memory mods = new address[](8);
-        for (uint256 i; i < mods.length; ++i) {
-            mods[i] = address(uint160(uint256(keccak256(abi.encode("mod", i)))));
-            bzz.mint(mods[i], 3000 * XBZZ);
-            vm.prank(mods[i]);
-            bzz.approve(address(s.stakeReg), type(uint256).max);
-            vm.prank(mods[i]);
-            s.stakeReg.stake(3000 * XBZZ);
-        }
-        vm.warp(vm.getBlockTimestamp() + cfg.activationDelay);
-        uint256 units = (3000 * XBZZ) / s.moderation.getParams().riskPerSeat;
-        for (uint256 i; i < mods.length; ++i) {
-            s.stakeReg.activate(mods[i]);
-            vm.prank(mods[i]);
-            s.stakeReg.setDutyUnits(units);
-        }
-        vm.roll(vm.getBlockNumber() + cfg.epochBlocks);
-        s.stakeReg.advanceEpoch(type(uint256).max);
-
-        bytes32[] memory topics = new bytes32[](1);
-        topics[0] = keccak256("marine biology");
-        uint256 fee = s.moderation.minFee(1);
-        bzz.mint(mods[0], fee);
-        vm.prank(mods[0]);
-        bzz.approve(address(s.moderation), type(uint256).max);
-        vm.prank(mods[0]);
-        uint256 caseId =
-            s.moderation.submit(Moderation.Kind.SUBMISSION, keccak256("c"), keccak256("m"), topics, 0, fee);
-
-        _drive(s, caseId);
-
-        assertEq(uint256(_phase(s, caseId)), uint256(Moderation.Phase.SETTLED), "settled through the library");
-    }
-
-    // --- governance handover ----------------------------------------------------
-
-    /// Both registries and the governor are owned by the deploy key until the
-    /// two-step transfer completes. `verify` does not revert on that — a
-    /// deployer-owned stack is a legitimate intermediate state — but the operator
-    /// must be told, and the handover must actually work.
-    function test_governance_starts_with_the_deployer_and_transfers_in_two_steps() public {
-        Deploy.Stack memory s = _deployThroughScript();
-        assertEq(s.stakeReg.governance(), address(script), "deploy key owns the stake registry");
-        assertEq(s.indexReg.governance(), address(script), "and the index registry");
-        assertEq(s.governor.governance(), address(script), "and the governor");
-
-        script.handOverGovernance(s, multisig);
-        // Proposed, not transferred: the second step is the recipient's.
-        assertEq(s.stakeReg.governance(), address(script), "still the deploy key until accepted");
-
-        vm.startPrank(multisig);
-        s.stakeReg.acceptGovernance();
-        s.indexReg.acceptGovernance();
+        vm.startPrank(governance);
+        s.reg.acceptGovernance();
+        s.idx.acceptGovernance();
         s.governor.acceptGovernance();
         vm.stopPrank();
 
-        assertEq(s.stakeReg.governance(), multisig, "stake registry handed over");
-        assertEq(s.indexReg.governance(), multisig, "index registry handed over");
-        assertEq(s.governor.governance(), multisig, "governor handed over");
-    }
+        assertEq(s.reg.governance(), governance);
+        assertEq(s.idx.governance(), governance);
+        assertEq(s.governor.governance(), governance);
 
-    // --- helpers ---------------------------------------------------------------
-
-    function _phase(Deploy.Stack memory s, uint256 caseId) internal view returns (Moderation.Phase p) {
-        (,, p,,,,) = s.moderation.caseInfo(caseId);
-    }
-
-    function _rollToSeed(Deploy.Stack memory s, uint256 caseId) internal {
-        uint256 ri = s.moderation.roundCount(caseId) - 1;
-        (,,,,,,,, uint256 snapshotBlock,) = s.moderation.roundInfo(caseId, ri);
-        uint256 target = snapshotBlock + 1;
-        if (vm.getBlockNumber() < target) vm.roll(target);
-        else vm.roll(vm.getBlockNumber() + 1);
-        s.stakeReg.advanceEpoch(type(uint256).max);
-    }
-
-    /// Carry one undisputed case from DRAW to SETTLED using nothing but the public API.
-    function _drive(Deploy.Stack memory s, uint256 caseId) internal {
-        Moderation.Params memory p = s.moderation.getParams();
-        uint256 guard;
-        while (_phase(s, caseId) != Moderation.Phase.SETTLED) {
-            require(guard++ < 40, "case did not settle");
-            Moderation.Phase ph = _phase(s, caseId);
-            uint256 ri = s.moderation.roundCount(caseId) - 1;
-            if (ph == Moderation.Phase.DRAW) {
-                _rollToSeed(s, caseId);
-                s.moderation.realizeSeats(caseId);
-            } else if (ph == Moderation.Phase.COMMIT) {
-                (, uint256 n,,,,,,,,) = s.moderation.roundInfo(caseId, ri);
-                for (uint256 i; i < n; ++i) {
-                    address sh = s.moderation.seatHolderAt(caseId, ri, i);
-                    bytes32 h =
-                        s.moderation.computeCommit(caseId, ri, sh, Moderation.Vote.Approve, keccak256("salt"));
-                    vm.prank(sh);
-                    s.moderation.commitVote(caseId, h);
-                }
-                if (_phase(s, caseId) == Moderation.Phase.COMMIT) {
-                    vm.warp(vm.getBlockTimestamp() + p.commitTimeout);
-                    s.moderation.closeCommit(caseId);
-                }
-            } else if (ph == Moderation.Phase.REVEAL) {
-                (, uint256 n,,,,,,,,) = s.moderation.roundInfo(caseId, ri);
-                for (uint256 i; i < n; ++i) {
-                    address sh = s.moderation.seatHolderAt(caseId, ri, i);
-                    vm.prank(sh);
-                    s.moderation.revealVote(caseId, Moderation.Vote.Approve, keccak256("salt"));
-                }
-                if (_phase(s, caseId) == Moderation.Phase.REVEAL) {
-                    vm.warp(vm.getBlockTimestamp() + p.revealWindow);
-                    s.moderation.closeReveal(caseId);
-                }
-            } else if (ph == Moderation.Phase.TALLY) {
-                vm.roll(vm.getBlockNumber() + p.seedLag + 1);
-                s.moderation.realizeOutcome(caseId);
-            } else if (ph == Moderation.Phase.APPEAL_WINDOW) {
-                (,,,,, uint256 deadline,) = s.moderation.caseInfo(caseId);
-                vm.warp(deadline);
-                s.moderation.finalize(caseId);
-            } else if (ph == Moderation.Phase.FINALIZED || ph == Moderation.Phase.SETTLING) {
-                s.moderation.claim(caseId);
-            } else {
-                revert("unexpected phase");
-            }
-        }
+        // And the deployer is out of the governor entirely.
+        vm.prank(address(script));
+        vm.expectRevert(RulesetGovernor.NotGovernance.selector);
+        s.governor.proposeParams(_params());
     }
 }

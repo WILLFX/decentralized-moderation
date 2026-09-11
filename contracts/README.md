@@ -6,26 +6,26 @@ it describes the older one.
 
 | | directory | spec | status |
 |---|---|---|---|
-| **v3 — current** | `src/v3/` | `specs/state-machine-v3.md` | **the architecture under review** |
+| **v3 — current** | `src/` | `specs/protocol.md` | **the architecture under review** |
 | v1 — historical | `src/` | `specs/state-machine.md` | complete, audited, superseded |
 
 ---
 
 ## v3 — the current architecture
 
-Solidity implementation of **`specs/state-machine-v3.md`**, which is normative.
+Solidity implementation of **`specs/protocol.md`**, which is normative.
 Where `specs/design-v3.md` disagrees with it, the state machine wins.
 
 Four contracts, all inside EIP-170:
 
 | File | Role | Runtime |
 |---|---|---|
-| `src/v3/Moderation.sol` | The **case state machine** — §4 end to end, plus the parts of §5, §7 and §8 a case reaches. A *logic* contract in the registry's sense: it drives moderator accounting through `StakeRegistry` and never touches a bond directly. | 21,786 B (88.6%) |
-| `src/v3/StakeRegistry.sol` | **Permanent** custody of stake and bond, the claim ledger (§2.4), capability grants and the one maintenance reserve (§5.6). | 10,338 B (42.1%) |
-| `src/v3/RulesetGovernor.sol` | Timelocked parameter and guidelines governance. `Moderation` is its **target**, not its host — the pending record and `eta` live here, which is why adding governance cost `Moderation` nothing. | 6,386 B (26.0%) |
-| `src/v3/IndexRegistry.sol` | **Permanent** topic → entry index — what a reader actually consults (§8). | 4,285 B (17.4%) |
+| `src/Moderation.sol` | The **case state machine** — §4 end to end, plus the parts of §5, §7 and §8 a case reaches. A *logic* contract in the registry's sense: it drives moderator accounting through `StakeRegistry` and never touches a bond directly. | 21,786 B (88.6%) |
+| `src/StakeRegistry.sol` | **Permanent** custody of stake and bond, the claim ledger (§2.4), capability grants and the one maintenance reserve (§5.6). | 10,338 B (42.1%) |
+| `src/RulesetGovernor.sol` | Timelocked parameter and guidelines governance. `Moderation` is its **target**, not its host — the pending record and `eta` live here, which is why adding governance cost `Moderation` nothing. | 6,386 B (26.0%) |
+| `src/IndexRegistry.sol` | **Permanent** topic → entry index — what a reader actually consults (§8). | 4,285 B (17.4%) |
 
-**Deployment:** `script/DeployV3.s.sol`, exercised by `test/v3/DeployV3.t.sol`.
+**Deployment:** `script/Deploy.s.sol`, exercised by `test/Deploy.t.sol`.
 `verify()` is the real deliverable: every link in the stack fails *silently and
 late* — a missing `MAY_DISCHARGE` reverts at settlement, after bonds are
 committed — so `verify` names the first broken one instead.
@@ -39,7 +39,7 @@ committed — so `verify` names the first broken one instead.
 | `Moderation.t.sol`, `StakeRegistry.t.sol`, `IndexRegistry.t.sol`, `RulesetGovernor.t.sol` | Per-contract properties, each test naming the invariant or § it checks |
 | `Invariant.t.sol` + `handlers/SystemHandler.sol` | **Stateful** invariants over all four *real* contracts under the fuzzer — 11 properties the machine tries to break, rather than sequences we thought of |
 | `DrawProperties.t.sol` | The draw swept rather than sampled — 2,600 exact monotonicity comparisons, I12 at every unanimous tally |
-| `DrawVectors.t.sol` + `simulation/v3/check_draw_vectors.py` | A **two-implementation differential** on the draw. The contract emits vectors; a Python derivation reproduces `u[0..2]`, tickets and verdict independently |
+| `DrawVectors.t.sol` + `simulation/check_draw_vectors.py` | A **two-implementation differential** on the draw. The contract emits vectors; a Python derivation reproduces `u[0..2]`, tickets and verdict independently |
 | `ModerationGas.t.sol` | Measured figures for `GAS_BUDGETS.md` |
 
 **Mutation testing** (`tools/mutation/`) is the acceptance bar, not a metric:
@@ -49,7 +49,7 @@ committed — so `verify` names the first broken one instead.
 reported `INVALID`, never scored as a kill — that rule exists because it was
 violated twice before it was written down.
 
-The differential is **KAT-gated**: `simulation/v3/keccak.py` validates itself
+The differential is **KAT-gated**: `simulation/keccak.py` validates itself
 against `hashlib.sha3_256` and published Keccak-256 vectors at import, and raises
 rather than returning numbers if either fails. The checker also breaks its own
 derivation and requires the comparison to notice, so an agreement is evidence
@@ -59,7 +59,7 @@ rather than a coincidence.
 
 `contracts/DEVIATIONS.md` D3-1…D3-22 is the complete list — every place the
 implementation departed from, refined, or pinned something the spec left open,
-with what, why, and threat-model impact. `specs/state-machine-v3.md` §10 carries
+with what, why, and threat-model impact. `specs/protocol.md` §10 carries
 the parameters that are still open and the reasons they cannot be closed from
 inside the design.
 

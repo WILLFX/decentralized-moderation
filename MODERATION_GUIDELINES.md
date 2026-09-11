@@ -125,7 +125,7 @@ submissions do.
 - **Reveal what you committed.** Committing costs you nothing up front, but a
   commitment you never reveal is debited `REVEAL_BOND` at settlement. Withholding
   is never worth it: your vote can only help the side you actually hold, and
-  removing it strictly lowers that side's chances (`state-machine-v3` §5.2).
+  removing it strictly lowers that side's chances (`specs/protocol.md` §5.2).
 - **Borderline cases will occur.** On a genuinely borderline judgment you may end
   up incoherent with the verdict and pay the debit `d`. It is a bounded, one-off
   amount set as a small multiple of what a case pays — an inconvenience, not a
@@ -142,7 +142,7 @@ submissions do.
 
   - **A challenge is not a vote and does not say which side you are on.** It buys
     a second round; it does not state a position in it. You commit inside that
-    round like everyone else, hidden (`state-machine-v3` §3.5).
+    round like everyone else, hidden (`specs/protocol.md` §3.5).
   - **The bond is a price, not a bet.** It is debited whichever way the case ends.
     You are not refunded for being right, and you are not charged extra for being
     wrong — so there is nothing to steer (§4.6).
@@ -184,7 +184,7 @@ submissions do.
   **Corrected in place, before first use, and deliberately not cut as v2.** The
   §4 practical notes and the §3 removal text described the *v2* mechanism —
   challenges as unbonded public votes, penalties as identity freezes, "freezing
-  power" — all of which `specs/state-machine-v3.md` replaced with a bonded
+  power" — all of which `specs/protocol.md` replaced with a bonded
   challenge that discloses no direction (§3.5), a fixed balance debit (§5.1), and
   a `track` record that no longer sets any freeze length. The three-question test
   itself is unchanged; only the descriptions of consequence were wrong.

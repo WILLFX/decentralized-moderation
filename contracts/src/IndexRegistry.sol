@@ -1,183 +1,158 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @title IndexRegistry
-/// @notice The topic → approved-entries index, held independently of the
-///         moderation game's business logic (M2.5-P0-b, third contract).
+/// @title IndexRegistry (v3) — what a reader consults
+/// @notice §8 end to end: the finality-independent write (§8.1), interim status as
+///         a value (§8.2), content-derived identifiers (§8.2b), and the split
+///         `SUPER_SAFE` query (§8.3).
 ///
-///         This is the protocol's actual product: the safe-search index. If it
-///         lived inside the game contract, every logic redeployment would throw
-///         away every approval ever made and the index would restart empty —
-///         which would make improving the game prohibitively expensive forever.
-///         So approvals live here permanently, and only the *game* is replaced.
-///
-///         The registry knows nothing about voting, appeals or settlement. It
-///         accepts writes and deletions from the currently authorized logic
-///         contract, and serves reads to anyone.
-///
-/// ## Trust model
-///
-/// Same shape as StakeRegistry: governance may name the authorized logic
-/// contract, behind a timelock, and can do nothing else. Reads are permissionless
-/// and can never be gated — a search front end keeps working across migrations.
-/// Governance cannot write or delete entries itself; only the logic contract can,
-/// and only as the outcome of an adjudicated case.
+/// @dev Every identifier this index exposes is a function of CONTENT. None is a
+///      function of insertion order, of a counter, or of any state a particular
+///      logic contract owns — so a replacement contract re-derives the same
+///      identifier from the same content rather than issuing a new one. v1 paid a
+///      CRITICAL (P0-1a) for a logic-local identifier that collided across a
+///      migration, and §8.4 applied the lesson to claims and not to entries.
 contract IndexRegistry {
-    struct Entry {
-        bytes32 contentHash;
-        bytes32 metaHash;
-        uint40 approvalTime; // drives the supersafe age filter
-        bool uncontested; // no Reject vote was ever revealed
-        bool fullQuorum; // decided at full quorum, no under-quorum fallback (H-09)
-        // M2.6-P0-1: identity is minted HERE, by the permanent registry. A logic
-        // contract's own caseId restarts at 0 on every redeployment, so keying the
-        // index by it made a replacement logic's first case collide with the
-        // original's — overwriting the reverse-map slot and orphaning the older
-        // entry (readable, un-deletable, and reported absent by isIndexed).
-        uint256 globalId; // registry-minted, unique for all time
-        address originLogic; // which logic adjudicated this entry
-        uint256 localCaseId; // that logic's own case id, for provenance
-        uint256 rulesVersion; // provenance: ruleset the decision was made under
-        uint256 guidelinesVersion; // provenance: guidelines in force at submission
-        // M2.6-P0-1c: the reservation this entry is protected by. Deleting the
-        // entry frees it — that is the ONLY way a reservation can be released by
-        // anyone other than the case that took it, and it is what lets a
-        // replacement logic make a legacy entry's content submittable again after
-        // adjudicating its removal.
-        bytes32 dedupKey;
-    }
+    // =========================================================================
+    // §8.2 — status is a VALUE, not an absence
+    // =========================================================================
 
-    /// Monotonic, never reused. Entry 0 is never minted so `globalId == 0` is a
-    /// safe "absent" sentinel.
-    uint256 public nextEntryId = 1;
-
-    mapping(bytes32 => Entry[]) internal indexByTopic;
-    mapping(bytes32 => bool) internal topicSeen;
-    /// topic -> globalId -> position+1, so deletion is O(1) (H-03) AND cannot be
-    /// collided across logic versions (M2.6-P0-1).
-    mapping(bytes32 => mapping(uint256 => uint256)) internal entryPosPlusOne;
-    /// globalId -> the topic it was written under, so a holder of the id alone can
-    /// locate and remove it (needed for cross-version removal).
-    mapping(uint256 => bytes32) public topicOfEntry;
-
-    /// M2.6-P0-1b: the live-content reservation lives HERE, not in the logic
-    /// contract. Held in `Moderation`, the dedup map restarted empty on every
-    /// redeployment, so a replacement logic re-indexed content that was already
-    /// live in this permanent index — the same content, twice, under one topic.
-    /// A reservation must outlive the logic that took it, exactly as entries do.
+    /// @dev `NONE = 0` is not a status among the others; it is what makes the rest
+    ///      mean anything. With the enum beginning at `PLURALITY_APPROVE`, an
+    ///      unwritten slot and a case whose plurality leans Approve would read
+    ///      IDENTICALLY — in the section whose entire purpose is that those two are
+    ///      distinguishable.
     ///
-    /// H-02 ownership keying is preserved and widened to (logic, caseId): only
-    /// the case that took a reservation may release it, so neither a stale case
-    /// nor a replacement logic can free a key a live case still holds.
-    struct Reservation {
-        address logic; // the logic contract holding it
-        uint256 caseId; // that logic's own case id
-        bool exists; // explicit: case 0 is a real owner
+    ///      `REMOVED` is the seventh slot and the §8 re-read found it missing.
+    ///      `RETAINED` is deliberately NOT here: it is a removal case's terminal,
+    ///      not an entry status. A failed removal disturbs no LIST answer, so there
+    ///      is nothing to write.
+    enum Status {
+        NONE,
+        PLURALITY_APPROVE,
+        PLURALITY_REJECT,
+        APPROVED,
+        REJECTED,
+        UNRESOLVED,
+        REMOVED
     }
 
-    mapping(bytes32 => Reservation) internal contentReservations;
+    /// @notice What the claim behind an entry ASKED. §8.5's `actionType`, carried
+    ///         onto the entry because the listing predicate needs it.
+    /// @dev These must agree with `Moderation.ActionType`. A claim key is
+    ///      `H(actionType, ...)`, so the index cannot recover the action type from
+    ///      the key it is handed — the writer states it and the index records it.
+    ///      `test_s8_2_actionTypeConstantsAgreeWithModeration` pins the agreement.
+    uint8 public constant ACTION_LIST = 0;
+    uint8 public constant ACTION_REMOVE = 1;
+
+    /// @notice One entry per `(content, topic)`. Its status is the latest RESOLVED
+    ///         question about it.
+    /// @dev `strict` and `openQuestions` are §8.3's split: the static half is fixed
+    ///      at the terminal that wrote it and can never go stale, and the live half
+    ///      is the only thing that moves.
+    ///
+    ///      `actionType` says what the entry's claim asked, and without it `status`
+    ///      is ambiguous: `APPROVED` on a `LIST` claim means "show this", and
+    ///      `APPROVED` on a `REMOVE` claim means "stop showing it". Those are
+    ///      opposite instructions to a safe-search reader wearing one enum value.
+    struct Entry {
+        uint8 status;
+        uint8 plurality;
+        bool strict;
+        uint32 openQuestions;
+        uint8 actionType;
+    }
+
+    // =========================================================================
+    // Storage
+    // =========================================================================
 
     address public governance;
+    address public pendingGovernance;
     uint256 public immutable timelockDelay;
 
-    /// M2.6-P0-5: a logic contract's authorization has three states, not two.
-    ///
-    /// With only on/off, revoking a live logic STRANDED its cases — its pot, its
-    /// committed stake, its duty reservations and its unpaid appeal contributors
-    /// all sat in a contract that could no longer touch the registries, and the
-    /// replacement could not settle them because the case storage lives in the old
-    /// contract. Governance's only alternative was to leave the old logic fully
-    /// authorized, which let anyone keep opening NEW cases in it, so it never
-    /// provably drained. `SETTLE_ONLY` is the missing middle: finish what you
-    /// started, start nothing new.
-    enum LogicState {
-        NONE,
-        OPEN_AND_SETTLE,
-        SETTLE_ONLY
-    }
+    /// @notice Logic contracts permitted to write. Granted behind the same
+    ///         propose/cancel/execute timelock `StakeRegistry` uses — not
+    ///         `msg.sender == owner`, and not a second idiom.
+    mapping(address => bool) public writers;
 
-    mapping(address => LogicState) public logicState;
+    mapping(bytes32 => Entry) internal entries;
 
-    /// M2.6-P0-5b: the index side needs its OWN drain signal.
+    /// @notice `topicKey -> entryKey[]` — the enumerable listing of LISTED content.
+    /// @dev Membership is exactly `status == APPROVED && actionType == ACTION_LIST`.
+    ///      A `REMOVED` entry leaves this list while the entry itself persists and
+    ///      stays addressable at the same `entryKey`: the listing and the record are
+    ///      two different objects, and an earlier reading of §8.2b conflated them.
     ///
-    /// `SETTLE_ONLY` and `StakeRegistry.canRevoke` were built as if there were one
-    /// registry. There are two, governed independently, and a case's obligations
-    /// span both: settlement disposes stake here and writes entries THERE, in the
-    /// same final step (`Moderation._settleFinish`). Gating only the stake side
-    /// meant governance could revoke index-side while a case sat in `SETTLING` —
-    /// its stake obligations correctly refusing revocation, its index write now
-    /// impossible. Every subsequent `claim()` reverted `NotLogic`, so the case
-    /// never finished, so its stake obligations never closed, so
-    /// `StakeRegistry.canRevoke` never flipped either. The stake-side gate did not
-    /// prevent that; it only guaranteed the resulting deadlock was permanent.
-    ///
-    /// So the index tracks what it is owed the same way the stake registry does: a
-    /// count of cases that may still write, delete or release through it. The logic
-    /// contract opens one per case at submit and closes it when the case reaches a
-    /// terminal phase (SETTLED or VOID) — the two points where its index effects
-    /// are complete.
-    ///
-    /// A content reservation is deliberately NOT the unit of account. Removals take
-    /// no reservation at all yet still delete entries at settlement, and an approved
-    /// submission's reservation outlives its case by design (it belongs to the
-    /// ENTRY afterwards, and is freed by deleting it). Counting reservations would
-    /// therefore be wrong in both directions.
-    mapping(address => uint256) public logicOpenCases;
-    /// logic -> its own case id -> whether that case's index obligation is open.
-    /// Makes open/close idempotent, so a repeated call is a no-op rather than an
-    /// underflow that would brick settlement. Not authorization-epoch keyed the way
-    /// stake obligations are: revocation now requires the count to be zero, so a
-    /// re-authorized logic can never inherit a live flag.
-    mapping(address => mapping(uint256 => bool)) internal caseOpen;
+    ///      **The second conjunct is not decoration.** The predicate read
+    ///      `status == APPROVED` alone while every claim was a `LIST` claim, which
+    ///      made it accidentally right. A `REMOVE` claim that carries — verdict
+    ///      Approve, meaning *remove it* — writes `APPROVED` to its OWN entry, and
+    ///      under the one-conjunct predicate that entry joins the topic's listing.
+    ///      The successful removal would publish itself as approved content, in the
+    ///      list a safe-search reader consults. Membership is a property of the
+    ///      LISTING, not of whichever claim happened to be writing when it was
+    ///      first stated.
+    mapping(bytes32 => bytes32[]) internal listing;
 
-    struct PendingLogic {
+    /// @notice `topicKey -> entryKey -> index + 1`.
+    /// @dev **Plus one, and that is the whole of it.** A position map returning 0
+    ///      for "absent" cannot distinguish absent from FIRST IN THE LIST — the same
+    ///      defect as a legal `topicKey == 0`, both I29, and the second is
+    ///      `M2.6-F1` verbatim, which this codebase has already fixed once.
+    mapping(bytes32 => mapping(bytes32 => uint256)) internal posPlusOne;
+
+    struct PendingWriter {
         address logic;
-        uint256 eta;
+        bool allowed;
+        uint40 eta;
         bool exists;
     }
 
-    PendingLogic public pendingLogic;
-    address public pendingGovernance;
+    PendingWriter internal pendingWriter;
 
-    event TopicCreated(bytes32 indexed topicKey);
+    // =========================================================================
+    // Events
+    // =========================================================================
+
     event EntryWritten(
-        uint256 indexed globalId,
-        bytes32 indexed topicKey,
-        address indexed originLogic,
-        uint256 localCaseId,
-        bool uncontested,
-        bool fullQuorum
+        bytes32 indexed entryKey, bytes32 indexed topicKey, bytes32 indexed claimKey, uint8 status, bool strict
     );
-    event EntryRemoved(uint256 indexed globalId, bytes32 indexed topicKey);
-    event ContentReserved(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
-    event ContentReleased(bytes32 indexed dedupKey, address indexed logic, uint256 caseId);
-    event CaseOpened(address indexed logic, uint256 indexed localCaseId);
-    event CaseClosed(address indexed logic, uint256 indexed localCaseId);
-    event LogicProposed(address indexed logic, uint256 eta);
-    event LogicAuthorized(address indexed logic);
-    event LogicRetiring(address indexed logic);
-    event LogicRevoked(address indexed logic);
-    event GovernanceTransferProposed(address indexed next);
+    event ListingAdded(bytes32 indexed topicKey, bytes32 indexed entryKey);
+    event ListingRemoved(bytes32 indexed topicKey, bytes32 indexed entryKey);
+    event QuestionOpened(bytes32 indexed entryKey, uint32 openQuestions);
+    event QuestionClosed(bytes32 indexed entryKey, uint32 openQuestions);
+    event WriterProposed(address indexed logic, bool allowed, uint256 eta);
+    event WriterProposalCancelled(address indexed logic);
+    event WriterSet(address indexed logic, bool allowed);
+    event GovernanceProposed(address indexed next);
     event GovernanceTransferred(address indexed next);
 
+    // =========================================================================
+    // Errors
+    // =========================================================================
+
     error NotGovernance();
-    error NotLogic();
+    error NotWriter();
+    error ZeroAddress();
+    error ZeroTopicKey();
+    error BadStatus();
+    error BadActionType();
+    error NotAListEntry();
+    error NoSuchEntry();
+    error NoQuestionOpen();
     error NoPendingProposal();
     error TimelockNotElapsed();
-    error ZeroAddress();
-    error BadRange();
-    error LogicStillHasObligations(); // M2.6-P0-5b: cannot revoke a logic mid-flight
-    /// M2.6-F1: `topicOfEntry == 0` is this contract's "not live" sentinel, so a
-    /// live entry under topic 0 would make the sentinel lie. Refused at the mint.
-    error ZeroTopicKey();
+    error BadPage();
 
     modifier onlyGovernance() {
         if (msg.sender != governance) revert NotGovernance();
         _;
     }
 
-    modifier onlyLogic() {
-        if (logicState[msg.sender] == LogicState.NONE) revert NotLogic();
+    modifier onlyWriter() {
+        if (!writers[msg.sender]) revert NotWriter();
         _;
     }
 
@@ -186,351 +161,232 @@ contract IndexRegistry {
         governance = msg.sender;
     }
 
-    // --- logic-facing --------------------------------------------------------
+    // =========================================================================
+    // §8.2b — identifiers
+    // =========================================================================
 
-    /// @notice Declare that `localCaseId` may still act on this index, so
-    ///         revocation cannot strand it (M2.6-P0-5b). Idempotent.
-    function openCase(uint256 localCaseId) external onlyLogic {
-        if (caseOpen[msg.sender][localCaseId]) return;
-        caseOpen[msg.sender][localCaseId] = true;
-        logicOpenCases[msg.sender] += 1;
-        emit CaseOpened(msg.sender, localCaseId);
+    /// @notice An entry is addressed by `H(claimKey, topicKey)`.
+    /// @dev A claim key names a SET of entries — §8.1 writes up to `MAX_TOPICS` per
+    ///      claim — so it cannot name a member of that set, and deletion needs to
+    ///      name a member.
+    function entryKeyOf(bytes32 claimKey, bytes32 topicKey) public pure returns (bytes32) {
+        return keccak256(abi.encode(claimKey, topicKey));
     }
 
-    /// @notice Discharge a case's index obligation: its effects are complete and
-    ///         it will never write, delete or release again. Idempotent, so a
-    ///         double close is a no-op rather than an underflow that would revert
-    ///         the settlement transaction carrying it.
-    function closeCase(uint256 localCaseId) external onlyLogic {
-        if (!caseOpen[msg.sender][localCaseId]) return;
-        delete caseOpen[msg.sender][localCaseId];
-        logicOpenCases[msg.sender] -= 1;
-        emit CaseClosed(msg.sender, localCaseId);
-    }
+    // =========================================================================
+    // §8.1 — the writes
+    // =========================================================================
 
-    /// @notice True when `logic` has no case that could still act on this index.
-    ///         The index-side counterpart of `StakeRegistry.canRevoke`; both must
-    ///         hold before a logic is safe to revoke, because a case's final step
-    ///         touches both registries.
-    function canRevoke(address logic) public view returns (bool) {
-        return logicOpenCases[logic] == 0;
-    }
-
-    function caseIsOpen(address logic, uint256 localCaseId) external view returns (bool) {
-        return caseOpen[logic][localCaseId];
-    }
-
-    /// @notice Write an approved entry and mint its permanent global id.
-    /// @return globalId The registry-minted identity. The caller MUST record this;
-    ///         it is the only safe handle for later removal.
+    /// @notice The four per-claim writes: interim plurality at `TALLY`, and the
+    ///         terminal at each of the four transitions that establish one.
+    /// @dev Membership of the topic's listing is exactly `status == APPROVED`,
+    ///      re-derived on every write, so the listing cannot drift from the status
+    ///      it is supposed to reflect.
     function writeEntry(
+        bytes32 claimKey,
         bytes32 topicKey,
-        uint256 localCaseId,
-        bytes32 contentHash,
-        bytes32 metaHash,
-        bool uncontested,
-        bool fullQuorum,
-        uint256 rulesVersion,
-        uint256 guidelinesVersion,
-        bytes32 dedupKey
-    ) external onlyLogic returns (uint256 globalId) {
-        // M2.6-F1: topic 0 is this contract's "not live" sentinel (`legacyEntryInfo`,
-        // `topicOfEntry`). An entry minted under it would be live and unreachable
-        // through the cross-logic removal route at once. Enforced HERE, in the
-        // permanent registry, because it is this contract's docblock that claims the
-        // sentinel holds — a guard in the replaceable logic would leave the claim
-        // false for the next logic. The logic ALSO refuses it at submit, for a
-        // different reason: see `Moderation.submit`.
+        uint8 status,
+        uint8 plurality,
+        bool strict,
+        uint8 actionType
+    ) external onlyWriter returns (bytes32 entryKey) {
+        // §8.2b, I29 — a claim carries up to MAX_TOPICS topics in a fixed-width
+        // slot and unused slots read 0, so a legal zero topic would make "no topic
+        // here" and "the topic whose key is 0" the same read.
         if (topicKey == bytes32(0)) revert ZeroTopicKey();
-        if (!topicSeen[topicKey]) {
-            topicSeen[topicKey] = true;
-            emit TopicCreated(topicKey);
-        }
-        globalId = nextEntryId++;
-        indexByTopic[topicKey].push(
-            Entry({
-                contentHash: contentHash,
-                metaHash: metaHash,
-                approvalTime: uint40(block.timestamp),
-                uncontested: uncontested,
-                fullQuorum: fullQuorum,
-                globalId: globalId,
-                originLogic: msg.sender,
-                localCaseId: localCaseId,
-                rulesVersion: rulesVersion,
-                guidelinesVersion: guidelinesVersion,
-                dedupKey: dedupKey
-            })
-        );
-        entryPosPlusOne[topicKey][globalId] = indexByTopic[topicKey].length;
-        topicOfEntry[globalId] = topicKey;
-        emit EntryWritten(globalId, topicKey, msg.sender, localCaseId, uncontested, fullQuorum);
+        if (status == uint8(Status.NONE) || status > uint8(Status.REMOVED)) revert BadStatus();
+        if (actionType > ACTION_REMOVE) revert BadActionType();
+
+        entryKey = entryKeyOf(claimKey, topicKey);
+        Entry storage e = entries[entryKey];
+        e.status = status;
+        e.plurality = plurality;
+        e.strict = strict;
+        e.actionType = actionType;
+
+        _syncListing(topicKey, entryKey, status, actionType);
+        emit EntryWritten(entryKey, topicKey, claimKey, status, strict);
     }
 
-    /// O(1) swap-and-pop (H-03). No-op if absent, so a removal whose target was
-    /// already deleted settles cleanly.
-    /// @notice Delete an entry by its permanent global id. Any authorized logic may
-    ///         remove any entry — including one written by a superseded logic — which
-    ///         is what makes legacy entries adjudicable after a migration.
-    /// @dev Deleting an entry ALSO frees the content reservation it carries
-    ///      (M2.6-P0-1c). That is deliberate and is the only cross-logic release
-    ///      path: without it, a legacy entry removed by a replacement logic would
-    ///      leave its content permanently unsubmittable, because the reservation's
-    ///      owning logic no longer exists to release it. Binding the release to an
-    ///      actual deletion — rather than exposing a "release anyone's key" call —
-    ///      is what keeps H-02 intact: an obsolete removal deletes nothing (the
-    ///      position map is already clear) and therefore releases nothing.
-    function deleteEntry(bytes32 topicKey, uint256 globalId) external onlyLogic {
-        uint256 p = entryPosPlusOne[topicKey][globalId];
-        if (p == 0) return;
-        Entry[] storage arr = indexByTopic[topicKey];
+    /// @notice §8.1's FIFTH write — the only one that reaches outside its own claim
+    ///         key. A successful removal case sets the original `LIST` entry to
+    ///         `REMOVED` and drops it from the topic's listing.
+    /// @dev The caller supplies the LIST claim key. Both entry keys are derived from
+    ///      content (§8.2b), so the removal case computes this from its own fields
+    ///      and NO STORED POINTER is needed.
+    ///
+    ///      `REMOVED` is a status and not a deletion. For a safe-search client
+    ///      `REMOVED` and `REJECTED` are the same instruction, and the distinction is
+    ///      for the reader who wants to know why — deleting the entry destroys
+    ///      exactly that reader's answer, and would make a content-derived
+    ///      identifier resolve to nothing.
+    function removeListing(bytes32 listClaimKey, bytes32 topicKey) external onlyWriter returns (bytes32 entryKey) {
+        if (topicKey == bytes32(0)) revert ZeroTopicKey();
+        entryKey = entryKeyOf(listClaimKey, topicKey);
+        Entry storage e = entries[entryKey];
+        if (e.status == uint8(Status.NONE)) revert NoSuchEntry();
+        // The fifth write reaches outside its own claim key, so it states what it
+        // is allowed to reach: a LIST answer. Pointing it at a REMOVE entry would
+        // let a removal case mark another removal case's record REMOVED.
+        if (e.actionType != ACTION_LIST) revert NotAListEntry();
+
+        e.status = uint8(Status.REMOVED);
+
+        // §8.3 — `strict` is the static half of SUPER_SAFE and survives everything
+        // else, because every conjunct is a fact about a tally that already
+        // happened. A removal is the one event that falsifies it, and it must be
+        // cleared HERE rather than left to the counter: the removal case closes its
+        // own question at the same terminal, so `openQuestions` returns to 0 and a
+        // retained `strict` would make a REMOVED entry read SUPER_SAFE — the exact
+        // claim the index exists to never make wrongly.
+        e.strict = false;
+
+        _syncListing(topicKey, entryKey, uint8(Status.REMOVED), e.actionType);
+        emit EntryWritten(entryKey, topicKey, listClaimKey, uint8(Status.REMOVED), false);
+    }
+
+    /// @dev Swap-and-pop against the position map, `O(1)`. The moved element's
+    ///      position is rewritten, which is the whole reason the map exists.
+    function _syncListing(bytes32 topicKey, bytes32 entryKey, uint8 status, uint8 actionType) internal {
+        bool shouldBeListed = (status == uint8(Status.APPROVED) && actionType == ACTION_LIST);
+        uint256 p = posPlusOne[topicKey][entryKey];
+
+        if (shouldBeListed) {
+            if (p != 0) return; // already listed
+            listing[topicKey].push(entryKey);
+            posPlusOne[topicKey][entryKey] = listing[topicKey].length; // index + 1
+            emit ListingAdded(topicKey, entryKey);
+            return;
+        }
+
+        if (p == 0) return; // already absent
+        bytes32[] storage arr = listing[topicKey];
         uint256 idx = p - 1;
-        bytes32 dedupKey = arr[idx].dedupKey;
         uint256 last = arr.length - 1;
         if (idx != last) {
-            Entry storage moved = arr[last];
+            bytes32 moved = arr[last];
             arr[idx] = moved;
-            entryPosPlusOne[topicKey][moved.globalId] = idx + 1;
+            posPlusOne[topicKey][moved] = idx + 1;
         }
         arr.pop();
-        delete entryPosPlusOne[topicKey][globalId];
-        delete topicOfEntry[globalId];
-        if (contentReservations[dedupKey].exists) {
-            emit ContentReleased(dedupKey, contentReservations[dedupKey].logic, contentReservations[dedupKey].caseId);
-            delete contentReservations[dedupKey];
-        }
-        emit EntryRemoved(globalId, topicKey);
+        delete posPlusOne[topicKey][entryKey];
+        emit ListingRemoved(topicKey, entryKey);
     }
 
-    // --- live-content reservation (M2.6-P0-1b) -------------------------------
+    // =========================================================================
+    // §8.3 — the live half of SUPER_SAFE
+    // =========================================================================
 
-    /// @notice Reserve a content key against duplicate submission, permanently and
-    ///         across logic versions. This is the invariant: content live in the
-    ///         permanent index cannot be re-submitted into it, and a migration
-    ///         does not reset that.
-    /// @param dedupKey The logic's content key, e.g. H(contentHash, metaHash, topicKey).
-    /// @param localCaseId The reserving logic's own case id — the release handle.
-    /// @return True if reserved; false if the key is ALREADY held, by any logic
-    ///         including a superseded one. Callers must check — the `try` prefix
-    ///         is the signal. `Moderation` turns false into `DuplicateSubmission`;
-    ///         the boolean exists so it can, without paying twice at the contract
-    ///         boundary on the EIP-170-bound side.
-    function tryReserveContent(bytes32 dedupKey, uint256 localCaseId) external onlyLogic returns (bool) {
-        Reservation storage r = contentReservations[dedupKey];
-        if (r.exists) return false;
-        r.logic = msg.sender;
-        r.caseId = localCaseId;
-        r.exists = true;
-        emit ContentReserved(dedupKey, msg.sender, localCaseId);
-        return true;
+    /// @notice A re-review or removal case has OPENED against this content.
+    /// @dev A COUNTER, never a boolean: two concurrent questions closing one at a
+    ///      time would clear a boolean while a question was still open, and "no
+    ///      question is open" would read true in a state it must exclude (I29).
+    function openQuestion(bytes32 claimKey, bytes32 topicKey) external onlyWriter {
+        bytes32 entryKey = entryKeyOf(claimKey, topicKey);
+        Entry storage e = entries[entryKey];
+        if (e.status == uint8(Status.NONE)) revert NoSuchEntry();
+        e.openQuestions += 1;
+        emit QuestionOpened(entryKey, e.openQuestions);
     }
 
-    /// @notice Release a reservation. No-op unless the caller is the logic that
-    ///         took it AND names the case that owns it (H-02): an obsolete case
-    ///         must never wipe a key a newer submission now holds, and after a
-    ///         migration a replacement logic must not be able to free another
-    ///         version's live content by guessing a case id.
-    function releaseContent(bytes32 dedupKey, uint256 localCaseId) external onlyLogic {
-        Reservation storage r = contentReservations[dedupKey];
-        if (!r.exists || r.logic != msg.sender || r.caseId != localCaseId) return;
-        delete contentReservations[dedupKey];
-        emit ContentReleased(dedupKey, msg.sender, localCaseId);
+    function closeQuestion(bytes32 claimKey, bytes32 topicKey) external onlyWriter {
+        bytes32 entryKey = entryKeyOf(claimKey, topicKey);
+        Entry storage e = entries[entryKey];
+        if (e.openQuestions == 0) revert NoQuestionOpen();
+        e.openQuestions -= 1;
+        emit QuestionClosed(entryKey, e.openQuestions);
     }
 
-    // --- reads (permissionless, never gated) ---------------------------------
+    // =========================================================================
+    // Reads
+    // =========================================================================
 
-    /// @notice The full reservation record. `exists` is explicit because case 0 is
-    ///         a legitimate owner and cannot be distinguished by caseId alone.
-    function contentReservation(bytes32 dedupKey)
+    function entryOf(bytes32 claimKey, bytes32 topicKey) external view returns (Entry memory) {
+        return entries[entryKeyOf(claimKey, topicKey)];
+    }
+
+    function entryAt(bytes32 entryKey) external view returns (Entry memory) {
+        return entries[entryKey];
+    }
+
+    function statusOf(bytes32 claimKey, bytes32 topicKey) external view returns (uint8) {
+        return entries[entryKeyOf(claimKey, topicKey)].status;
+    }
+
+    /// @notice §8.3. `strict AND openQuestions == 0` — `O(1)` and local to the index,
+    ///         so a reader consults one contract to answer the one question the
+    ///         index exists to answer.
+    function isSuperSafe(bytes32 claimKey, bytes32 topicKey) external view returns (bool) {
+        Entry storage e = entries[entryKeyOf(claimKey, topicKey)];
+        return e.strict && e.openQuestions == 0;
+    }
+
+    function isListed(bytes32 claimKey, bytes32 topicKey) external view returns (bool) {
+        return posPlusOne[topicKey][entryKeyOf(claimKey, topicKey)] != 0;
+    }
+
+    function listedCount(bytes32 topicKey) external view returns (uint256) {
+        return listing[topicKey].length;
+    }
+
+    /// @notice Paged enumeration. **No function here iterates an unbounded list.**
+    /// @dev A topic accumulates entries without limit, so a function that walks a
+    ///      whole topic is a contract that stops working at a size nobody chose.
+    ///      The caller pages; the cost is `O(limit)` and independent of how large
+    ///      the topic has grown.
+    function listedPage(bytes32 topicKey, uint256 offset, uint256 limit)
         external
         view
-        returns (bool exists, address logic, uint256 caseId)
+        returns (bytes32[] memory page)
     {
-        Reservation storage r = contentReservations[dedupKey];
-        return (r.exists, r.logic, r.caseId);
-    }
-
-    function isContentReserved(bytes32 dedupKey) external view returns (bool) {
-        return contentReservations[dedupKey].exists;
-    }
-
-    /// @notice Everything a logic contract needs to open a removal case against an
-    ///         entry it did not write (M2.6-P0-1c). Returns `topicKey == 0` when
-    ///         the id is not live, which is the caller's existence check.
-    /// @dev **Why the sentinel is sound (M2.6-F1).** It rests on `writeEntry`
-    ///      refusing `topicKey == 0`, and on nothing else. The justification this
-    ///      docblock used to give — "`globalId` starts at 1, so no live entry can
-    ///      sit under topic 0" — was a non-sequitur: `globalId`'s sentinel and
-    ///      `topicKey`'s sentinel are different sentinels, and `nextEntryId = 1`
-    ///      says nothing about which topic an entry is filed under. Nothing rejected
-    ///      topic 0 at the mint, so an approved submission carrying it produced a
-    ///      live entry that this function reported dead — `submitLegacyRemoval` then
-    ///      refused it as `TargetNotRemovable`, while `deleteEntry` still worked
-    ///      through the local route. The entry therefore became unremovable at
-    ///      exactly the moment its writing logic was superseded, which is the one
-    ///      situation P0-1c exists for, and its content reservation (released only
-    ///      by `deleteEntry`) went with it.
-    /// @dev The payload comes from the registry, not the caller, so a removal
-    ///      displays exactly what settlement will act on (H-01) even when the case
-    ///      record that produced the entry lives in a contract this one cannot read.
-    function legacyEntryInfo(uint256 globalId)
-        external
-        view
-        returns (bytes32 topicKey, bytes32 contentHash, bytes32 metaHash, address originLogic)
-    {
-        topicKey = topicOfEntry[globalId];
-        if (topicKey == bytes32(0)) return (bytes32(0), bytes32(0), bytes32(0), address(0));
-        Entry storage e = indexByTopic[topicKey][entryPosPlusOne[topicKey][globalId] - 1];
-        return (topicKey, e.contentHash, e.metaHash, e.originLogic);
-    }
-
-    /// @notice The owning case id alone, for the logic contract's compatibility
-    ///         view. Single-word return: `Moderation` is the EIP-170-bound
-    ///         contract, so the decode cost is kept on this side of the boundary.
-    function reservationCaseId(bytes32 dedupKey) external view returns (uint256) {
-        return contentReservations[dedupKey].caseId;
-    }
-
-    function entryCount(bytes32 topicKey) external view returns (uint256) {
-        return indexByTopic[topicKey].length;
-    }
-
-    function entryAt(bytes32 topicKey, uint256 i) external view returns (Entry memory) {
-        return indexByTopic[topicKey][i];
-    }
-
-    function isIndexed(bytes32 topicKey, uint256 globalId) external view returns (bool) {
-        return entryPosPlusOne[topicKey][globalId] != 0;
-    }
-
-    /// @notice Provenance for an entry: who decided it, under which local case, and
-    ///         under which ruleset/guidelines. Permanent entries must remain
-    ///         interpretable after the logic that created them is gone.
-    function entryProvenance(bytes32 topicKey, uint256 globalId)
-        external
-        view
-        returns (address originLogic, uint256 localCaseId, uint256 rulesVersion, uint256 guidelinesVersion)
-    {
-        uint256 p = entryPosPlusOne[topicKey][globalId];
-        if (p == 0) return (address(0), 0, 0, 0);
-        Entry storage e = indexByTopic[topicKey][p - 1];
-        return (e.originLogic, e.localCaseId, e.rulesVersion, e.guidelinesVersion);
-    }
-
-    /// @notice Paginated slice of a topic (M-04): an unbounded view eventually
-    ///         exceeds practical RPC response limits on a large index.
-    function entries(bytes32 topicKey, uint256 cursor, uint256 limit) external view returns (Entry[] memory out) {
-        Entry[] storage arr = indexByTopic[topicKey];
-        uint256 len = arr.length;
-        if (cursor > len) revert BadRange();
-        uint256 n = len - cursor;
-        if (n > limit) n = limit;
-        out = new Entry[](n);
-        for (uint256 i; i < n; ++i) {
-            out[i] = arr[cursor + i];
+        if (limit == 0) revert BadPage();
+        bytes32[] storage arr = listing[topicKey];
+        uint256 n = arr.length;
+        if (offset >= n) return new bytes32[](0);
+        uint256 end = offset + limit;
+        if (end > n) end = n;
+        page = new bytes32[](end - offset);
+        for (uint256 i = offset; i < end; ++i) {
+            page[i - offset] = arr[i];
         }
     }
 
-    /// @notice Paginated supersafe slice: uncontested AND decided at full quorum
-    ///         (H-09) AND aged past `minAge`. Age is a display policy, so it is a
-    ///         caller argument rather than registry state — the index outlives any
-    ///         particular parameter set.
-    function supersafeEntries(bytes32 topicKey, uint256 minAge, uint256 cursor, uint256 limit)
-        external
-        view
-        returns (Entry[] memory out)
-    {
-        Entry[] storage arr = indexByTopic[topicKey];
-        uint256 len = arr.length;
-        if (cursor > len) revert BadRange();
-        uint256 end = cursor + limit;
-        if (end > len) end = len;
+    // =========================================================================
+    // Writer capability — the timelock idiom this project already has
+    // =========================================================================
 
-        uint256 count;
-        for (uint256 i = cursor; i < end; ++i) {
-            if (_isSupersafe(arr[i], minAge)) count++;
-        }
-        out = new Entry[](count);
-        uint256 j;
-        for (uint256 i = cursor; i < end; ++i) {
-            if (_isSupersafe(arr[i], minAge)) out[j++] = arr[i];
-        }
-    }
-
-    function _isSupersafe(Entry storage e, uint256 minAge) internal view returns (bool) {
-        return e.uncontested && e.fullQuorum && block.timestamp - e.approvalTime >= minAge;
-    }
-
-    // --- governance ----------------------------------------------------------
-
-    function proposeLogic(address logic) external onlyGovernance {
+    function proposeWriter(address logic, bool allowed) external onlyGovernance {
         if (logic == address(0)) revert ZeroAddress();
-        pendingLogic = PendingLogic({logic: logic, eta: block.timestamp + timelockDelay, exists: true});
-        emit LogicProposed(logic, block.timestamp + timelockDelay);
+        uint256 eta = block.timestamp + timelockDelay;
+        pendingWriter = PendingWriter({logic: logic, allowed: allowed, eta: uint40(eta), exists: true});
+        emit WriterProposed(logic, allowed, eta);
     }
 
-    /// @dev M2.6-P0-5d, checked for the same hole and gated for a different reason.
-    ///
-    ///      This registry has **no `authEpoch`**, so there is no namespace to rename
-    ///      and the orphaning failure `StakeRegistry.executeLogic` had cannot occur
-    ///      here. `caseOpen` is keyed `(logic, localCaseId)` only.
-    ///
-    ///      That asymmetry — index flags surviving a re-authorization while stake
-    ///      handles die — is benign, but ONLY because `revokeLogic` on both sides is
-    ///      now gated on drain. A flag can never outlive its case: `logicOpenCases`
-    ///      reaches zero only when every `openCase` has been matched by a
-    ///      `closeCase`, which deletes the flag, and revocation to `NONE` requires
-    ///      that count to be zero. Before P0-5b gated this side, it was NOT benign:
-    ///      a logic could be revoked with open cases, re-authorized, and inherit
-    ///      `caseOpen[logic][0] == true` from its previous life — `openCase` would
-    ///      return early, the counter would never rise, and that case would be
-    ///      revocable straight through the gate.
-    ///
-    ///      The gate below is therefore not fixing an orphaning bug; it keeps the two
-    ///      registries' governance surfaces identical. Without it, one
-    ///      `executeLogic` pair against a live logic would revert stake-side and
-    ///      succeed index-side, leaving the logic OPEN_AND_SETTLE here and
-    ///      SETTLE_ONLY there. `Moderation._requireOpen` checks both, so that
-    ///      desync fails closed — but a desync governance can create by accident is
-    ///      worth not creating.
-    function executeLogic() external onlyGovernance {
-        PendingLogic memory pl = pendingLogic;
-        if (!pl.exists) revert NoPendingProposal();
-        if (block.timestamp < pl.eta) revert TimelockNotElapsed();
-        if (logicState[pl.logic] != LogicState.NONE && !canRevoke(pl.logic)) {
-            revert LogicStillHasObligations();
-        }
-        logicState[pl.logic] = LogicState.OPEN_AND_SETTLE;
-        delete pendingLogic;
-        emit LogicAuthorized(pl.logic);
+    function cancelWriter() external onlyGovernance {
+        PendingWriter memory w = pendingWriter;
+        if (!w.exists) revert NoPendingProposal();
+        delete pendingWriter;
+        emit WriterProposalCancelled(w.logic);
     }
 
-    function cancelLogic() external onlyGovernance {
-        delete pendingLogic;
+    function executeWriter() external onlyGovernance {
+        PendingWriter memory w = pendingWriter;
+        if (!w.exists) revert NoPendingProposal();
+        if (block.timestamp < w.eta) revert TimelockNotElapsed();
+        writers[w.logic] = w.allowed;
+        delete pendingWriter;
+        emit WriterSet(w.logic, w.allowed);
     }
 
-    /// @notice Stop a logic writing new entries while it settles existing cases.
-    function retireLogic(address logic) external onlyGovernance {
-        if (logicState[logic] != LogicState.OPEN_AND_SETTLE) revert NotLogic();
-        logicState[logic] = LogicState.SETTLE_ONLY;
-        emit LogicRetiring(logic);
-    }
-
-    /// @dev Refuses while the logic still has a case that could act on the index.
-    ///      Revoking one whose settlement had not yet written its entries left that
-    ///      case unable to finish AND unable to release its stake, because
-    ///      `_settleFinish` does both in one step — the stake-side gate could not
-    ///      see the index-side hazard, and vice versa.
-    function revokeLogic(address logic) external onlyGovernance {
-        if (!canRevoke(logic)) revert LogicStillHasObligations();
-        logicState[logic] = LogicState.NONE;
-        emit LogicRevoked(logic);
+    function pendingWriterProposal() external view returns (address logic, bool allowed, uint256 eta, bool exists) {
+        PendingWriter memory w = pendingWriter;
+        return (w.logic, w.allowed, w.eta, w.exists);
     }
 
     function proposeGovernance(address next) external onlyGovernance {
         if (next == address(0)) revert ZeroAddress();
         pendingGovernance = next;
-        emit GovernanceTransferProposed(next);
+        emit GovernanceProposed(next);
     }
 
     function acceptGovernance() external {

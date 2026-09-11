@@ -6,7 +6,7 @@ properties matter and the third is the one benchmarks usually get wrong:
 1.  **Ground truth exists and is independent of the classifiers.** Labelled by
     people, against the same one-line guidelines, with disagreements resolved
     and recorded rather than dropped.
-2.  **The mix reflects real submissions.** `simulation/v3/FINDINGS-v3.md` shows
+2.  **The mix reflects real submissions.** `simulation/FINDINGS-v3.md` shows
     the design's behaviour is dominated by `prior`, and `prior` is not one
     number — it is much higher on obvious content than on borderline content.
     A corpus of hard cases measures the wrong quantity, and so does a corpus of

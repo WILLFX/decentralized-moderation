@@ -153,6 +153,12 @@ Stated because the numbers are only as good as these.
   higher for the defender too.
 - **Honest attendance at 80% and attackers always-on.** This asymmetry carries a
   lot of the result. It is the design's own stated assumption about motive.
+- **`D` is flattered.** Its challenge rounds vote *after* a preliminary outcome
+  has been published, so committees 3 and 4 can see which side is winning — the
+  same exposure §F prices at 10–29 points. The engine does not apply the
+  conformity penalty to them (`visible_lead` is passed only in architecture `B`).
+  Modelling it would push `D` further down, never up, so the ordering in §A and
+  §D is a lower bound on how much worse `D` is rather than an artefact.
 
 ## §I Conclusion
 

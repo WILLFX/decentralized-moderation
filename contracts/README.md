@@ -1,304 +1,134 @@
 # Moderation contracts
 
-**This directory holds two complete implementations of two different
-architectures.** Read this section before anything else, because everything below
-it describes the older one.
+**These contracts implement a different protocol from `specs/protocol.md`.**
 
-| | directory | spec | status |
-|---|---|---|---|
-| **v3 — current** | `src/` | `specs/protocol.md` | **the architecture under review** |
-| v1 — historical | `src/` | `specs/state-machine.md` | complete, audited, superseded |
+They are a complete, tested implementation — 266 tests, stateful invariants,
+a two-implementation differential on the draw, mutation campaigns — of a design
+that has since been replaced. This file is the audit of how far they are from the
+one that is now normative.
+
+| File | Runtime | Verdict against the spec |
+|---|---|---|
+| `src/Moderation.sol` | 21,786 B | **Rewrite.** §A |
+| `src/StakeRegistry.sol` | 10,338 B | **Rewrite.** §B |
+| `src/IndexRegistry.sol` | 4,285 B | Partly reusable. §C |
+| `src/RulesetGovernor.sol` | 6,386 B | Unspecified — see spec §10.3 |
+
+The audit below is read from the code against the spec, not from anyone's list of
+objections.
 
 ---
 
-## v3 — the current architecture
+## §A `Moderation.sol` — the case state cannot represent the design
 
-Solidity implementation of **`specs/protocol.md`**, which is normative.
-Where `specs/design-v3.md` disagrees with it, the state machine wins.
+Not "needs changes." The storage layout cannot hold the lifecycle in spec §4.
 
-Four contracts, all inside EIP-170:
+### Hard blocks
 
-| File | Role | Runtime |
-|---|---|---|
-| `src/Moderation.sol` | The **case state machine** — §4 end to end, plus the parts of §5, §7 and §8 a case reaches. A *logic* contract in the registry's sense: it drives moderator accounting through `StakeRegistry` and never touches a bond directly. | 21,786 B (88.6%) |
-| `src/StakeRegistry.sol` | **Permanent** custody of stake and bond, the claim ledger (§2.4), capability grants and the one maintenance reserve (§5.6). | 10,338 B (42.1%) |
-| `src/RulesetGovernor.sol` | Timelocked parameter and guidelines governance. `Moderation` is its **target**, not its host — the pending record and `eta` live here, which is why adding governance cost `Moderation` nothing. | 6,386 B (26.0%) |
-| `src/IndexRegistry.sol` | **Permanent** topic → entry index — what a reader actually consults (§8). | 4,285 B (17.4%) |
+**`uint8 round; // 0 or 1`.** The contract hard-codes exactly two rounds. Line 846
+is the only increment (`c.round = 1`) and line 804 treats round 1 as terminal.
+Spec §4.2 allows **two challenges**, so three rounds. Not a constant to bump —
+the round is a field with two meanings and every guard reads it as a boolean.
 
-**Deployment:** `script/Deploy.s.sol`, exercised by `test/Deploy.t.sol`.
-`verify()` is the real deliverable: every link in the stack fails *silently and
-late* — a missing `MAY_DISCHARGE` reverts at settlement, after bonds are
-committed — so `verify` names the first broken one instead.
+**One `eligSeedBlock` per round.** Spec §4.1 needs **two committees per round**,
+the second seeded from randomness that does not exist until the first committee's
+commit phase has closed. There is one seed field and eligibility mixes `c.round`
+into the hash, so a second committee inside a round is not addressable.
 
-### How v3 is checked
+**`commitsThisRound` / `revealsThisRound` are per round, not per committee.**
+Spec §11 requires a minimum per committee, explicitly because 40 commits in
+committee 1 and one in committee 2 is not two committees. That distinction cannot
+be computed from this state.
 
-**266 tests across 9 suites**, and the four kinds are not interchangeable:
-
-| Suite | What it is for |
-|---|---|
-| `Moderation.t.sol`, `StakeRegistry.t.sol`, `IndexRegistry.t.sol`, `RulesetGovernor.t.sol` | Per-contract properties, each test naming the invariant or § it checks |
-| `Invariant.t.sol` + `handlers/SystemHandler.sol` | **Stateful** invariants over all four *real* contracts under the fuzzer — 11 properties the machine tries to break, rather than sequences we thought of |
-| `DrawProperties.t.sol` | The draw swept rather than sampled — 2,600 exact monotonicity comparisons, I12 at every unanimous tally |
-| `DrawVectors.t.sol` + `simulation/check_draw_vectors.py` | A **two-implementation differential** on the draw. The contract emits vectors; a Python derivation reproduces `u[0..2]`, tickets and verdict independently |
-| `ModerationGas.t.sol` | Measured figures for `GAS_BUDGETS.md` |
-
-**Mutation testing** (`tools/mutation/`) is the acceptance bar, not a metric:
-`StakeRegistry` 37/37, `RulesetGovernor` 57/57, `IndexRegistry` 33/33,
-`Moderation` 70/75 with five survivors argued as equivalent mutants and
-**reachability asserted by test rather than by prose**. A compile failure is
-reported `INVALID`, never scored as a kill — that rule exists because it was
-violated twice before it was written down.
-
-The differential is **KAT-gated**: `simulation/keccak.py` validates itself
-against `hashlib.sha3_256` and published Keccak-256 vectors at import, and raises
-rather than returning numbers if either fails. The checker also breaks its own
-derivation and requires the comparison to notice, so an agreement is evidence
-rather than a coincidence.
-
-### What v3 leaves open
-
-`contracts/DEVIATIONS.md` D3-1…D3-22 is the complete list — every place the
-implementation departed from, refined, or pinned something the spec left open,
-with what, why, and threat-model impact. `specs/protocol.md` §10 carries
-the parameters that are still open and the reasons they cannot be closed from
-inside the design.
-
----
-
-## v1 (M2) — the first architecture, kept for reference
-
-Solidity implementation of `specs/state-machine.md`, built and tested with
-Foundry. Work order: `specs/m2-work-order.md`.
-
-> **This implements the FIRST architecture and is superseded.** Panels are drawn,
-> drawn moderators are obligated to serve, appeals are bond-funded, and deeper
-> rounds supersede shallower ones. It is kept because it is complete, audited, and
-> because building it is what produced the finding that motivated everything
-> since: **assigning moderators to cases creates a resource an attacker can
-> exhaust.** Nothing below is stale about *this* codebase; it simply describes a
-> design the project no longer builds on.
-
-> Status: **M2.6 complete** (all P0 remediation items closed; re-audit target: the `m2.6-close` tag), **plus a post-close regression pass** — that tag was
-> independently verified and eight blocking regressions were found in items marked
-> closed, plus three fixes that no test discriminated. They are fixed on top of it,
-> as are the post-close items 2b, 4, 5, 8, 9, 10, 11, P1-3's residual, K-5 and the
-> external-audit findings; the tag is not moved, because it is the
-> commit the audit ran against. See the "Regressions found after the close" table
-> in `specs/m2_6-work-order.md`. The state machine (staking, sortition, case
-> lifecycle, appeals, settlement, index, governance) is implemented across four
-> contracts — the replaceable game and its governor, plus two permanent
-> registries — with **274 passing tests** (188 at the tag) including a
-> handler-driven invariant campaign, a 52-vector differential regression test
-> against a Python integer reference (a port of the Solidity, not an independent
-> derivation — see `Differential.t.sol`'s header for what that does and does not
-> prove), and a live logic-migration test.
->
-> See `specs/m2_6-work-order.md` (Resolution record) and
-> `specs/m2_6-state-of-play.md` for what landed, the four documented deviations
-> from the prescription, and the open residuals.
->
-> Builds with `via_ir = true` (EIP-170: `Moderation` does not fit the 24,576-byte
-> limit without it). The suite runs on the same pipeline that ships. One
-> consequence for contributors: **test code must use `vm.getBlockTimestamp()` /
-> `vm.getBlockNumber()`, never `block.timestamp` / `block.number`** — the IR
-> optimizer hoists those across `vm.warp`/`vm.roll` and the test silently reads a
-> stale clock. See `GAS_BUDGETS.md`.
-
-## Module map
-
-| File | Role |
-|---|---|
-| `src/Moderation.sol` | The **replaceable game**: cases, appeals, settlement. Holds pot money only (fees + appeal bonds). |
-| `src/RulesetGovernor.sol` | Governance **authoring**: proposing, validating and timelocking rulesets and guidelines versions. Split out of `Moderation` in M2.6 when it hit EIP-170 — authoring is cold and validation-heavy, enforcement is on every hot path. Ruleset *storage* stays in `Moderation` (`_cp()` reads it per transition); the governor pushes validated results in via `applyRuleset`. |
-| `src/lib/Settlement.sol` | The settlement block — init, per-seat disposal, finish, index effects — as a **DELEGATECALLed library**. Split out of `Moderation` in M2.6 when the widen restructure needed EIP-170 room in the round state machine. A library rather than a contract because settlement touches almost all of `Case`/`Round`: the bytes move, the storage does not. |
-| `src/lib/ProtocolLimits.sol` | The immutable H-11 caps, shared by the contract that validates a ruleset and the one that enforces it so the two cannot drift. |
-| `src/StakeRegistry.sol` | **Permanent** custody + bookkeeping for moderator stake, the sortition tree and the H-07 duty pool. Moderators stake, exit and withdraw here directly — never through the game, so exit is never gated by logic. |
-| `src/IndexRegistry.sol` | **Permanent** topic → approved-entries index. The protocol's actual product; it outlives every logic redeployment. |
-| `src/lib/SortitionTree.sol` | Stake-weighted draw over a sum tree (clean 0.8.x port of Kleros' MIT `SortitionSumTreeFactory`; see attribution in the file). |
-| `src/lib/FreezeMath.sol` | The §6.4 freezing-power curve `1 + (CAP-1)(1-e^(-meanTrack/SAT))` via solady `expWad`. |
-
-Settlement math (the WO-1 solvent payout order) lives in `Moderation.sol` itself,
-since it touches every part of the state.
-
-Stake and approvals live in the registries so the game can be improved without
-forcing every moderator to withdraw and re-stake and without discarding the
-index. Governance repoints the registries at a new logic contract behind a
-timelock; both stay authorized during handover so in-flight cases settle. See
-`test/Migration.t.sol` for the property exercised end to end.
-
-Conservation therefore spans two balances:
-
-    balanceOf(Moderation)    == openPotsTotal + totalPendingBond
-                                + totalPendingPayout + totalSettling
-    balanceOf(StakeRegistry) == free + committed + frozen + dutyBonded
-
-`Moderation` is at **20,012 bytes, 4,564 free** against EIP-170, after the second
-structural split moved settlement into a delegatecalled library. That margin was
-439 before the split, which is why it had to happen before the widen restructure
-rather than after. See `specs/m2_6-work-order.md`, "Size position".
-
-## Deployment
-
-`script/Deploy.s.sol`, exercised by `test/Deploy.t.sol`. **The test is the artefact;
-the script is what it tests** — a deploy script nothing drives is documentation that
-compiles, which is what this repository had until M2.6-item-9.
-
-`Settlement` is a **linked library**: it must be deployed and its address linked into
-`Moderation` before `Moderation` can be deployed at all. Foundry does that
-automatically for tests, so no suite could catch it being missed and the requirement
-lived only in the module map above.
-
-**The order is forced, not conventional.**
-
-| # | step | why here |
-|---|---|---|
-| 1 | `StakeRegistry(token, timelock, minStake, activationDelay, exitCooldown, riskPerSeat, epochBlocks, minTrackDecay)` | governance is `msg.sender`; `minTrackDecay` is immutable and every ruleset must sit inside it (K-5) |
-| 2 | `IndexRegistry(timelock)` | governance is `msg.sender` |
-| 3 | `RulesetGovernor(governance, timelock)` | **before** `Moderation` — `Moderation.governor` is immutable |
-| 4 | deploy + link `Settlement` | Foundry's job; see the link note below |
-| 5 | `Moderation(token, stakeReg, indexReg, governor)` | reverts on a zero governor, and on `token != stakeReg.token()` |
-| 6 | `governor.bindModeration(moderation)` | **one-way and unrecoverable**; refuses a `Moderation` that does not name this governor (M2.6-F3), so the order above is enforced rather than merely required |
-| 7 | `proposeLogic` on BOTH registries → wait `timelockDelay` → `executeLogic()` on both | authorization |
-
-The circularity — the governor needs the game, the game needs the governor — resolves
-only because `RulesetGovernor` is constructed without a `Moderation` reference and
-binds afterward. **Step 6 is the one that cannot be undone:** a wrong bind leaves a
-governor that governs nothing and a `Moderation` whose immutable `governor` points at
-it, with no repair from either side.
-
-**`verify` is the deliverable.** It reverts on anything that would make the stack
-unusable, so a broken deployment fails the script rather than the first case: one
-token across `Moderation` and the registry; `OPEN_AND_SETTLE` on **both** registries
-(desynchronised authorization is its own failure, not half of one); the bind checked
-from both sides; `stakeReg.riskPerSeat() >= moderation.getParams().riskPerSeat`;
-`moderation.getParams().trackDecay >= stakeReg.minTrackDecay()` (K-5 — below the
-floor, every case opens and then reverts in `claim()` forever); a nonzero
-`timelockDelay` on the governor and BOTH registries (F4 — the constructors accept
-zero deliberately, so this is where the policy lives; `DEVIATIONS.md` D-16); and the
-linked library.
-
-**The link is the one thing no in-script check can prove.** The library address is
-baked into `Moderation`'s bytecode at link time and Solidity cannot read its own link
-table. So it splits: if you linked explicitly (`--libraries
-src/lib/Settlement.sol:Settlement:0x...`) pass that address to `verify` and it asserts
-the address holds the *right* code, not merely some code; and
-`test_a_script_deployed_stack_settles_a_real_case` proves `Moderation` actually
-reaches it the only way it can be proven — by settling a case, which delegatecalls
-the library. A deployment that does neither is unverified on this point and `verify`
-says so instead of returning green.
-
-**Two properties of the process, stated because a single `run()` would hide them.**
-
-- **It is not one transaction.** The registry timelock sits inside step 7, so there is
-  a window where every contract exists and none is authorized. `submit` refuses during
-  it (`_requireOpen`) — a case opened then would take a fee it could never settle.
-  That refusal is asserted, not waited out.
-- **Governance is the deploy key until transferred.** Both registries set
-  `governance = msg.sender`; the governor takes it as an argument.
-  `handOverGovernance` proposes to all three, and the recipient must call
-  `acceptGovernance()` on each. If `GOVERNANCE_OWNER` is unset, `verify` warns loudly
-  rather than passing quietly — a stack still owned by a deploy key is a finding, not
-  a default.
-
-## Tests
-
-| Suite | Covers |
-|---|---|
-| `Staking.t.sol` | free/committed/frozen partition, activation, exit floor, freeze exclusion (§3, §9.3, §9.5) |
-| `SortitionTree.t.sol` | draw correctness + distribution + gas |
-| `CaseLifecycle.t.sol` | submit → draw → commit → reveal → tally, widen, VOID, two-seed ordering (§5) |
-| `Appeals.t.sol` | flip-bond aggregation, floor cap, reclaim, self-appeal, MAX_DEPTH (§5.4) |
-| `Settlement.t.sol` + `FreezeMath.t.sol` | WO-1 payout order, flip-flop conservation, freeze, track (§6) |
-| `Index.t.sol` | write-at-settlement, uncontested, removal, supersafe (§8); H-09 quorum counts independent revealers, not seats |
-| `Registries.t.sol` | the storage/logic split: no re-staking across an upgrade, approvals survive, timelocked repoint, exit independent of logic, governance cannot touch funds |
-| `Migration.t.sol` | a live logic migration: case settled under A, registries repointed, stake + index intact, new case settles under B; the retirement lifecycle, and the drain gate on BOTH registries (M2.6-P0-5b) |
-| `Governance.t.sol` | timelocked params via `RulesetGovernor`, append-only guidelines, no pause (§9.9), the apply boundary, the drawable-panel cap, the M2.6-P0-8 freeze bounds, and the two-step governance transfer (M2.6-L-2) |
-| `Invariant.t.sol` | handler campaign: conservation, partition, no-principal-lost (§9.1/2/3/11) |
-| `StakeBenefit.t.sol` | single-stake-benefit statistical property (§9.10) |
-| `Differential.t.sol` | 52 vectors vs. `simulation/vectors/reference_int.py`, bit-exact. A **regression net, not an oracle** — the reference is a port of the Solidity, and two of its assumptions (last round adjudicates; capacity sought == seats seated) are mirrored by the injector, so no vector varies them. See the file header |
-| `GasBounds.t.sol` | worst-case `claim()` under the 8M ceiling; the seat-draw and epoch-drain batch bounds; §10 failure modes |
-| `StalledDraw.t.sol` | M2.6-P0-6/6b/6c: a draw that cannot complete must still end, and disposal depends on whether a commit window ever opened. Split out of `CaseLifecycle.t.sol` when that outgrew the `via_ir` pipeline |
-| `SeatDraw.t.sol` | M2.6-P0-3d / H-03B: the cross-batch upward family, which no registry-level fixture can reach (`DRAW_SEATS_PER_BATCH` returns to the caller mid-panel) |
-| `StallRound.t.sol` | M2.6-item-2b: the commit-time widen and the next-depth stall round |
-| `RewardScoping.t.sol` | M2.6-item-10: per-depth reward allocation and the depth-dependent divisor, by injection over a specified round shape |
-| `Deploy.t.sol` | M2.6-item-9: every deploy phase through the timelock, each invariant `verify` claims, and that `verify` rejects each broken stack |
-| `WidenSeats.t.sol` | F2: a widen re-draw adds seats to a voter that already revealed; settlement pays only the seats tallied at reveal |
-| `Scaffold.t.sol` | M2-0 smoke: the toolchain runs, and the two load-bearing environment facts (xBZZ has 16 decimals; WAD is not a token base unit) |
-
-Spec departures are catalogued in `DEVIATIONS.md`; gas budgets/actuals in
-`GAS_BUDGETS.md`. Regenerate differential vectors with
-`python3 ../simulation/vectors/export_vectors.py > test/vectors/settlement_vectors.json`.
-
-## Toolchain (pinned)
-
-| Tool | Version | Notes |
-|---|---|---|
-| Foundry (`forge`) | v1.7.1 | built from source (see below) |
-| solc | 0.8.28 | pre-provisioned under `~/.svm/0.8.28` |
-| forge-std | v1.9.7 | submodule `lib/forge-std` |
-| solady | v0.1.9 | submodule `lib/solady` (FixedPointMathLib, ERC20 mock) |
-
-## Environment provisioning (this sandbox)
-
-Outbound egress is proxied and several hosts the normal Foundry install relies on
-are policy-blocked, so the standard `foundryup` path does not work here. What was
-done instead, all through allowed hosts:
-
-- **`solc`**: svm's default host `binaries.soliditylang.org` is blocked. The
-  0.8.28 binary is fetched from the GitHub `ethereum/solc-bin` mirror
-  (`raw.githubusercontent.com`, allowed), **sha256-verified against the mirror's
-  `list.json`**, and placed at `~/.svm/0.8.28/solc-0.8.28`. `foundry.toml` pins
-  `solc_version = "0.8.28"` and sets `offline = true` so forge never probes the
-  blocked host.
-
-  ```sh
-  mkdir -p ~/.svm/0.8.28
-  base=https://raw.githubusercontent.com/ethereum/solc-bin/gh-pages/linux-amd64
-  curl -sSL -o ~/.svm/0.8.28/solc-0.8.28 \
-    "$base/solc-linux-amd64-v0.8.28%2Bcommit.7893614a"
-  curl -sSL -o /tmp/list.json "$base/list.json"   # keep: needed for forge, below
-  # expect 9a0fb7e0db2c0641dbae1c5cc645dc686820c83af516226abb1c0a2f76636f25
-  sha256sum ~/.svm/0.8.28/solc-0.8.28
-  chmod +x ~/.svm/0.8.28/solc-0.8.28
-  ```
-
-- **`forge`/`anvil`**: `foundryup` downloads prebuilt binaries from GitHub
-  releases, which are blocked (403). Build from source instead — but the plain
-  `cargo install` **fails**: the `svm-rs-builds` build script fetches
-  `binaries.soliditylang.org/linux-amd64/list.json` at compile time and panics
-  on the blocked CONNECT. Point it at the mirror copy saved above:
-
-  ```sh
-  SVM_RELEASES_LIST_JSON=/tmp/list.json \
-    cargo install --git https://github.com/foundry-rs/foundry \
-      --tag v1.7.1 --locked forge anvil
-  ```
-
-  (github git access and `index.crates.io` are allowed.) The build takes ~30 min
-  on 4 cores. If it fails partway, `CARGO_TARGET_DIR` set to the
-  `/tmp/cargo-install*` path cargo names in its error message reuses the
-  artifacts instead of restarting.
-
-- **Submodules**: `lib/forge-std` and `lib/solady` are git submodules and a fresh
-  clone leaves them empty — `forge test` then fails on unresolvable imports.
-  `git submodule update --init --recursive` from the repo root.
-
-On an unrestricted machine, `foundryup && forge test` works normally; none of the
-above is a project requirement, only a sandbox workaround.
-
-## Environment facts (load-bearing)
-
-- **xBZZ has 16 decimals**, not 18 (Swarm BZZ token). Internal fixed-point math is
-  WAD (1e18) and is kept independent of token decimals; token amounts are base
-  units. `MockBZZ` reproduces the 16-decimal quirk so a stray "1 token = 1e18"
-  assumption fails a test. Re-confirm the deployed Gnosis token at M4.
-- **Gnosis block gas limit ~17M** — see `GAS_BUDGETS.md` (could not be confirmed
-  live; RPCs blocked here).
-
-## Build & test
+**The phase machine has the wrong shape.**
 
 ```
-cd contracts
-forge test
-forge snapshot        # gas (M2-9)
+implemented   COMMIT → REVEAL → TALLY → DRAW → FINALIZED
+spec §4       C1 COMMIT → C2 COMMIT → JOINT REVEAL → DRAW
+                        → CHALLENGE WINDOW → (up to 2 more pairs) → FINALIZED
 ```
+
+`TALLY` exists only to publish the plurality, which spec §4.2 replaces with a
+published preliminary outcome. There is no phase for a second committee
+committing.
+
+### Fields serving features the design does not have
+
+Of 32 fields in `Case`, **18 exist for mechanisms the spec no longer contains**:
+
+`terminal`, `unresolvedReason` (the UNRESOLVED rows) · `paramsVersion`,
+`guidelinesVersion` (governance pinning) · `plurality` (the withheld verdict) ·
+`challengeReserve` (bonds) · `drawBounty`, `claimBounty` (bounties) ·
+`commitBlocks`, `revealBlocks`, `challengeBlocks` (fixed windows, replaced by a
+clock anchored to the third commit) · `reveals0` (`SUPER_SAFE`) · `challenger`
+(a bonded role; in the spec a challenger is a voter) · `outcomeEntropy`,
+`outcomeSeedBlock` (one draw reused; the spec draws fresh each round) ·
+`claimKey`, `actionType` (reservation machinery).
+
+### Fields the design needs and the struct lacks
+
+A second committee seed per round · per-committee commit and reveal counts · a
+challenge counter over `{0,1,2}` · whether all three tickets were Approve
+(spec §7) · whether the entry is anonymous (spec §7).
+
+**Conclusion.** Ten of 32 fields survive roughly as they are. More than half serve
+deleted mechanisms, five are missing, and three of the survivors need splitting.
+Editing this into shape is more work than writing it, and leaves dead state behind.
+
+## §B `StakeRegistry.sol` — the same, for the same reason
+
+The `Moderator` record is:
+
+```
+stake · bond · openVoteCount · openChallenges · liabilities
+      · maturesAt · exitRequestedAt · track
+```
+
+Spec §2 needs **`stake`** and **a total frozen time**. That is all.
+
+- `bond`, `openVoteCount`, `openChallenges`, `liabilities` are the bond system.
+  The spec has no bond. And this is the direct answer to "why did you reintroduce
+  non-infinite concurrency" — we did not add a limit, we added **a second capital
+  system whose solvency check is a concurrency limit as a side effect.**
+- `track` is never read to weight or scale anything. Storage with no consumer.
+- `maturesAt`, `exitRequestedAt` are unspecified (spec §10.3).
+- **There is no freeze.** `FreezeMath` was deleted when penalties became balance
+  debits. The spec's only penalty does not exist in the code.
+
+Roughly half the contract is `createVoteClaim` / `createChallengeClaim` /
+`debit` / `discharge` / `dischargeCondemned` / `mayCommit` / `mayChallenge` and
+the claim ledger behind them — all of it the bond system.
+
+## §C `IndexRegistry.sol` — partly reusable
+
+The entry model (claim key, topic key, status, counts) survives. What does not:
+
+- `strict` and the open-question counter existed to serve `SUPER_SAFE`, which
+  spec §7 drops. Likely orphaned.
+- Spec §7 wants two facts recorded per entry — anonymity, and whether all three
+  tickets were Approve. Neither field exists.
+
+## §D What is worth keeping regardless of the rewrite
+
+Not everything here is tied to the old design.
+
+- **The draw.** `decideAt` and its cross-checks — the Foundry property tests, the
+  Python differential, the KAT-gated keccak — test the ticket rule itself, which
+  spec §5 keeps. The estimator fed to it is open (spec §11); the machinery around
+  it is not wasted.
+- **The test harness shape.** `SystemHandler`, the invariant suite and the
+  mutation campaigns are built against behaviour, not storage layout, and most of
+  that structure transfers.
+- **`script/Deploy.s.sol`'s `verify()`.** Every link in a four-contract stack
+  fails silently and late; the deployment check is worth keeping whatever the
+  contracts become.
+
+## §E Status of the numbers in this file
+
+Sizes and the 266-test count are real and current. **They measure the old
+protocol.** Nothing here should be read as evidence that the spec's design works,
+because none of it implements the spec's design.
+
+`DEVIATIONS.md` documents deviations from `specs/state-machine.md`, a document
+that is no longer in the repository. It is archaeology and describes neither the
+current code nor the current spec.

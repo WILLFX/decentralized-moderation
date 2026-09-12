@@ -20,7 +20,9 @@ interface IIndexRegistry {
         bytes32 topicKey,
         uint8 status,
         bool allTicketsApprove,
-        bool everChallenged
+        bool everChallenged,
+        uint32 approve,
+        uint32 reject
     ) external;
 }
 
@@ -438,7 +440,15 @@ contract Moderation is ReentrancyGuard {
         if (c.preliminary == uint8(Outcome.APPROVE)) {
             bytes32[MAX_TOPICS] storage t = caseTopics[caseId];
             for (uint256 i; i < c.topicCount; ++i) {
-                index.writeEntry(c.claimKey, t[i], uint8(Outcome.APPROVE), c.ticketsApprove == 3, c.everChallenged);
+                index.writeEntry(
+                    c.claimKey,
+                    t[i],
+                    uint8(Outcome.APPROVE),
+                    c.ticketsApprove == 3,
+                    c.everChallenged,
+                    c.pooledApprove,
+                    c.pooledReject
+                );
             }
         }
         emit Finalized(caseId, c.preliminary);

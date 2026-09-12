@@ -59,9 +59,15 @@ contract MockIndex {
     mapping(bytes32 => Entry) public entries;
     uint256 public writes;
 
-    function writeEntry(bytes32 claimKey, bytes32, uint8, bool allTicketsApprove, bool everChallenged)
-        external
-    {
+    function writeEntry(
+        bytes32 claimKey,
+        bytes32,
+        uint8,
+        bool allTicketsApprove,
+        bool everChallenged,
+        uint32,
+        uint32
+    ) external {
         entries[claimKey] = Entry(true, allTicketsApprove, everChallenged);
         ++writes;
     }

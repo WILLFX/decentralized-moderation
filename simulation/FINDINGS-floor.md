@@ -128,9 +128,11 @@ secondary.** A lottery cannot be a safety certificate — proven in §A, and no
 parameter choice changes it. A threshold can — proven in §B. But both are
 downstream of §C.
 
-**The staged-committee argument is downstream too.** `FINDINGS-exact.md` shows
-splitting a committee is strictly worse; that remains true and still matters for
-how a cohort is drawn. It changes the constant, never the floor.
+**The staged-committee argument is downstream too, and smaller than it looked.**
+`FINDINGS-staged.md` now finds staging *neutral* on capture — the verdict draws
+on the combined tally — and worth up to 10.6 points for hiding an earlier
+committee's tally from a later one. Either way it moves the constant and never
+the floor: no arrangement of committees changes `f(p)`.
 
 **`prior` decides whether any of this is deployable.** The project's own README
 already said *"≈ 0.665 … is not a search index, and no state machine repairs

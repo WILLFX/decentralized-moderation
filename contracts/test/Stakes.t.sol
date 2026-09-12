@@ -99,6 +99,45 @@ contract StakesTest is Test {
         assertEq(reg.totalFrozen(bob), 16 days, "same total, any order");
     }
 
+    /// @dev The exact second a freeze ends. A freeze of `d` starting at `T` runs
+    ///      out AT `T + d`, not one second later — so `isFrozen` is
+    ///      `frozenUntil > now`, and mutation testing found that no test pinned
+    ///      the boundary. Three surviving mutants, all the same off-by-one.
+    function test_freezeExpiresAtTheBoundaryNotAfterIt() public {
+        _stake(alice);
+        uint256 start = ts;
+        vm.prank(CASES);
+        reg.settle(alice, true, FREEZE);
+        assertEq(reg.frozenUntil(alice), start + FREEZE);
+
+        vm.warp(start + FREEZE - 1);
+        assertTrue(reg.isFrozen(alice), "still frozen one second before");
+        vm.prank(alice);
+        vm.expectRevert(StakeRegistry.IsFrozen.selector);
+        reg.withdraw();
+
+        vm.warp(start + FREEZE);
+        assertFalse(reg.isFrozen(alice), "free exactly at the boundary");
+        vm.prank(alice);
+        reg.withdraw();
+    }
+
+    /// @dev And the same boundary on the ACCUMULATION side: a freeze landing
+    ///      exactly as the previous one ends must start from now, not extend a
+    ///      lapsed deadline.
+    function test_freezeLandingExactlyAtExpiryStartsFresh() public {
+        _stake(alice);
+        uint256 start = ts;
+        vm.prank(CASES);
+        reg.settle(alice, true, 3 days);
+
+        vm.warp(start + 3 days);
+        vm.prank(CASES);
+        reg.settle(alice, true, 5 days);
+        assertEq(reg.frozenUntil(alice), start + 3 days + 5 days);
+        assertEq(reg.totalFrozen(alice), 8 days);
+    }
+
     function test_frozenModeratorCannotWithdraw() public {
         _stake(alice);
         vm.prank(CASES);

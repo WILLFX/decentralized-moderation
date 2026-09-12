@@ -118,6 +118,9 @@ contract StakeRegistry {
         if (s.openVotes != 0) --s.openVotes;
         if (!incoherent) return;
 
+        // `>` vs `>=` here is an EQUIVALENT mutant and mutation testing will
+        // always report it as a survivor: when the two are equal both branches
+        // yield the same value. Do not chase it.
         uint256 base = s.frozenUntil > block.timestamp ? s.frozenUntil : block.timestamp;
         uint40 until_ = uint40(base + duration);
         s.frozenUntil = until_;

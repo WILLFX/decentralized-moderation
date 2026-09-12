@@ -107,6 +107,39 @@ contract IndexTest is Test {
         assertTrue(idx.isListed(claims[3], BIO));
     }
 
+    /// @dev `isListed` reads the position map; the listing ARRAY is what a reader
+    ///      actually enumerates. Mutation testing found the two can disagree:
+    ///      inverting the swap-remove guard makes `pop()` delete the tail entry
+    ///      instead of the removed one, and the tail's map entry survives — so it
+    ///      still reports as listed while being gone from the page.
+    ///
+    ///      Every removal test that only asked `isListed` passed on that mutant.
+    function test_removalKeepsThePageItselfCorrect() public {
+        bytes32[5] memory claims;
+        for (uint256 i; i < 5; ++i) {
+            claims[i] = keccak256(abi.encode("c", i));
+            _write(claims[i], BIO, APPROVE, true, false);
+        }
+
+        vm.prank(CASES);
+        idx.removeListing(claims[1], BIO); // from the middle: the tail moves
+
+        bytes32[] memory page = idx.listedPage(BIO, 0, 10);
+        assertEq(page.length, 4, "the page shrank by exactly one");
+
+        bool[5] memory seen;
+        for (uint256 i; i < page.length; ++i) {
+            for (uint256 j; j < 5; ++j) {
+                if (page[i] == idx.entryKeyOf(claims[j], BIO)) seen[j] = true;
+            }
+        }
+        assertFalse(seen[1], "the removed entry is off the page");
+        for (uint256 j; j < 5; ++j) {
+            if (j == 1) continue;
+            assertTrue(seen[j], "a survivor vanished from the page");
+        }
+    }
+
     function test_removalMarksTheEntryRejected() public {
         _write(keccak256("a"), BIO, APPROVE, true, false);
         vm.prank(CASES);

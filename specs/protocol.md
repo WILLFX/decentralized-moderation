@@ -187,20 +187,58 @@ costs its submitter every time.
 
 ## 10. Distance from the current implementation
 
-`contracts/src/` implements an earlier design. It differs from this document in:
+`contracts/src/` implements an earlier design. This section is built by reading
+this document against the contracts, **not** by collecting the objections someone
+happened to raise — an objection list stops wherever the reader stopped, and the
+most dangerous divergences are the ones nobody thought to ask about.
+
+### 10.1 Contradicts this document
 
 | area | implemented | this document |
 |---|---|---|
 | committees per round | one | two, staged (§4.1) |
 | penalty | balance debit | additive freeze (§2) |
 | concurrency | capped by bond solvency | unlimited (§2) |
-| pre-challenge publication | plurality only, verdict withheld | preliminary outcome (§4.2) |
+| pre-challenge publication | plurality, verdict withheld | preliminary outcome (§4.2) |
 | challenge | bonded, direction hidden | a public opposite vote (§4.2) |
-| draw | once per claim | fresh per preliminary outcome (§5) |
+| draw | once per claim, reused on re-review | fresh per preliminary outcome (§5) |
 | challenge window | 12 hours | 1 hour (§4.2) |
 | commit window | 20 minutes, fixed | 15 minutes from 3rd commit (§4.1) |
 | max challenges | 1 | 2 (§4.2) |
 | strict label | `SUPER_SAFE` predicate | two recorded facts (§7) |
+| eligibility | fixed cohort target, widened mid-window | `N−5` leading zero bits, no widening (§3) |
+
+### 10.2 Required here, absent there
+
+- **Freeze.** There is no freeze anywhere in the contracts. `FreezeMath` was
+  deleted when penalties moved to balance debits. §2 needs it back, and it must be
+  additive to a total rather than an extension from the present moment.
+- **Staged committee selection.** No second seed derived after a first commit
+  phase closes. §4.1 requires one per committee.
+- **A commit clock anchored to the third commit.** Windows are currently fixed
+  from phase open.
+
+### 10.3 Built without being asked for
+
+**This is the category that matters, and it was missing from earlier versions of
+this table.** Each of these exists in the contracts, none appears in the design,
+and each was our addition rather than a decision anyone took.
+
+| subsystem | what it is | status |
+|---|---|---|
+| **Bonds** | `postBond`, `mayCommit`, `mayChallenge`, `createVoteClaim`, `createChallengeClaim`, `debit`, `discharge`, `dischargeCondemned`, `claimChallenge`, plus `bond`, `liabilities`, `openVoteCount`, `openChallenges` in storage | **A second capital system on top of the stake.** §2 has a stake and nothing else. Unlimited concurrency and a solvency-checked bond are the same decision taken twice in opposite directions — the bond is what caps concurrency. Removing the bond removes the cap. |
+| **Maintenance reserve** | `sweepMaintenance`, `depositMaintenance`, `proposeMaintenanceWithdrawal`, `executeMaintenanceWithdrawal` | Exists to receive debits. With no debits there is nothing to receive. Whether the protocol should hold a treasury at all is undecided. |
+| **Governance** | `RulesetGovernor`, `applyParams`, `applyGuidelines`, `proposeCaps`, `executeCaps`, `setGovernor`, timelocks | Never specified. Some upgrade path is probably needed; the shape of it was never agreed. |
+| **Track record** | `track`, `recordParticipation`, decay and saturation | Never specified. Currently weights nothing and scales nothing, so it is storage with no consumer. |
+| **Retry and reservation machinery** | `reopen`, `withdrawRefund`, claim keys, permanent reservations, `NO_TURNOUT` / `NO_REVEALS` / `NO_RANDOMNESS` terminal rows, retry cooldowns | Never specified. §4 has one lifecycle with one terminal state. |
+| **Maturation and exit cooldown** | `maturesAt`, `exitRequestedAt`, `maturation`, `exitCooldown` | Never specified. A fresh stake currently cannot vote for a period. |
+| **Permissionless phase pokes** | `closeCommit`, `closeReveal`, `closeTally`, `draw` as separate transactions, with bounties | Never specified. Partly an artefact of the plurality phase, which §4.2 removes. |
+| **Index questions** | `openQuestion`, `closeQuestion`, the open-question counter | Existed to serve `SUPER_SAFE`. §7 drops that label, so this is likely orphaned. |
+| **Topic cap** | `MAX_TOPICS = 5` | Never specified. |
+
+**None of these is condemned by being listed here.** Several may turn out to be
+necessary. The point is that each is an open decision that was taken silently,
+and the list exists so that they are decided rather than inherited.
 
 ## 11. Open parameters
 

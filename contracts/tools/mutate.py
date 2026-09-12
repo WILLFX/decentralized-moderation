@@ -42,8 +42,23 @@ import time
 from dataclasses import dataclass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FAST = ["forge", "test", "--no-match-path", "test/Invariant.t.sol"]
+#: `--fail-fast` stops at the first failing test. Most mutants die, and a dead
+#: mutant needs one failure, not a whole suite.
+FAST = ["forge", "test", "--no-match-path", "test/Invariant.t.sol", "--fail-fast"]
 SLOW = ["forge", "test", "--match-path", "test/Invariant.t.sol"]
+
+#: Campaigns compile through the LEGACY pipeline, not `via_ir`.
+#:
+#: Compilation is most of what a mutant costs, and `via_ir` is 30s a clean build
+#: against 4.6s. That is 14s an iteration against 4s — a 400-mutant sweep in half
+#: an hour rather than most of a day.
+#:
+#: Sound because a campaign measures the TEST SUITE, not the deployed bytecode.
+#: Both pipelines implement the same Solidity semantics and differ in
+#: optimization, so a test that catches a logic bug catches it under either. The
+#: shipped profile and the ordinary `forge test` still use `via_ir`, so what ships
+#: is still what is tested.
+ENV = {**os.environ, "FOUNDRY_VIA_IR": "false"}
 
 #: Set by `scratch()`. Every mutation and every `forge` run happens here.
 WORK = ROOT
@@ -129,7 +144,9 @@ def generate(src: str) -> list[Mutant]:
 
 def run(cmd: list[str], timeout: int) -> tuple[bool, str]:
     try:
-        p = subprocess.run(cmd, cwd=WORK, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(
+            cmd, cwd=WORK, capture_output=True, text=True, timeout=timeout, env=ENV
+        )
         return p.returncode == 0, p.stdout + p.stderr
     except subprocess.TimeoutExpired:
         return False, "TIMEOUT"

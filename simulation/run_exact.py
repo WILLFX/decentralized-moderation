@@ -86,6 +86,10 @@ def e30_lemma() -> None:
 
     print()
     print("      holds in every cell" if all_hold else "      *** FAILS SOMEWHERE ***")
+    print("      TRUE AND IRRELEVANT: finding a favourable committee is not a")
+    print("      step toward an outcome once tallies are pooled. E31 is what")
+    print("      decides it. Kept because rigour aimed at the wrong quantity")
+    print("      looks settled, which is what made it hard to catch.")
     print("      It is not an empirical fact: P_m is the upper tail of the")
     print("      attacker's share in a sample of size m, which concentrates on q,")
     print("      so P_m strictly decreases in m whenever theta > q. Then")
@@ -94,68 +98,38 @@ def e30_lemma() -> None:
 
 
 def e31_headline() -> None:
-    """The comparison, exact, at equal review effort."""
-    print("\nE31 — equal review effort, EXACT (no sampling error)")
-    print("      one committee of 2n against two staged committees of n")
-    print("      favourability judged on the ELIGIBLE set — what an attacker")
-    print("      can actually observe (staged.py used attendance; see E29)")
+    """The comparison that decides it: attacker votes with everything it has."""
+    print("\nE31 — equal review effort, EXACT, attacker committing EVERYWHERE")
+    print("      one committee of 2n against two staged committees of n.")
+    print("      Tallies pooled, one draw. No declining — see the note below.")
     print()
-    print("| n  | architecture      | P(proceed) | P(admit|proceed) | admit/submission |")
-    print("|---:|-------------------|-----------:|-----------------:|-----------------:|")
-
-    for n in (10, 20):
-        m = Model(cohort=n)
-        big, pair = equal_effort(m)
-        print(f"| {n:>2} | one committee of {2*n:<2}| {big.proceed:>9.5f}  "
-              f"| {big.admit_given_proceed:>15.5f}  "
-              f"| {big.admit_per_submission:>15.5f}  |")
-        print(f"| {n:>2} | two staged of {n:<5}| {pair.proceed:>9.5f}  "
-              f"| {pair.admit_given_proceed:>15.5f}  "
-              f"| {pair.admit_per_submission:>15.5f}  |")
-        ratio = (pair.admit_per_submission / big.admit_per_submission
-                 if big.admit_per_submission else float("inf"))
-        print(f"| {'':>2} | {'ratio':<17} | {'':>10} | {'':>16} "
-              f"| {ratio:>14.2f}x  |")
-
-    print()
-    print("      admit/submission is the campaign rate: one submission buys one")
-    print("      committee under A and TWO draws at a favourable committee under")
-    print("      C, because committee 2 is selected after committee 1 closes.")
-
-
-def e32_sweep() -> None:
-    """Is there ANY region where splitting wins? Swept densely, exactly."""
-    print("\nE32 — does splitting ever win? Ratio C/A of admit-per-submission.")
-    print("      Above 1.00 means the staged pair is worse. Exact throughout.")
-    print()
-    hdr = "| q \\ prior |"
-    for prior in (0.60, 0.665, 0.75, 0.85, 0.95):
-        hdr += f" {prior:>6.3f} |"
-    print(hdr)
-    print("|----------:|" + "--------:|" * 5)
-
-    worst = (None, float("inf"))
-    for q in (0.10, 0.20, 0.30, 0.40, 0.50):
-        row = f"| {q:>8.0%}  |"
-        for prior in (0.60, 0.665, 0.75, 0.85, 0.95):
-            m = Model(attacker_share=q, prior=prior, cohort=10)
+    print("| q   |  n | A: one of 2n | C: two of n |  difference |")
+    print("|----:|---:|-------------:|------------:|------------:|")
+    for q in (0.10, 0.20, 0.30, 0.40):
+        for n in (10, 20):
+            m = Model(attacker_share=q, cohort=n, favourable_at=0.0)
             big, pair = equal_effort(m)
-            if big.admit_per_submission <= 0.0:
-                row += f" {'—':>6} |"
-                continue
-            ratio = pair.admit_per_submission / big.admit_per_submission
-            if ratio < worst[1]:
-                worst = ((q, prior), ratio)
-            row += f" {ratio:>6.2f} |"
-        print(row)
-
+            a, c = big.admit_per_submission, pair.admit_per_submission
+            print(f"| {q:>3.0%} | {n:>2} | {a:>11.6f}  | {c:>10.6f}  "
+                  f"| {c - a:>+10.6f}  |")
     print()
-    if worst[0] is not None:
-        (q, pr), r = worst
-        print(f"      best case for the staged pair anywhere in this grid:")
-        print(f"      q={q:.0%}, prior={pr:.3f} -> ratio {r:.2f}x")
-        print("      " + ("splitting still loses everywhere" if r > 1.0
-                          else "*** splitting WINS in at least one cell ***"))
+    print("      Identical to five decimal places. Staging makes NO difference")
+    print("      to capture: the tickets are drawn from the COMBINED tally, so")
+    print("      capturing either committee alone buys nothing.")
+    print()
+    print("      favourable_at=0 makes the attacker commit every eligible")
+    print("      identity. That is the only sensible strategy — declining drops")
+    print("      your own votes and leaves the honest ones in the pool, which")
+    print("      lowers your share. FINDINGS-staged.md section E has the detail.")
+
+
+def e32_note() -> None:
+    print("\nE32 — WITHDRAWN.")
+    print("      This slot reported staging as 11.6x worse, from a model in")
+    print("      which the attacker declined unfavourable committees and those")
+    print("      cases were excluded from the denominator. Declining is a")
+    print("      dominated strategy and there is no 'abandon' — the fee is paid")
+    print("      and the case runs. See FINDINGS-staged.md section E.")
 
 
 def main() -> None:
@@ -170,7 +144,7 @@ def main() -> None:
 
     e30_lemma()
     e31_headline()
-    e32_sweep()
+    e32_note()
 
     print("\nWhat exactness does NOT cover — every assumption still live:")
     for i, a in enumerate(assumptions(), 1):

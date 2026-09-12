@@ -34,12 +34,19 @@ moment the seed exists. "A favourable first committee" is therefore *observed*,
 not inferred — which is what makes selective capture a strategy at all, and what
 staging is meant to break.
 
-**The attacker is pay-insensitive and selective.** Their prize is the listing,
-external to the protocol, so cost never deters a *vote*; it only prices an
-*attempt*. They proceed when a committee is favourable and abandon when it is
-not. Honest moderators are modelled as attending and voting their reading — the
-optimistic case, so any failure found here is a floor and not an artefact of
-pessimism about turnout.
+**The attacker is pay-insensitive.** Their prize is the listing, external to the
+protocol, so cost never deters a vote. Honest moderators attend and vote their
+reading — the optimistic case.
+
+**WARNING on ``selective=True``.** That mode has the attacker decline to commit
+in a committee that comes out unfavourable, and drops the case from the
+denominator when they decline everywhere. **It is a dominated strategy and no
+reported figure should use it.** Declining removes the attacker's own votes and
+leaves the honest ones in the pooled tally, which lowers their share: with C1 at
+10 attackers + 10 honest and C2 at 2 + 18, voting everywhere gives 12/40 = 30%
+and voting only in C1 gives 10/38 = 26%. There is also no "abandon" — the fee is
+paid and the case runs regardless. It is retained only so the error recorded in
+``FINDINGS-staged.md`` §E can be re-derived. **Pass ``selective=False``.**
 """
 
 from __future__ import annotations

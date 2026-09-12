@@ -1,134 +1,124 @@
 # Moderation contracts
 
-**These contracts implement a different protocol from `specs/protocol.md`.**
+Solidity implementation of **`specs/protocol.md`**, which is normative.
 
-They are a complete, tested implementation — 266 tests, stateful invariants,
-a two-implementation differential on the draw, mutation campaigns — of a design
-that has since been replaced. This file is the audit of how far they are from the
-one that is now normative.
+| File | Runtime | Role |
+|---|---:|---|
+| `src/Moderation.sol` | 13,451 B | the case state machine — §3 through §8 |
+| `src/StakeRegistry.sol` | 2,778 B | stake custody and frozen time — §2 |
+| `src/IndexRegistry.sol` | 2,899 B | the topic → entry index — §7 |
 
-| File | Runtime | Verdict against the spec |
-|---|---|---|
-| `src/Moderation.sol` | 21,786 B | **Rewrite.** §A |
-| `src/StakeRegistry.sol` | 10,338 B | **Rewrite.** §B |
-| `src/IndexRegistry.sol` | 4,285 B | Partly reusable. §C |
-| `src/RulesetGovernor.sol` | 6,386 B | Unspecified — see spec §10.3 |
-
-The audit below is read from the code against the spec, not from anyone's list of
-objections.
+`script/Deploy.s.sol` deploys and links all three. **`verify()` is the
+deliverable there, not `run()`**: both registries hold a one-shot `moderation`
+address and `Moderation` holds theirs as immutables, so an unlinked stack
+deploys, accepts submissions, and fails at the *first commit* — long after anyone
+is watching. Every link is asserted in both directions, and a test proves
+`verify()` actually catches an unlinked stack rather than trusting it to.
 
 ---
 
-## §A `Moderation.sol` — the case state cannot represent the design
+## Tests
 
-Not "needs changes." The storage layout cannot hold the lifecycle in spec §4.
+80 tests across nine suites.
 
-### Hard blocks
+| suite | what it is for |
+|---|---|
+| `Lifecycle.t.sol` | one case end to end, and the staging properties |
+| `ChallengeRound.t.sol` | the second round, end to end |
+| `Removal.t.sol` | §8 — Approve means remove |
+| `Guards.t.sol` | the guards, and the state a reader is shown |
+| `Stakes.t.sol` | §2 — additive freezes, and the stake never taken |
+| `Index.t.sol` | §7 — two facts recorded, and the swap-remove |
+| `Draw.t.sol` | §5 — the ticket rule, and vector emission |
+| `Integration.t.sol` | the three real contracts, no mocks |
+| `Invariant.t.sol` | nine properties under fuzzed orderings |
 
-**`uint8 round; // 0 or 1`.** The contract hard-codes exactly two rounds. Line 846
-is the only increment (`c.round = 1`) and line 804 treats round 1 as terminal.
-Spec §4.2 allows **two challenges**, so three rounds. Not a constant to bump —
-the round is a field with two meanings and every guard reads it as a boolean.
+Two of those carry more weight than their size suggests.
 
-**One `eligSeedBlock` per round.** Spec §4.1 needs **two committees per round**,
-the second seeded from randomness that does not exist until the first committee's
-commit phase has closed. There is one seed field and eligibility mixes `c.round`
-into the hash, so a second committee inside a round is not addressable.
+**`Integration.t.sol` uses no mocks.** Every other suite substitutes a mock
+registry or index, and `Moderation` calls both through interfaces declared
+locally — so a signature drifting from the real contract compiles and reverts at
+runtime. It also runs at 64 staked moderators rather than 8, which is the only
+place `eligBits` is non-zero and the narrowing hash of §3 is exercised at all.
 
-**`commitsThisRound` / `revealsThisRound` are per round, not per committee.**
-Spec §11 requires a minimum per committee, explicitly because 40 commits in
-committee 1 and one in committee 2 is not two committees. That distinction cannot
-be computed from this state.
+**`Invariant.t.sol` guards itself against vacuity.** A handler whose calls all
+revert satisfies every invariant by doing nothing, and three attempts at this
+suite passed that way before the coverage check caught them. It cannot be an
+`invariant_*` function (Foundry evaluates those once before fuzzing, when nothing
+has happened) nor `afterInvariant` (Foundry calls that with handler state reset,
+so every counter reads zero, and a `view` one silently aborts the run). It is an
+ordinary test that drives the handler by hand and proves each interesting state
+is reachable through it.
 
-**The phase machine has the wrong shape.**
+## The draw differential
 
-```
-implemented   COMMIT → REVEAL → TALLY → DRAW → FINALIZED
-spec §4       C1 COMMIT → C2 COMMIT → JOINT REVEAL → DRAW
-                        → CHALLENGE WINDOW → (up to 2 more pairs) → FINALIZED
-```
+`Draw.t.sol` constrains the *rate* — that the outcome tracks `3a² − 2a³`. It says
+nothing about the ticket derivation, and a domain-separation mistake keeps `u`
+uniform, keeps the rate exactly right, passes every statistical test, and
+silently makes two draws identical.
 
-`TALLY` exists only to publish the plurality, which spec §4.2 replaces with a
-published preliminary outcome. There is no phase for a second committee
-committing.
-
-### Fields serving features the design does not have
-
-Of 32 fields in `Case`, **18 exist for mechanisms the spec no longer contains**:
-
-`terminal`, `unresolvedReason` (the UNRESOLVED rows) · `paramsVersion`,
-`guidelinesVersion` (governance pinning) · `plurality` (the withheld verdict) ·
-`challengeReserve` (bonds) · `drawBounty`, `claimBounty` (bounties) ·
-`commitBlocks`, `revealBlocks`, `challengeBlocks` (fixed windows, replaced by a
-clock anchored to the third commit) · `reveals0` (`SUPER_SAFE`) · `challenger`
-(a bonded role; in the spec a challenger is a voter) · `outcomeEntropy`,
-`outcomeSeedBlock` (one draw reused; the spec draws fresh each round) ·
-`claimKey`, `actionType` (reservation machinery).
-
-### Fields the design needs and the struct lacks
-
-A second committee seed per round · per-committee commit and reveal counts · a
-challenge counter over `{0,1,2}` · whether all three tickets were Approve
-(spec §7) · whether the entry is anonymous (spec §7).
-
-**Conclusion.** Ten of 32 fields survive roughly as they are. More than half serve
-deleted mechanisms, five are missing, and three of the survivors need splitting.
-Editing this into shape is more work than writing it, and leaves dead state behind.
-
-## §B `StakeRegistry.sol` — the same, for the same reason
-
-The `Moderator` record is:
+So `simulation/check_draw_vectors.py` re-derives every `u[i]` from a pure-Python
+keccak that refuses to load unless it reproduces published KATs. 48 swept vectors
+agree. It also **sabotages its own derivation** — dropping the round from the
+preimage — and fails loudly if the comparison does not notice, because a
+differential that agrees is only evidence if it would have disagreed.
 
 ```
-stake · bond · openVoteCount · openChallenges · liabilities
-      · maturesAt · exitRequestedAt · track
+cd contracts && forge test --match-test test_emitDrawVectors
+python3 simulation/check_draw_vectors.py
 ```
 
-Spec §2 needs **`stake`** and **a total frozen time**. That is all.
+## Mutation testing
 
-- `bond`, `openVoteCount`, `openChallenges`, `liabilities` are the bond system.
-  The spec has no bond. And this is the direct answer to "why did you reintroduce
-  non-infinite concurrency" — we did not add a limit, we added **a second capital
-  system whose solvency check is a concurrency limit as a side effect.**
-- `track` is never read to weight or scale anything. Storage with no consumer.
-- `maturesAt`, `exitRequestedAt` are unspecified (spec §10.3).
-- **There is no freeze.** `FreezeMath` was deleted when penalties became balance
-  debits. The spec's only penalty does not exist in the code.
+```
+python3 tools/mutate.py --all
+```
 
-Roughly half the contract is `createVoteClaim` / `createChallengeClaim` /
-`debit` / `discharge` / `dischargeCondemned` / `mayCommit` / `mayChallenge` and
-the claim ledger behind them — all of it the bond system.
+Three outcomes, **two** scored:
 
-## §C `IndexRegistry.sol` — partly reusable
+| | |
+|---|---|
+| `KILLED` | compiles, a test fails — the suite caught it |
+| `SURVIVED` | compiles, everything passes — a hole |
+| `INVALID` | does not compile — proves nothing, **never scored** |
 
-The entry model (claim key, topic key, status, counts) survives. What does not:
+An earlier generation of harnesses here counted INVALID as killed, which inflates
+the rate with mutants no test could have caught. The rate is
+`killed / (killed + survived)` and INVALID is printed beside it.
 
-- `strict` and the open-question counter existed to serve `SUPER_SAFE`, which
-  spec §7 drops. Likely orphaned.
-- Spec §7 wants two facts recorded per entry — anonymity, and whether all three
-  tickets were Approve. Neither field exists.
+Latest full sweep — 240 mutants, no sampling:
 
-## §D What is worth keeping regardless of the rewrite
+| | killed | survived | INVALID | rate |
+|---|---:|---:|---:|---:|
+| `Moderation` | 147 | 36 | 4 | **80.3%** |
+| `IndexRegistry` | 34 | 2 | 1 | **94.4%** |
+| `StakeRegistry` | 15 | 1 | 0 | **93.8%** |
 
-Not everything here is tied to the old design.
+**The remaining survivors are not a to-do list.** Most are equivalent mutants —
+`x > t ? x : t` against `>=`, `n > limit` against `>=` when they are equal,
+`offset >= length` against `>` when both yield an empty page — which cannot be
+killed because they do not change behaviour. The rest are event arguments and one
+struct field (`committee` on a challenge record) that nothing reads. Writing
+assertions for those would raise the number while constraining nothing.
 
-- **The draw.** `decideAt` and its cross-checks — the Foundry property tests, the
-  Python differential, the KAT-gated keccak — test the ticket rule itself, which
-  spec §5 keeps. The estimator fed to it is open (spec §11); the machinery around
-  it is not wasted.
-- **The test harness shape.** `SystemHandler`, the invariant suite and the
-  mutation campaigns are built against behaviour, not storage layout, and most of
-  that structure transfers.
-- **`script/Deploy.s.sol`'s `verify()`.** Every link in a four-contract stack
-  fails silently and late; the deployment check is worth keeping whatever the
-  contracts become.
+Campaigns mutate a **scratch copy** of the project, never the working tree. That
+is not tidiness: a `git add -A` landing mid-campaign once committed two live
+mutants to `main`, one of them a `vt.settled = false` that makes a vote claimable
+repeatedly. They also compile through the legacy pipeline, which is 4.6s against
+30s, because a campaign measures the test suite rather than the deployed
+bytecode — while the shipped profile and ordinary `forge test` keep `via_ir`, so
+what ships is still what is tested.
 
-## §E Status of the numbers in this file
+## Open
 
-Sizes and the 266-test count are real and current. **They measure the old
-protocol.** Nothing here should be read as evidence that the spec's design works,
-because none of it implements the spec's design.
+`specs/protocol.md` §11 lists what has no value yet: the estimator, the cost of
+non-reveal, per-committee minimums, what "anonymous" means, and identity
+rotation — the sharpest, since a frozen moderator can leave the stake idle and
+stake a fresh address. `StakeRegistry`'s closing comment states that one where
+someone reading the contract will hit it.
 
-`DEVIATIONS.md` documents deviations from `specs/state-machine.md`, a document
-that is no longer in the repository. It is archaeology and describes neither the
-current code nor the current spec.
+Two deliberate deviations from the spec are marked in the code rather than
+hidden: eligibility bits are pinned from the *staked* count rather than the
+non-frozen count §3 names, because a freeze expires on a clock with no
+transaction to observe; and the estimator is `A/N`, isolated in `_estimator` so
+the alternative is a one-line change.

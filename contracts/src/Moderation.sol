@@ -24,6 +24,7 @@ interface IIndexRegistry {
         uint32 approve,
         uint32 reject
     ) external;
+    function removeListing(bytes32 claimKey, bytes32 topicKey) external;
 }
 
 /// @title Moderation
@@ -80,6 +81,8 @@ contract Moderation is ReentrancyGuard {
         bytes32 claimKey;
         address submitter;
         uint8 topicCount;
+        uint8 actionType; // 0 = LIST, 1 = REMOVE (§8)
+        uint256 targetCaseId; // the listing a removal targets; 0 for a listing
         // --- lifecycle
         uint8 phase;
         uint8 challenges; // 0..MAX_CHALLENGES
@@ -119,6 +122,9 @@ contract Moderation is ReentrancyGuard {
     bytes32 internal constant OUTCOME_DOMAIN = keccak256("outcome");
     bytes32 internal constant COMMIT_DOMAIN = keccak256("commit");
 
+    uint8 public constant ACTION_LIST = 0;
+    uint8 public constant ACTION_REMOVE = 1;
+
     uint8 public constant MAX_CHALLENGES = 2;
     uint256 public constant MAX_TOPICS = 5;
 
@@ -148,9 +154,16 @@ contract Moderation is ReentrancyGuard {
     mapping(uint256 => mapping(address => Vote)) internal votes;
     mapping(uint256 => uint256) public refundOwed;
 
+    /// @dev A listing may have at most one removal case open at a time, and a
+    ///      listing already removed cannot be removed again.
+    mapping(uint256 => uint256) public openRemovalOf;
+    mapping(uint256 => bool) public removed;
+
     // --------------------------------------------------------------- events
 
     event Submitted(uint256 indexed caseId, address indexed submitter, bytes32 claimKey);
+    event RemovalSubmitted(uint256 indexed caseId, uint256 indexed targetCaseId, address indexed by);
+    event Removed(uint256 indexed targetCaseId, uint256 indexed removalCaseId);
     event Committed(uint256 indexed caseId, address indexed m, uint8 committee, uint8 round);
     event Revealed(uint256 indexed caseId, address indexed m, uint8 vote);
     event PhaseChanged(uint256 indexed caseId, uint8 from, uint8 to);
@@ -175,6 +188,9 @@ contract Moderation is ReentrancyGuard {
     error BadTopics();
     error FeeTooLow();
     error ChallengeExhausted();
+    error NotARemovableListing();
+    error RemovalAlreadyOpen();
+    error AlreadyRemoved();
 
     constructor(
         address _token,
@@ -222,14 +238,59 @@ contract Moderation is ReentrancyGuard {
             caseTopics[caseId][i] = topics[i];
         }
 
+        _open(caseId, fee);
+        emit Submitted(caseId, msg.sender, c.claimKey);
+    }
+
+    /// @dev §8 — a removal targets an entry already listed and runs through the
+    ///      same engine: same committees, same staging, same tickets, same
+    ///      challenge. **Approve means remove.**
+    ///
+    ///      It references the listing's case rather than re-supplying its hashes
+    ///      and topics, so the two cannot disagree about what is being removed —
+    ///      a removal naming its own topic list could remove an entry from one
+    ///      topic and leave it under another.
+    function submitRemoval(uint256 targetCaseId, uint256 fee)
+        external
+        nonReentrant
+        returns (uint256 caseId)
+    {
+        if (fee < feeMin) revert FeeTooLow();
+
+        Case storage t = cases[targetCaseId];
+        if (
+            t.phase != uint8(Phase.FINALIZED) || t.actionType != ACTION_LIST
+                || t.preliminary != uint8(Outcome.APPROVE)
+        ) revert NotARemovableListing();
+        if (removed[targetCaseId]) revert AlreadyRemoved();
+        if (openRemovalOf[targetCaseId] != 0) revert RemovalAlreadyOpen();
+
+        caseId = nextCaseId++;
+        Case storage c = cases[caseId];
+
+        c.contentHash = t.contentHash;
+        c.metaHash = t.metaHash;
+        c.claimKey = t.claimKey;
+        c.submitter = msg.sender;
+        c.topicCount = t.topicCount;
+        c.actionType = ACTION_REMOVE;
+        c.targetCaseId = targetCaseId;
+        caseTopics[caseId] = caseTopics[targetCaseId];
+
+        openRemovalOf[targetCaseId] = caseId;
+
+        _open(caseId, fee);
+        emit RemovalSubmitted(caseId, targetCaseId, msg.sender);
+    }
+
+    function _open(uint256 caseId, uint256 fee) internal {
+        Case storage c = cases[caseId];
         c.pot = uint128(fee);
         c.eligBits = _eligBits();
         c.phase = uint8(Phase.COMMIT_A);
         c.seedBlockA = uint40(block.number + seedLag);
         c.phaseDeadline = uint40(block.timestamp + maxWaitForThird);
-
         address(token).safeTransferFrom(msg.sender, address(this), fee);
-        emit Submitted(caseId, msg.sender, c.claimKey);
     }
 
     /// @dev §3 derives `N` from the count of NON-FROZEN moderators. That count
@@ -437,8 +498,21 @@ contract Moderation is ReentrancyGuard {
         c.phase = uint8(Phase.FINALIZED);
         c.finalizedAt = uint40(block.timestamp);
 
-        if (c.preliminary == uint8(Outcome.APPROVE)) {
-            bytes32[MAX_TOPICS] storage t = caseTopics[caseId];
+        bytes32[MAX_TOPICS] storage t = caseTopics[caseId];
+
+        if (c.actionType == ACTION_REMOVE) {
+            // §8 — the fee is paid whichever way this goes, so nothing is
+            // refunded here. A speculative removal costs its submitter every
+            // time, which is what stops removal being free censorship.
+            openRemovalOf[c.targetCaseId] = 0;
+            if (c.preliminary == uint8(Outcome.APPROVE)) {
+                removed[c.targetCaseId] = true;
+                for (uint256 i; i < c.topicCount; ++i) {
+                    index.removeListing(c.claimKey, t[i]);
+                }
+                emit Removed(c.targetCaseId, caseId);
+            }
+        } else if (c.preliminary == uint8(Outcome.APPROVE)) {
             for (uint256 i; i < c.topicCount; ++i) {
                 index.writeEntry(
                     c.claimKey,
@@ -456,6 +530,7 @@ contract Moderation is ReentrancyGuard {
 
     function _toUnresolved(uint256 caseId) internal {
         Case storage c = cases[caseId];
+        if (c.actionType == ACTION_REMOVE) openRemovalOf[c.targetCaseId] = 0;
         c.phase = uint8(Phase.UNRESOLVED);
         c.finalizedAt = uint40(block.timestamp);
         refundOwed[caseId] += c.pot;

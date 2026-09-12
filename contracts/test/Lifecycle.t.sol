@@ -71,6 +71,14 @@ contract MockIndex {
         entries[claimKey] = Entry(true, allTicketsApprove, everChallenged);
         ++writes;
     }
+
+    mapping(bytes32 => bool) public gone;
+    uint256 public removals;
+
+    function removeListing(bytes32 claimKey, bytes32) external {
+        gone[claimKey] = true;
+        ++removals;
+    }
 }
 
 contract LifecycleTest is Test {

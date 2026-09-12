@@ -10,7 +10,8 @@ interface IStakeRegistry {
     function isActive(address a) external view returns (bool);
     function isFrozen(address a) external view returns (bool);
     function stakedCount() external view returns (uint256);
-    function freeze(address a, uint256 duration) external;
+    function noteCommit(address a) external;
+    function settle(address a, bool incoherent, uint256 duration) external;
 }
 
 interface IIndexRegistry {
@@ -264,6 +265,8 @@ contract Moderation is ReentrancyGuard {
         votes[caseId][msg.sender] =
             Vote({commitment: h, committee: committee, round: c.challenges, revealed: 0, settled: false});
 
+        stakes.noteCommit(msg.sender);
+
         uint32 n;
         if (committee == 1) {
             n = ++c.commitsA;
@@ -400,6 +403,7 @@ contract Moderation is ReentrancyGuard {
         if (against == uint8(Outcome.APPROVE)) ++c.pooledApprove;
         else ++c.pooledReject;
 
+        stakes.noteCommit(msg.sender);
         c.everChallenged = true;
         ++c.challenges;
 
@@ -463,16 +467,15 @@ contract Moderation is ReentrancyGuard {
         vt.settled = true;
 
         uint256 paid;
-        bool frozen;
+        bool frozen = vt.revealed != 0 && vt.revealed != c.preliminary;
+        stakes.settle(m, frozen, freezePerLoss);
+
         if (vt.revealed == c.preliminary) {
             paid = shareOf(caseId);
             // paid from this contract's own balance — the fee never left it, so
             // routing the reward through the registry would only move custody
             // around for no reason
             if (paid != 0) address(token).safeTransfer(m, paid);
-        } else if (vt.revealed != 0) {
-            stakes.freeze(m, freezePerLoss);
-            frozen = true;
         }
         emit Claimed(caseId, m, paid, frozen);
     }

@@ -26,8 +26,22 @@ contract MockStakes {
         return frozenUntil[a] > block.timestamp;
     }
 
+    mapping(address => uint32) public openVotes;
+
+    function noteCommit(address a) external {
+        ++openVotes[a];
+    }
+
     /// @dev §2 — durations are ADDITIVE to a total, not extensions from now, so
     ///      the same losses cost the same whatever order they settle in.
+    function settle(address a, bool incoherent, uint256 duration) external {
+        if (openVotes[a] != 0) --openVotes[a];
+        if (!incoherent) return;
+        totalFrozen[a] += duration;
+        uint256 base = frozenUntil[a] > block.timestamp ? frozenUntil[a] : block.timestamp;
+        frozenUntil[a] = base + duration;
+    }
+
     function freeze(address a, uint256 duration) external {
         totalFrozen[a] += duration;
         uint256 base = frozenUntil[a] > block.timestamp ? frozenUntil[a] : block.timestamp;

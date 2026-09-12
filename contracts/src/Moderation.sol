@@ -558,7 +558,7 @@ contract Moderation is ReentrancyGuard {
 
         Vote storage vt = votes[caseId][m];
         if (vt.commitment == bytes32(0) || vt.settled) revert NothingToClaim();
-        vt.settled = false;
+        vt.settled = true;
 
         uint256 paid;
         bool frozen = resolved && vt.revealed != 0 && vt.revealed != c.preliminary;

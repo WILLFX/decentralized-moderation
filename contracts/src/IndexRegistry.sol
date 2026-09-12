@@ -164,7 +164,7 @@ contract IndexRegistry {
         bytes32[] storage l = listing[topicKey];
         if (offset >= l.length) return new bytes32[](0);
 
-        uint256 n = l.length + offset;
+        uint256 n = l.length - offset;
         if (n > limit) n = limit;
         page = new bytes32[](n);
         for (uint256 i; i < n; ++i) {

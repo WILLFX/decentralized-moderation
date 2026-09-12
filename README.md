@@ -20,11 +20,12 @@ This document sums up the aim of the project, the problems we are solving, and h
 >
 > **Two decisions are open and the code does not yet reflect either.**
 > `simulation/FINDINGS-staged.md` measured a proposed staged two-committee
-> lifecycle and found it four times worse per attempt than the single committee
-> at equal review effort — so that proposal is not adopted. The same run found
-> that publishing a running tally before voting closes costs 10–29 points, and
-> the contract currently publishes one. **It has not had an independent external
-> review.**
+> lifecycle: it makes **no difference** to an attacker's capture odds, because the
+> verdict is drawn from the two committees' combined tally — but it does stop a
+> later committee seeing an earlier one's tally, which is worth up to 10.6 points
+> depending on how much voters conform. The contract currently publishes a running
+> tally and uses one committee per round, so neither is settled. **It has not had
+> an independent external review.**
 
 > **Standing constraint.** No deployment with material funds, and the index is not
 > presented as reliable safe-search certification, until `prior` is measured

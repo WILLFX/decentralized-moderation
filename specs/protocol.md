@@ -6,11 +6,11 @@ else in the repository disagrees with it, this file wins.
 **Implemented in** `contracts/src/` — `Moderation`, `StakeRegistry`,
 `RulesetGovernor`, `IndexRegistry` — against 266 tests.
 
-**Under active revision.** `simulation/FINDINGS-staged.md` measured the staged
-two-committee proposal and found it strictly worse than the single committee
-specified here, so §3's cohort rule stands; the same run found that publishing a
-running tally before voting closes costs 10–29 points, which §4.2 does. **Those
-two are open and are not yet reflected below.**
+**Under active revision.** `simulation/FINDINGS-staged.md` finds that a staged
+two-committee round changes nothing about capture — the verdict draws on the
+combined tally — but does hide an earlier committee's tally from a later one,
+worth up to 10.6 points. §3's one-committee rule and §4.2's published plurality
+are both open on that basis and are not yet changed below.
 
 **Citations to `design-v3` and `state-machine-v2`** appear throughout as the
 record of where a rule came from. Those documents are not on `main` — the repo

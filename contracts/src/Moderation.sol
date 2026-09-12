@@ -150,6 +150,7 @@ contract Moderation is ReentrancyGuard {
 
     uint256 public nextCaseId = 1;
     mapping(uint256 => Case) internal cases;
+
     mapping(uint256 => bytes32[MAX_TOPICS]) internal caseTopics;
     mapping(uint256 => mapping(address => Vote)) internal votes;
     mapping(uint256 => uint256) public refundOwed;

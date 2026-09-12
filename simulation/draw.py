@@ -14,19 +14,27 @@ so the two can be compared vector by vector.
 The expression, from `Moderation._decide`:
 
     u_i = uint128(uint256(keccak256(abi.encode(
-        OUTCOME_DOMAIN, block.chainid, address(this), caseId, i, entropy
+        OUTCOME_DOMAIN, block.chainid, address(this), caseId, round, i, entropy
     ))))
 
-    ticket_i  <=>  u_i * (A + R + 2)  <  (A + 1) << 128
+    ticket_i  <=>  u_i * (A + R)  <  A << 128
     verdict   =    APPROVE if tickets >= 2 else REJECT
 
-`abi.encode` of six static 32-byte types is their concatenation, with the address
-left-padded — there is no head/tail split because none of them is dynamic.
+`abi.encode` of seven static 32-byte types is their concatenation, with the
+address left-padded — there is no head/tail split because none of them is
+dynamic.
+
+Two things changed with the rewrite and both are load-bearing here. The estimator
+is the raw share `A/N`, not `(A+1)/(N+2)` — so a unanimous tally decides with
+certainty rather than leaving a residue. And the ROUND is mixed into the hash,
+because §5 draws fresh tickets at every preliminary outcome; without it a
+challenge round would reuse the first round's `u` and the second draw would be
+no draw at all.
 """
 
 from __future__ import annotations
 
-from .keccak import keccak256
+from keccak import keccak256
 
 __all__ = ["OUTCOME_DOMAIN", "ticket_u", "decide", "APPROVE", "REJECT"]
 
@@ -34,7 +42,7 @@ APPROVE = 1
 REJECT = 2
 
 #: `keccak256("v3.outcome")`, the constant `Moderation` uses.
-OUTCOME_DOMAIN = keccak256(b"v3.outcome")
+OUTCOME_DOMAIN = keccak256(b"outcome")
 
 
 def _word(value: int) -> bytes:
@@ -53,7 +61,9 @@ def _address_word(address: str | int) -> bytes:
     return _word(address)
 
 
-def ticket_u(chain_id: int, contract: str | int, case_id: int, index: int, entropy: bytes) -> int:
+def ticket_u(
+    chain_id: int, contract: str | int, case_id: int, round_: int, index: int, entropy: bytes
+) -> int:
     """`u_i` — the low 128 bits of the domain-separated hash."""
     if len(entropy) != 32:
         raise ValueError("entropy must be 32 bytes")
@@ -62,6 +72,7 @@ def ticket_u(chain_id: int, contract: str | int, case_id: int, index: int, entro
         + _word(chain_id)
         + _address_word(contract)
         + _word(case_id)
+        + _word(round_)
         + _word(index)
         + entropy
     )
@@ -73,6 +84,7 @@ def decide(
     chain_id: int,
     contract: str | int,
     case_id: int,
+    round_: int,
     entropy: bytes,
     pooled_approve: int,
     pooled_reject: int,
@@ -85,10 +97,14 @@ def decide(
     form here would produce a differential that agrees on rates and disagrees on
     exactly the cases the property is about.
     """
-    den = pooled_approve + pooled_reject + 2  # N + 2, >= 2 always
-    num = pooled_approve + 1  # A + 1
+    den = pooled_approve + pooled_reject  # N — CAN be zero
+    num = pooled_approve  # A
 
-    us = [ticket_u(chain_id, contract, case_id, i, entropy) for i in range(3)]
+    # the contract's guard: an empty tally draws nothing and rejects
+    if den == 0:
+        return ([], 0, REJECT)
+
+    us = [ticket_u(chain_id, contract, case_id, round_, i, entropy) for i in range(3)]
     tickets = sum(1 for u in us if u * den < num << 128)
     verdict = APPROVE if tickets >= 2 else REJECT
     return us, tickets, verdict

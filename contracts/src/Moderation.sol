@@ -543,17 +543,30 @@ contract Moderation is ReentrancyGuard {
     ///      added to their total frozen time — the only penalty in the design.
     ///      A commitment never revealed is settled unpaid; what else it should
     ///      cost is open (`specs/protocol.md` §11).
+    /// @dev Also callable on an UNRESOLVED case, and it has to be. A vote is
+    ///      settled here and nowhere else, and settling is what releases the
+    ///      moderator's open-vote count. Without this an unresolved case — three
+    ///      commits and no reveals reaches one — would strand every committer's
+    ///      stake permanently, because `StakeRegistry.withdraw` refuses while a
+    ///      vote is open. There is no verdict on such a case, so nobody is
+    ///      incoherent and nobody is paid or frozen.
     function claim(uint256 caseId, address m) external nonReentrant {
         Case storage c = cases[caseId];
-        if (c.phase != uint8(Phase.FINALIZED)) revert BadPhase();
+        bool resolved = c.phase == uint8(Phase.FINALIZED);
+        if (!resolved && c.phase != uint8(Phase.UNRESOLVED)) revert BadPhase();
 
         Vote storage vt = votes[caseId][m];
         if (vt.commitment == bytes32(0) || vt.settled) revert NothingToClaim();
         vt.settled = true;
 
         uint256 paid;
-        bool frozen = vt.revealed != 0 && vt.revealed != c.preliminary;
+        bool frozen = resolved && vt.revealed != 0 && vt.revealed != c.preliminary;
         stakes.settle(m, frozen, freezePerLoss);
+
+        if (!resolved) {
+            emit Claimed(caseId, m, 0, false);
+            return;
+        }
 
         if (vt.revealed == c.preliminary) {
             paid = shareOf(caseId);

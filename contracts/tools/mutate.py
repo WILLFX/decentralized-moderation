@@ -31,16 +31,43 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FAST = ["forge", "test", "--no-match-path", "test/Invariant.t.sol"]
 SLOW = ["forge", "test", "--match-path", "test/Invariant.t.sol"]
+
+#: Set by `scratch()`. Every mutation and every `forge` run happens here.
+WORK = ROOT
+
+
+def scratch() -> pathlib.Path:
+    """A throwaway copy of the project to mutate.
+
+    **The real working tree is never touched.** An earlier run mutated `src/` in
+    place, and a `git add -A` that happened to land mid-campaign committed two
+    live mutants to main — one of them a `vt.settled = false` that makes a vote
+    claimable repeatedly. The harness restored the originals correctly; the
+    problem is that a campaign makes the tree untrustworthy for as long as it
+    runs, and nothing else in the repository knows that.
+
+    `lib/` is symlinked rather than copied: it is 9.5 MB of dependencies that no
+    mutation touches.
+    """
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="mutate-"))
+    for d in ("src", "test", "script"):
+        shutil.copytree(ROOT / d, tmp / d)
+    shutil.copy2(ROOT / "foundry.toml", tmp / "foundry.toml")
+    os.symlink(ROOT / "lib", tmp / "lib")
+    return tmp
 
 KILLED, SURVIVED, INVALID = "KILLED", "SURVIVED", "INVALID"
 
@@ -102,7 +129,7 @@ def generate(src: str) -> list[Mutant]:
 
 def run(cmd: list[str], timeout: int) -> tuple[bool, str]:
     try:
-        p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, cwd=WORK, capture_output=True, text=True, timeout=timeout)
         return p.returncode == 0, p.stdout + p.stderr
     except subprocess.TimeoutExpired:
         return False, "TIMEOUT"
@@ -127,7 +154,9 @@ def first_failure(out: str) -> str:
     return m.group(1) if m else "?"
 
 
-def campaign(path: pathlib.Path, limit: int | None, timeout: int) -> dict:
+def campaign(rel: str, limit: int | None, timeout: int) -> dict:
+    """`rel` is a path relative to the project root, mutated inside `WORK`."""
+    path = WORK / rel
     original = path.read_text()
     lines = original.splitlines(keepends=True)
     mutants = generate(original)
@@ -203,19 +232,26 @@ def main() -> int:
     args = ap.parse_args()
 
     targets = (
-        [ROOT / "src" / f for f in ("Moderation.sol", "StakeRegistry.sol", "IndexRegistry.sol")]
+        [f"src/{f}" for f in ("Moderation.sol", "StakeRegistry.sol", "IndexRegistry.sol")]
         if args.all
-        else [pathlib.Path(f) if pathlib.Path(f).is_absolute() else ROOT / f for f in args.files]
+        else [str(pathlib.Path(f)) for f in args.files]
     )
     if not targets:
         ap.error("give a file or --all")
 
-    ok, out = run(FAST, args.timeout)
-    if not ok:
-        print("the suite is not green before mutating; fix that first", file=sys.stderr)
-        return 2
+    global WORK
+    WORK = scratch()
+    print(f"mutating a copy at {WORK}\nthe real tree is untouched\n")
 
-    results = [campaign(p, args.limit, args.timeout) for p in targets]
+    try:
+        ok, out = run(FAST, args.timeout)
+        if not ok:
+            print("the suite is not green before mutating; fix that first", file=sys.stderr)
+            return 2
+
+        results = [campaign(t, args.limit, args.timeout) for t in targets]
+    finally:
+        shutil.rmtree(WORK, ignore_errors=True)
 
     k = sum(r["killed"] for r in results)
     s = sum(r["survived"] for r in results)

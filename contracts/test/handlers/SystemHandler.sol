@@ -154,6 +154,56 @@ contract SystemHandler is CommonBase, StdCheats, StdUtils {
         }
     }
 
+    /// @dev Commits enough distinct actors to clear the per-committee reveal
+    ///      floor in ONE call, for the same reason `advancePhase` performs the
+    ///      transition appropriate to the current phase: a floor of `k` needs `k`
+    ///      commits in each committee and then `k` reveals, and a fuzzer landing
+    ///      that sequence by chance on single-actor calls never reached
+    ///      FINALIZED — the suite's own coverage check caught it. The fuzzer still
+    ///      chooses when this fires, on which case, from which actor, and which
+    ///      way they all vote; `commit` above still exists for the one-at-a-time
+    ///      orderings.
+    function commitFloor(uint256 seed, uint256 caseSeed, bool approve) public {
+        uint256 id = _case(caseSeed);
+        if (id == 0) return;
+        uint8 v = approve ? APPROVE : REJECT;
+        uint8 round = mod.caseInfo(id).challenges;
+        uint256 need = mod.minRevealsPerCommittee();
+
+        uint256 placed;
+        for (uint256 j; j < actors.length && placed < need; ++j) {
+            address m = actors[(seed + j) % actors.length];
+            bytes32 h = mod.commitHash(id, round, m, v, SALT);
+            vm.prank(m);
+            try mod.commit(id, h) {
+                ++ghostUnsettled[m];
+                committedVote[id][m] = v;
+                ++placed;
+                _hit("commit");
+            } catch {
+                _missed("commit");
+            }
+        }
+    }
+
+    /// @dev Reveals every actor that has an unrevealed commitment on the case.
+    ///      Paired with `commitFloor` for the same reachability reason.
+    function revealAll(uint256 caseSeed) public {
+        uint256 id = _case(caseSeed);
+        if (id == 0) return;
+        for (uint256 j; j < actors.length; ++j) {
+            address m = actors[j];
+            uint8 v = committedVote[id][m];
+            if (v == 0) continue;
+            vm.prank(m);
+            try mod.reveal(id, v, SALT) {
+                _hit("reveal");
+            } catch {
+                _missed("reveal");
+            }
+        }
+    }
+
     function reveal(uint256 seed, uint256 caseSeed) public {
         uint256 id = _case(caseSeed);
         if (id == 0) return;

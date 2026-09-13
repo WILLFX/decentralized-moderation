@@ -111,8 +111,14 @@ contract StakeRegistry {
         ++mods[m].openVotes;
     }
 
-    /// @dev One call per settled vote. Incoherent: the freeze, added to the
-    ///      total. Coherent or unrevealed: the vote simply closes.
+    /// @dev One call per settled vote. `incoherent`: the freeze, added to the
+    ///      total. Otherwise the vote simply closes.
+    ///
+    ///      `incoherent` covers a vote that was revealed and lost AND a commitment
+    ///      that was never revealed at all — `Moderation.claim` decides which, and
+    ///      charges them the same duration on purpose so that withholding is not
+    ///      cheaper than being wrong. This contract does not distinguish them and
+    ///      should not: it holds the penalty, not the reason for it.
     function settle(address m, bool incoherent, uint256 duration) external onlyModeration {
         Moderator storage s = mods[m];
         if (s.openVotes != 0) --s.openVotes;

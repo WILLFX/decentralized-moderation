@@ -22,6 +22,11 @@ contract RemovalTest is Test {
     uint256 constant FREEZE = 8 days;
     uint256 constant SEED_LAG = 2;
     uint256 constant FEE = 1000;
+    /// @dev The WEAKEST per-committee reveal floor. These suites exercise the
+    ///      lifecycle, not the floor, and at k = 1 every scenario below keeps the
+    ///      shape it had before the floor existed. The floor itself is tested at
+    ///      its deployed value in `RevealFloor.t.sol`.
+    uint256 constant FLOOR = 1;
 
     uint8 constant APPROVE = 1;
     uint8 constant REJECT = 2;
@@ -47,7 +52,8 @@ contract RemovalTest is Test {
             MAX_WAIT,
             FREEZE,
             SEED_LAG,
-            FEE
+            FEE,
+            FLOOR
         );
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
@@ -81,13 +87,24 @@ contract RemovalTest is Test {
 
     /// @dev Drives a case from an open COMMIT_A through to FINALIZED, with the
     ///      given number of moderators all voting `v`.
+    ///
+    ///      **The `n` are split across BOTH committees**, because the reveal floor
+    ///      requires each to finish with at least `FLOOR` revealed votes and a case
+    ///      whose committee B is empty no longer resolves at all. This helper used
+    ///      to put every moderator in committee A, which is the arrangement the
+    ///      staging exists to prevent — so it was testing a lifecycle the design
+    ///      does not have. `n` must be at least `2 * FLOOR`.
     function _runToFinal(uint256 id, uint8 v, uint256 n) internal {
+        require(n >= 2 * FLOOR, "_runToFinal: n below two committees' worth");
+        uint256 inA = n / 2;
+
         _advance(SEED_LAG + 1);
-        for (uint256 i; i < n; ++i) _commit(id, mods[i], v, 0);
+        for (uint256 i; i < inA; ++i) _commit(id, mods[i], v, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
 
         _advance(SEED_LAG + 1);
+        for (uint256 i = inA; i < n; ++i) _commit(id, mods[i], v, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
 

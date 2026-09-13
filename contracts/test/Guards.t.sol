@@ -24,6 +24,11 @@ contract GuardsTest is Test {
     uint256 constant FREEZE = 8 days;
     uint256 constant SEED_LAG = 2;
     uint256 constant FEE = 1000;
+    /// @dev The WEAKEST per-committee reveal floor. These suites exercise the
+    ///      lifecycle, not the floor, and at k = 1 every scenario below keeps the
+    ///      shape it had before the floor existed. The floor itself is tested at
+    ///      its deployed value in `RevealFloor.t.sol`.
+    uint256 constant FLOOR = 1;
 
     uint8 constant APPROVE = 1;
     uint8 constant REJECT = 2;
@@ -40,7 +45,7 @@ contract GuardsTest is Test {
         index = new MockIndex();
         mod = new Moderation(
             address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE
+            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR
         );
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
@@ -158,6 +163,7 @@ contract GuardsTest is Test {
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
         _advance(SEED_LAG + 1);
+        _commit(id, mods[4], APPROVE); // committee B, for the reveal floor
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
         assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.REVEAL));
@@ -172,6 +178,8 @@ contract GuardsTest is Test {
             vm.prank(mods[i]);
             mod.reveal(id, APPROVE, bytes32("s"));
         }
+        vm.prank(mods[4]);
+        mod.reveal(id, APPROVE, bytes32("s"));
         _wait(REVEAL_WINDOW + 1);
         mod.closeReveal(id);
         _advance(SEED_LAG + 1);
@@ -231,10 +239,11 @@ contract GuardsTest is Test {
         // list something
         uint256 listing = _submit();
         _advance(SEED_LAG + 1);
-        for (uint256 i; i < 4; ++i) _commit(listing, mods[i], APPROVE);
+        for (uint256 i; i < 2; ++i) _commit(listing, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(listing);
         _advance(SEED_LAG + 1);
+        for (uint256 i = 2; i < 4; ++i) _commit(listing, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(listing);
         for (uint256 i; i < 4; ++i) {

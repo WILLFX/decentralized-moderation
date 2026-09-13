@@ -92,7 +92,7 @@ it more profitable than judging (`simulation/FINDINGS-staged.md` §B).
 
 **The commit clock starts at the third commit, not the first.** Three commitments
 start the timer; they are not a quorum and do not by themselves make a tally
-sufficient.
+sufficient. What makes a tally sufficient is §4.4.
 
 ### 4.2 Challenge
 
@@ -127,6 +127,48 @@ the second challenge has resolved.
 
 **No payout happens before finalization.** Preliminary outcomes move no money.
 
+### 4.4 The per-committee floor
+
+**Each committee of a round must finish with at least `MIN_REVEALS` revealed
+votes, or no outcome is drawn for that round.**
+
+It is counted on **reveals**, not on commits, and the distinction is the whole
+mechanism. A commit floor can be cleared by committing `k` identities per committee
+and then revealing only the ones that help — the withheld commitments would cost
+nothing, so the floor would be satisfied without any evidence being produced. A
+reveal floor cannot be cleared that way: the `k` votes per committee have to be
+exposed, and each one carries the ordinary liability of §6.
+
+It is **per committee and not combined**, for the reason §4.1 already gives: a
+combined threshold is cleared by 40 reveals in committee 1 and one in committee 2,
+which is not two committees. A healthy committee may not cover for an empty one.
+
+Failing the floor means different things depending on whether anything was decided
+yet, and the two are deliberately not symmetric:
+
+- **First round.** No outcome exists, so the case is **unresolved** and the fee is
+  refunded. The publisher paid for a judgment that did not happen.
+- **Challenge round.** A preliminary outcome already stands, and it **finalizes**.
+  Voiding the case here would hand any challenger a way to destroy a decided case
+  by challenging and then bringing nobody. The challenge bought two committees, they
+  did not materialise, and the challenge failed to produce evidence — so the outcome
+  it was challenging stands, and the challenger is frozen under §6 for a vote that
+  changed nothing.
+
+**What the floor does and does not buy.** It does not make capture impossible. A
+clique that fields `MIN_REVEALS` revealing identities in *each* committee still
+decides a unanimous case with certainty, because §5's estimator is the raw share.
+What the floor changes is the price: from a handful of identities to roughly
+`2 · MIN_REVEALS / P(eligible)` held, all exposed and all liable.
+`contracts/test/ThreeVote.t.sol` pins both halves of that, and
+`simulation/FINDINGS-floor-price.md` prices it — including the part that is
+uncomfortable, which is that the cost falls hardest in exactly the low-turnout
+conditions that make capture possible in the first place.
+
+| parameter | value |
+|---|---|
+| `MIN_REVEALS` | 3 *(conditional — see §11)* |
+
 ## 5. The draw
 
 Three tickets are drawn against the combined tally of every committee that has
@@ -136,10 +178,22 @@ Tickets are drawn **fresh at each preliminary outcome**, over the pool as it
 stands. Retry is bounded by the challenge cap rather than by reusing a single
 draw.
 
+**The estimator is the raw share `A/N`.** The alternative considered was the
+Laplace form `â = (A+1)/(N+2)`, which never returns certainty on a unanimous tally
+and so was expected to blunt a thin-tally capture. It was rejected on measurement,
+not taste. Against a clique holding a unanimous tally of 3 it lowers capture to
+89.6%, worth about 1.12 fees — and against a pay-insensitive attacker whose prize
+is external to the protocol, a resubmission fee is not a barrier. On an honest
+unanimous tally of the same size it produces an outcome contradicting *every* vote
+10.4% of the time. The estimator sees only `(A, N)`; it cannot tell a thin attacker
+tally from a thin honest one, and in a quiet registry both are thin. So it charges
+the wrong party, and the thin-tally problem is solved structurally by §4.4's floor
+instead.
+
 | parameter | value |
 |---|---|
 | ticket rule | majority of 3 |
-| estimator fed to the tickets | *(open — §11)* |
+| estimator fed to the tickets | raw share `A/N` |
 
 ## 6. Settlement
 
@@ -149,7 +203,20 @@ At finalization:
   a share of the fee;
 - every moderator whose revealed vote is incoherent has `FREEZE_PER_LOSS` added
   to their total frozen time;
-- a moderator who committed and did not reveal is penalised (§11).
+- **a moderator who committed and did not reveal has the same `FREEZE_PER_LOSS`
+  added.** The amount is forced rather than chosen. Reveals are public
+  transactions in a shared phase, so a moderator can watch the tally form and
+  withhold if they would be incoherent; if withholding cost less than being wrong,
+  anyone expecting to lose would withhold and revealing would be the dominated
+  move. Equal makes revealing weakly better, because it keeps the chance of being
+  paid.
+
+**A non-revealer is frozen even on a case that reached no outcome** (§4.4). That
+is not symmetry for its own sake: an unresolved case is one where a committee
+finished below §4.4's floor, so a moderator whose reveal was needed to reach it
+could otherwise withhold, have the fee refunded, list nothing, and repeat — which
+is censorship at zero cost. A moderator who *did* reveal on an unresolved case is
+not frozen and is not paid; there is no outcome to be coherent with.
 
 Settlement is **pull**: each moderator claims their own. No transaction has to
 process an unbounded set of participants.
@@ -180,8 +247,14 @@ costs its submitter every time.
 
 ## 9. What is deliberately not here
 
-- **No quorum gate.** Three commits start a clock, nothing more.
-- **No no-show penalty.** Eligibility is an opportunity.
+- **No commit quorum.** Three commits start a clock, nothing more. §4.4's floor is
+  a gate, but it sits on *revealed* votes at reveal close, not on commitments at
+  commit close — a case with three commits opens and runs exactly as before; what it
+  cannot do is produce an outcome without evidence. The two are not
+  interchangeable, which is §4.4's entire point.
+- **No no-show penalty.** Eligibility is an opportunity: a moderator who is
+  eligible and never commits owes nothing. §6's freeze is for a moderator who
+  *committed* and then withheld, which is a different act.
 - **No stake slashing or redistribution.** §2.
 - **No vote weighting.** One identity, one vote.
 - **No verdict before all voting closes** within a round. §4.1.
@@ -194,20 +267,20 @@ objection list stops wherever the reader stopped.
 
 ### 10.1 Specified here, not implemented
 
-| | |
-|---|---|
-| **the per-committee minimum** (§11) | Nothing requires either committee to hold anybody. With §5's `A/N` making a unanimous tally certain, and §4.1's three commits explicitly not a quorum, **three identities that are the only committers take a case with probability 1** — `contracts/test/ThreeVote.t.sol` pins it at 40 of 40, and `simulation/FINDINGS-floor-price.md` prices the fix. |
-| **a cost for non-reveal** (§11) | A commitment never revealed is neither paid nor frozen. Reveals are public transactions in a shared phase, so a moderator can watch the tally form and withhold if they would be incoherent. Free, and profitable. |
+Nothing. Every section above has code behind it.
 
-Both are open items on §11 rather than implementation errors, and both are
-observable on a testnet.
+The two entries that stood here — the per-committee minimum and a cost for
+non-reveal — are implemented as §4.4 and §6. They were one decision rather than
+two: a floor counted on commits is cleared by commitments that are never revealed,
+and a free non-reveal lets a moderator kill a case that the floor would otherwise
+have resolved. Deciding either alone leaves a hole the other one opens.
 
 ### 10.2 Deliberate deviations, marked in the code
 
 | | |
 |---|---|
 | **eligibility bits** | §3 derives `N` from the count of NON-FROZEN moderators. That count falls and rises with no transaction to observe — a freeze expires on a clock — so it cannot be maintained on chain. `Moderation._eligBits` pins it from the STAKED count, which is exact, and `commit` rejects a frozen caller separately. The threshold sits slightly wide while part of the registry is frozen. |
-| **the estimator** | §5 leaves it open; the code uses the raw share `A/N`, isolated in `_estimator` so the alternative is a one-line change. |
+| **one vote per case, not per committee** | A moderator eligible for both committees of a round votes in whichever they reach first, and cannot vote twice. §3 does not say which way this should go. At the eligibility rates §3 produces the overlap is small — around 0.4% of the registry at 1,000 — so it is not material to §4.4's floor, but it is a choice the document does not make. |
 
 ### 10.3 Required by the code, not by this document
 
@@ -227,18 +300,17 @@ contract will hit it.
 
 Not decided, and each needs a number before deployment.
 
-- `STAKE`, `FREEZE_PER_LOSS`, fee level and its split.
-- **The estimator fed to the tickets.** The implemented design uses
-  `â = (A+1)/(N+2)`, which never returns certainty on a unanimous tally; that was
-  introduced to stop a single vote deciding a case outright, a job the third-commit
-  timer may already do. The raw share `A/N` and the smoothed form are alternatives
-  for the same problem and have not been compared under this lifecycle.
-- **Non-reveal.** A commitment never revealed must cost something, or withholding
-  becomes free. Amount and mechanism open.
-- **A maximum wait for the third commit.** Without one, a case with two commits
-  stays open indefinitely.
-- **Minimum participation per committee.** A combined threshold is not enough: 40
-  commits in committee 1 and one in committee 2 is not two committees.
+- `STAKE`, `FREEZE_PER_LOSS`, fee level and its split, and `MAX_WAIT` — the
+  longest a case may sit before a third commit arrives. The mechanism exists; the
+  durations are placeholders.
+- **`MIN_REVEALS`, and it is conditional rather than merely undecided.** §4.4 sets
+  it to 3. `simulation/FINDINGS-floor-price.md` prices that at 0.9% of cases
+  unresolvable given 20% turnout and a 75% reveal rate, against roughly 96 identities
+  an attacker must hold. **Below about 10% turnout no value both stops a small clique
+  and leaves ordinary cases resolvable** — at 10% turnout a floor of 3 leaves 28% of
+  cases unresolvable. Turnout is unmeasured, so 3 is a defensible choice at the
+  participation the design needs anyway and a bad one below it. It is a constructor
+  argument, so the testnet can move it without a rewrite.
 - **What "anonymous" means** in §7.
 - **Binding the guidelines to the chain.** Moderators are paid for coherence with
   each other's reading of `MODERATION_GUIDELINES.md`, so which text was in force is

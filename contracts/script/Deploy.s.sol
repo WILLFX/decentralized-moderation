@@ -25,6 +25,7 @@ contract Deploy is Script {
         uint256 freezePerLoss;
         uint256 seedLag;
         uint256 feeMin;
+        uint256 minRevealsPerCommittee;
     }
 
     struct Stack {
@@ -48,6 +49,13 @@ contract Deploy is Script {
         p.freezePerLoss = 8 days; // §11 — undecided
         p.seedLag = 2;
         p.feeMin = 1e14;
+        // §11's per-committee minimum, on REVEALS. `simulation/FINDINGS-floor-price.md`
+        // prices it: k = 3 costs 0.9% of cases at 20% turnout and a 75% reveal
+        // rate, and forces a clique that would decide a case alone to hold on the
+        // order of 96 identities instead of 3. Below 10% turnout no k both stops a
+        // small clique and leaves ordinary cases resolvable, so this value is
+        // conditional on turnout the testnet has not measured yet.
+        p.minRevealsPerCommittee = 3;
     }
 
     function deploy(Params memory p) public returns (Stack memory s) {
@@ -56,6 +64,9 @@ contract Deploy is Script {
         if (p.seedLag == 0) revert BadParams("seedLag");
         // a seed must still be addressable when the phase it gates is reached
         if (p.seedLag >= 250) revert BadParams("seedLag too large");
+        // 0 is rejected by the constructor too; caught here so a bad deploy fails
+        // before any contract is created rather than halfway through the stack
+        if (p.minRevealsPerCommittee == 0) revert BadParams("minRevealsPerCommittee");
 
         s.stakes = new StakeRegistry(p.token, p.stakeAmount);
         s.index = new IndexRegistry();
@@ -69,7 +80,8 @@ contract Deploy is Script {
             p.maxWaitForThird,
             p.freezePerLoss,
             p.seedLag,
-            p.feeMin
+            p.feeMin,
+            p.minRevealsPerCommittee
         );
 
         s.stakes.setModeration(address(s.moderation));

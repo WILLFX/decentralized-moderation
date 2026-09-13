@@ -209,22 +209,27 @@ contract InvariantTest is StdInvariant, Test {
             );
         }
 
-        // and settlement, on a second case taken to the end
+        // and settlement, on a second case taken to the end. Both committees have
+        // to clear the per-committee reveal floor or the case terminates
+        // UNRESOLVED and `closeChallenge` is never reached — which is exactly what
+        // this check caught when the floor landed.
         handler.submit(2);
         handler.warp(1, 4);
-        for (uint256 i; i < 4; ++i) handler.commit(i, 1, true);
+        for (uint256 i; i < 3; ++i) handler.commit(i, 1, true);
         handler.warp(20, 3);
         handler.advancePhase(1, 0);
-        handler.warp(70, 3); // committee B draws nobody; the max wait expires
+        handler.warp(1, 4);
+        for (uint256 i = 3; i < 6; ++i) handler.commit(i, 1, true);
+        handler.warp(70, 3);
         handler.advancePhase(1, 0);
-        for (uint256 i; i < 4; ++i) handler.reveal(i, 1);
+        for (uint256 i; i < 6; ++i) handler.reveal(i, 1);
         handler.warp(40, 3);
         handler.advancePhase(1, 0);
         handler.warp(1, 3);
         handler.advancePhase(1, 0);
         handler.warp(70, 3);
         handler.advancePhase(1, 0); // closeChallenge -> FINALIZED
-        for (uint256 i; i < 4; ++i) handler.claim(i, 1);
+        for (uint256 i; i < 6; ++i) handler.claim(i, 1);
 
         assertGt(handler.calls(bytes32(bytes("closeChallenge"))), 0, "never finalized");
         assertGt(handler.calls(bytes32(bytes("claim"))), 0, "never settled");

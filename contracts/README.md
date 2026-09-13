@@ -4,7 +4,7 @@ Solidity implementation of **`specs/protocol.md`**, which is normative.
 
 | File | Runtime (shipped, `via_ir`) | legacy | Role |
 |---|---:|---:|---|
-| `src/Moderation.sol` | 11,400 B | 13,451 B | the case state machine — §3 through §8 |
+| `src/Moderation.sol` | 11,544 B | 13,550 B | the case state machine — §3 through §8 |
 | `src/StakeRegistry.sol` | 2,396 B | 2,778 B | stake custody and frozen time — §2 |
 | `src/IndexRegistry.sol` | 2,504 B | 2,899 B | the topic → entry index — §7 |
 
@@ -24,7 +24,7 @@ is watching. Every link is asserted in both directions, and a test proves
 
 ## Tests
 
-81 tests across ten suites.
+91 tests across eleven suites.
 
 | suite | what it is for |
 |---|---|
@@ -37,7 +37,8 @@ is watching. Every link is asserted in both directions, and a test proves
 | `Draw.t.sol` | §5 — the ticket rule, and vector emission |
 | `Integration.t.sol` | the three real contracts, no mocks |
 | `Invariant.t.sol` | nine properties under fuzzed orderings |
-| `ThreeVote.t.sol` | pins the open §11 gap: three identities take a case, 40/40 |
+| `ThreeVote.t.sol` | what §4.4's floor bought, and what it did not |
+| `RevealFloor.t.sol` | §4.4 — the floor, and its two asymmetric failure paths |
 
 Three of those carry more weight than their size suggests.
 
@@ -56,13 +57,15 @@ so every counter reads zero, and a `view` one silently aborts the run). It is an
 ordinary test that drives the handler by hand and proves each interesting state
 is reachable through it.
 
-**`ThreeVote.t.sol` is a tripwire, not a passing feature.** It asserts that three
-identities which are the only committers take a case with *certainty* — 40 runs,
-40 captures — because `_estimator`'s raw `A/N` makes a unanimous tally certain,
-three commits are explicitly not a quorum, and nothing requires committee B to
-hold anybody. It documents an open §11 gap by pinning it. **If §11's
-per-committee minimum lands, this test must change**, and a green run of it is
-evidence the gap is still open rather than evidence anything works.
+**`ThreeVote.t.sol` is a pair of tests that disagree with each other on purpose.**
+It used to be a tripwire pinning an open gap — three identities that were the only
+committers took a case 40 times out of 40. §4.4's floor landed and the test changed,
+which is what it was there for. What replaced it says both halves: the old attack is
+dead at even the weakest floor, because it needed committee B to hold nobody; and a
+clique fielding `k` revealing identities in *each* committee still takes a unanimous
+case with certainty, because `A/N` is still `A/N`. **The floor priced capture; it did
+not remove it.** If anyone later reads it as having removed it, the second test is
+the correction.
 
 ## The draw differential
 
@@ -125,14 +128,22 @@ what ships is still what is tested.
 
 ## Open
 
-`specs/protocol.md` §11 lists what has no value yet: the estimator, the cost of
-non-reveal, per-committee minimums, what "anonymous" means, and identity
-rotation — the sharpest, since a frozen moderator can leave the stake idle and
-stake a fresh address. `StakeRegistry`'s closing comment states that one where
-someone reading the contract will hit it.
+`specs/protocol.md` §11 is the list. Two things about it are worth stating here.
 
-Two deliberate deviations from the spec are marked in the code rather than
-hidden: eligibility bits are pinned from the *staked* count rather than the
-non-frozen count §3 names, because a freeze expires on a clock with no
-transaction to observe; and the estimator is `A/N`, isolated in `_estimator` so
-the alternative is a one-line change.
+**`minRevealsPerCommittee = 3` is conditional, not settled.** It is a constructor
+argument precisely so a testnet can move it. `simulation/FINDINGS-floor-price.md`
+prices it at 0.9% of cases unresolvable given 20% turnout and a 75% reveal rate —
+and at 28% given 10% turnout. Below roughly 10% turnout no value both stops a small
+clique and leaves ordinary cases resolvable. Turnout is unmeasured.
+
+**Identity rotation is the sharpest open item and nothing here touches it.** A
+frozen moderator can leave the frozen stake idle and stake a fresh address, so
+escaping a freeze costs one stake tied up for the freeze duration — exactly what
+serving it costs. `StakeRegistry`'s closing comment states that where someone
+reading the contract will hit it.
+
+Two deliberate deviations from the spec are marked in the code rather than hidden:
+eligibility bits are pinned from the *staked* count rather than the non-frozen count
+§3 names, because a freeze expires on a clock with no transaction to observe; and a
+moderator votes once per case rather than once per committee, which §3 does not
+decide either way.

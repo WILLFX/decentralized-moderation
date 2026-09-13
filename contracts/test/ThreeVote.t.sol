@@ -6,67 +6,165 @@ import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 
-/// @notice **A record of current behaviour, not an endorsement of it.**
+/// @notice **What the per-committee reveal floor buys, and what it does not.**
 ///
-/// `specs/protocol.md` §5 uses the raw share `A/N`, so a unanimous tally decides
-/// with certainty. §4.1 starts the commit clock at the third commitment and says
-/// plainly that three commits are a timer trigger and not a quorum. Nothing
-/// requires committee B to contain anybody.
+/// This suite used to pin the opposite: three identities that were the only
+/// committers took a case with probability 1, forty times out of forty. That was
+/// a tripwire on §11's undecided per-committee minimum. The minimum has since
+/// landed, counted on REVEALS, and these two tests are what replaced it.
 ///
-/// Those three choices are individually defensible and together they mean three
-/// identities that are the only committers take a case with probability 1. This
-/// test pins that so the consequence is visible in the suite rather than latent
-/// in the arithmetic.
+/// They are deliberately a pair, because the floor is easy to overstate in both
+/// directions:
 ///
-/// **If §11's minimum participation per committee lands, this test must change** —
-/// and that is the point of it. It is the tripwire on a decision that has not
-/// been taken.
+/// - the original attack is dead, and it dies at the *weakest* possible floor,
+///   because it depended on committee B holding nobody at all;
+/// - a clique that fields identities in BOTH committees still decides a case with
+///   certainty once it clears the floor. The floor did not make capture
+///   impossible. It made it cost `k` revealed, liable identities per committee.
+///
+/// So the floor's value is entirely the identity count it forces, which is what
+/// `simulation/FINDINGS-floor-price.md` prices, and nothing about it removes the
+/// fact that `A/N` makes a unanimous tally certain. If anyone later reads the
+/// floor as having closed capture, the second test is the correction.
 contract ThreeVoteTest is Test {
-    Moderation mod; MockBZZ token; MockStakes stakes; MockIndex index;
+    MockBZZ token;
+    MockStakes stakes;
+    MockIndex index;
     address sub = address(0x5011);
-    address[3] a;
-    uint256 blk = 100; uint256 ts = 1_000_000;
+    uint256 blk = 100;
+    uint256 ts = 1_000_000;
+
+    uint8 constant APPROVE = 1;
+    uint8 constant PHASE_UNRESOLVED = 6;
+    uint256 constant FEE = 1000;
 
     function setUp() public {
-        token = new MockBZZ(); stakes = new MockStakes(); index = new MockIndex();
-        mod = new Moderation(address(token), address(stakes), address(index),
-            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1000);
-        for (uint256 i; i < 3; ++i) { a[i] = address(uint160(0x900 + i)); stakes.add(a[i]); }
-        token.mint(sub, 1e12); vm.prank(sub); token.approve(address(mod), type(uint256).max);
-        vm.roll(blk); vm.warp(ts);
+        token = new MockBZZ();
+        stakes = new MockStakes();
+        index = new MockIndex();
+        vm.roll(blk);
+        vm.warp(ts);
     }
 
-    /// @dev Forty cases, forty different entropies, committee B empty throughout.
-    ///      Certainty here is not luck and not a seed: `f(A/N) = f(1) = 1`.
-    function test_threeIdentitiesTakeACaseWithCertainty() public {
-        uint256 listed;
+    function _deploy(uint256 floor) internal returns (Moderation mod) {
+        mod = new Moderation(
+            address(token), address(stakes), address(index),
+            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, floor
+        );
+        token.mint(sub, 1e12);
+        vm.prank(sub);
+        token.approve(address(mod), type(uint256).max);
+    }
+
+    function _clique(uint256 n) internal returns (address[] memory who) {
+        who = new address[](n);
+        for (uint256 i; i < n; ++i) {
+            who[i] = address(uint160(0x900 + i));
+            stakes.add(who[i]);
+        }
+    }
+
+    function _submit(Moderation mod, uint256 salt) internal returns (uint256 id) {
+        bytes32[] memory topics = new bytes32[](1);
+        topics[0] = keccak256("bio");
+        vm.prank(sub);
+        id = mod.submit(keccak256(abi.encode("c", salt)), keccak256("m"), topics, FEE);
+        blk += 3;
+        vm.roll(blk);
+    }
+
+    function _commitAll(Moderation mod, uint256 id, address[] memory who, uint256 from, uint256 to)
+        internal
+    {
+        for (uint256 i = from; i < to; ++i) {
+            bytes32 h = mod.commitHash(id, 0, who[i], APPROVE, bytes32("s"));
+            vm.prank(who[i]);
+            mod.commit(id, h);
+        }
+    }
+
+    function _revealAll(Moderation mod, uint256 id, address[] memory who, uint256 to) internal {
+        for (uint256 i; i < to; ++i) {
+            vm.prank(who[i]);
+            mod.reveal(id, APPROVE, bytes32("s"));
+        }
+    }
+
+    /// @dev The attack this suite was built to pin, re-run at the weakest floor
+    ///      the contract will accept. It depended on committee B being empty, and
+    ///      `k = 1` already demands one revealed vote in EACH committee — so the
+    ///      case terminates UNRESOLVED with the fee refunded and nothing listed.
+    ///      Forty trials, because the claim being refuted was a claim of certainty.
+    function test_emptySecondCommitteeNoLongerDecidesACase() public {
+        Moderation mod = _deploy(1);
+        address[] memory a = _clique(3);
+
         uint256 TRIALS = 40;
         for (uint256 t; t < TRIALS; ++t) {
-            bytes32[] memory topics = new bytes32[](1);
-            topics[0] = keccak256("bio");
-            vm.prank(sub);
-            uint256 id = mod.submit(keccak256(abi.encode("c", t)), keccak256("m"), topics, 1000);
+            uint256 id = _submit(mod, t);
 
-            blk += 3; vm.roll(blk);
-            for (uint256 i; i < 3; ++i) {
-                bytes32 h = mod.commitHash(id, 0, a[i], 1, bytes32("s"));
-                vm.prank(a[i]); mod.commit(id, h);
-            }
-            ts += 2 hours; vm.warp(ts);
+            _commitAll(mod, id, a, 0, 3); // all three land in committee A
+            ts += 2 hours;
+            vm.warp(ts);
             mod.closeCommitA(id);
-            blk += 3; vm.roll(blk); ts += 2 hours; vm.warp(ts);
-            mod.closeCommitB(id);                      // committee B: nobody
-            for (uint256 i; i < 3; ++i) { vm.prank(a[i]); mod.reveal(id, 1, bytes32("s")); }
-            ts += 1 hours; vm.warp(ts);
+            blk += 3;
+            vm.roll(blk);
+            ts += 2 hours;
+            vm.warp(ts);
+            mod.closeCommitB(id); // committee B: nobody
+            _revealAll(mod, id, a, 3);
+            ts += 1 hours;
+            vm.warp(ts);
             mod.closeReveal(id);
-            blk += 3; vm.roll(blk);
+
+            assertEq(mod.caseInfo(id).phase, PHASE_UNRESOLVED, "should not have resolved");
+            assertEq(mod.refundOwed(id), FEE, "fee must be refunded, not kept");
+            assertEq(index.writes(), 0, "nothing may be listed");
+
+            // and there is no outcome to draw: the case left REVEAL for a
+            // terminal phase, so `draw` has nothing to act on
+            vm.expectRevert(Moderation.BadPhase.selector);
             mod.draw(id);
-            ts += 2 hours; vm.warp(ts);
-            mod.closeChallenge(id);
-            if (mod.caseInfo(id).preliminary == 1) ++listed;
         }
-        emit log_named_uint("listed out of", TRIALS);
-        emit log_named_uint("listed", listed);
-        assertEq(listed, TRIALS, "three identities decided every case with certainty");
+    }
+
+    /// @dev The other half, and the uncomfortable one. Six identities — three
+    ///      revealing in each committee — clear a floor of 3 and take the case with
+    ///      certainty, because `A/N` on a unanimous tally is still 1 and `f(1) = 1`.
+    ///      The floor converted "3 identities" into "2k revealed, liable
+    ///      identities"; it did not convert certainty into a probability.
+    function test_aCliqueThatFieldsBothCommitteesStillTakesItWithCertainty() public {
+        Moderation mod = _deploy(3);
+        address[] memory a = _clique(6);
+
+        uint256 TRIALS = 40;
+        uint256 listed;
+        for (uint256 t; t < TRIALS; ++t) {
+            uint256 id = _submit(mod, t);
+
+            _commitAll(mod, id, a, 0, 3); // committee A
+            ts += 2 hours;
+            vm.warp(ts);
+            mod.closeCommitA(id);
+            blk += 3;
+            vm.roll(blk);
+            _commitAll(mod, id, a, 3, 6); // committee B
+            ts += 2 hours;
+            vm.warp(ts);
+            mod.closeCommitB(id);
+            _revealAll(mod, id, a, 6);
+            ts += 1 hours;
+            vm.warp(ts);
+            mod.closeReveal(id);
+            blk += 3;
+            vm.roll(blk);
+            mod.draw(id);
+            ts += 2 hours;
+            vm.warp(ts);
+            mod.closeChallenge(id);
+
+            if (mod.caseInfo(id).preliminary == APPROVE) ++listed;
+        }
+        assertEq(listed, TRIALS, "a clique clearing the floor still decides with certainty");
     }
 }

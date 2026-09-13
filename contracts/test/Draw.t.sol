@@ -11,7 +11,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 ///         plants them and calls through.
 contract DrawHarness is Moderation {
     constructor(address t, address s, address i)
-        Moderation(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1)
+        Moderation(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1)
     {}
 
     function plant(uint256 caseId, uint32 a, uint32 r, uint8 round) external {

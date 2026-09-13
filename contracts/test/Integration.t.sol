@@ -25,6 +25,8 @@ contract IntegrationTest is Test {
 
     uint256 constant STAKE = 10e16;
     uint256 constant FEE = 1e15;
+    /// @dev Matches `Deploy.defaults`' `freezePerLoss`, which this suite deploys.
+    uint256 constant FREEZE = 8 days;
 
     address submitter = address(0x5011);
     address[64] mods;
@@ -106,7 +108,7 @@ contract IntegrationTest is Test {
         broken.index = new IndexRegistry();
         broken.moderation = new Moderation(
             address(token), address(broken.stakes), address(broken.index),
-            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE
+            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1
         );
         // deployed, never linked — this is the state that otherwise fails at the
         // first commit, long after anyone is watching
@@ -204,12 +206,29 @@ contract IntegrationTest is Test {
         s.moderation.closeReveal(id);
         assertEq(s.moderation.caseInfo(id).phase, uint8(Moderation.Phase.UNRESOLVED));
 
+        // Nobody revealed, so every committer is a non-revealer and every one of
+        // them is frozen. That is the vector the reveal floor opens and this
+        // closes: a case is UNRESOLVED precisely when a committee finished below
+        // the floor, so a moderator whose reveal was needed to reach it could
+        // otherwise withhold, refund the publisher, list nothing, and repeat —
+        // censorship at zero cost.
         for (uint256 i; i < mods.length; ++i) {
             if (s.moderation.voteOf(id, mods[i]).commitment == bytes32(0)) continue;
             s.moderation.claim(id, mods[i]);
             assertEq(s.stakes.openVotes(mods[i]), 0, "released");
-            assertEq(s.stakes.totalFrozen(mods[i]), 0, "no verdict, so no penalty");
+            assertEq(s.stakes.totalFrozen(mods[i]), FREEZE, "non-reveal is frozen");
 
+            // and the freeze bites: the stake cannot leave while it runs
+            vm.prank(mods[i]);
+            vm.expectRevert(StakeRegistry.IsFrozen.selector);
+            s.stakes.withdraw();
+        }
+
+        // §2 — time is the only currency of penalty. Once it elapses the stake
+        // comes back in full; it was never taken.
+        _wait(FREEZE + 1);
+        for (uint256 i; i < mods.length; ++i) {
+            if (s.moderation.voteOf(id, mods[i]).commitment == bytes32(0)) continue;
             vm.prank(mods[i]);
             s.stakes.withdraw();
             assertEq(token.balanceOf(mods[i]), STAKE, "stake back in full");
@@ -240,7 +259,12 @@ contract IntegrationTest is Test {
 
         _wait(2 hours);
         s.moderation.closeCommitA(id);
+
+        // committee B has to hold somebody: `isEligible` now answers for committee
+        // B's seed, and a moderator who already voted in A cannot vote again
         _advance(3);
+        uint256 inB = _commitEligible(id, APPROVE);
+        require(inB > 0, "need an eligible committee B");
         _wait(2 hours);
         s.moderation.closeCommitB(id);
 

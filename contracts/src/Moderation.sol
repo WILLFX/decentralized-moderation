@@ -93,7 +93,8 @@ contract Moderation is ReentrancyGuard {
         uint40 seedBlockB;
         uint40 outcomeSeedBlock; // armed when REVEAL closes; fresh each round
         uint8 eligBits; // N-5, pinned at submission
-        // --- per-committee counts, current round only (§11 needs them apart)
+        // --- per-committee counts, current round only. Kept APART because §4.4's
+        // floor is per committee: a combined count cannot tell 6-and-0 from 3-and-3.
         uint32 commitsA;
         uint32 commitsB;
         uint32 revealsA;
@@ -141,8 +142,19 @@ contract Moderation is ReentrancyGuard {
     uint256 public immutable commitWindow; // 15 min, from the 3rd commit
     uint256 public immutable revealWindow; // 30 min
     uint256 public immutable challengeWindow; // 1 hour
-    uint256 public immutable maxWaitForThird; // §11 — bounds an empty case
+    uint256 public immutable maxWaitForThird; // bounds a case nobody commits to
     uint256 public immutable freezePerLoss; // §2
+
+    /// @dev §4.4's per-committee minimum, counted on REVEALS and not on commits.
+    ///      Commits are the wrong quantity: a clique can commit `k` in each
+    ///      committee to clear a commit floor and then reveal only what helps,
+    ///      because a non-revealed commitment costs nothing to withhold. That
+    ///      clears the floor without producing any evidence — which is exactly
+    ///      what `simulation/FINDINGS-floor-price.md` §G concedes a commit floor
+    ///      cannot do. Counted on reveals, the `k` votes per committee must
+    ///      actually be exposed, and each one carries the ordinary freeze
+    ///      liability.
+    uint256 public immutable minRevealsPerCommittee;
     uint256 public immutable seedLag;
     uint256 public immutable feeMin;
 
@@ -192,6 +204,7 @@ contract Moderation is ReentrancyGuard {
     error NotARemovableListing();
     error RemovalAlreadyOpen();
     error AlreadyRemoved();
+    error BadFloor();
 
     constructor(
         address _token,
@@ -203,7 +216,8 @@ contract Moderation is ReentrancyGuard {
         uint256 _maxWaitForThird,
         uint256 _freezePerLoss,
         uint256 _seedLag,
-        uint256 _feeMin
+        uint256 _feeMin,
+        uint256 _minRevealsPerCommittee
     ) {
         token = IERC20(_token);
         stakes = IStakeRegistry(_stakes);
@@ -215,6 +229,16 @@ contract Moderation is ReentrancyGuard {
         freezePerLoss = _freezePerLoss;
         seedLag = _seedLag;
         feeMin = _feeMin;
+
+        // A floor of 0 is not "the floor turned off", it is a footgun: with no
+        // floor, a case that nobody revealed reaches `_decide` with an empty
+        // tally, which resolves REJECT and pays nobody instead of refunding the
+        // publisher for a judgment that never happened. `k = 1` is the weakest
+        // meaningful setting and is already strictly stronger than the combined
+        // "any reveal at all" check this replaced, because it demands one in EACH
+        // committee.
+        if (_minRevealsPerCommittee == 0) revert BadFloor();
+        minRevealsPerCommittee = _minRevealsPerCommittee;
     }
 
     // ------------------------------------------------------------- submit
@@ -300,7 +324,7 @@ contract Moderation is ReentrancyGuard {
     ///      chain. `N` is pinned here from the count of STAKED moderators, which
     ///      is exact, and `commit` rejects a frozen caller separately. The
     ///      threshold is therefore calibrated slightly wide whenever part of the
-    ///      registry is frozen. Recorded in `specs/protocol.md` §11.
+    ///      registry is frozen. Recorded in `specs/protocol.md` §10.2.
     function _eligBits() internal view returns (uint8) {
         uint256 n = stakes.stakedCount();
         uint8 bits;
@@ -316,7 +340,7 @@ contract Moderation is ReentrancyGuard {
     /// @dev One vote per case, not per committee. A moderator eligible for both
     ///      committees of a round votes in whichever they reach first.
     ///      Whether eligibility should instead be one-shot — so that declining
-    ///      committee A forfeits committee B — is open (`specs/protocol.md` §11).
+    ///      committee A forfeits committee B — is open (`specs/protocol.md` §10.2).
     function commit(uint256 caseId, bytes32 h) external {
         Case storage c = cases[caseId];
         uint8 committee = _committeeOf(c.phase);
@@ -406,12 +430,37 @@ contract Moderation is ReentrancyGuard {
     /// @dev The outcome seed is armed at reveal close and consumed by `draw`, so
     ///      the tally is frozen before the randomness that resolves it exists —
     ///      and a fresh height is armed for every round, because §5 draws afresh.
+    ///
+    ///      This is also where §4.4's per-committee minimum is enforced, because
+    ///      this is the first moment both committees' REVEALED counts are final.
+    ///      `revealsA` and `revealsB` are per-round: `challenge` resets them, so
+    ///      each round must field its own two committees rather than inheriting
+    ///      the first round's.
+    ///
+    ///      **What a failed floor means depends on whether anything was decided
+    ///      yet, and the two cases are not symmetric.** On the first round no
+    ///      outcome exists, so the case is UNRESOLVED and the fee is refunded —
+    ///      the publisher paid for a judgment that never happened. On a challenge
+    ///      round a preliminary outcome already stands, and voiding the case would
+    ///      hand any challenger a way to destroy a decided case by challenging and
+    ///      then bringing nobody. So the standing outcome finalizes instead: the
+    ///      challenge bought two committees, they did not materialise, and the
+    ///      challenge failed to produce evidence.
+    ///
+    ///      The challenger is not let off. Their vote was opposite the outcome
+    ///      that now finalizes, so `claim` settles them as incoherent and freezes
+    ///      them — a vote that changed nothing and still cost the ordinary
+    ///      liability, which is the whole price of a frivolous challenge.
     function closeReveal(uint256 caseId) external {
         Case storage c = cases[caseId];
         if (c.phase != uint8(Phase.REVEAL)) revert BadPhase();
         if (block.timestamp < c.phaseDeadline) revert TooEarly();
 
-        if (c.pooledApprove + c.pooledReject == 0) return _toUnresolved(caseId);
+        uint256 k = minRevealsPerCommittee;
+        if (c.revealsA < k || c.revealsB < k) {
+            if (c.challenges == 0) return _toUnresolved(caseId);
+            return _finalize(caseId);
+        }
 
         c.outcomeSeedBlock = uint40(block.number + seedLag);
         emit PhaseChanged(caseId, uint8(Phase.REVEAL), uint8(Phase.CHALLENGE));
@@ -542,15 +591,30 @@ contract Moderation is ReentrancyGuard {
     /// @dev Pull settlement, one moderator at a time, permissionless. §6.
     ///      Coherent: paid a share of the pot. Incoherent: `FREEZE_PER_LOSS`
     ///      added to their total frozen time — the only penalty in the design.
-    ///      A commitment never revealed is settled unpaid; what else it should
-    ///      cost is open (`specs/protocol.md` §11).
+    ///
+    ///      **A commitment never revealed is frozen for the same duration as a
+    ///      wrong one, and the amount is forced rather than chosen.** Reveals are
+    ///      public transactions in a shared phase, so a moderator can watch the
+    ///      tally form and withhold if they would be incoherent. If withholding
+    ///      cost less than being wrong, then anyone expecting to lose would
+    ///      withhold and revealing would be the dominated move. Equal removes the
+    ///      choice: both cost the same, so revealing is weakly better because it
+    ///      keeps the chance of being paid.
     /// @dev Also callable on an UNRESOLVED case, and it has to be. A vote is
     ///      settled here and nowhere else, and settling is what releases the
-    ///      moderator's open-vote count. Without this an unresolved case — three
-    ///      commits and no reveals reaches one — would strand every committer's
-    ///      stake permanently, because `StakeRegistry.withdraw` refuses while a
-    ///      vote is open. There is no verdict on such a case, so nobody is
-    ///      incoherent and nobody is paid or frozen.
+    ///      moderator's open-vote count. Without this an unresolved case would
+    ///      strand every committer's stake permanently, because
+    ///      `StakeRegistry.withdraw` refuses while a vote is open.
+    ///
+    ///      **On an UNRESOLVED case a non-revealer is still frozen, and that is
+    ///      not tidiness — it closes a vector the per-committee floor opens.** A
+    ///      case is UNRESOLVED when a committee finished below the floor. A
+    ///      moderator whose own reveal was needed to reach it can therefore push
+    ///      the case to UNRESOLVED by withholding: the fee is refunded, nothing is
+    ///      listed, and repeating it censors a submission indefinitely. Free, if
+    ///      non-reveal were free here. A revealer on an unresolved case is NOT
+    ///      frozen — they did their part and the case failed for want of others —
+    ///      and nobody is paid, because there is no outcome to be coherent with.
     function claim(uint256 caseId, address m) external nonReentrant {
         Case storage c = cases[caseId];
         bool resolved = c.phase == uint8(Phase.FINALIZED);
@@ -561,7 +625,11 @@ contract Moderation is ReentrancyGuard {
         vt.settled = true;
 
         uint256 paid;
-        bool frozen = resolved && vt.revealed != 0 && vt.revealed != c.preliminary;
+        // `Outcome.NONE` is 0 and `c.preliminary` is APPROVE or REJECT once drawn,
+        // so `revealed != preliminary` already catches the non-revealer on a
+        // resolved case; the first clause is what carries the unresolved one.
+        bool frozen = vt.revealed == uint8(Outcome.NONE)
+            || (resolved && vt.revealed != c.preliminary);
         stakes.settle(m, frozen, freezePerLoss);
 
         if (!resolved) {
@@ -604,8 +672,9 @@ contract Moderation is ReentrancyGuard {
     ///      round that adds no votes cannot move the answer and a round that adds
     ///      votes can only move it toward the side it added.
     ///
-    ///      `_estimator` is the one open choice in here — `specs/protocol.md` §11.
-    ///      It is isolated so the alternative is a one-line change.
+    ///      `_estimator` is the raw share, decided in `specs/protocol.md` §5 against
+    ///      the Laplace form `(A+1)/(N+2)`. It stays isolated in one function because
+    ///      that is where the decision lives, not because it is still open.
     function _decide(uint256 caseId, bytes32 entropy) internal view returns (uint8 outcome, uint8 tickets) {
         (uint256 num, uint256 den) = _estimator(caseId);
         if (den == 0) return (uint8(Outcome.REJECT), 0);

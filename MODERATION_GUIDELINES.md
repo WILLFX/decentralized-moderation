@@ -125,11 +125,23 @@ submissions do.
 - **Fetch before you vote.** Both the content chunk and the metadata JSON are
   content-addressed (CAC), so what you fetch is exactly what was submitted and
   exactly what stays approved. Never vote on the metadata alone.
-- **Reveal what you committed.** Withholding is never worth it on the merits:
-  your vote can only help the side you actually hold, and removing it strictly
-  lowers that side's chances. Be aware that the protocol does not currently
-  *price* a non-reveal — a commitment never revealed is neither paid nor frozen —
-  and that this is an open item (`specs/protocol.md` §11), not a licence.
+- **Reveal what you committed.** Withholding is never worth it on the merits —
+  your vote can only help the side you actually hold — and it is now priced as
+  well: **a commitment you never reveal adds the same `FREEZE_PER_LOSS` as a vote
+  that turns out wrong** (`specs/protocol.md` §6). Set equal deliberately, so that
+  withholding is never the cheaper option when you suspect you are on the losing
+  side. Revealing is weakly better every time, because it keeps the chance of
+  being paid.
+
+  This applies even when the case reaches **no outcome at all**. A case is
+  unresolved when a committee finished below the reveal floor, which is a state
+  your own withholding can cause, so a non-revealer is frozen there too. A
+  moderator who *did* reveal on an unresolved case is not frozen — and is not paid,
+  because there is no outcome to be coherent with.
+- **Your committee has to produce evidence, not just show up.** Each committee in a
+  round must finish with at least `MIN_REVEALS` revealed votes or the round draws no
+  outcome (§4.4). It counts reveals, not commitments, so a committee that all
+  committed and then went quiet decides nothing.
 - **Borderline cases will occur.** On a genuinely borderline judgment you may end
   up incoherent with the outcome, and `FREEZE_PER_LOSS` is added to your total
   frozen time. It is a bounded, fixed duration, additive to a running total rather

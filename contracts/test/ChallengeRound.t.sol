@@ -26,6 +26,11 @@ contract ChallengeRoundTest is Test {
     uint256 constant FREEZE = 8 days;
     uint256 constant SEED_LAG = 2;
     uint256 constant FEE = 1000;
+    /// @dev The WEAKEST per-committee reveal floor. These suites exercise the
+    ///      lifecycle, not the floor, and at k = 1 every scenario below keeps the
+    ///      shape it had before the floor existed. The floor itself is tested at
+    ///      its deployed value in `RevealFloor.t.sol`.
+    uint256 constant FLOOR = 1;
 
     uint8 constant APPROVE = 1;
     uint8 constant REJECT = 2;
@@ -42,7 +47,7 @@ contract ChallengeRoundTest is Test {
         index = new MockIndex();
         mod = new Moderation(
             address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE
+            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR
         );
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
@@ -74,13 +79,19 @@ contract ChallengeRoundTest is Test {
     /// @dev Runs one full pair-of-committees round: A commits, B commits, both
     ///      reveal, tickets drawn. `voters` is the inclusive range of moderator
     ///      indices, all voting `v`.
+    ///      The range is SPLIT across the two committees: each must finish with at
+    ///      least `FLOOR` revealed votes or the round does not resolve, so putting
+    ///      the whole range in committee A would test a shape the design rejects.
     function _round(uint256 id, uint8 round, uint256 from, uint256 to, uint8 v) internal {
+        uint256 mid = from + (to - from) / 2;
+
         _advance(SEED_LAG + 1);
-        for (uint256 i = from; i < to; ++i) _commit(id, mods[i], v, round);
+        for (uint256 i = from; i < mid; ++i) _commit(id, mods[i], v, round);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
 
         _advance(SEED_LAG + 1);
+        for (uint256 i = mid; i < to; ++i) _commit(id, mods[i], v, round);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
 
@@ -163,10 +174,12 @@ contract ChallengeRoundTest is Test {
 
         _advance(SEED_LAG + 1);
         for (uint256 i; i < 4; ++i) _commit(id, mods[i], REJECT, 0);
-        _commit(id, mods[4], APPROVE, 0); // the lone dissenter, voting Approve
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
         _advance(SEED_LAG + 1);
+        // the lone dissenter, voting Approve — placed in committee B so the
+        // reveal floor is met there too
+        _commit(id, mods[4], APPROVE, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
 

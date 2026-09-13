@@ -94,6 +94,11 @@ contract LifecycleTest is Test {
     uint256 constant FREEZE = 8 days;
     uint256 constant SEED_LAG = 2;
     uint256 constant FEE = 1000;
+    /// @dev The WEAKEST per-committee reveal floor. These suites exercise the
+    ///      lifecycle, not the floor, and at k = 1 every scenario below keeps the
+    ///      shape it had before the floor existed. The floor itself is tested at
+    ///      its deployed value in `RevealFloor.t.sol`.
+    uint256 constant FLOOR = 1;
 
     address submitter = address(0x5011);
     address[8] mods;
@@ -130,7 +135,8 @@ contract LifecycleTest is Test {
             MAX_WAIT,
             FREEZE,
             SEED_LAG,
-            FEE
+            FEE,
+            FLOOR
         );
 
         for (uint256 i; i < mods.length; ++i) {
@@ -262,10 +268,11 @@ contract LifecycleTest is Test {
         _advance(SEED_LAG + 1);
 
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE, 0);
-        _commit(id, mods[3], REJECT, 0);
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(id);
         _advance(SEED_LAG + 1);
+        // committee B must hold somebody or the reveal floor stops the case
+        _commit(id, mods[3], REJECT, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
 
@@ -295,9 +302,10 @@ contract LifecycleTest is Test {
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(id);
         _advance(SEED_LAG + 1);
+        _commit(id, mods[3], APPROVE, 0); // committee B, for the reveal floor
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
-        for (uint256 i; i < 3; ++i) _reveal(id, mods[i], APPROVE);
+        for (uint256 i; i < 4; ++i) _reveal(id, mods[i], APPROVE);
         _wait(REVEAL_WINDOW + 1);
         mod.closeReveal(id);
         _advance(SEED_LAG + 1);
@@ -310,7 +318,7 @@ contract LifecycleTest is Test {
 
         Moderation.Case memory c = mod.caseInfo(id);
         assertEq(c.pooledReject, 1, "the challenge counted as a Reject");
-        assertEq(c.pooledApprove, 3, "and the pool carried forward");
+        assertEq(c.pooledApprove, 4, "and the pool carried forward");
         assertEq(c.challenges, 1);
         assertTrue(c.everChallenged, "never anonymous again");
         assertEq(c.phase, uint8(Moderation.Phase.COMMIT_A), "a fresh staged pair");

@@ -11,7 +11,7 @@ search application over — with no company in the middle.
 **Normative:** [`specs/protocol.md`](specs/protocol.md). Where anything here
 disagrees with it, the spec wins.
 
-> **Status.** The three contracts implement the protocol. 81 tests, mutation
+> **Status.** The three contracts implement the protocol. 91 tests, mutation
 > testing, a two-implementation differential on the verdict draw. **Nothing is
 > deployed, nothing has been externally reviewed, and §11 of the spec lists
 > parameters that have no value yet** — including `prior`, which decides whether
@@ -79,13 +79,14 @@ submit
   │  R_B armed only when A closes
   ├── committee B commits          closes 15 min after the 3rd commit
   ├── A and B reveal together      30 min
+  │      each committee must finish with >= 3 REVEALED votes, or no outcome
   ├── 3 tickets on the COMBINED tally → preliminary outcome, published
   └── 1 hour challenge window
         challenged? → committees C and D on the same pattern, tickets drawn
         AFRESH over the whole pool. At most two challenges.
 ```
 
-Two properties carry the design.
+Three properties carry the design.
 
 **Committee B is unknowable while A commits.** Its seed is a block height armed
 only when A's commit phase closes, so nobody deciding whether to commit in A can
@@ -95,8 +96,20 @@ see who else will review the case.
 commits with no tally to follow. Payment is for coherence with the outcome, so a
 visible tally would make following it more profitable than judging.
 
-Three commitments **start a clock**. They are not a quorum and do not by
-themselves make a tally sufficient — see §7.
+**Each committee must produce evidence, not just attendance.** A round draws no
+outcome unless both committees finish with at least `MIN_REVEALS` *revealed* votes.
+Counted on reveals rather than commits on purpose: a commit floor is cleared by
+committing the required number and then revealing only what helps, and withholding
+would otherwise be free. Per committee rather than combined, because 40 reveals in
+A and one in B is not two committees.
+
+A first round that misses the floor is **unresolved and the fee refunded** — the
+publisher paid for a judgment that never happened. A *challenge* round that misses
+it lets the standing outcome **finalize** instead, because voiding the case there
+would let any challenger destroy a decided case by challenging and bringing nobody.
+
+Three commitments **start a clock**. They are not a quorum; what makes a tally
+sufficient is the floor above.
 
 ## 5. The outcome
 
@@ -109,8 +122,17 @@ A challenge is a **public vote opposite** the published outcome — you cannot
 challenge an Approve by approving. It counts once and carries the ordinary
 liability.
 
+The estimator fed to the tickets is the **raw share `A/N`**. The Laplace form
+`(A+1)/(N+2)` was considered and rejected on measurement: against a clique holding a
+unanimous tally of 3 it buys about 1.12 fees, which is nothing to an attacker whose
+prize is external, while inflicting a wrong outcome on 10.4% of honest unanimous
+tallies of the same size. It sees only `(A, N)`, so it cannot tell a thin attacker
+tally from a thin honest one — and in a quiet registry both are thin.
+
 **No money moves before finalization.** At it, every moderator coherent with the
-outcome claims a share of the fee; every incoherent one is frozen.
+outcome claims a share of the fee; every incoherent one is frozen — **and so is
+anyone who committed and never revealed**, for the same duration, so withholding is
+never cheaper than being wrong.
 
 ## 6. The index
 
@@ -130,7 +152,7 @@ whichever way it goes, so a speculative removal costs its submitter every time.
 
 ## 7. What is open, and what it means
 
-`specs/protocol.md` §11 is the list. Three items are worth stating here because
+`specs/protocol.md` §11 is the list. Two items are worth stating here because
 they are not cosmetic.
 
 **`prior` — how often a moderator's judgment matches the truth — is unmeasured,
@@ -147,16 +169,21 @@ anti-correlated with the truth, and **no rule over it separates them**: not the
 lottery, not a threshold, not unanimity, at any cohort size. A testnet is the
 instrument (`measurement/prior/`).
 
-**Three identities can take a case with certainty.** `A/N` makes a unanimous
-tally certain, three commits are explicitly not a quorum, and nothing requires
-committee B to hold anybody. `contracts/test/ThreeVote.t.sol` pins it at 40 of
-40. The fix is §11's per-committee minimum, priced in
-`simulation/FINDINGS-floor-price.md`: it works, and it costs most in exactly the
-low-turnout conditions that make the attack possible.
+**`MIN_REVEALS` is set, but conditionally.** Each committee must finish a round
+with at least 3 *revealed* votes or no outcome is drawn (spec §4.4). Counted on
+reveals rather than commits, because a commit floor is cleared by committing and
+then withholding. `simulation/FINDINGS-floor-price.md` prices it: 0.9% of cases
+unresolvable at 20% turnout, against roughly 96 identities an attacker must hold
+instead of 3. **Below about 10% turnout no value works** — a floor of 3 leaves 28%
+of cases unresolvable there. Turnout is unmeasured, so the number is defensible at
+the participation this design needs anyway and bad below it.
 
-**A non-reveal costs nothing.** Reveals are public transactions in a shared
-phase, so a moderator can watch the tally form and withhold if they would be
-incoherent. §11 says this needs a price; there is no mechanism yet.
+**The floor did not make capture impossible, and the tests say so.** A clique that
+fields 3 revealing identities in *each* committee still takes a unanimous case with
+certainty, because the estimator is the raw share.
+`contracts/test/ThreeVote.t.sol` pins both halves: the old three-identity attack is
+dead, and the priced-up version still works. What changed is the cost, not the
+possibility.
 
 ## 8. Layout
 

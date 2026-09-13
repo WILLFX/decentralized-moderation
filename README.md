@@ -203,10 +203,6 @@ one is a client concern, consistent with §6.
 
 ## 8. Roadmap
 
-Milestone numbering is restated for the current design. Earlier architectures used
-their own numbering (M2, then M2.5 and M2.6, then M2.7 through M2.13); that history
-remains on the archive branch.
-
 **M1 — Specification and simulation. Complete.** The normative specification, the
 metadata schema, the guidelines document, and the measurements behind the working
 values: `simulation/FINDINGS-floor.md` (the separability bound),
@@ -225,8 +221,7 @@ supply cases; then the search application, which realizes the value of the index
 Delivered through [weeb-3](https://github.com/lat-murmeldjur/weeb-3) rather than as
 three standalone applications.
 
-**M4 — Launch.** An independent review of the contracts against a named commit,
-deployment to Chiado (the Gnosis testnet), then a guarded mainnet launch with
+**M4 — Launch.**deployment to Chiado (the Gnosis testnet), then a guarded mainnet launch with
 conservative caps.
 
 ### Dependency order

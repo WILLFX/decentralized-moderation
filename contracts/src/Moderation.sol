@@ -229,31 +229,47 @@ contract Moderation is ReentrancyGuard {
     error FeeTooLarge();
     error BadGuidelines();
 
-    constructor(
-        address _token,
-        address _stakes,
-        address _index,
-        uint256 _commitWindow,
-        uint256 _revealWindow,
-        uint256 _challengeWindow,
-        uint256 _maxWaitForThird,
-        uint256 _freezePerLoss,
-        uint256 _seedLag,
-        uint256 _feeMin,
-        uint256 _minRevealsPerCommittee,
-        uint32 _guidelinesVersion,
-        bytes32 _guidelinesHash
-    ) {
-        token = IERC20(_token);
-        stakes = IStakeRegistry(_stakes);
-        index = IIndexRegistry(_index);
-        commitWindow = _commitWindow;
-        revealWindow = _revealWindow;
-        challengeWindow = _challengeWindow;
-        maxWaitForThird = _maxWaitForThird;
-        freezePerLoss = _freezePerLoss;
-        seedLag = _seedLag;
-        feeMin = _feeMin;
+    /// @dev The constructor's arguments, as a struct rather than thirteen positional
+    ///      parameters. Two reasons, and the first is not style.
+    ///
+    ///      **Thirteen positional arguments broke the legacy compiler.** Decoding them
+    ///      overflows the stack ("Variable dataEnd is 1 slot too deep"), and while the
+    ///      shipped profile uses `via_ir` and does not care, `tools/mutate.py` compiles
+    ///      through the legacy pipeline for speed — 4.6s against 30s, which is the
+    ///      difference between a half-hour campaign and most of a day. A constructor
+    ///      that only `via_ir` can compile would have turned every mutant INVALID and
+    ///      reported it as a clean sweep. A `memory` struct is one stack slot.
+    ///
+    ///      **And nine of the thirteen were `uint256`.** Any two of them could be
+    ///      transposed and still compile, in a constructor that sets the freeze
+    ///      duration, the fee floor and every phase window. `Deploy` names every field.
+    struct Config {
+        address token;
+        address stakes;
+        address index;
+        uint256 commitWindow;
+        uint256 revealWindow;
+        uint256 challengeWindow;
+        uint256 maxWaitForThird;
+        uint256 freezePerLoss;
+        uint256 seedLag;
+        uint256 feeMin;
+        uint256 minRevealsPerCommittee;
+        uint32 guidelinesVersion;
+        bytes32 guidelinesHash;
+    }
+
+    constructor(Config memory cfg) {
+        token = IERC20(cfg.token);
+        stakes = IStakeRegistry(cfg.stakes);
+        index = IIndexRegistry(cfg.index);
+        commitWindow = cfg.commitWindow;
+        revealWindow = cfg.revealWindow;
+        challengeWindow = cfg.challengeWindow;
+        maxWaitForThird = cfg.maxWaitForThird;
+        freezePerLoss = cfg.freezePerLoss;
+        seedLag = cfg.seedLag;
+        feeMin = cfg.feeMin;
 
         // A floor of 0 is not "the floor turned off", it is a footgun: with no
         // floor, a case that nobody revealed reaches `_decide` with an empty
@@ -262,16 +278,16 @@ contract Moderation is ReentrancyGuard {
         // meaningful setting and is already strictly stronger than the combined
         // "any reveal at all" check this replaced, because it demands one in EACH
         // committee.
-        if (_minRevealsPerCommittee == 0) revert BadFloor();
-        minRevealsPerCommittee = _minRevealsPerCommittee;
+        if (cfg.minRevealsPerCommittee == 0) revert BadFloor();
+        minRevealsPerCommittee = cfg.minRevealsPerCommittee;
 
         // Both are rejected at zero rather than defaulted. A zero hash would pin the
         // cases of this deployment to no document at all, which is the state this
         // exists to end; a zero version gives a reader no way to say which revision
         // they are looking at.
-        if (_guidelinesVersion == 0 || _guidelinesHash == bytes32(0)) revert BadGuidelines();
-        guidelinesVersion = _guidelinesVersion;
-        guidelinesHash = _guidelinesHash;
+        if (cfg.guidelinesVersion == 0 || cfg.guidelinesHash == bytes32(0)) revert BadGuidelines();
+        guidelinesVersion = cfg.guidelinesVersion;
+        guidelinesHash = cfg.guidelinesHash;
     }
 
     // ------------------------------------------------------------- submit

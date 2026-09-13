@@ -95,20 +95,25 @@ contract Deploy is Script {
 
         s.stakes = new StakeRegistry(p.token, p.stakeAmount);
         s.index = new IndexRegistry();
+        // Every field named. Nine of these are `uint256`; positionally, the freeze
+        // duration and the fee floor are interchangeable to the compiler and not to
+        // anybody else.
         s.moderation = new Moderation(
-            p.token,
-            address(s.stakes),
-            address(s.index),
-            p.commitWindow,
-            p.revealWindow,
-            p.challengeWindow,
-            p.maxWaitForThird,
-            p.freezePerLoss,
-            p.seedLag,
-            p.feeMin,
-            p.minRevealsPerCommittee,
-            p.guidelinesVersion,
-            p.guidelinesHash
+            Moderation.Config({
+                token: p.token,
+                stakes: address(s.stakes),
+                index: address(s.index),
+                commitWindow: p.commitWindow,
+                revealWindow: p.revealWindow,
+                challengeWindow: p.challengeWindow,
+                maxWaitForThird: p.maxWaitForThird,
+                freezePerLoss: p.freezePerLoss,
+                seedLag: p.seedLag,
+                feeMin: p.feeMin,
+                minRevealsPerCommittee: p.minRevealsPerCommittee,
+                guidelinesVersion: p.guidelinesVersion,
+                guidelinesHash: p.guidelinesHash
+            })
         );
 
         s.stakes.setModeration(address(s.moderation));

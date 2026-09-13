@@ -106,10 +106,8 @@ contract IntegrationTest is Test {
         Deploy.Stack memory broken;
         broken.stakes = new StakeRegistry(address(token), STAKE);
         broken.index = new IndexRegistry();
-        broken.moderation = new Moderation(
-            address(token), address(broken.stakes), address(broken.index),
-            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1, 1, keccak256("g")
-        );
+        broken.moderation = new Moderation(Moderation.Config(address(token), address(broken.stakes), address(broken.index),
+            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1, 1, keccak256("g")));
         // deployed, never linked — this is the state that otherwise fails at the
         // first commit, long after anyone is watching
         vm.expectRevert(abi.encodeWithSelector(Deploy.NotLinked.selector, "stakes->moderation"));

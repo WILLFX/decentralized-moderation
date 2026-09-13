@@ -47,10 +47,8 @@ contract ThreeVoteTest is Test {
     }
 
     function _deploy(uint256 floor) internal returns (Moderation mod) {
-        mod = new Moderation(
-            address(token), address(stakes), address(index),
-            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, floor, 1, keccak256("g")
-        );
+        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, floor, 1, keccak256("g")));
         token.mint(sub, 1e12);
         vm.prank(sub);
         token.approve(address(mod), type(uint256).max);

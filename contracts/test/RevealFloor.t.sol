@@ -49,11 +49,9 @@ contract RevealFloorTest is Test {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(
-            address(token), address(stakes), address(index),
+        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
-            1, keccak256("g")
-        );
+            1, keccak256("g")));
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
             stakes.add(mods[i]);
@@ -136,11 +134,9 @@ contract RevealFloorTest is Test {
 
     function test_constructorRejectsAFloorOfZero() public {
         vm.expectRevert(Moderation.BadFloor.selector);
-        new Moderation(
-            address(token), address(stakes), address(index),
+        new Moderation(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, 0,
-            1, keccak256("g")
-        );
+            1, keccak256("g")));
     }
 
     function test_bothCommitteesAtTheFloorResolvesNormally() public {

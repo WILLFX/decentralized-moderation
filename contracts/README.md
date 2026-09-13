@@ -4,14 +4,23 @@ Solidity implementation of **`specs/protocol.md`**, which is normative.
 
 | File | Runtime (shipped, `via_ir`) | legacy | Role |
 |---|---:|---:|---|
-| `src/Moderation.sol` | 11,582 B | 13,569 B | the case state machine — §3 through §8 |
+| `src/Moderation.sol` | 11,753 B | 13,730 B | the case state machine — §3 through §8 |
 | `src/StakeRegistry.sol` | 2,396 B | 2,778 B | stake custody and frozen time — §2 |
 | `src/IndexRegistry.sol` | 2,504 B | 2,899 B | the topic → entry index — §7 |
 
 Both columns clear EIP-170's 24,576 B with wide margin, so `via_ir` is a choice
-rather than a necessity — it stays on because the shipped profile and the test
-profile should be the same bytecode. (It was once a necessity: the contract these
-replaced was 25,986 B legacy and undeployable.)
+rather than a necessity for *size* — it stays on because the shipped profile and the
+test profile should be the same bytecode. (It was once a size necessity: the contract
+these replaced was 25,986 B legacy and undeployable.)
+
+**The legacy pipeline has to keep working even though nothing ships through it**,
+because `tools/mutate.py` compiles that way for speed — 4.6s against 30s a mutant.
+Pinning the guidelines briefly broke it: thirteen positional constructor arguments
+overflow the stack during decoding ("Variable dataEnd is 1 slot too deep"), which
+`via_ir` compiles happily and legacy does not. A campaign would then have turned every
+mutant INVALID and reported a clean sweep. The constructor takes a `Config` struct
+instead — one stack slot — and `forge build` under `FOUNDRY_VIA_IR=false` is the check
+that catches this class of breakage.
 
 **The guidelines are pinned here, not governed.** `Moderation` carries
 `guidelinesVersion` and `guidelinesHash` as immutables, so every case in a deployment

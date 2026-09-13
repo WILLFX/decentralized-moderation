@@ -49,11 +49,9 @@ contract GuardsTest is Test {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(
-            address(token), address(stakes), address(index),
+        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
-            GUIDELINES_VERSION, GUIDELINES_HASH
-        );
+            GUIDELINES_VERSION, GUIDELINES_HASH));
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
             stakes.add(mods[i]);

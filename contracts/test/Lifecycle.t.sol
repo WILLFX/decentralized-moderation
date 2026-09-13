@@ -131,8 +131,7 @@ contract LifecycleTest is Test {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(
-            address(token),
+        mod = new Moderation(Moderation.Config(address(token),
             address(stakes),
             address(index),
             COMMIT_WINDOW,
@@ -144,8 +143,7 @@ contract LifecycleTest is Test {
             FEE,
             FLOOR,
             GUIDELINES_VERSION,
-            GUIDELINES_HASH
-        );
+            GUIDELINES_HASH));
 
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));

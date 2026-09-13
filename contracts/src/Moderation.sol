@@ -130,8 +130,9 @@ contract Moderation is ReentrancyGuard {
     uint256 public constant MAX_TOPICS = 5;
 
     /// @dev Only 256 block hashes are addressable. Every seed must be consumed
-    ///      inside this horizon or the phase cannot proceed.
-    uint256 internal constant BLOCKHASH_HORIZON = 250;
+    ///      inside this horizon or the phase cannot proceed. Public because a
+    ///      client computing its own eligibility needs to know when a seed dies.
+    uint256 public constant BLOCKHASH_HORIZON = 250;
 
     // ------------------------------------------------------------ immutables
 
@@ -332,6 +333,9 @@ contract Moderation is ReentrancyGuard {
             n >>= 1;
             ++bits;
         }
+        // `>` against `>=` here is an EQUIVALENT mutant: at `bits == 5` both
+        // branches yield 0, because `5 - 5` is the same as the else. Mutation
+        // testing will report it as a survivor forever. Do not chase it.
         return bits > 5 ? bits - 5 : 0;
     }
 
@@ -726,6 +730,16 @@ contract Moderation is ReentrancyGuard {
     function _eligible(uint256 caseId, address m, uint8 committee) internal view returns (bool) {
         Case storage c = cases[caseId];
         uint256 sb = committee == 1 ? c.seedBlockA : c.seedBlockB;
+
+        // `sb == 0` is UNREACHABLE through either caller and kept as defence in
+        // depth. `commit` and `isEligible` both ask only about the CURRENT phase's
+        // committee: `seedBlockA` is armed in `submit` and `seedBlockB` in
+        // `closeCommitA`, so by the time a phase can be asked about, its seed
+        // exists. Mutation testing will always report that clause's mutants as
+        // survivors for this reason; the `block.number <= sb` half is reachable and
+        // is tested. Do not delete it — it is what stops a future caller reaching
+        // past the current phase from hashing against `blockhash(0)`, which every
+        // identity would pass identically.
         if (sb == 0 || block.number <= sb) revert SeedUnavailable();
         if (block.number > sb + BLOCKHASH_HORIZON) revert SeedUnavailable();
 

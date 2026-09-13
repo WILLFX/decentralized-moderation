@@ -18,6 +18,7 @@ design.
 | `FINDINGS-staged.md` | `run_staged.py`, `run_exact.py` | `staged.py`, `exact.py` | Monte Carlo, cross-checked against exact enumeration |
 | `FINDINGS-floor-price.md` | `run_floor_price.py` | `floor_price.py` | exact binomial tails |
 | the draw differential | `check_draw_vectors.py` | `draw.py`, `keccak.py` | re-derivation against contract-emitted vectors |
+| the eligibility differential | `check_eligibility_vectors.py` | `eligibility.py`, `keccak.py` | re-derivation against contract-emitted vectors |
 
 ```bash
 cd simulation
@@ -25,7 +26,8 @@ python3 run_floor.py          # the separability bound
 python3 run_staged.py         # the staged pair, sampled
 python3 run_exact.py          # the same comparison, enumerated
 python3 run_floor_price.py    # pricing §11's per-committee minimum
-python3 check_draw_vectors.py # after: forge test --match-test test_emitDrawVectors
+python3 check_draw_vectors.py        # after: forge test --match-test test_emitDrawVectors
+python3 check_eligibility_vectors.py # after: forge test --match-test test_emitEligibilityVectors
 ```
 
 ## The four results, shortest form
@@ -55,6 +57,19 @@ minimum closes that; its price is cases that cannot resolve, and it turns
 entirely on turnout, which is unmeasured. `k` between 2 and 4 is defensible at
 20% turnout or better; nothing is defensible below 10%.
 
+**The eligibility differential — which identities, not how many.**
+`Integration.t.sol` checks that eligibility narrows to about half at 64 staked. That
+constrains the count and nothing else, and inverting the predicate survived the
+whole contract suite: the complement of a half-sized set is also half-sized, and
+every test commits *whoever is eligible*. `eligibility.py` re-derives §3's
+predicate — and the threshold, from the registry size — so the comparison is
+identity by identity: 128 vectors across both committees of a real case, 512 across
+planted bit widths 1–4 (a real registry pins `eligBits` at 1 from 64 to 127, so the
+shift would otherwise be tested once). It requires the two committees to be
+different draws, refuses vectors emitted where the contract short-circuits at
+`eligBits == 0`, and refuses any width whose eligible set is uniform — all-false
+cannot distinguish the predicate from a constant.
+
 **The draw differential — the contract's ticket derivation, re-derived
 independently.** `Draw.t.sol` constrains the *rate*, that the outcome tracks
 `3a² − 2a³`. That is not enough: a domain-separation mistake keeps `u` uniform,
@@ -63,7 +78,14 @@ two draws identical. So `check_draw_vectors.py` recomputes every `u[i]` from a
 pure-Python keccak that refuses to load unless it reproduces published KATs, and
 **sabotages its own derivation** — dropping the round from the preimage — failing
 loudly if the comparison does not notice. A differential that agrees is only
-evidence if it would have disagreed.
+evidence if it would have disagreed. The eligibility checker does the same, dropping
+the committee.
+
+**Neither differential runs under `forge test`, so neither shows up in a mutation
+score.** A mutant in the draw or the eligibility hash regenerates the vectors too,
+so the Python side agrees with the mutant and the campaign calls it a survivor.
+These are evidence about the contracts; they are not part of the suite's measured
+strength, and a property that has to appear there needs a Solidity assertion.
 
 ## One estimator, in one place
 

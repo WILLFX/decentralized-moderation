@@ -4,7 +4,7 @@ Solidity implementation of **`specs/protocol.md`**, which is normative.
 
 | File | Runtime (shipped, `via_ir`) | legacy | Role |
 |---|---:|---:|---|
-| `src/Moderation.sol` | 11,544 B | 13,550 B | the case state machine — §3 through §8 |
+| `src/Moderation.sol` | 11,582 B | 13,569 B | the case state machine — §3 through §8 |
 | `src/StakeRegistry.sol` | 2,396 B | 2,778 B | stake custody and frozen time — §2 |
 | `src/IndexRegistry.sol` | 2,504 B | 2,899 B | the topic → entry index — §7 |
 
@@ -24,7 +24,7 @@ is watching. Every link is asserted in both directions, and a test proves
 
 ## Tests
 
-91 tests across eleven suites.
+115 tests across thirteen suites.
 
 | suite | what it is for |
 |---|---|
@@ -39,6 +39,8 @@ is watching. Every link is asserted in both directions, and a test proves
 | `Invariant.t.sol` | nine properties under fuzzed orderings |
 | `ThreeVote.t.sol` | what §4.4's floor bought, and what it did not |
 | `RevealFloor.t.sol` | §4.4 — the floor, and its two asymmetric failure paths |
+| `Settlement.t.sol` | holes a mutation campaign found: fund safety, guards, boundaries |
+| `Eligibility.t.sol` | §3 — the threshold, the seed window, and the vector emitters |
 
 Three of those carry more weight than their size suggests.
 
@@ -67,23 +69,53 @@ case with certainty, because `A/N` is still `A/N`. **The floor priced capture; i
 not remove it.** If anyone later reads it as having removed it, the second test is
 the correction.
 
-## The draw differential
+## The two differentials
 
-`Draw.t.sol` constrains the *rate* — that the outcome tracks `3a² − 2a³`. It says
-nothing about the ticket derivation, and a domain-separation mistake keeps `u`
-uniform, keeps the rate exactly right, passes every statistical test, and
-silently makes two draws identical.
+Both follow the same pattern, and both exist because a check on an *aggregate* is
+blind to which inputs produced it.
 
-So `simulation/check_draw_vectors.py` re-derives every `u[i]` from a pure-Python
-keccak that refuses to load unless it reproduces published KATs. 48 swept vectors
-agree. It also **sabotages its own derivation** — dropping the round from the
-preimage — and fails loudly if the comparison does not notice, because a
-differential that agrees is only evidence if it would have disagreed.
+**The draw.** `Draw.t.sol` constrains the *rate* — that the outcome tracks
+`3a² − 2a³`. It says nothing about the ticket derivation, and a domain-separation
+mistake keeps `u` uniform, keeps the rate exactly right, passes every statistical
+test, and silently makes two draws identical. So
+`simulation/check_draw_vectors.py` re-derives every `u[i]` in Python. 48 vectors
+agree.
+
+**Eligibility.** `Integration.t.sol` checks that eligibility narrows: at 64 staked,
+about half are eligible. That constrains the *count*. A mutation campaign showed
+what hides behind it — inverting the predicate, `h >> (256 - eligBits) == 0` to
+`!= 0`, survived the entire suite, because the complement of a half-sized set is
+also half-sized and every test commits *whoever is eligible* rather than a set it
+fixed in advance. So `simulation/check_eligibility_vectors.py` re-derives the
+predicate identity by identity: 128 vectors from both committees of a real case,
+plus 512 from a planted sweep across bit widths 1–4, since a real registry pins
+`eligBits` at 1 for every size from 64 to 127 and the shift would otherwise be
+compared at one width only. It also re-derives the *threshold* from the registry
+size, and requires the two committees to be different draws.
+
+Each Python side loads a keccak that refuses to run unless it reproduces published
+KATs, **sabotages its own derivation** — the draw drops the round from the
+preimage, eligibility drops the committee — and fails loudly if the comparison does
+not notice. A differential that agrees is only evidence if it would have disagreed.
+Each also refuses to pass on vacuous input: the eligibility checker rejects vectors
+emitted at `eligBits == 0`, where the contract short-circuits, and rejects any
+width whose eligible set is uniform, because a set that is all-false cannot
+distinguish the predicate from a constant.
 
 ```
-cd contracts && forge test --match-test test_emitDrawVectors
+cd contracts && forge test --match-test "test_emit.*Vectors"
 python3 simulation/check_draw_vectors.py
+python3 simulation/check_eligibility_vectors.py
 ```
+
+**Both are Python scripts, so `forge test` does not run them — and neither does a
+mutation campaign.** That is worth stating plainly: a mutant that changes the draw
+or the eligibility hash also regenerates the vectors, so the differential agrees
+with the mutant and the campaign scores it a survivor. The differentials are
+evidence about the code; they contribute nothing to the mutation rate, and any
+property that must show up in that rate needs an assertion inside Solidity.
+`test_thePhaseDerivedCommitteeMatchesTheExplicitOne` is there for exactly that
+reason.
 
 ## Mutation testing
 

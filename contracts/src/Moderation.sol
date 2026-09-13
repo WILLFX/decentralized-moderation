@@ -105,7 +105,7 @@ contract Moderation is ReentrancyGuard {
         // --- outcome
         uint8 preliminary; // published at each draw
         uint8 ticketsApprove; // of 3, at the latest draw
-        bool everChallenged; // §7: a challenged entry is never anonymous
+        bool everChallenged; // §7: a volunteered objection is on record
         uint128 pot;
     }
 

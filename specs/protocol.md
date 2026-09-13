@@ -242,9 +242,26 @@ declared topics, and the tally.
 Two facts are recorded alongside every entry rather than being compressed into a
 label:
 
-- **whether the entry was anonymous** — an entry that was challenged can never be
-  anonymous;
-- **whether all three tickets were Approve.**
+- **whether all three tickets were Approve** — unanimity of the draw, not of the
+  tally;
+- **whether the entry was ever challenged.**
+
+**On the second: earlier drafts of this section called an unchallenged entry
+"anonymous". That word is retired rather than defined.** Nothing here is anonymous —
+every stake, commitment, revealed vote and fee payment is on chain, and a label
+suggesting otherwise would mislead a reader about the one thing §7 exists to avoid
+deciding for them. What the fact records is narrower and worth stating directly.
+
+A challenge is the only act in this protocol where an identity **volunteers** a
+position against a published outcome. Every other vote is the discharge of a
+commitment made blind, before the voter could know what they were agreeing or
+disagreeing with. So a challenged entry carries a named, deliberate objection on
+record forever, and an unchallenged one does not.
+
+Read it with its limit: a challenge carries the ordinary freeze liability (§6), so
+the absence of one is partly the absence of appetite for that liability and not
+proof that nobody doubted the entry. It is evidence about what somebody was willing
+to stake, which is a different and smaller thing than evidence about the content.
 
 There is no `SUPER_SAFE` flag. A client that wants a stricter filter reads these
 facts and applies its own rule; the protocol does not decide what "safe enough"
@@ -324,7 +341,6 @@ Not decided, and each needs a number before deployment.
   cases unresolvable. Turnout is unmeasured, so 3 is a defensible choice at the
   participation the design needs anyway and a bad one below it. It is a constructor
   argument, so the testnet can move it without a rewrite.
-- **What "anonymous" means** in §7.
 - **Who decides that a guidelines revision is warranted.** The *binding* is settled
   (§2): the version and hash are immutable, a deployment judges against one text, and
   `script/Deploy.s.sol` refuses a stack whose pin is not the document. What is open is

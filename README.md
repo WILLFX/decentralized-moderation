@@ -138,8 +138,14 @@ never cheaper than being wrong.
 
 A finalized Approve writes the content hash, the metadata hash, the topics and
 the tally. Two facts are recorded beside it rather than compressed into a label:
-whether the draw was **unanimous**, and whether the entry was ever
-**challenged**.
+whether the draw was **unanimous**, and whether the entry was ever **challenged**.
+
+The second is worth reading precisely. A challenge is the only act in the protocol
+where an identity *volunteers* a position against a published outcome — every other
+vote is the discharge of a commitment made blind — so a challenged entry carries a
+named, deliberate objection on record. But a challenge costs the ordinary freeze
+liability, so the absence of one is partly the absence of appetite for that liability
+rather than proof nobody doubted the entry.
 
 **There is no `SUPER_SAFE` flag.** A client wanting a cautious filter reads those
 and applies its own rule. The protocol does not decide what "safe enough" means

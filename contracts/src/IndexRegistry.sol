@@ -11,8 +11,13 @@ pragma solidity ^0.8.28;
 /// recorded facts and lets the client decide:
 ///
 ///   * `allTicketsApprove` — whether the draw was unanimous;
-///   * `everChallenged` — whether anyone challenged it. A challenged entry is
-///     never anonymous.
+///   * `everChallenged` — whether any identity volunteered a position against the
+///     published outcome. Every other vote on a case is the discharge of a
+///     commitment made blind; a challenge is the one deliberate objection, so it is
+///     the one thing an entry can carry that somebody chose to put their name to.
+///     §7 retired the word "anonymous" for this: nothing here is anonymous, and the
+///     absence of a challenge is partly the absence of appetite for the freeze
+///     liability rather than the absence of doubt.
 ///
 /// A client wanting a cautious filter reads those and applies its own rule. The
 /// protocol does not decide what "safe enough" means on a reader's behalf, and a

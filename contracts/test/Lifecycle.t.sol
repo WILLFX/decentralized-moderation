@@ -326,7 +326,7 @@ contract LifecycleTest is Test {
         assertEq(c.pooledReject, 1, "the challenge counted as a Reject");
         assertEq(c.pooledApprove, 4, "and the pool carried forward");
         assertEq(c.challenges, 1);
-        assertTrue(c.everChallenged, "never anonymous again");
+        assertTrue(c.everChallenged, "the objection is on record for good");
         assertEq(c.phase, uint8(Moderation.Phase.COMMIT_A), "a fresh staged pair");
         assertEq(c.seedBlockB, 0, "B unknowable again");
         assertEq(c.commitsA, 0, "per-committee counts reset, tally does not");

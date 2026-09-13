@@ -40,7 +40,7 @@ contract IndexTest is Test {
 
         IndexRegistry.Entry memory b = idx.entryOf(keccak256("b"), BIO);
         assertFalse(b.allTicketsApprove);
-        assertTrue(b.everChallenged, "challenged: never anonymous");
+        assertTrue(b.everChallenged, "challenged: the objection is on record");
 
         // both are listed. the index does not filter on the reader's behalf
         assertTrue(idx.isListed(keccak256("a"), BIO));

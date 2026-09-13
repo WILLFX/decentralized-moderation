@@ -56,7 +56,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from protocol_v3 import a_hat, draw_tickets, f, verdict
+from estimator import draw_tickets, f, share, verdict
 
 APPROVE, REJECT = True, False
 
@@ -179,10 +179,19 @@ def _votes(
 
 
 def _draw_verdict(rng: random.Random, approve: int, reject: int) -> bool:
+    """The drawn outcome, or REJECT when there is nothing to draw against.
+
+    An empty tally is not a drawn Reject on chain — with §4.4's reveal floor the
+    case never reaches a draw at all — but this engine predates the floor and models
+    a round with no votes as producing no listing, which is the same observable for
+    what it measures. `estimator.verdict` returns None there so the distinction is
+    not lost silently.
+    """
     total = approve + reject
     if total == 0:
         return REJECT
-    return verdict(draw_tickets(rng), approve, total)
+    drawn = verdict(draw_tickets(rng), approve, total)
+    return REJECT if drawn is None else drawn
 
 
 @dataclass

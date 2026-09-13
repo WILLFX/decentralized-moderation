@@ -12,6 +12,17 @@ something else, and that something else is worth having.**
 This file previously reported the opposite. §E records what was wrong and why,
 because the error is more instructive than the result.
 
+**Re-run against the implemented estimator.** Every figure below was once computed
+against the Laplace form `â = (A+1)/(N+2)`, which `Moderation._estimator` does not
+use. `specs/protocol.md` §5 settles the estimator as the raw share `A/N` and both
+engines now import it from `estimator.py`, so the numbers here are the ones the
+contract produces. The conclusions did not change — they rest on both committees'
+votes feeding a single draw, which is a structural fact about the lifecycle and not
+a property of the estimator — but the figures did, and in a consistent direction:
+Laplace pulls the estimate toward 0.5, so it was *understating* capture wherever
+the attacker's share ran above half. At `q = 40%` the old figure was 0.6726 and the
+true one is 0.6954.
+
 ---
 
 ## §A Staging makes no difference to capture
@@ -22,10 +33,10 @@ staged committees of `n`:
 
 | q | one committee of 2n | two staged of n | difference |
 |---:|---:|---:|---:|
-| 10% | 0.394536 | 0.394542 | +0.000006 |
-| 20% | 0.491564 | 0.491550 | −0.000014 |
-| 30% | 0.585065 | 0.585028 | −0.000042 |
-| 40% | 0.672572 | 0.672514 | −0.000065 |
+| 10% | 0.379088 | 0.379091 | +0.000003 |
+| 20% | 0.490338 | 0.490320 | −0.000018 |
+| 30% | 0.597060 | 0.597014 | −0.000046 |
+| 40% | 0.695416 | 0.695346 | −0.000070 |
 
 Identical to five decimal places. The residual is consistent with the small
 variance difference between one binomial draw at `2n/N` and two at `n/N`; it is
@@ -45,13 +56,13 @@ E26, re-run with the attacker committing everywhere:
 
 | P(honest voter follows a visible lead) | tally visible | tally hidden | cost |
 |---:|---:|---:|---:|
-| 0% | 59.16% | 58.88% | +0.28pp |
-| 15% | 61.44% | 58.88% | +2.56pp |
-| 35% | 64.28% | 58.88% | +5.40pp |
-| 50% | 65.55% | 58.88% | +6.67pp |
-| 75% | 69.43% | 58.88% | +10.55pp |
+| 0% | 59.74% | 59.42% | +0.32pp |
+| 15% | 62.15% | 59.42% | +2.73pp |
+| 35% | 65.10% | 59.42% | +5.68pp |
+| 50% | 66.29% | 59.42% | +6.87pp |
+| 75% | 70.12% | 59.42% | +10.70pp |
 
-**Between 0 and 10.6 points**, entirely driven by how much honest voters
+**Between 0 and 10.7 points**, entirely driven by how much honest voters
 actually conform. At zero conformity there is no effect — which corrects an
 earlier claim here that a visible tally was worth 10 points even with nobody
 swayed. That claim was an artefact of the error in §E.
@@ -83,7 +94,7 @@ an arithmetic slip — it looks settled.
 ## §D What holds
 
 1. **Staging costs nothing.** §A.
-2. **Staging hides the tally, worth 0–10.6 points** depending on conformity. §B.
+2. **Staging hides the tally, worth 0–10.7 points** depending on conformity. §B.
 3. Therefore the staged design is **better than a single committee**, for the
    reason its author gave and not for the reason previously argued here.
 
@@ -106,8 +117,9 @@ them, and reported it as an advantage conferred by the architecture. The 11.6×
 was a denominator artefact: there is no "abandon" — the fee is paid, the case
 runs, and not voting is simply losing.
 
-**The control in this file already said so.** E25 forced the attacker to commit
-everywhere and returned 58.38% against 59.09% — no difference. That was written
+**The control in this file already said so.** E24 forces the attacker to commit
+everywhere and returns 59.33% for one committee against 59.49% for the staged pair
+— no difference. That was written
 up as "staging itself contributes nothing" and then the selective numbers were
 used as the headline anyway.
 

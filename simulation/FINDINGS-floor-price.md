@@ -10,19 +10,30 @@ tails, no sampling.
 
 ## §A What is being priced, and why it is not optional
 
-`specs/protocol.md` §11 carries an open item, in its own words: *"Set a minimum
-commitment requirement for each committee. A combined threshold is not enough."*
+**Since this was written, the floor has landed as `specs/protocol.md` §4.4, with
+`MIN_REVEALS = 3`.** Two things about it differ from what is priced below and both
+make the cost higher, not lower: it counts **reveals** rather than commits (§G.2),
+and the value chosen sits inside the range §F concludes with rather than at its
+cheap end. Everything else here stands as the pricing behind that choice.
 
-It reads like tidy-up. It is not. Three specified choices meet:
+`specs/protocol.md` then carried it as an open item, in its own words: *"Set a
+minimum commitment requirement for each committee. A combined threshold is not
+enough."*
+
+It read like tidy-up. It is not. Three specified choices meet:
 
 - §5's raw share `A/N` makes a unanimous tally **certain**;
 - §4.1 starts the commit clock at the third commitment and says plainly that
   three commits are a trigger, **not a quorum**;
-- nothing requires committee B to contain anybody.
+- nothing then required committee B to contain anybody.
 
-Each is defensible alone. Together, **three identities that are the only
-committers take a case with probability 1** — pinned at 40 of 40 in
-`contracts/test/ThreeVote.t.sol`.
+Each is defensible alone. Together, **three identities that were the only
+committers took a case with probability 1**. `contracts/test/ThreeVote.t.sol` used
+to pin that at 40 of 40; it now pins the two facts that replaced it — that the
+attack dies at even the weakest floor, because it needed committee B to hold nobody,
+and that a clique fielding `MIN_REVEALS` revealing identities in *each* committee
+still takes a unanimous case with certainty. The floor priced capture. It did not
+remove it, and §5's estimator is unchanged.
 
 ## §B The committee size is not a free parameter
 
@@ -127,9 +138,14 @@ not mine to make.
 1. Turnout is independent across identities and across the two committees. Real
    moderators are correlated — the same people are busy at the same times — and
    correlation makes the squaring worse, not better.
-2. Committers are treated as revealers. A commit that never reveals still counts
-   toward a commit floor, which is what the specification asks for, but it means
-   the floor guarantees participation and not evidence.
+2. Committers are treated as revealers. **This assumption is the reason the floor
+   as implemented counts REVEALS.** A commit that never reveals would still clear a
+   commit floor, so a clique could commit `k` per committee and then reveal only
+   what helps — the floor would guarantee participation and not evidence. That is
+   what `specs/protocol.md` §4.4 closes, and it means the cost rows above should be
+   read against the *reveal* rate rather than the commit rate: at 20% turnout a
+   floor of 3 costs 0.1% of cases if everyone who commits reveals, and 0.9% at a 75%
+   reveal rate.
 3. An attacker is always-on and honest moderators are not, which is the design's
    own stated asymmetry.
 4. The eligibility rate is exact from §3; the registry sizes are chosen, the

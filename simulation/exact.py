@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from math import comb
 from typing import Dict, Iterable, List, Tuple
 
+from estimator import f, share
+
 #: Probability mass below which a state is dropped. The total dropped mass is
 #: tracked and asserted against this, so the error is bounded and visible rather
 #: than assumed away.
@@ -129,15 +131,6 @@ class Model:
         return not self.content_is_safe
 
 
-def a_hat(approve: int, total: int) -> float:
-    return (approve + 1) / (total + 2)
-
-
-def f(a: float) -> float:
-    """P(majority of three tickets approves) = 3a^2 - 2a^3."""
-    return 3.0 * a * a - 2.0 * a * a * a
-
-
 # --------------------------------------------------------------------------
 # one committee
 # --------------------------------------------------------------------------
@@ -221,7 +214,7 @@ def expected_admit(d: Dist, *, attacker_wants_approve: bool) -> float:
     for (approve, total), p in d.items():
         if total == 0:
             continue
-        pa = f(a_hat(approve, total))
+        pa = f(share(approve, total))
         tot += p * (pa if attacker_wants_approve else (1.0 - pa))
     return tot
 

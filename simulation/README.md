@@ -65,25 +65,30 @@ pure-Python keccak that refuses to load unless it reproduces published KATs, and
 loudly if the comparison does not notice. A differential that agrees is only
 evidence if it would have disagreed.
 
-## `protocol_v3.py`, and a divergence to know about
+## One estimator, in one place
 
-`protocol_v3.py` is an engine for an **earlier design** — widening, quorum gates,
-balance debits, `REVEAL_BOND`/`LAMBDA`. That design is gone and its findings file
-is not on this branch. The module survives only because `staged.py` imports four
-primitives from it: `a_hat`, `draw_tickets`, `verdict`, `f`.
+`estimator.py` holds the draw as `specs/protocol.md` §5 decides it and
+`Moderation._estimator` implements it: the **raw share `A/N`**, the three tickets,
+and the `u < a` comparison the contract makes by cross-multiplication. Both live
+engines import it — `staged.py` samples, `exact.py` enumerates — and neither keeps
+its own copy.
 
-One of those four does not match what is implemented. `a_hat` is the Laplace
-estimator `â = (A+1)/(N+2)`; `Moderation._estimator` uses the **raw share
-`A/N`**. So `FINDINGS-staged.md`'s numbers are computed against an estimator the
-contract does not use. The direction of its conclusion does not depend on the
-estimator — it rests on both committees' votes feeding one draw — but the figures
-do, and raw `A/N` is the more permissive of the two, so the staged pair is if
-anything worse than reported rather than better. Tracked as work to do, not as a
-result to cite around.
+That is not tidiness. They did each keep their own copy, both of the Laplace form
+`â = (A+1)/(N+2)`, which the contract does not use, so every figure in
+`FINDINGS-staged.md` was computed against the wrong estimator until it was re-run.
+The conclusions held — they rest on both committees' votes feeding one draw, which
+is structural — but the figures moved, and in a direction worth knowing: Laplace
+pulls the estimate toward 0.5, so it **understated** capture wherever the attacker's
+share ran above half. At a 40% attacker share the old figure was 0.6726 against a
+true 0.6954.
 
-Everything else here is estimator-independent: `floor.py` and `floor_price.py`
-derive their own quantities, `exact.py` enumerates, and `draw.py` reproduces the
-contract exactly by construction.
+An engine for the superseded design (`protocol_v3.py` — widening, quorum gates,
+balance debits, `REVEAL_BOND`/`LAMBDA`) used to live here as the source of those
+primitives. It is gone; nothing imported it once `estimator.py` existed.
+
+`floor.py`, `floor_price.py` and `draw.py` were never affected: the first two derive
+their own quantities and the third reproduces the contract's keccak by
+construction.
 
 ## What these models do not do
 

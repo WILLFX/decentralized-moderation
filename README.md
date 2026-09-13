@@ -11,11 +11,15 @@ search application over — with no company in the middle.
 **Normative:** [`specs/protocol.md`](specs/protocol.md). Where anything here
 disagrees with it, the spec wins.
 
-> **Status.** The three contracts implement the protocol. 123 tests, mutation
-> testing, a two-implementation differential on the verdict draw. **Nothing is
-> deployed, nothing has been externally reviewed, and §11 of the spec lists
-> parameters that have no value yet** — including `prior`, which decides whether
-> any of this works at all.
+> **Status: M1 and M2 complete, M3 next** (§8). The three contracts implement the
+> protocol — 123 tests, a mutation campaign at 97.0%, independent differentials on
+> both the draw and eligibility. **Nothing is deployed and nothing has been
+> externally reviewed.**
+>
+> **M3 is the moderator interface, and it is the blocker.** The parameters §7 lists
+> as open are measurements, not decisions, and the instrument is a running testnet —
+> which needs moderators, who need somewhere to moderate. `prior` is the sharpest of
+> them: it decides whether any of this works at all.
 
 ---
 
@@ -199,7 +203,54 @@ certainty, because the estimator is the raw share.
 dead, and the priced-up version still works. What changed is the cost, not the
 possibility.
 
-## 8. Layout
+## 8. Roadmap
+
+Restated for this design. The earlier architectures each had their own milestone
+numbering — M2, then M2.5/M2.6, then M2.7–M2.13 — which is what three rewrites leave
+behind; that history is on the archive branch and is not continued here.
+
+**M1 — Specification and simulation. Complete.** The normative spec, the metadata
+schema, the guidelines document, and the measurements that turn working values into
+numbers rather than intuition: `simulation/FINDINGS-floor.md` (the separability
+bound), `FINDINGS-staged.md` (staging is neutral on capture), `FINDINGS-floor-price.md`
+(the per-committee minimum priced).
+
+**M2 — Contracts. Complete.** `Moderation`, `StakeRegistry`, `IndexRegistry` and a
+deploy script that verifies its own links. 123 tests across thirteen suites, a
+mutation campaign at 97.0% with every survivor accounted for in the source, and two
+independent differentials — the draw and eligibility — each of which sabotages its own
+derivation to prove it would notice a disagreement.
+
+**M3 — Interfaces. Not started, and it blocks everything below it.** In dependency
+order: the **moderator interface first**, because without moderators nothing gets
+judged; then the submit interface, so publishers can feed the pipeline; then the
+search dapp, which is what makes the index worth having. Served through
+[weeb-3](https://github.com/lat-murmeldjur/weeb-3) rather than built as three
+standalone apps.
+
+**M4 — Launch.** An independent review of the contracts against a named commit,
+deployment to Chiado (Gnosis testnet), then a guarded mainnet launch with conservative
+caps.
+
+### Why the order is not negotiable
+
+§7's open items are not a list of things to decide in a meeting. `prior`, turnout and
+the reveal rate are **measurements**, and the instrument is a running testnet
+(`measurement/prior/`). A testnet needs moderators, and moderators need an interface.
+So:
+
+```
+M3 (moderator interface) → testnet → prior, turnout, reveal rate
+                                   → MIN_REVEALS, STAKE, FREEZE_PER_LOSS, the fee
+                                   → M4 mainnet
+```
+
+**The independent review is a gate inside M4, not a milestone of its own.** It checks
+the contracts; it cannot supply a measurement, and nothing downstream of it moves until
+the numbers exist. Running it earlier is allowed and buys an earlier answer on the code
+— it does not shorten the chain above.
+
+## 9. Layout
 
 | | |
 |---|---|
@@ -213,7 +264,7 @@ Earlier architectures and the full design history are on the
 **`archive/v1-v2-and-design-history`** branch. They are not here because a reader
 cannot tell which of three state machines is the system.
 
-## 9. Standing constraint
+## 10. Standing constraint
 
 **No deployment with material funds, and the index is not presented as reliable
 safe-search certification, until `prior` is measured and an independent review of

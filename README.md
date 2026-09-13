@@ -252,10 +252,6 @@ answer on the code without shortening the sequence above.
 | `measurement/prior/` | how `prior` is measured, and why a testnet is the instrument |
 | `MODERATION_GUIDELINES.md` | the standard moderators apply |
 
-Earlier architectures and the full design history are on the
-`archive/v1-v2-and-design-history` branch, and are kept off this branch so that a
-reader is not left to determine which of several state machines is the system.
-
 ## 10. Standing constraint
 
 **No deployment with material funds, and the index is not presented as reliable

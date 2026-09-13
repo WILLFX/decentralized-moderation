@@ -103,20 +103,40 @@ An earlier generation of harnesses here counted INVALID as killed, which inflate
 the rate with mutants no test could have caught. The rate is
 `killed / (killed + survived)` and INVALID is printed beside it.
 
-Latest full sweep — 240 mutants, no sampling:
+**The previous entry here said the survivors were "not a to-do list" and mostly
+equivalent mutants. That was wrong, and the campaign after §4.4 landed showed how
+wrong.** Of 34 survivors on `Moderation`, 19 were real and killable. Five were
+outright holes, each confirmed by applying the mutant and watching the whole suite
+pass:
 
-| | killed | survived | INVALID | rate |
-|---|---:|---:|---:|---:|
-| `Moderation` | 147 | 36 | 4 | **80.3%** |
-| `IndexRegistry` | 34 | 2 | 1 | **94.4%** |
-| `StakeRegistry` | 15 | 1 | 0 | **93.8%** |
+| mutant | what it costs |
+|---|---|
+| `vt.settled = true` → `false` | a coherent voter re-enters `claim` and is paid **again each time**, draining the pot. This is the mutant a stray `git add -A` once committed to `main`; the suite had never covered it. |
+| `claim`'s `\|\|` → `&&` | `claim(caseId, m)` is permissionless in `m`, so a non-voter passes the guard and reaches `settle(m, true, …)`: **anyone can freeze any address.** |
+| `challenge`'s stake guard `\|\|` → `&&` | an address holding **no stake** can buy a case two more committees. |
+| `challenge`'s seed `+` → `-` | the challenge round's committee A seed becomes a **past** block, so the challenger can compute that committee at the moment they challenge. The staging property, gone. |
+| `draw`'s cap `>=` → `>` | the challenge cap becomes three rather than two. |
 
-**The remaining survivors are not a to-do list.** Most are equivalent mutants —
-`x > t ? x : t` against `>=`, `n > limit` against `>=` when they are equal,
-`offset >= length` against `>` when both yield an empty page — which cannot be
-killed because they do not change behaviour. The rest are event arguments and one
-struct field (`committee` on a challenge record) that nothing reads. Writing
-assertions for those would raise the number while constraining nothing.
+`test/Settlement.t.sol` is the answer to them: sixteen tests, each written against
+a named mutant, each verified to fail on that mutant and pass on clean code. The
+new code from §4.4 needed none of them — all eleven mutants on the floor
+condition, the round-0/challenge branch, the non-reveal freeze and the constructor
+guard were killed by `RevealFloor.t.sol` and `ThreeVote.t.sol` first time.
+
+**One survivor is genuinely unkillable and is annotated in the source.**
+`challenge`'s `c.challenges >= MAX_CHALLENGES` is unreachable: `draw` finalizes at
+the cap, so no state reaches `Phase.CHALLENGE` carrying two challenges. It is kept
+as defence in depth against a future change in `draw`, and mutation testing will
+report it forever.
+
+**What remains is one coherent gap rather than scattered noise: eligibility has no
+differential.** Inverting the narrowing hash — `h >> (256 - eligBits) == 0` to
+`!= 0` — survives, because every test commits *whoever is eligible* and the
+complement of a half-sized set is also half-sized. The `_eligBits` loop bounds and
+the seed-window guards survive for the same reason. `Draw.t.sol` plus
+`check_draw_vectors.py` pin the draw against an independent derivation; nothing
+does that for eligibility, and until something does, "the committee is 32 to 64 by
+construction" is a claim the suite cannot check.
 
 Campaigns mutate a **scratch copy** of the project, never the working tree. That
 is not tidiness: a `git add -A` landing mid-campaign once committed two live

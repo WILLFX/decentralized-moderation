@@ -498,6 +498,15 @@ contract Moderation is ReentrancyGuard {
         Case storage c = cases[caseId];
         if (c.phase != uint8(Phase.CHALLENGE)) revert BadPhase();
         if (block.timestamp >= c.phaseDeadline) revert TooLate();
+
+        // UNREACHABLE BY CONSTRUCTION, and kept as defence in depth. `draw` only
+        // opens `Phase.CHALLENGE` while `c.challenges < MAX_CHALLENGES` and
+        // finalizes otherwise, so a case in this phase has at most
+        // `MAX_CHALLENGES - 1` challenges and this can never fire. Mutation
+        // testing will therefore ALWAYS report `>=` -> `>` here as a survivor: no
+        // test can kill a branch that no state reaches. Do not chase it, and do
+        // not delete it either — it is the only thing standing between a future
+        // change in `draw`'s finalize condition and an uncapped challenge loop.
         if (c.challenges >= MAX_CHALLENGES) revert ChallengeExhausted();
         if (!stakes.isActive(msg.sender) || stakes.isFrozen(msg.sender)) revert NotEligible();
         if (votes[caseId][msg.sender].commitment != bytes32(0)) revert AlreadyVoted();

@@ -539,6 +539,27 @@ contract SettlementTest is Test {
         assertEq(mod.caseInfo(removal).targetCaseId, listing);
     }
 
+    /// @dev `pot` is a `uint128` and `fee` is a `uint256`. An unchecked cast would
+    ///      credit a truncated pot while the full amount was transferred in, so a fee
+    ///      of exactly `2**128` would move `2**128` tokens and record a pot of zero.
+    ///      No plausible token reaches that, but the token is a constructor argument,
+    ///      so the bound is checked rather than assumed.
+    function test_aFeeTooLargeForThePotIsRejected() public {
+        bytes32[] memory topics = new bytes32[](1);
+        topics[0] = keccak256("biology");
+
+        uint256 tooBig = uint256(type(uint128).max) + 1;
+        vm.prank(submitter);
+        vm.expectRevert(Moderation.FeeTooLarge.selector);
+        mod.submit(keccak256("c"), keccak256("m"), topics, tooBig);
+
+        // and the largest fee that does fit is accepted, so the bound is not off by one
+        token.mint(submitter, type(uint128).max);
+        vm.prank(submitter);
+        uint256 id = mod.submit(keccak256("c2"), keccak256("m"), topics, type(uint128).max);
+        assertEq(mod.caseInfo(id).pot, type(uint128).max, "the whole fee is credited");
+    }
+
     /// @dev A reveal must not land at the instant the reveal window shuts. Kills
     ///      `block.timestamp >= c.phaseDeadline` -> `>` in `reveal` — the same shape
     ///      as the guard in `commit`, which was tested, on a function that was not.

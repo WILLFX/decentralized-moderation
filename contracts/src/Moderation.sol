@@ -206,6 +206,7 @@ contract Moderation is ReentrancyGuard {
     error RemovalAlreadyOpen();
     error AlreadyRemoved();
     error BadFloor();
+    error FeeTooLarge();
 
     constructor(
         address _token,
@@ -311,6 +312,13 @@ contract Moderation is ReentrancyGuard {
 
     function _open(uint256 caseId, uint256 fee) internal {
         Case storage c = cases[caseId];
+
+        // `pot` is a uint128 and `fee` is not, so an unchecked cast would credit a
+        // truncated pot while `safeTransferFrom` below moved the full amount — the
+        // submitter's loss, silently. No plausible token reaches this, but the token
+        // is a constructor argument and the cast is the only thing standing between
+        // that choice and a silent one.
+        if (fee > type(uint128).max) revert FeeTooLarge();
         c.pot = uint128(fee);
         c.eligBits = _eligBits();
         c.phase = uint8(Phase.COMMIT_A);

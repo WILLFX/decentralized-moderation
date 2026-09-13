@@ -1,60 +1,57 @@
 # Decentralized Moderation
 
-*A staking-based moderation market and safe-search index for
-[Swarm](https://www.ethswarm.org/), governed entirely by a smart contract.*
+A staking-based moderation market and safe-search index for
+[Swarm](https://www.ethswarm.org/), governed entirely by a smart contract.
 
-Publishers pay a fee to have content judged. Staked moderators judge it, hidden
-from each other, in a Schelling game against published guidelines. Content that
-passes is recorded in an on-chain, topic-indexed registry that anyone can build a
-search application over — with no company in the middle.
+Publishers pay a fee to have content judged. Staked moderators judge it, hidden from
+each other, in a Schelling game against published guidelines. Content that passes is
+recorded in an on-chain, topic-indexed registry that any search application can build
+on.
 
-**Normative:** [`specs/protocol.md`](specs/protocol.md). Where anything here
-disagrees with it, the spec wins.
+[`specs/protocol.md`](specs/protocol.md) is normative. Where this document disagrees
+with it, the specification governs.
 
-> **Status: M1 and M2 complete, M3 next** (§8). The three contracts implement the
-> protocol — 123 tests, a mutation campaign at 97.0%, independent differentials on
-> both the draw and eligibility. 
->
-> **M3 is the moderator interface.** The parameters §7 lists
-> as open are measurements, not decisions, and the instrument is a running testnet —
-> which needs moderators, who need somewhere to moderate.
+**Status.** Milestones M1 and M2 are complete; M3 is next (§8). The three contracts
+implement the protocol, with 123 tests, a mutation score of 97.0%, and independent
+differentials on both the verdict draw and eligibility. Several parameters have no
+value yet; §7 lists them.
+
 ---
 
-## 1. Why this exists
+## 1. Purpose
 
-Swarm feeds make permissionless publishing trivial: anyone who knows a string can
-derive the same feed key, so anyone can write and anyone can read. Commenting,
-blogging and annotation on top of any subject, with no user registry, no server,
-no operator.
+Swarm feeds make permissionless publishing straightforward: anyone who knows a string
+can derive the same feed key, so anyone can write and anyone can read. This supports
+commenting, blogging and annotation on any subject with no user registry, no server
+and no operator.
 
-The flip side is that anyone can write anything. Centralized platforms answer
-this by employing moderators out of a corporate budget. A decentralized system
-has no corporation and no budget, and unmoderated feeds are unusable for ordinary
+It also means anyone can write anything. Centralized platforms address this by
+employing moderators from a corporate budget. A decentralized system has neither a
+corporation nor a budget, and unmoderated feeds are unsuitable for general-purpose
 applications.
 
-What is missing is a mechanism where **the people who want to publish pay a group
-anyone can join** to certify that content is safe and honestly described. That
-turns moderation from a cost centre into open, paid work requiring nothing but a
-contract — and its by-product is something the decentralized web lacks entirely:
-**safe search**.
+This project supplies the missing mechanism: publishers pay an open group to certify
+that content is safe and honestly described. Moderation becomes paid work that
+requires nothing but a contract, and the resulting registry provides safe search for
+the decentralized web.
 
 ## 2. Moderators
 
-A moderator stakes a **fixed amount**. Every stake is the same size; influence is
-bought by running more identities, each paying its own stake, never by staking
-more.
+A moderator stakes a fixed amount. Every stake is the same size; influence is acquired
+by running additional identities, each paying its own stake, and never by staking more
+against one identity.
 
-**Concurrency is unlimited.** Nothing is reserved per case and nothing is locked.
-A moderator may be voting in as many cases at once as they choose.
+Concurrency is unlimited. Nothing is reserved per case and nothing is locked, so a
+moderator may vote in as many cases at once as they choose.
 
-**The only penalty is a freeze.** A vote incoherent with the outcome adds a fixed
-duration to the moderator's total frozen time. Durations are *additive to a
-running total*, so the same losses cost the same whatever order they settle in. A
-frozen moderator is eligible for nothing until it elapses.
+The only penalty is a freeze. A vote incoherent with the outcome adds a fixed duration
+to the moderator's total frozen time. Durations are additive to a running total, so a
+given set of losses costs the same regardless of the order in which they settle. A
+frozen moderator is eligible for nothing until the total elapses.
 
-**The stake is never taken.** Not slashed, not redistributed, not transferred to
-another moderator. Time is the only currency of penalty, and a frozen stake is
-idle rather than gone.
+The stake itself is never taken — not slashed, not redistributed, not transferred to
+another moderator. Time is the only currency of penalty, and a frozen stake is idle
+rather than forfeit.
 
 ## 3. Eligibility
 
@@ -64,177 +61,180 @@ For each case and each committee, a moderator is eligible when
 hash( case , moderator , R )   has at least   N − 5   leading zero bits
 ```
 
-with `N` set so the registry lies in `[2^N, 2^(N+1))`. So the committee falls out
-of the rule rather than being chosen — between 32 and 64 by construction.
+with `N` set so the registry size lies in `[2^N, 2^(N+1))`. Committee size therefore
+follows from the rule rather than being chosen, and falls between 32 and 64 by
+construction.
 
-Eligibility creates **no obligation**. A moderator who is eligible and does
-nothing suffers nothing; there is no no-show penalty anywhere. It is publicly
-computable: anyone can find their own eligible identities once `R` exists.
+Eligibility creates no obligation. A moderator who is eligible and does nothing
+suffers nothing; there is no no-show penalty. Eligibility is publicly computable: any
+party can determine their own eligible identities once `R` exists.
 
-## 4. A case
+## 4. Case lifecycle
 
 ```
 submit
-  │  R_A = a FUTURE block at submission
+  │  R_A = a future block, fixed at submission
   ├── committee A commits          closes 15 min after the 3rd commit
   │  R_B armed only when A closes
   ├── committee B commits          closes 15 min after the 3rd commit
   ├── A and B reveal together      30 min
-  │      each committee must finish with >= 3 REVEALED votes, or no outcome
-  ├── 3 tickets on the COMBINED tally → preliminary outcome, published
+  │      each committee must finish with at least MIN_REVEALS revealed votes
+  ├── 3 tickets drawn on the combined tally → preliminary outcome, published
   └── 1 hour challenge window
-        challenged? → committees C and D on the same pattern, tickets drawn
-        AFRESH over the whole pool. At most two challenges.
+        if challenged: committees C and D on the same pattern, with tickets
+        drawn afresh over the whole pool. At most two challenges.
 ```
 
 Three properties carry the design.
 
-**Committee B is unknowable while A commits.** Its seed is a block height armed
-only when A's commit phase closes, so nobody deciding whether to commit in A can
+*Committee B is not knowable while A commits.* Its seed is a block height armed only
+when A's commit phase closes, so a moderator deciding whether to commit in A cannot
 see who else will review the case.
 
-**Neither committee sees the other's votes.** Both reveal in one phase, so B
-commits with no tally to follow. Payment is for coherence with the outcome, so a
-visible tally would make following it more profitable than judging.
+*Neither committee sees the other's votes.* Both reveal in one phase, so B commits
+without a tally to follow. Payment is for coherence with the outcome, so a visible
+tally would make following it more profitable than judging.
 
-**Each committee must produce evidence, not just attendance.** A round draws no
-outcome unless both committees finish with at least `MIN_REVEALS` *revealed* votes.
-Counted on reveals rather than commits on purpose: a commit floor is cleared by
+*Each committee must produce evidence, not merely attendance.* A round draws no
+outcome unless both committees finish with at least `MIN_REVEALS` revealed votes. The
+threshold counts reveals rather than commits: a commit threshold can be cleared by
 committing the required number and then revealing only what helps, and withholding
-would otherwise be free. Per committee rather than combined, because 40 reveals in
-A and one in B is not two committees.
+would otherwise be free. It applies per committee rather than in combination, since 40
+reveals in A and one in B do not constitute two committees.
 
-A first round that misses the floor is **unresolved and the fee refunded** — the
-publisher paid for a judgment that never happened. A *challenge* round that misses
-it lets the standing outcome **finalize** instead, because voiding the case there
-would let any challenger destroy a decided case by challenging and bringing nobody.
+A first round that misses the threshold is unresolved and the fee is refunded, the
+publisher having paid for a judgment that did not take place. A challenge round that
+misses it allows the standing outcome to finalize instead; voiding the case at that
+point would allow a challenger to destroy a decided case by challenging and then
+bringing nobody.
 
-Three commitments **start a clock**. They are not a quorum; what makes a tally
-sufficient is the floor above.
+Three commitments start a clock. They are not a quorum; sufficiency is determined by
+the threshold above.
 
-## 5. The outcome
+## 5. Outcome determination
 
-Three tickets are drawn against the combined tally of every committee that
-revealed; the outcome is the majority of the three. Tickets are drawn **fresh at
-each preliminary outcome**, so retry is bounded by the challenge cap rather than
-by reusing one draw.
+Three tickets are drawn against the combined tally of every committee that revealed,
+and the outcome is the majority of the three. Tickets are drawn afresh at each
+preliminary outcome, so retry is bounded by the challenge cap rather than by reuse of a
+single draw.
 
-A challenge is a **public vote opposite** the published outcome — you cannot
-challenge an Approve by approving. It counts once and carries the ordinary
-liability.
+A challenge is a public vote opposite the published outcome; an Approve cannot be
+challenged by approving. It counts once and carries the ordinary liability.
 
-The estimator fed to the tickets is the **raw share `A/N`**. The Laplace form
-`(A+1)/(N+2)` was considered and rejected on measurement: against a clique holding a
-unanimous tally of 3 it buys about 1.12 fees, which is nothing to an attacker whose
-prize is external, while inflicting a wrong outcome on 10.4% of honest unanimous
-tallies of the same size. It sees only `(A, N)`, so it cannot tell a thin attacker
-tally from a thin honest one — and in a quiet registry both are thin.
+The estimator supplied to the tickets is the raw share `A/N`. The Laplace form
+`(A+1)/(N+2)` was evaluated and not adopted. Against a clique holding a unanimous
+tally of three it reduces capture probability by an amount worth approximately 1.12
+fees, which is not a deterrent to an attacker whose prize lies outside the protocol,
+while producing an outcome contradicting every vote in 10.4% of honest unanimous
+tallies of the same size. The estimator is a function of `(A, N)` alone and cannot
+distinguish a thin attacker tally from a thin honest one; in a low-turnout registry
+both are thin.
 
-**No money moves before finalization.** At it, every moderator coherent with the
-outcome claims a share of the fee; every incoherent one is frozen — **and so is
-anyone who committed and never revealed**, for the same duration, so withholding is
+No funds move before finalization. At finalization each moderator coherent with the
+outcome may claim a share of the fee, and each incoherent one is frozen. A moderator
+who committed and never revealed is frozen for the same duration, so withholding is
 never cheaper than being wrong.
 
-## 6. The index
+## 6. Index
 
-A finalized Approve writes the content hash, the metadata hash, the topics and
-the tally. Two facts are recorded beside it rather than compressed into a label:
-whether the draw was **unanimous**, and whether the entry was ever **challenged**.
+A finalized Approve writes the content hash, the metadata hash, the declared topics
+and the tally. Two further facts are recorded rather than compressed into a label:
+whether the draw was unanimous, and whether the entry was ever challenged.
 
-The second is worth reading precisely. A challenge is the only act in the protocol
-where an identity *volunteers* a position against a published outcome — every other
-vote is the discharge of a commitment made blind — so a challenged entry carries a
-named, deliberate objection on record. But a challenge costs the ordinary freeze
-liability, so the absence of one is partly the absence of appetite for that liability
-rather than proof nobody doubted the entry.
+The second warrants a precise reading. A challenge is the only act in the protocol in
+which an identity volunteers a position against a published outcome; every other vote
+is the discharge of a commitment made blind. A challenged entry therefore carries a
+named, deliberate objection on record. A challenge also carries the ordinary freeze
+liability, so the absence of one reflects in part an absence of appetite for that
+liability rather than an absence of doubt.
 
-**There is no `SUPER_SAFE` flag.** A client wanting a cautious filter reads those
-and applies its own rule. The protocol does not decide what "safe enough" means
-on a reader's behalf, and a client wanting a different bar does not need the
-protocol changed.
+There is no `SUPER_SAFE` flag. A client wanting a cautious filter reads the recorded
+facts and applies its own rule. The protocol does not determine what "safe enough"
+means on a reader's behalf, and a client wanting a different threshold does not
+require a protocol change.
 
-A removal targets a listed entry and runs through the same engine — same
-committees, same staging, same tickets. **Approve means remove.** The fee is paid
-whichever way it goes, so a speculative removal costs its submitter every time.
+A removal targets a listed entry and runs through the same engine: the same
+committees, the same staging, the same tickets. On a removal case, Approve means
+remove. The fee is paid whichever way the case resolves, so a speculative removal
+costs its submitter in every instance.
 
-## 7. What is open, and what it means
+## 7. Open parameters
 
-`specs/protocol.md` §11 is the list. Two items are worth stating here because
-they are not cosmetic.
+`specs/protocol.md` §11 is the authoritative list. Four items are summarized here
+because they bear on whether the system can be deployed.
 
-**The guidelines are pinned, and that fixes what a case means.** `Moderation` carries
-the guidelines version and the keccak-256 of `MODERATION_GUIDELINES.md` as
-**immutables**, and the deploy script refuses a stack whose hash is not that document.
-Every case in a deployment was judged under one text by construction. Immutable rather
-than governed, because a settable pointer means somebody can change what every open
-case means — so **a guidelines revision is a new deployment**, and index continuity
-across one is a client concern, by the same principle §6 already uses.
-
-**`prior` — how often a moderator's judgment matches the truth — is unmeasured,
-and it decides everything.** `simulation/FINDINGS-floor.md` derives the condition
-exactly: safe and unsafe content are distinguishable only when
+**`prior` is unmeasured.** `prior` is the probability that a moderator's judgment
+matches the truth. `simulation/FINDINGS-floor.md` derives the governing condition:
+safe and unsafe content are distinguishable only when
 
 ```
 prior  >  ( 1 + q/(1−q) ) / 2
 ```
 
-At a 30% attacker share that is `prior > 0.714`. Below it, a revealed vote is
-*more* likely to be Approve on unsafe content than on safe content — the tally is
-anti-correlated with the truth, and **no rule over it separates them**: not the
-lottery, not a threshold, not unanimity, at any cohort size. A testnet is the
-instrument (`measurement/prior/`).
+At a 30% attacker share this requires `prior > 0.714`. Below that threshold a revealed
+vote is more likely to be Approve on unsafe content than on safe content. The tally is
+then anti-correlated with the truth, and no rule over it separates the two cases —
+neither the lottery, nor a threshold, nor unanimity, at any cohort size. A testnet is
+the measurement instrument; see `measurement/prior/`.
 
-**`MIN_REVEALS` is set, but conditionally.** Each committee must finish a round
-with at least 3 *revealed* votes or no outcome is drawn (spec §4.4). Counted on
-reveals rather than commits, because a commit floor is cleared by committing and
-then withholding. `simulation/FINDINGS-floor-price.md` prices it: 0.9% of cases
-unresolvable at 20% turnout, against roughly 96 identities an attacker must hold
-instead of 3. **Below about 10% turnout no value works** — a floor of 3 leaves 28%
-of cases unresolvable there. Turnout is unmeasured, so the number is defensible at
-the participation this design needs anyway and bad below it.
+**`MIN_REVEALS` is set conditionally.** Each committee must finish a round with at
+least 3 revealed votes or no outcome is drawn (spec §4.4).
+`simulation/FINDINGS-floor-price.md` prices this at 0.9% of cases unresolvable given
+20% turnout and a 75% reveal rate, against approximately 96 identities an attacker
+must hold in place of 3. Below roughly 10% turnout no value satisfies both
+requirements: a threshold of 3 leaves 28% of cases unresolvable there. Turnout is
+unmeasured, so the current value is defensible at the participation level the design
+requires in any case, and unsuitable below it.
 
-**The floor did not make capture impossible, and the tests say so.** A clique that
-fields 3 revealing identities in *each* committee still takes a unanimous case with
+**The threshold reduces the cost of capture rather than preventing it.** A clique
+fielding 3 revealing identities in each committee still takes a unanimous case with
 certainty, because the estimator is the raw share.
-`contracts/test/ThreeVote.t.sol` pins both halves: the old three-identity attack is
-dead, and the priced-up version still works. What changed is the cost, not the
-possibility.
+`contracts/test/ThreeVote.t.sol` covers both halves: the original three-identity
+attack no longer succeeds, and the more expensive form still does.
+
+**The guidelines binding is settled; the process around a revision is not.**
+`Moderation` carries the guidelines version and the keccak-256 hash of
+`MODERATION_GUIDELINES.md` as immutables, and the deploy script rejects a stack whose
+hash is not that document. Every case in a deployment is therefore judged under one
+text by construction. The binding is immutable rather than governed because a settable
+pointer would allow a party to change the meaning of every open case. The consequence
+is that a guidelines revision requires a new deployment, and index continuity across
+one is a client concern, consistent with §6.
 
 ## 8. Roadmap
 
-Restated for this design. The earlier architectures each had their own milestone
-numbering — M2, then M2.5/M2.6, then M2.7–M2.13 — which is what three rewrites leave
-behind; that history is on the archive branch and is not continued here.
+Milestone numbering is restated for the current design. Earlier architectures used
+their own numbering (M2, then M2.5 and M2.6, then M2.7 through M2.13); that history
+remains on the archive branch.
 
-**M1 — Specification and simulation. Complete.** The normative spec, the metadata
-schema, the guidelines document, and the measurements that turn working values into
-numbers rather than intuition: `simulation/FINDINGS-floor.md` (the separability
-bound), `FINDINGS-staged.md` (staging is neutral on capture), `FINDINGS-floor-price.md`
-(the per-committee minimum priced).
+**M1 — Specification and simulation. Complete.** The normative specification, the
+metadata schema, the guidelines document, and the measurements behind the working
+values: `simulation/FINDINGS-floor.md` (the separability bound),
+`FINDINGS-staged.md` (staging is neutral with respect to capture), and
+`FINDINGS-floor-price.md` (the per-committee threshold priced).
 
-**M2 — Contracts. Complete.** `Moderation`, `StakeRegistry`, `IndexRegistry` and a
-deploy script that verifies its own links. 123 tests across thirteen suites, a
-mutation campaign at 97.0% with every survivor accounted for in the source, and two
-independent differentials — the draw and eligibility — each of which sabotages its own
-derivation to prove it would notice a disagreement.
+**M2 — Contracts. Complete.** `Moderation`, `StakeRegistry` and `IndexRegistry`, with
+a deploy script that verifies its own links. 123 tests across thirteen suites, a
+mutation score of 97.0% with each surviving mutant accounted for in the source, and
+two independent differentials — on the draw and on eligibility — each of which
+verifies that a deliberately broken derivation would be detected.
 
-**M3 — Interfaces. Not started, and it blocks everything below it.** In dependency
-order: the **moderator interface first**, because without moderators nothing gets
-judged; then the submit interface, so publishers can feed the pipeline; then the
-search dapp, which is what makes the index worth having. Served through
-[weeb-3](https://github.com/lat-murmeldjur/weeb-3) rather than built as three
-standalone apps.
+**M3 — Interfaces. Not started.** In dependency order: the moderator interface, since
+without moderators no case is judged; then the submit interface, so publishers can
+supply cases; then the search application, which realizes the value of the index.
+Delivered through [weeb-3](https://github.com/lat-murmeldjur/weeb-3) rather than as
+three standalone applications.
 
 **M4 — Launch.** An independent review of the contracts against a named commit,
-deployment to Chiado (Gnosis testnet), then a guarded mainnet launch with conservative
-caps.
+deployment to Chiado (the Gnosis testnet), then a guarded mainnet launch with
+conservative caps.
 
-### Why the order is not negotiable
+### Dependency order
 
-§7's open items are not a list of things to decide in a meeting. `prior`, turnout and
-the reveal rate are **measurements**, and the instrument is a running testnet
-(`measurement/prior/`). A testnet needs moderators, and moderators need an interface.
-So:
+The remaining open parameters are measurements rather than decisions. `prior`, turnout
+and the reveal rate can only be obtained from a running testnet
+(`measurement/prior/`), a testnet requires moderators, and moderators require an
+interface:
 
 ```
 M3 (moderator interface) → testnet → prior, turnout, reveal rate
@@ -242,24 +242,24 @@ M3 (moderator interface) → testnet → prior, turnout, reveal rate
                                    → M4 mainnet
 ```
 
-**The independent review is a gate inside M4, not a milestone of its own.** It checks
-the contracts; it cannot supply a measurement, and nothing downstream of it moves until
-the numbers exist. Running it earlier is allowed and buys an earlier answer on the code
-— it does not shorten the chain above.
+The independent review is a gate within M4 rather than a separate milestone. It
+assesses the contracts and cannot supply a measurement, so nothing downstream of it
+proceeds until the measured values exist. Conducting it earlier yields an earlier
+answer on the code without shortening the sequence above.
 
-## 9. Layout
+## 9. Repository layout
 
 | | |
 |---|---|
 | `specs/protocol.md` | normative, and the only design document |
-| `contracts/` | the three contracts, tests, mutation harness |
+| `contracts/` | the three contracts, tests, and mutation harness |
 | `simulation/` | the measurements, each with its findings |
-| `measurement/prior/` | how `prior` gets measured, and why a testnet is the instrument |
-| `MODERATION_GUIDELINES.md` | what moderators are actually judging |
+| `measurement/prior/` | how `prior` is measured, and why a testnet is the instrument |
+| `MODERATION_GUIDELINES.md` | the standard moderators apply |
 
 Earlier architectures and the full design history are on the
-**`archive/v1-v2-and-design-history`** branch. They are not here because a reader
-cannot tell which of three state machines is the system.
+`archive/v1-v2-and-design-history` branch, and are kept off this branch so that a
+reader is not left to determine which of several state machines is the system.
 
 ## 10. Standing constraint
 

@@ -1,19 +1,17 @@
 """The v1 guidelines, and the prompt a moderator is actually answering.
 
-README §3.6 P5 makes the guidelines one line, deliberately:
+`MODERATION_GUIDELINES.md` makes the safety standard one line, deliberately:
 
     "Would Google SafeSearch return this?"
-    plus "the metadata honestly describes the content, and the topics fit."
 
-and README §3.6 states the claim this measurement exists to test:
+plus "the metadata honestly describes the content, and the topics fit."
 
-    "Accuracy comes from the guidelines being a clear Schelling point,
-     not from cohort size."
-
-`state-machine-v3.md` §10 and `v2-audit-checklist.md` §5.3 have both carried that
-as open for three audits. Everything downstream — `f(a)`, the permanence of
-`REJECTED` (§8.4), the reachability of `SUPER_SAFE` (§8.3) — is a function of how
-often an independent reader of that line agrees with the ground truth.
+The claim this measurement exists to test is that accuracy comes from the
+guidelines being a clear Schelling point rather than from cohort size. It has
+never been measured, and `simulation/FINDINGS-floor.md` is why it matters: the
+separability bound is stated in terms of `prior`, so how often an independent
+reader of that line agrees with the ground truth decides whether any rule over the
+tally can separate safe content from unsafe at all.
 
 **The prompt is the artefact under test, not a wrapper around it.** If a different
 phrasing produces materially different agreement, that is a finding about the

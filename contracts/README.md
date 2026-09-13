@@ -2,11 +2,16 @@
 
 Solidity implementation of **`specs/protocol.md`**, which is normative.
 
-| File | Runtime | Role |
-|---|---:|---|
-| `src/Moderation.sol` | 13,451 B | the case state machine — §3 through §8 |
-| `src/StakeRegistry.sol` | 2,778 B | stake custody and frozen time — §2 |
-| `src/IndexRegistry.sol` | 2,899 B | the topic → entry index — §7 |
+| File | Runtime (shipped, `via_ir`) | legacy | Role |
+|---|---:|---:|---|
+| `src/Moderation.sol` | 11,400 B | 13,451 B | the case state machine — §3 through §8 |
+| `src/StakeRegistry.sol` | 2,396 B | 2,778 B | stake custody and frozen time — §2 |
+| `src/IndexRegistry.sol` | 2,504 B | 2,899 B | the topic → entry index — §7 |
+
+Both columns clear EIP-170's 24,576 B with wide margin, so `via_ir` is a choice
+rather than a necessity — it stays on because the shipped profile and the test
+profile should be the same bytecode. (It was once a necessity: the contract these
+replaced was 25,986 B legacy and undeployable.)
 
 `script/Deploy.s.sol` deploys and links all three. **`verify()` is the
 deliverable there, not `run()`**: both registries hold a one-shot `moderation`
@@ -19,7 +24,7 @@ is watching. Every link is asserted in both directions, and a test proves
 
 ## Tests
 
-80 tests across nine suites.
+81 tests across ten suites.
 
 | suite | what it is for |
 |---|---|
@@ -32,8 +37,9 @@ is watching. Every link is asserted in both directions, and a test proves
 | `Draw.t.sol` | §5 — the ticket rule, and vector emission |
 | `Integration.t.sol` | the three real contracts, no mocks |
 | `Invariant.t.sol` | nine properties under fuzzed orderings |
+| `ThreeVote.t.sol` | pins the open §11 gap: three identities take a case, 40/40 |
 
-Two of those carry more weight than their size suggests.
+Three of those carry more weight than their size suggests.
 
 **`Integration.t.sol` uses no mocks.** Every other suite substitutes a mock
 registry or index, and `Moderation` calls both through interfaces declared
@@ -49,6 +55,14 @@ has happened) nor `afterInvariant` (Foundry calls that with handler state reset,
 so every counter reads zero, and a `view` one silently aborts the run). It is an
 ordinary test that drives the handler by hand and proves each interesting state
 is reachable through it.
+
+**`ThreeVote.t.sol` is a tripwire, not a passing feature.** It asserts that three
+identities which are the only committers take a case with *certainty* — 40 runs,
+40 captures — because `_estimator`'s raw `A/N` makes a unanimous tally certain,
+three commits are explicitly not a quorum, and nothing requires committee B to
+hold anybody. It documents an open §11 gap by pinning it. **If §11's
+per-committee minimum lands, this test must change**, and a green run of it is
+evidence the gap is still open rather than evidence anything works.
 
 ## The draw differential
 

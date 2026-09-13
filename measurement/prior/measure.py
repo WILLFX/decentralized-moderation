@@ -3,13 +3,13 @@
     prior  — P(a moderator agrees with ground truth), per difficulty band
     rho    — intra-item correlation across configurations
 
-**Both outputs are load-bearing and the second has never been measured.**
+**Both outputs are load-bearing and neither has been measured.**
 `f(a) = 3a² − 2a³` is the CDF of the median of three uniforms, which assumes the
-tally is composed of independent judgments. `v2-audit-checklist.md` P1-4 and §5.6
-have carried "AI identities are not independent moderators" as DEFERRED since the
-first audit. `rho` is that quantity: at `rho = 0` a cohort of 32 is 32 opinions,
-at `rho = 1` it is one opinion sampled 32 times, and `simulation/correlated.py`
-turns the pair into the design's numbers.
+tally is composed of independent judgments. Nothing in the design can tell a model
+apart from a person, so if models moderate, that independence is an assumption
+rather than a property. `rho` is the quantity: at `rho = 0` a cohort of 32 is 32
+opinions, at `rho = 1` it is one opinion sampled 32 times. Read the pair against
+`simulation/FINDINGS-floor.md`, which states the bound they have to clear.
 
 A **configuration** is what an operator actually runs: a model, a prompt, a
 provider, a temperature. Two operators running the same model on the same prompt
@@ -85,7 +85,8 @@ class CaseRecord:
 
 
 def band_of(approve: int, reject: int) -> str:
-    """Difficulty band from the tally itself — `â`'s distance from a coin flip.
+    """Difficulty band from the tally itself — the revealed share's distance from
+    a coin flip.
 
     **The cohort tells you which band a case is in.** There is no corpus to
     construct and no difficulty to assign by hand: a case that split 17/17 was
@@ -95,13 +96,16 @@ def band_of(approve: int, reject: int) -> str:
     independent of the quantity being measured. If moderators are poor, tallies
     split and everything lands in `hard`. That makes the band informative about
     the cohort, not about some objective difficulty of the item — and it is
-    still the right stratifier, because §8.6's permanence and §4's false-approval
-    rate are both functions of what the cohort did.
+    still the right stratifier, because what the design does with a case is a
+    function of what the cohort did, not of any objective difficulty.
     """
     n = approve + reject
     if n == 0:
         return "empty"
-    d = abs((approve + 1) / (n + 2) - 0.5)          # â, per state-machine §4.5
+    # Laplace-smoothed so a 1/0 tally does not read as maximally easy. This is a
+    # difficulty label only — it is not the estimator the draw uses, which is the
+    # raw share (`Moderation._estimator`, `specs/protocol.md` §10.2).
+    d = abs((approve + 1) / (n + 2) - 0.5)
     return "easy" if d >= 0.30 else "medium" if d >= 0.15 else "hard"
 
 
@@ -179,25 +183,16 @@ def rho(res: Result, items: Sequence[Item]) -> float:
     return 0.0 if e >= 1.0 else (o - e) / (1 - e)
 
 
-#: Above this, reliability weighting stops helping and starts helping the
-#: attacker. Measured in `simulation/FINDINGS-weighted.md` §3 at 8,000 trials:
-#: 0.797 at `prior` 0.665, 0.967 at `prior` 0.95. The bar is not the mean plus a
-#: constant — it tracks how heavy the honest cohort's left tail is — so it must be
-#: read against the band's own `prior`, not against a single number.
-WEIGHTING_CROSSOVER = {0.665: 0.797, 0.95: 0.967}
-
-
 def reliability_by_rater(res: Result, items: Sequence[Item],
                          band: Optional[str] = None,
                          min_items: int = 30) -> Dict[str, Tuple[float, int]]:
     """Per-rater `P(vote == truth)`, Laplace-smoothed, for raters with enough
     items to estimate.
 
-    Smoothed as `(hits + 1) / (n + 2)` — the same uniform prior `â` uses — because
-    the quantity this feeds is a **log-odds weight**, and an unsmoothed 1.0 or 0.0
-    sends that to infinity. `min_items` is not optional: see
-    `reliability_spread`'s docstring for why the upper tail of a small-sample
-    estimate lies.
+    Smoothed as `(hits + 1) / (n + 2)` under a uniform prior, so a rater who
+    happens to go 12-for-12 reads 0.93 rather than 1.0. `min_items` is not
+    optional: see `reliability_spread`'s docstring for why the upper tail of a
+    small-sample estimate lies.
     """
     truth = {i.id: i.truth for i in items}
     bands = {i.id: i.difficulty for i in items}
@@ -212,24 +207,28 @@ def reliability_by_rater(res: Result, items: Sequence[Item],
 
 def reliability_spread(res: Result, items: Sequence[Item],
                        min_items: int = 30) -> Dict[str, Dict[str, float]]:
-    """The two numbers reliability weighting turns on, per band.
+    """The shape of the per-rater accuracy distribution, per band.
 
-    **`sd`** decides whether weighting pays at all. `FINDINGS-weighted.md` §1: the
-    gain scales with it and is *exactly zero* at zero spread. If moderators are
-    uniform there is nothing to sort and the whole idea is inert.
+    **This is not an argument for reliability weighting.** `specs/protocol.md` §9
+    excludes vote weighting outright — one identity, one vote. An earlier design
+    measured what weighting would buy and that work is not on this branch, so none
+    of its numbers are quoted here. Two things are still worth having:
 
-    **`p95`** decides whether it is safe. An attacker does not need to dodge gold
-    cases; he answers everything honestly except the case he is attacking, so his
-    score is what his *judgment* is worth. The testnet cannot label attackers —
-    but it does not have to. **The best honest raters are the careful readers**,
-    so the upper tail of this distribution is the estimate of what a motivated
-    adversary achieves on this content mix. If it clears the band's crossover,
-    weighting is unsafe and no weight cap fixes that (§6).
+    **`sd`** says whether the population is uniform. If it is, the band mean is the
+    whole story. If it is not, that mean is an average over readers of visibly
+    different accuracy, and the separability bound in
+    `simulation/FINDINGS-floor.md` bites unevenly across them.
+
+    **`p95`** estimates what a *motivated careful reader* achieves on this content
+    mix — the attacker-capability input the bound needs, and otherwise a guess. The
+    testnet cannot label attackers and does not have to: **the best honest raters
+    are the careful readers**, so the upper tail of this distribution is the
+    estimate.
 
     **`p95` is biased UPWARD and this is not a detail.** It is the maximum of a set
     of noisy estimates, so it captures whoever got lucky as well as whoever is
-    good — the winner's curse, and it runs in the direction that makes weighting
-    look unsafe when it may not be. `min_items` is the only defence: at 30 items a
+    good — the winner's curse, and it runs in the direction that overstates what an
+    adversary can do. `min_items` is the only defence: at 30 items a
     true-0.665 rater reads 0.80 or better about 5% of the time, which is exactly
     the quantile being reported, so **30 is a floor and not a target.** Report `n`
     alongside and treat a `p95` from thin data as an upper bound on the upper
@@ -273,27 +272,21 @@ def report(res: Result, items: Sequence[Item]) -> None:
     print(f"\nrho (intra-item correlation of error): {r:.4f}"
           f"{'' if ok else '   <-- UNUSABLE: too few configs/items, see rho_is_usable'}")
     print("    0 -> a cohort of N is N opinions")
-    print("    1 -> a cohort of N is one opinion sampled N times (P1-4 / O4)")
+    print("    1 -> a cohort of N is one opinion sampled N times")
 
     spread = reliability_spread(res, items)
-    print("\nreliability spread, per band — decides whether weighting is worth")
-    print("having (`sd`) and whether it is safe to have (`p95`):")
+    print("\nper-rater accuracy spread, per band — `sd` says whether the")
+    print("population is uniform, `p95` estimates a careful reader's ceiling:")
     if not spread:
         print("    (no band has 2+ raters with 30+ items — not estimable yet)")
     for b, s in sorted(spread.items()):
-        band_prior = prior_by_band(res, items).get(b, (float('nan'), 0))[0]
-        cross = min(WEIGHTING_CROSSOVER.items(),
-                    key=lambda kv: abs(kv[0] - band_prior))[1]
-        flag = "  <-- ABOVE CROSSOVER: weighting favours the attacker" \
-            if s["p95"] >= cross else ""
         print(f"    {b:>10}  mean {s['mean']:.4f}  sd {s['sd']:.4f}  "
               f"p95 {s['p95']:.4f}  max {s['max']:.4f}  "
               f"(raters={int(s['n_raters'])}, min items/rater="
-              f"{int(s['min_items_per_rater'])}, crossover~{cross:.3f}){flag}")
-    print("    sd  ~0     -> weighting is inert; the gain scales with this")
-    print("    p95 >= crossover -> weighting runs in reverse, and no cap fixes it")
+              f"{int(s['min_items_per_rater'])})")
+    print("    sd ~0 -> the population is uniform; the band mean is the story")
     print("    p95 is biased UP on thin data (winner's curse) — read it as an")
     print("    upper bound on an upper bound until items/rater is well past 30.")
 
-    print("\nFeed rho into simulation/correlated.py, and the spread into")
-    print("simulation/run_weighted.py (concentration, attacker_gold_accuracy).")
+    print("\nRead prior (per band) and p95 against the separability bound in")
+    print("simulation/FINDINGS-floor.md: prior > (1 + q/(1-q))/2.")

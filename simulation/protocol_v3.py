@@ -1,48 +1,39 @@
-"""Simulation engine for the challenge-free-then-not architecture.
+"""Engine for a SUPERSEDED design, retained for four primitives.
 
-Design: ``specs/design-v3.md``.  Normative: ``specs/protocol.md``.
-Where the two disagree the state machine wins, and this engine follows the
-state machine.  The commit this was last reconciled against is the one that
-last touched this file — see ``git log``, not a pin here, because a pin in a
-docstring is a number with no source that goes stale silently (I33).
+**Nothing here is the current design.** ``specs/protocol.md`` is normative and
+describes something else: the only penalty is an additive freeze, there is no
+quorum gate, no eligibility widening, no bond and no balance debit, and tickets
+are drawn afresh at each preliminary outcome rather than once after all voting
+closes. The parameter set below — ``widen_factor``, ``min_commits``,
+``debit_multiple`` — belongs to that older design, and the findings it produced
+are not on this branch.
 
-**The v2 engine cannot be reused and its results cannot be carried over.** Three
-things changed at the level of what a case *is*:
+It survives for one reason: ``staged.py`` imports ``a_hat``, ``draw_tickets``,
+``verdict`` and ``f`` from it. Those four are the draw, and the draw is the part
+the two designs have most nearly in common.
 
-* the verdict is a **majority of three tickets**, not one, so `P(Approve)` is
-  `f(â) = 3â² − 2â³` rather than `a`, where `â = (A+1)/(N+2)` is the posterior
-  mean of the population's Approve rate rather than the sample proportion
-  (state-machine §4.5);
-* the randomness is realized **once per claim, after all voting closes**
-  (state-machine §4.5) — not at round-0 close, and not once per round — which
-  makes the verdict *monotone* in the tally and is the whole reason a challenge
-  cannot buy a re-roll;
-* penalties are **balance debits**, not time freezes, so the risk/reward ratio is
-  a chosen constant instead of `freeze_days × concurrent_cases`.
+**One of the four does not match the implementation, and it matters when reading
+``FINDINGS-staged.md``.** ``a_hat`` is the Laplace estimator ``â = (A+1)/(N+2)``;
+``Moderation._estimator`` uses the **raw share ``A/N``** (``specs/protocol.md``
+§10.2). Raw ``A/N`` is the more permissive of the two — it returns certainty on a
+unanimous tally, which is the whole of what ``ThreeVote.t.sol`` pins — so a result
+computed here against ``â`` understates capture rather than overstating it. The
+direction of ``FINDINGS-staged.md``'s conclusion does not depend on the choice,
+because it rests on both committees' votes feeding a single draw; its figures do.
 
-``simulation/FINDINGS-v2.md`` §A and §D are produced by risk units, which are
-withdrawn.  Nothing from them transfers.
-
-What this exists to measure — the questions the spec cannot answer about itself,
-listed in `specs/protocol.md` §10:
-
-1.  **F9.** `T` is calibrated so the expected cohort is `TARGET_COHORT`, which
-    needs the active-moderator count — the quantity §3.6 says cannot be
-    maintained on chain.  What does a static `T` cost as the registry grows?
-2.  **F12.** §3.3 argues eligibility widening cannot shift composition because it
-    is uniform over *identities*.  Composition is a property of who *acts*.  Does
-    a widening step at a publicly known minute favour an always-on cohort?
-3.  **`h`.** Honest challenge reliability, the one quantity that lives outside the
-    contract.  §4.5 claims the single-randomness rule largely defuses it.
-4.  The open parameters: `d`, `BOND_MIN`, `CHALLENGE_BOND`.  `MIN_COMMITS`
-    was on this list and is no longer a parameter at all — E14/E14b measured it
-    inert above its calibration registry and destructive below, and §4.8b
-    removed it.  See ``FINDINGS-adaptive.md`` §2.
+Two further differences worth knowing before reading anything else out of this
+module. The verdict is a **majority of three tickets**, so ``P(Approve)`` is
+``f(a) = 3a² − 2a³`` rather than ``a``. And ``verdict`` compares ``u < a`` rather
+than ``u mod N < A``: both are uniform and both give ``f(a)``, but only the
+comparison form is **monotone** in the tally. The current design does not rely on
+that monotonicity — it draws fresh tickets each round on purpose, bounding retry
+by the challenge cap instead — but the contract uses the same cross-multiplied
+comparison, so the primitive is faithful to it.
 
 The attacker is pay-insensitive throughout: their prize is the listing, which is
-external to the protocol, so they act whenever eligible and able.  Honest turnout
-is a rational response to expected earnings net of the debit.  That asymmetry is
-the design's own claim about motives.
+external to the protocol, so they act whenever eligible and able. Honest turnout
+is a rational response to expected earnings. That asymmetry is the design's own
+claim about motives, and it carries over unchanged.
 """
 
 from __future__ import annotations
@@ -65,27 +56,25 @@ class ParamsV3:
     widen_factor: float = 1.5
     widen_enabled: bool = True
 
-    # quorum — there is none, in either round (§4.8, §4.8b).
+    # quorum — there is none, in either round, in either design. The superseded
+    # design removed its `MIN_COMMITS` gate after measuring it inert above its
+    # calibration registry and destructive below; the current design never had
+    # one, and `specs/protocol.md` §4.1 says plainly that three commits start a
+    # clock and are not a quorum.
     #
-    # `MIN_REVEALS` went first: a terminal-class gate on state every revealer can
-    # watch. `MIN_COMMITS` followed, at 1 rather than 16, because E14/E14b
-    # measured it inert at every registry above its calibration size and
-    # destructive below — see `FINDINGS-adaptive.md` §2. What stops a thin tally
-    # from deciding a case outright is §4.5's estimator, not a floor.
-    #
-    # **`FINDINGS-v3.md` predates this and was produced at 16.** Its §D figure —
-    # 92.2% NO_TURNOUT at registry 250 — is the measurement that removed the
-    # gate, so it is history and not a current property. Re-running run_v3.py
-    # now will not reproduce it; that is correct, and §D says so.
+    # What the older design relied on to stop a thin tally deciding a case
+    # outright was its estimator, not a floor. The current design uses the raw
+    # share instead, which does NOT stop it — hence §11's open per-committee
+    # minimum and `simulation/FINDINGS-floor-price.md`, which prices it.
     min_commits: int = 1
 
     # economics (§5)
     fee: float = 90.0
     gas_cost: float = 3.0
-    #: `d`, the incoherence debit, as a multiple of expected pay. §1 gives the
-    #: working value `d = 1.4 × E[P/N]`, the ratio v2.1 found viable.
-    #: `REVEAL_BOND = LAMBDA = d + G` (§1, §2.4, §5.2) — `G` is the gas
-    #: allowance, and this engine does not model gas, so it carries `d` alone.
+    #: `d`, the incoherence debit, as a multiple of expected pay — the superseded
+    #: design's penalty. The current design has no debit at all: the only penalty
+    #: is an additive freeze and the stake is never taken (`specs/protocol.md`
+    #: §2). Retained only so this engine still runs.
     debit_multiple: float = 1.4
 
     # behaviour
@@ -164,7 +153,7 @@ def a_hat(approve: int, total: int) -> float:
     uniform prior, and it is symmetric.
     """
     if total <= 0:
-        raise ValueError("a_hat() on an empty tally — `N >= 1` is arithmetic (§4.8)")
+        raise ValueError("a_hat() on an empty tally — `N >= 1` is arithmetic")
     return (approve + 1) / (total + 2)
 
 
@@ -267,7 +256,7 @@ class CaseResult:
 
 def run_case(p: ParamsV3, rng: random.Random, *, content_is_safe: bool,
              attacker_wants: bool = APPROVE) -> CaseResult:
-    """One case, following state-machine-v3 §4.
+    """One case, following the superseded design's lifecycle.
 
     `attacker_wants` is the verdict the hostile side is pushing: `APPROVE` for a
     listing attack, `REJECT` for censorship.  They are pay-insensitive and vote
@@ -297,7 +286,7 @@ def run_case(p: ParamsV3, rng: random.Random, *, content_is_safe: bool,
     r0.commits_honest, r0.commits_attacker = len(hon), len(att)
     voted |= set(hon) | set(att)
 
-    # §4.8 — the gate is on COMMITS, at commit close, before any tally exists.
+    # The gate is on COMMITS, at commit close, before any tally exists.
     if r0.commits < p.min_commits:
         return CaseResult("UNRESOLVED", "NO_TURNOUT", rounds=(r0,))
 

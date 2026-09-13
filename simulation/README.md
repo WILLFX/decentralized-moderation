@@ -1,115 +1,96 @@
-# Moderation Protocol Simulation (M1)
+# Simulation
 
-> **This directory describes the M1 simulation of the FIRST architecture** —
-> stake-weighted draws, a proportional lottery, bonded appeals, freeze-based
-> settlement. It is kept as the record of how the working values were first
-> derived. **The current simulation is `simulation/`**, which models the
-> three-ticket verdict against `â`, one randomness per claim, and balance debits;
-> its results are in `FINDINGS-v3.md`, `FINDINGS-adaptive.md` and
-> `FINDINGS-weighted.md`. Nothing in v2's or v1's findings carries over — the
-> verdict rule itself changed.
+Every quantitative claim the repository makes comes from here. The normative
+design is [`../specs/protocol.md`](../specs/protocol.md); nothing in this
+directory is normative, and where a finding disagrees with the spec the finding
+is either out of date or a reason to change the spec — never a silent third
+design.
 
-An agent-based simulation of the decentralized moderation game, written to turn
-the README's *working values* into data-backed protocol parameters **before any
-Solidity is written** (roadmap M1). It plays full cases — stake-weighted subset
-draws, commit-reveal voting, stake-proportional probabilistic outcomes, bonded
-appeals, and freeze-based settlement with no internal stake transfer — over
-populations of honest and adversarial moderators, and prices each attack from
-README §7 and §3.6.
+- **Runtime:** Python 3.9+, standard library only. No dependencies.
+- **Exact where it can be.** Three of the four measurements enumerate a finite
+  state space rather than sampling, so they have no seed and no confidence band.
 
-- **Runtime:** Python 3.9+ standard library only. No dependencies to install.
-- **Reproducible:** every scenario is seeded; pass `--seed` to vary.
+## What is here
 
-## Quick start
+| findings | produced by | engine | method |
+|---|---|---|---|
+| `FINDINGS-floor.md` | `run_floor.py` | `floor.py` | exact + proved asymptotics |
+| `FINDINGS-staged.md` | `run_staged.py`, `run_exact.py` | `staged.py`, `exact.py` | Monte Carlo, cross-checked against exact enumeration |
+| `FINDINGS-floor-price.md` | `run_floor_price.py` | `floor_price.py` | exact binomial tails |
+| the draw differential | `check_draw_vectors.py` | `draw.py`, `keccak.py` | re-derivation against contract-emitted vectors |
 
 ```bash
 cd simulation
-python3 run.py all                 # run every scenario
-python3 run.py whale-sweep         # attack success & attacker net vs stake share
-python3 run.py honest              # honest-moderator ROI by difficulty
-python3 tests/test_protocol.py     # invariant tests (no pytest needed)
+python3 run_floor.py          # the separability bound
+python3 run_staged.py         # the staged pair, sampled
+python3 run_exact.py          # the same comparison, enumerated
+python3 run_floor_price.py    # pricing §11's per-committee minimum
+python3 check_draw_vectors.py # after: forge test --match-test test_emitDrawVectors
 ```
 
-Add `--json out.json` to any command to dump machine-readable results, and
-`--trials N` to change the Monte-Carlo sample size (default 1500).
+## The four results, shortest form
 
-## What it models
+**`FINDINGS-floor.md` — the one that outranks the others.** Safe and unsafe
+content are distinguishable only when `prior > (1 + q/(1−q)) / 2`; at a 30%
+attacker share that is `prior > 0.714`. Below it the tally is *anti-correlated*
+with the truth and **no rule over it separates them** — not the lottery, not a
+threshold, not unanimity, at any cohort size. It also establishes that the
+lottery's error converges to a positive constant in cohort size while a
+threshold's decays exponentially, which is a `Θ(1)` against `exp(−Θ(N))`
+difference rather than a tuning question. `prior` is unmeasured; see
+`../measurement/prior/`.
 
-The engine (`moderation_sim/protocol.py`) implements the case state machine of
-`../specs/state-machine.md` §5. It is deliberately **economic, not
-cryptographic**: commit-reveal is represented by its *effect* (hidden,
-independent votes), not by hashing. Key abstractions, and where they diverge
-from the chain, are documented at the top of `protocol.py`. The load-bearing
-ones:
+**`FINDINGS-staged.md` — the staged pair comes out worse, and the reason is
+checkable on paper.** The preliminary outcome's tickets are drawn from the
+*combined* tally of both committees, so capturing committee 1 alone buys nothing
+and the staging does not create the separation it was meant to. Two engines that
+share no code agree on it: `staged.py` samples a behavioural model, `exact.py`
+enumerates the state space, and `run_exact.py`'s first experiment cross-checks
+them before reporting anything else.
 
-- **Seats, not weighted voters** (spec §5.2). Each round has N counted **seats**
-  drawn stake-weighted **with replacement** — a large stake can win several. Every
-  seat is one **flat vote**; the outcome is drawn ∝ seat counts (`_draw_seats`,
-  `_draw_outcome`). Stake buys selection frequency, not vote weight (no
-  double-count). No `weight_policy` knob.
-- **Solvent settlement:** refunds first, bounty/bonus from the residual, so no
-  case mints money (`test_settlement_conserves_funds`).
-- **Freezing power** comes from the **seat-weighted mean** track of the winning
-  side (split-resistant), and only *bites* in **campaign mode** (below).
-- **Appeals are configurable, not assumed benign.** `Params.honest_appeal_threshold`
-  (EV-gate) and `Params.naive_appeal_frac` (a caring honest side that appeals
-  regardless) both drive results — the attacker's profit is a function of them,
-  not a constant. Likewise `error_correlation` (shared honest blind spots).
-- **No internal transfer:** settlement moves only external money (fees + forfeited
-  bonds) to coherent voters; principal is untouched (`test_no_internal_stake_transfer`).
+**`FINDINGS-floor-price.md` — a floor works, and costs most exactly where it is
+needed.** Three identities that are the only committers take a case with
+certainty (pinned in `../contracts/test/ThreeVote.t.sol`). A per-committee
+minimum closes that; its price is cases that cannot resolve, and it turns
+entirely on turnout, which is unmeasured. `k` between 2 and 4 is defensible at
+20% turnout or better; nothing is defensible below 10%.
 
-### Campaign mode (freeze must persist to matter)
+**The draw differential — the contract's ticket derivation, re-derived
+independently.** `Draw.t.sol` constrains the *rate*, that the outcome tracks
+`3a² − 2a³`. That is not enough: a domain-separation mistake keeps `u` uniform,
+keeps the rate exactly right, passes every statistical test, and silently makes
+two draws identical. So `check_draw_vectors.py` recomputes every `u[i]` from a
+pure-Python keccak that refuses to load unless it reproduces published KATs, and
+**sabotages its own derivation** — dropping the round from the preimage — failing
+loudly if the comparison does not notice. A differential that agrees is only
+evidence if it would have disagreed.
 
-`campaign.py::run_campaign` drives a persistent population on an absolute clock so
-a frozen moderator is actually absent from later draws. The single-case scenarios
-rebuild the population each trial, under which freezing is inert. All freeze,
-farming, and veteran-effect results come from campaign mode; it is a sequential
-approximation of overlapping cases (documented in `campaign.py`). Campaign
-outcomes are high-variance, so they are averaged over several seeds with ±sd.
+## `protocol_v3.py`, and a divergence to know about
 
-## Layout
+`protocol_v3.py` is an engine for an **earlier design** — widening, quorum gates,
+balance debits, `REVEAL_BOND`/`LAMBDA`. That design is gone and its findings file
+is not on this branch. The module survives only because `staged.py` imports four
+primitives from it: `a_hat`, `draw_tickets`, `verdict`, `f`.
 
-```
-simulation/
-  run.py                       CLI: scenarios, sweeps, JSON output
-  moderation_sim/
-    params.py                  Params dataclass — every spec §1 symbol
-    protocol.py                case engine: draw→commit→reveal→tally→appeal→settle
-    campaign.py                persistent-population campaigns (freeze bites)
-    agents.py                  voting strategies (honest, attacker, copy-voter)
-    costs.py                   fee-floor cost model (gas + voter pay)
-    scenarios.py               the attack experiments + sweeps
-    metrics.py                 Monte-Carlo aggregation (± sd, per-case units)
-  tests/test_protocol.py       invariant + sanity tests
-  FINDINGS.md                  interpreted results, stated with their conditions
-```
+One of those four does not match what is implemented. `a_hat` is the Laplace
+estimator `â = (A+1)/(N+2)`; `Moderation._estimator` uses the **raw share
+`A/N`**. So `FINDINGS-staged.md`'s numbers are computed against an estimator the
+contract does not use. The direction of its conclusion does not depend on the
+estimator — it rests on both committees' votes feeding one draw — but the figures
+do, and raw `A/N` is the more permissive of the two, so the staged pair is if
+anything worse than reported rather than better. Tracked as work to do, not as a
+result to cite around.
 
-## Scenarios
+Everything else here is estimator-independent: `floor.py` and `floor_price.py`
+derive their own quantities, `exact.py` enumerates, and `draw.py` reproduces the
+contract exactly by construction.
 
-| Command | Demonstrates (see FINDINGS for numbers + conditions) |
-|---|---|
-| `whale` / `whale-sweep` | Attack success vs (stake, difficulty, honest liveness). A minority whale is not powerless on borderline content with honest offline. |
-| `naive` | Attacker net/case as a function of the honest side's appeal rationality — "attacker profits nothing" is conditional. |
-| `track-farming` | Campaign-mode farming: bounded, not eliminated; split and concentrated both give no reliable attack-success uplift. Reports honest freeze p95. |
-| `honest` | Honest ROI and correctness by difficulty (± sd); plus correlated-error rows. |
-| `fee-floor` | Fee floor from per-vote op cost; gas negligible; margin ~2 clears borderline. |
-| `copy` | Copy/correlated voting degrades correctness only as independence breaks; whale × copy helps the attacker. |
-| `underparticipation` | Widen path holds correctness down to ~15% online. |
+## What these models do not do
 
-See `FINDINGS.md` for interpreted results **with their conditions and confidence
-bands**, and `../specs/state-machine.md` §11 for the open-parameter list.
-
-## Caveats
-
-This is a first-generation model built to expose *directions and orders of
-magnitude*, not to emit final constants. It abstracts network timing, exact gas,
-proposer/randomness manipulation, and the *cost of acquiring* a stake majority
-(the real external defense against supermajority capture, which the model does
-not price). Campaign mode is a sequential approximation of concurrent cases, and
-liveness/honest-error are modeled as i.i.d. where reality is correlated.
-
-Crucially, the model is set up to **falsify** claims, not just confirm them: an
-adversarial review showed several first-pass headlines depended on
-defender-favorable assumptions, and the scenarios now relax those (content
-difficulty, honest liveness, appeal rationality, correlated error). FINDINGS
-reports what survives and what does not.
+They are economic and statistical, not cryptographic, and they abstract network
+timing, gas, and proposer influence over randomness. Turnout and honest error are
+modelled as independent across identities; real moderators are correlated — the
+same people are busy at the same times — and in every place it matters that
+correlation makes the reported number optimistic rather than pessimistic. Each
+findings file ends with its own assumptions section, and those are the places the
+result could still be wrong.

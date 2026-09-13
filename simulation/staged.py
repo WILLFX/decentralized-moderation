@@ -8,13 +8,14 @@ This is the measurement asked for directly, and never run:
 
 Four architectures, same population, same draw rule, same honest behaviour:
 
-    A  one committee per round                (what the repository implements)
+    A  one committee per round                (the baseline being compared against)
     B  two committees, first tally VISIBLE    (the naive two-stage)
     C  two committees, staged and HIDDEN      (the proposal)
     D  C, plus challenge rounds               (the proposal, complete)
 
-The decided design for D, which differs from what the repository implements and
-is the thing this run exists to evaluate:
+D is the design `specs/protocol.md` now specifies and `contracts/src/` now
+implements; A is kept as the baseline it is measured against, not as a description
+of the repository. The parts of D that this run exists to evaluate:
 
   * the preliminary outcome is **published** after each pair reveals;
   * a challenge is a **public vote opposite** that outcome, so it discloses its

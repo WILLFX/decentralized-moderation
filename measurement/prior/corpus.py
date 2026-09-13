@@ -6,7 +6,7 @@ properties matter and the third is the one benchmarks usually get wrong:
 1.  **Ground truth exists and is independent of the classifiers.** Labelled by
     people, against the same one-line guidelines, with disagreements resolved
     and recorded rather than dropped.
-2.  **The mix reflects real submissions.** `simulation/FINDINGS-v3.md` shows
+2.  **The mix reflects real submissions.** `simulation/FINDINGS-floor.md` shows
     the design's behaviour is dominated by `prior`, and `prior` is not one
     number — it is much higher on obvious content than on borderline content.
     A corpus of hard cases measures the wrong quantity, and so does a corpus of
@@ -16,8 +16,9 @@ properties matter and the third is the one benchmarks usually get wrong:
     guidelines' performance where nobody doubted it.
 
 `difficulty` is the label to stratify on when reporting: report `prior` per band,
-never as a single average, because §8.4's permanent rejection is defensible at one
-band and not at another.
+never as a single average. The separability bound in `simulation/FINDINGS-floor.md`
+is a threshold, so a population can sit above it on ordinary content and below it
+on borderline content — and one average hides exactly that.
 """
 
 from __future__ import annotations

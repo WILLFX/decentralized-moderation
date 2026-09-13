@@ -2,7 +2,7 @@
 
 **Version:** 1
 **Status:** Active
-**Applies to:** every case is judged against the guidelines version that was active at the time the submission was made (not the version active when the vote is cast).
+**Applies to:** every case is judged against the guidelines version that was active at the time the submission was made (not the version active when the vote is cast). **This is a convention among moderators, not an enforced one** — see "Versioning and change control".
 
 ---
 
@@ -11,14 +11,17 @@
 This is the **Schelling focal point** of the whole protocol. Moderators are not
 paid to enforce their personal taste; they are paid to predict *the reading any
 other honest moderator would give this same document*. Coherence with the final
-verdict earns a share of the fee; incoherence costs a fixed debit from your bond.
-The profitable long-run strategy is therefore to judge exactly the way a neutral
-reader of these guidelines would — nothing more, nothing less.
+outcome earns a share of the fee; incoherence adds a fixed duration to your
+frozen time, during which you are eligible for nothing. The profitable long-run
+strategy is therefore to judge exactly the way a neutral reader of these
+guidelines would — nothing more, nothing less.
 
 Because coherence is what is rewarded, this document is **as load-bearing as the
-contract**. Its keccak-256 hash is recorded on-chain, and the contract pins the
-active version at submission time so that no later edit can retroactively change
-how an already-submitted case should be judged.
+contract** — it is what moderators are predicting each other against. It is not,
+however, tied to the chain: **the contracts record no guidelines version and no
+hash of this document**, so nothing on chain fixes which text a given case was
+judged under. Until that changes, "the version active at submission" is a
+convention this document asks moderators to keep, enforced by nothing.
 
 This version is deliberately short. It grows **only** when a real, disputed case
 demonstrates that one line was not enough — never speculatively. Every addition
@@ -89,13 +92,13 @@ for all users.
 - **Legality in any specific jurisdiction.** You are applying a single global
   safe-search standard, not the law of any one country; moderators are not asked
   to make legal determinations. Content later shown to be illegal is handled by
-  the removal-request path (P1).
+  a removal case (§3).
 - **The submitter's identity or motive.** Judge the content and its metadata,
   not who sent it.
 
 ## 3. Removal requests
 
-A removal request (P1) targets an entry already in the index and is judged by
+A removal case targets an entry already in the index and is judged by
 the **same** three-question test applied to the entry's *current* state, plus one
 question specific to removals:
 
@@ -122,58 +125,69 @@ submissions do.
 - **Fetch before you vote.** Both the content chunk and the metadata JSON are
   content-addressed (CAC), so what you fetch is exactly what was submitted and
   exactly what stays approved. Never vote on the metadata alone.
-- **Reveal what you committed.** Committing costs you nothing up front, but a
-  commitment you never reveal is debited `REVEAL_BOND` at settlement. Withholding
-  is never worth it: your vote can only help the side you actually hold, and
-  removing it strictly lowers that side's chances (`specs/protocol.md` §5.2).
+- **Reveal what you committed.** Withholding is never worth it on the merits:
+  your vote can only help the side you actually hold, and removing it strictly
+  lowers that side's chances. Be aware that the protocol does not currently
+  *price* a non-reveal — a commitment never revealed is neither paid nor frozen —
+  and that this is an open item (`specs/protocol.md` §11), not a licence.
 - **Borderline cases will occur.** On a genuinely borderline judgment you may end
-  up incoherent with the verdict and pay the debit `d`. It is a bounded, one-off
-  amount set as a small multiple of what a case pays — an inconvenience, not a
-  material loss, and it never touches your 10 xBZZ stake (design principle 1).
-  Judge honestly regardless: over many cases, honest judgment is the only strategy
-  that is profitable in the long run.
-- **Challenge incorrect outcomes, and understand what a challenge is.** At about
-  one hour the contract publishes the **plurality** — which side has more revealed
-  votes. That is a fact about the votes and **not a verdict**; no randomness has
-  been drawn yet. During the challenge window that follows, any active moderator
-  may register a challenge by posting `CHALLENGE_BOND`.
+  up incoherent with the outcome, and `FREEZE_PER_LOSS` is added to your total
+  frozen time. It is a bounded, fixed duration, additive to a running total rather
+  than an extension from the present moment, so the same set of losses costs the
+  same whatever order they settle in. **Your stake is never taken** — not slashed,
+  not redistributed, not transferred. Time is the only currency of penalty. Judge
+  honestly regardless: over many cases, honest judgment is the only strategy that
+  is profitable in the long run.
+- **Challenge incorrect outcomes, and understand what a challenge is.** Once both
+  committees have revealed, three tickets are drawn against their combined tally
+  and the result is published as a **preliminary outcome**. A one hour challenge
+  window follows.
 
   Three things about it are easy to get wrong:
 
-  - **A challenge is not a vote and does not say which side you are on.** It buys
-    a second round; it does not state a position in it. You commit inside that
-    round like everyone else, hidden (`specs/protocol.md` §3.5).
-  - **The bond is a price, not a bet.** It is debited whichever way the case ends.
-    You are not refunded for being right, and you are not charged extra for being
-    wrong — so there is nothing to steer (§4.6).
-  - **You need no eligibility to challenge.** Any active moderator may. But you do
-    need eligibility to *vote* in the round you bought, like anyone else.
+  - **A challenge *is* a vote, and it discloses its direction.** It is a public
+    vote **opposite** the published outcome — you cannot challenge an Approve by
+    approving. Your vote counts once in the pool and carries the ordinary vote
+    liability, so challenging a correct outcome freezes you like any other
+    incoherent vote.
+  - **There is no bond.** Nothing is posted and nothing is refunded. The price of
+    challenging is the liability you take on by voting.
+  - **At most two challenges per case.** After the second resolves, the case
+    finalizes.
 
-  Votes from both rounds are **pooled** into one tally, and the single random draw
-  happens after everything closes. So a challenge that brings no new votes returns
-  the identical verdict — the only way to change the answer is to change the
-  evidence. An incorrect outcome that nobody challenges will simply stand.
+  A challenge buys another two committees, and the tickets are then drawn
+  **afresh** over the whole pool — every committee that has revealed, including
+  the first two. So a challenge that brings no new votes still re-draws, but over
+  a tally it barely moved; the way to change the answer is to change the evidence.
+  An incorrect outcome that nobody challenges will simply stand.
 - **Use a fresh address per moderator identity.** Addresses are permanently
-  linked on-chain to the decisions they make. Treat moderator addresses as
-  disposable identities, not as your primary wallet. (Open question in the
-  README; recommended practice here.) Note the trade-off: your **track record**
-  accrues per address and does not transfer, so rotating an address resets it to
-  a newcomer's. Each moderator weighs privacy against the standing they have
-  built.
+  linked on-chain to the decisions they make, so treat a moderator address as a
+  disposable identity rather than your primary wallet. Nothing in this design
+  accrues to an address across cases — there is no reputation or track record to
+  lose — so rotating costs you nothing but the stake for the new identity. Note
+  the other side of that: it is also why a freeze deters only to the extent
+  capital is scarce (`specs/protocol.md` §10.3).
 
 ---
 
 ## Versioning and change control
 
-- The active version integer and this document's keccak-256 hash are pinned
-  on-chain.
-- A case is always judged against the version active **at its submission block**.
+- **Nothing here is pinned on chain.** The contracts store no version integer and
+  no hash of this document. A case therefore carries no record of which text it
+  was judged under, and an edit to this file changes how every open case *should*
+  be judged with no on-chain trace. Pinning the version and hash at submission is
+  the mechanism that would fix it; it is not built, and it is not in
+  `specs/protocol.md` either — it is an open item, listed there in §11.
+- A case *should* be judged against the version active **at its submission
+  block**. That is the intent the pin above would enforce.
 - Changes are additive and case-driven: a new version is cut only when a real
   disputed case shows the current text is ambiguous, and the changelog entry must
   cite the case that forced it.
-- Who maintains this document and how updates are ratified is an open governance
-  question (see README §7); until resolved, changes follow the same bounded
-  multisig-plus-timelock path as numeric parameters (P6).
+- Who maintains this document and how updates are ratified is an **open
+  governance question** with no answer in this repository. There is no multisig,
+  no timelock and no upgrade path in the contracts; the numeric parameters in
+  `specs/protocol.md` §11 have no values yet, let alone a process for changing
+  them.
 
 ## Changelog
 
@@ -182,12 +196,15 @@ submissions do.
   removal-request handling, and moderator practical notes.
 
   **Corrected in place, before first use, and deliberately not cut as v2.** The
-  §4 practical notes and the §3 removal text described the *v2* mechanism —
-  challenges as unbonded public votes, penalties as identity freezes, "freezing
-  power" — all of which `specs/protocol.md` replaced with a bonded
-  challenge that discloses no direction (§3.5), a fixed balance debit (§5.1), and
-  a `track` record that no longer sets any freeze length. The three-question test
-  itself is unchanged; only the descriptions of consequence were wrong.
+  three-question test in §1 has never changed. Everything this document said
+  *around* it about consequence has been wrong at least once, because the protocol
+  it describes was rewritten under it: bonds, balance debits, a `track` record, a
+  published plurality and a direction-hiding challenge have all appeared here and
+  are all gone. The text now matches `specs/protocol.md` as the single normative
+  design: the only penalty is an additive freeze, the stake is never taken, a
+  preliminary outcome is drawn and published, and a challenge is a public vote
+  opposite it with no bond. The claim that this document's hash is pinned on chain
+  was also removed — it never was.
 
   **Why this is not a version bump.** The change-control rule below cuts a new
   version when a *disputed case* shows the text is ambiguous. No case has ever

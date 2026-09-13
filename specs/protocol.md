@@ -3,8 +3,9 @@
 **Status:** Normative. This is the design. Where anything else in the repository
 disagrees with it, this file wins.
 
-**Not yet implemented.** `contracts/src/` implements an earlier design and is
-being brought to this one. The differences are listed in §10.
+**Implemented.** `contracts/src/` implements this document. §10 lists every place
+it does not: what is specified here and not built, what deviates deliberately, and
+what the code requires that this document does not state.
 
 ---
 
@@ -187,58 +188,40 @@ costs its submitter every time.
 
 ## 10. Distance from the current implementation
 
-`contracts/src/` implements an earlier design. This section is built by reading
-this document against the contracts, **not** by collecting the objections someone
-happened to raise — an objection list stops wherever the reader stopped, and the
-most dangerous divergences are the ones nobody thought to ask about.
+`contracts/src/` implements this document. What follows is every place it does
+not, read from the code rather than assembled from anyone's objections — an
+objection list stops wherever the reader stopped.
 
-### 10.1 Contradicts this document
+### 10.1 Specified here, not implemented
 
-| area | implemented | this document |
-|---|---|---|
-| committees per round | one | two, staged (§4.1) |
-| penalty | balance debit | additive freeze (§2) |
-| concurrency | capped by bond solvency | unlimited (§2) |
-| pre-challenge publication | plurality, verdict withheld | preliminary outcome (§4.2) |
-| challenge | bonded, direction hidden | a public opposite vote (§4.2) |
-| draw | once per claim, reused on re-review | fresh per preliminary outcome (§5) |
-| challenge window | 12 hours | 1 hour (§4.2) |
-| commit window | 20 minutes, fixed | 15 minutes from 3rd commit (§4.1) |
-| max challenges | 1 | 2 (§4.2) |
-| strict label | `SUPER_SAFE` predicate | two recorded facts (§7) |
-| eligibility | fixed cohort target, widened mid-window | `N−5` leading zero bits, no widening (§3) |
+| | |
+|---|---|
+| **the per-committee minimum** (§11) | Nothing requires either committee to hold anybody. With §5's `A/N` making a unanimous tally certain, and §4.1's three commits explicitly not a quorum, **three identities that are the only committers take a case with probability 1** — `contracts/test/ThreeVote.t.sol` pins it at 40 of 40, and `simulation/FINDINGS-floor-price.md` prices the fix. |
+| **a cost for non-reveal** (§11) | A commitment never revealed is neither paid nor frozen. Reveals are public transactions in a shared phase, so a moderator can watch the tally form and withhold if they would be incoherent. Free, and profitable. |
 
-### 10.2 Required here, absent there
+Both are open items on §11 rather than implementation errors, and both are
+observable on a testnet.
 
-- **Freeze.** There is no freeze anywhere in the contracts. `FreezeMath` was
-  deleted when penalties moved to balance debits. §2 needs it back, and it must be
-  additive to a total rather than an extension from the present moment.
-- **Staged committee selection.** No second seed derived after a first commit
-  phase closes. §4.1 requires one per committee.
-- **A commit clock anchored to the third commit.** Windows are currently fixed
-  from phase open.
+### 10.2 Deliberate deviations, marked in the code
 
-### 10.3 Built without being asked for
+| | |
+|---|---|
+| **eligibility bits** | §3 derives `N` from the count of NON-FROZEN moderators. That count falls and rises with no transaction to observe — a freeze expires on a clock — so it cannot be maintained on chain. `Moderation._eligBits` pins it from the STAKED count, which is exact, and `commit` rejects a frozen caller separately. The threshold sits slightly wide while part of the registry is frozen. |
+| **the estimator** | §5 leaves it open; the code uses the raw share `A/N`, isolated in `_estimator` so the alternative is a one-line change. |
 
-**This is the category that matters, and it was missing from earlier versions of
-this table.** Each of these exists in the contracts, none appears in the design,
-and each was our addition rather than a decision anyone took.
+### 10.3 Required by the code, not by this document
 
-| subsystem | what it is | status |
-|---|---|---|
-| **Bonds** | `postBond`, `mayCommit`, `mayChallenge`, `createVoteClaim`, `createChallengeClaim`, `debit`, `discharge`, `dischargeCondemned`, `claimChallenge`, plus `bond`, `liabilities`, `openVoteCount`, `openChallenges` in storage | **A second capital system on top of the stake.** §2 has a stake and nothing else. Unlimited concurrency and a solvency-checked bond are the same decision taken twice in opposite directions — the bond is what caps concurrency. Removing the bond removes the cap. |
-| **Maintenance reserve** | `sweepMaintenance`, `depositMaintenance`, `proposeMaintenanceWithdrawal`, `executeMaintenanceWithdrawal` | Exists to receive debits. With no debits there is nothing to receive. Whether the protocol should hold a treasury at all is undecided. |
-| **Governance** | `RulesetGovernor`, `applyParams`, `applyGuidelines`, `proposeCaps`, `executeCaps`, `setGovernor`, timelocks | Never specified. Some upgrade path is probably needed; the shape of it was never agreed. |
-| **Track record** | `track`, `recordParticipation`, decay and saturation | Never specified. Currently weights nothing and scales nothing, so it is storage with no consumer. |
-| **Retry and reservation machinery** | `reopen`, `withdrawRefund`, claim keys, permanent reservations, `NO_TURNOUT` / `NO_REVEALS` / `NO_RANDOMNESS` terminal rows, retry cooldowns | Never specified. §4 has one lifecycle with one terminal state. |
-| **Maturation and exit cooldown** | `maturesAt`, `exitRequestedAt`, `maturation`, `exitCooldown` | Never specified. A fresh stake currently cannot vote for a period. |
-| **Permissionless phase pokes** | `closeCommit`, `closeReveal`, `closeTally`, `draw` as separate transactions, with bounties | Never specified. Partly an artefact of the plurality phase, which §4.2 removes. |
-| **Index questions** | `openQuestion`, `closeQuestion`, the open-question counter | Existed to serve `SUPER_SAFE`. §7 drops that label, so this is likely orphaned. |
-| **Topic cap** | `MAX_TOPICS = 5` | Never specified. |
+A guard the specification does not state and does require: **a moderator with an
+unsettled vote cannot withdraw.** If the only penalty is a freeze, committing and
+then withdrawing before settlement escapes every penalty the design has, because
+there is nothing else to take.
 
-**None of these is condemned by being listed here.** Several may turn out to be
-necessary. The point is that each is an open decision that was taken silently,
-and the list exists so that they are decided rather than inherited.
+What that guard does *not* close is identity rotation, and nothing here does. A
+frozen moderator can leave the frozen stake idle and stake a fresh address, so
+escaping a freeze costs one stake tied up for the freeze duration — which is
+exactly what serving it costs. **The freeze deters only to the extent capital is
+scarce.** `StakeRegistry`'s closing comment states this where a reader of the
+contract will hit it.
 
 ## 11. Open parameters
 
@@ -257,5 +240,12 @@ Not decided, and each needs a number before deployment.
 - **Minimum participation per committee.** A combined threshold is not enough: 40
   commits in committee 1 and one in committee 2 is not two committees.
 - **What "anonymous" means** in §7.
+- **Binding the guidelines to the chain.** Moderators are paid for coherence with
+  each other's reading of `MODERATION_GUIDELINES.md`, so which text was in force is
+  part of what a case means. Nothing records it: no version integer, no hash of the
+  document, nothing pinned at submission. Editing the guidelines silently changes
+  how every open case should be judged, and a settled case carries no evidence of
+  the standard it was settled under. The mechanism is small — store a version and
+  hash on the case at `submit` — but it is neither specified above nor implemented.
 - **`prior`** — how often a moderator's judgment matches the truth. Unmeasured,
   and `simulation/FINDINGS-floor.md` shows it decides whether any of this works.

@@ -13,14 +13,11 @@ disagrees with it, the spec wins.
 
 > **Status: M1 and M2 complete, M3 next** (§8). The three contracts implement the
 > protocol — 123 tests, a mutation campaign at 97.0%, independent differentials on
-> both the draw and eligibility. **Nothing is deployed and nothing has been
-> externally reviewed.**
+> both the draw and eligibility. 
 >
-> **M3 is the moderator interface, and it is the blocker.** The parameters §7 lists
+> **M3 is the moderator interface.** The parameters §7 lists
 > as open are measurements, not decisions, and the instrument is a running testnet —
-> which needs moderators, who need somewhere to moderate. `prior` is the sharpest of
-> them: it decides whether any of this works at all.
-
+> which needs moderators, who need somewhere to moderate.
 ---
 
 ## 1. Why this exists

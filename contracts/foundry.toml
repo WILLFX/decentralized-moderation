@@ -26,7 +26,12 @@ via_ir = true
 # Differential vectors are read from disk (M2-8, D10).
 # Differential vectors are read from disk (M2-8, D10), and M2.13 §5 WRITES the
 # draw vectors the Python differential consumes.
-fs_permissions = [{ access = "read-write", path = "./test/vectors" }]
+fs_permissions = [
+    { access = "read-write", path = "./test/vectors" },
+    # The deploy script hashes MODERATION_GUIDELINES.md rather than carrying a
+    # hardcoded constant, and a test re-reads it to prove the two cannot drift.
+    { access = "read", path = "../MODERATION_GUIDELINES.md" },
+]
 
 # Integer-only accounting contract: no unchecked surprises we didn't write.
 # Deterministic test RNG so distribution/statistical tests are reproducible.

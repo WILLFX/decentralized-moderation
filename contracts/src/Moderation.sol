@@ -159,6 +159,26 @@ contract Moderation is ReentrancyGuard {
     uint256 public immutable seedLag;
     uint256 public immutable feeMin;
 
+    /// @dev The guidelines this deployment judges against: a version integer and the
+    ///      keccak-256 of `MODERATION_GUIDELINES.md`. **Immutable, so every case in
+    ///      this contract was judged under exactly one text, by construction.**
+    ///
+    ///      Moderators are paid for coherence with each other's reading of that
+    ///      document, so which text was in force is part of what a case means. It
+    ///      used to be recorded nowhere: editing the guidelines silently changed how
+    ///      every open case should be judged, and a settled case carried no evidence
+    ///      of the standard it was settled under. `measurement/prior` cannot separate
+    ///      cases judged under different text after the fact, so it could not use the
+    ///      chain as an instrument at all.
+    ///
+    ///      Immutable rather than governed, because the alternative is an owner who
+    ///      can change what every open case means — a trusted party in a design whose
+    ///      premise is that there is none. **A guidelines revision is therefore a new
+    ///      deployment**, and index continuity across one is a client concern, exactly
+    ///      as §7 already makes the meaning of an entry a client concern.
+    uint32 public immutable guidelinesVersion;
+    bytes32 public immutable guidelinesHash;
+
     // ---------------------------------------------------------------- state
 
     uint256 public nextCaseId = 1;
@@ -207,6 +227,7 @@ contract Moderation is ReentrancyGuard {
     error AlreadyRemoved();
     error BadFloor();
     error FeeTooLarge();
+    error BadGuidelines();
 
     constructor(
         address _token,
@@ -219,7 +240,9 @@ contract Moderation is ReentrancyGuard {
         uint256 _freezePerLoss,
         uint256 _seedLag,
         uint256 _feeMin,
-        uint256 _minRevealsPerCommittee
+        uint256 _minRevealsPerCommittee,
+        uint32 _guidelinesVersion,
+        bytes32 _guidelinesHash
     ) {
         token = IERC20(_token);
         stakes = IStakeRegistry(_stakes);
@@ -241,6 +264,14 @@ contract Moderation is ReentrancyGuard {
         // committee.
         if (_minRevealsPerCommittee == 0) revert BadFloor();
         minRevealsPerCommittee = _minRevealsPerCommittee;
+
+        // Both are rejected at zero rather than defaulted. A zero hash would pin the
+        // cases of this deployment to no document at all, which is the state this
+        // exists to end; a zero version gives a reader no way to say which revision
+        // they are looking at.
+        if (_guidelinesVersion == 0 || _guidelinesHash == bytes32(0)) revert BadGuidelines();
+        guidelinesVersion = _guidelinesVersion;
+        guidelinesHash = _guidelinesHash;
     }
 
     // ------------------------------------------------------------- submit

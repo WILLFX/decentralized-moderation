@@ -11,7 +11,7 @@ search application over — with no company in the middle.
 **Normative:** [`specs/protocol.md`](specs/protocol.md). Where anything here
 disagrees with it, the spec wins.
 
-> **Status.** The three contracts implement the protocol. 91 tests, mutation
+> **Status.** The three contracts implement the protocol. 123 tests, mutation
 > testing, a two-implementation differential on the verdict draw. **Nothing is
 > deployed, nothing has been externally reviewed, and §11 of the spec lists
 > parameters that have no value yet** — including `prior`, which decides whether
@@ -154,6 +154,14 @@ whichever way it goes, so a speculative removal costs its submitter every time.
 
 `specs/protocol.md` §11 is the list. Two items are worth stating here because
 they are not cosmetic.
+
+**The guidelines are pinned, and that fixes what a case means.** `Moderation` carries
+the guidelines version and the keccak-256 of `MODERATION_GUIDELINES.md` as
+**immutables**, and the deploy script refuses a stack whose hash is not that document.
+Every case in a deployment was judged under one text by construction. Immutable rather
+than governed, because a settable pointer means somebody can change what every open
+case means — so **a guidelines revision is a new deployment**, and index continuity
+across one is a client concern, by the same principle §6 already uses.
 
 **`prior` — how often a moderator's judgment matches the truth — is unmeasured,
 and it decides everything.** `simulation/FINDINGS-floor.md` derives the condition

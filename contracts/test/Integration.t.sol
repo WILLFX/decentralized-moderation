@@ -108,12 +108,61 @@ contract IntegrationTest is Test {
         broken.index = new IndexRegistry();
         broken.moderation = new Moderation(
             address(token), address(broken.stakes), address(broken.index),
-            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1
+            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1, 1, keccak256("g")
         );
         // deployed, never linked — this is the state that otherwise fails at the
         // first commit, long after anyone is watching
         vm.expectRevert(abi.encodeWithSelector(Deploy.NotLinked.selector, "stakes->moderation"));
         deployer.verify(broken);
+    }
+
+    /// @dev **The deployed guidelines hash is the hash of the document in this
+    ///      repository, and `deploy` refuses anything else.** Moderators are paid for
+    ///      coherence with each other's reading of `MODERATION_GUIDELINES.md`, so
+    ///      which text was in force is part of what a case means — and it used to be
+    ///      recorded nowhere, which is why `measurement/prior` could not use the chain
+    ///      as an instrument at all.
+    ///
+    ///      This assertion on its own would be near-vacuous: `Deploy.defaults` reads
+    ///      the same file, so the two agree by construction rather than by check. What
+    ///      makes the pin real is the guard in `deploy`, which rejects a caller's hash
+    ///      that is not the document — see
+    ///      `test_aDeploymentWhoseGuidelinesHashIsNotTheDocumentIsRefused`. This one
+    ///      records the resulting property; that one is the evidence for it.
+    function test_theDeployedGuidelinesHashIsTheDocumentOnDisk() public view {
+        bytes32 onDisk = keccak256(bytes(vm.readFile("../MODERATION_GUIDELINES.md")));
+        assertEq(s.moderation.guidelinesHash(), onDisk, "the pin does not match the text");
+        assertGt(uint256(s.moderation.guidelinesVersion()), 0, "a version is recorded");
+    }
+
+    /// @dev Both halves of the pin are rejected at zero. A zero hash would pin every
+    ///      case to no document at all, which is the state this exists to end.
+    function test_aDeploymentWithoutGuidelinesIsRefused() public {
+        Deploy.Params memory p = deployer.defaults(address(token));
+
+        p.guidelinesVersion = 0;
+        vm.expectRevert(abi.encodeWithSelector(Deploy.BadParams.selector, "guidelinesVersion"));
+        deployer.deploy(p);
+
+        p = deployer.defaults(address(token));
+        p.guidelinesHash = bytes32(0);
+        vm.expectRevert(abi.encodeWithSelector(Deploy.BadParams.selector, "guidelinesHash"));
+        deployer.deploy(p);
+    }
+
+    /// @dev The guard that makes the pin evidence rather than a tautology: a hash that
+    ///      is not the document is refused, so nothing can be deployed claiming to
+    ///      judge against a text it does not carry.
+    function test_aDeploymentWhoseGuidelinesHashIsNotTheDocumentIsRefused() public {
+        Deploy.Params memory p = deployer.defaults(address(token));
+        p.guidelinesHash = keccak256("a different document entirely");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Deploy.BadParams.selector, "guidelinesHash does not match MODERATION_GUIDELINES.md"
+            )
+        );
+        deployer.deploy(p);
     }
 
     /// @dev With 64 staked, `eligBits` is non-zero and eligibility actually

@@ -51,7 +51,8 @@ contract RevealFloorTest is Test {
         index = new MockIndex();
         mod = new Moderation(
             address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR
+            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
+            1, keccak256("g")
         );
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
@@ -137,7 +138,8 @@ contract RevealFloorTest is Test {
         vm.expectRevert(Moderation.BadFloor.selector);
         new Moderation(
             address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, 0
+            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, 0,
+            1, keccak256("g")
         );
     }
 

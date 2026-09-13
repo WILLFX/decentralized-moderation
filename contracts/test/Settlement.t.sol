@@ -11,7 +11,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 ///         to a low-probability outcome.
 contract ShareHarness is Moderation {
     constructor(address t, address s, address i)
-        Moderation(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1)
+        Moderation(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g"))
     {}
 
     function plant(uint256 caseId, uint32 a, uint32 r, uint8 preliminary, uint128 pot) external {
@@ -65,7 +65,8 @@ contract SettlementTest is Test {
         index = new MockIndex();
         mod = new Moderation(
             address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR
+            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
+            1, keccak256("g")
         );
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));
@@ -460,7 +461,8 @@ contract SettlementTest is Test {
     function test_aOneWeiShareIsStillPaid() public {
         Moderation m2 = new Moderation(
             address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, 1, FLOOR
+            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, 1, FLOOR,
+            1, keccak256("g")
         );
         vm.prank(submitter);
         token.approve(address(m2), type(uint256).max);

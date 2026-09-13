@@ -2,7 +2,7 @@
 
 **Version:** 1
 **Status:** Active
-**Applies to:** every case is judged against the guidelines version that was active at the time the submission was made (not the version active when the vote is cast). **This is a convention among moderators, not an enforced one** — see "Versioning and change control".
+**Applies to:** every case in a given deployment, by construction — the version and this document's keccak-256 hash are immutable on the contract, so there is no "version active at submission" to get wrong.
 
 ---
 
@@ -17,11 +17,16 @@ strategy is therefore to judge exactly the way a neutral reader of these
 guidelines would — nothing more, nothing less.
 
 Because coherence is what is rewarded, this document is **as load-bearing as the
-contract** — it is what moderators are predicting each other against. It is not,
-however, tied to the chain: **the contracts record no guidelines version and no
-hash of this document**, so nothing on chain fixes which text a given case was
-judged under. Until that changes, "the version active at submission" is a
-convention this document asks moderators to keep, enforced by nothing.
+contract** — it is what moderators are predicting each other against. So it is tied
+to the chain: `Moderation` carries `guidelinesVersion` and `guidelinesHash` as
+**immutables**, and `script/Deploy.s.sol` refuses to deploy a stack whose hash is not
+the keccak-256 of this file. Every case in a deployment was judged under exactly one
+text, and anyone can check which.
+
+Immutable rather than governed, deliberately. The alternative is somebody who can
+change what every open case means, which is a trusted party in a design whose premise
+is that there is none. **The cost is that revising this document means a new
+deployment** — see "Versioning and change control".
 
 This version is deliberately short. It grows **only** when a real, disputed case
 demonstrates that one line was not enough — never speculatively. Every addition
@@ -184,22 +189,26 @@ submissions do.
 
 ## Versioning and change control
 
-- **Nothing here is pinned on chain.** The contracts store no version integer and
-  no hash of this document. A case therefore carries no record of which text it
-  was judged under, and an edit to this file changes how every open case *should*
-  be judged with no on-chain trace. Pinning the version and hash at submission is
-  the mechanism that would fix it; it is not built, and it is not in
-  `specs/protocol.md` either — it is an open item, listed there in §11.
-- A case *should* be judged against the version active **at its submission
-  block**. That is the intent the pin above would enforce.
+- **The version and this file's keccak-256 hash are immutable on `Moderation`.** A
+  deployment judges against one text and cannot be pointed at another, and
+  `script/Deploy.s.sol` refuses to deploy a stack whose pin is not the hash of this
+  file — so the contract and the document cannot drift apart.
+- **Editing this file therefore does not change any live case.** It changes what a
+  *future* deployment would pin. A revision that is meant to take effect is a new
+  deployment of `Moderation`, which is the price of having no party able to redefine
+  an open case.
+- Index continuity across a revision is a **client** concern, by the same principle
+  §7 already uses: the protocol records facts and clients decide what to do with
+  them. A client may read one deployment's index, several, or only versions it
+  trusts.
 - Changes are additive and case-driven: a new version is cut only when a real
   disputed case shows the current text is ambiguous, and the changelog entry must
   cite the case that forced it.
-- Who maintains this document and how updates are ratified is an **open
-  governance question** with no answer in this repository. There is no multisig,
-  no timelock and no upgrade path in the contracts; the numeric parameters in
-  `specs/protocol.md` §11 have no values yet, let alone a process for changing
-  them.
+- What remains open is not *whether* a version binds but **who decides that a
+  revision is warranted**. There is no multisig, no timelock and no upgrade path, and
+  none is needed for the pin — a revision is a deployment anyone can make and
+  moderators and clients can decline to use. Whether that is enough process is a
+  question this repository does not answer.
 
 ## Changelog
 
@@ -215,8 +224,13 @@ submissions do.
   are all gone. The text now matches `specs/protocol.md` as the single normative
   design: the only penalty is an additive freeze, the stake is never taken, a
   preliminary outcome is drawn and published, and a challenge is a public vote
-  opposite it with no bond. The claim that this document's hash is pinned on chain
-  was also removed — it never was.
+  opposite it with no bond.
+
+  The claim that this document's hash is pinned on chain was removed at that point,
+  because it never was. **It is now true**: `Moderation` carries the version and this
+  file's keccak-256 as immutables, and the deploy script refuses a mismatch. Note the
+  consequence for this changelog — every edit to this file changes its hash, so a
+  revision and a deployment are the same event.
 
   **Why this is not a version bump.** The change-control rule below cuts a new
   version when a *disputed case* shows the text is ambiguous. No case has ever

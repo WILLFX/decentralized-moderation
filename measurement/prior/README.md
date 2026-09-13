@@ -82,22 +82,28 @@ because it is easy to omit:
   for this. It is the single highest-value line in this document: `rho` and the
   per-rater distribution both need `(rater, item)` keying and neither can be
   recovered from pooled counts afterwards.
-- **The guidelines version and document hash, per case.** This does **not** exist.
-  `MODERATION_GUIDELINES.md` claimed it did and no longer does; `specs/protocol.md`
-  §11 now carries it as an open item. Cases decided under different guideline text
-  are different experiments and must not be pooled — and with nothing recorded on
-  chain, there is no way after the fact to tell which case belongs to which
-  experiment. **Pinning it is a prerequisite for this measurement, not a nice-to-have.**
+- **The guidelines version and document hash.** This now exists, and the shape it
+  took removes the problem rather than recording it: `Moderation` carries the version
+  and the document's keccak-256 as **immutables** (`specs/protocol.md` §2), so every
+  case in a deployment was judged under one text by construction. There is nothing to
+  separate and nothing to pool wrongly. **This was a prerequisite for the measurement
+  and it is met.**
+
+  The consequence for study design is worth stating: a guidelines revision is a new
+  *deployment*, so it is a new dataset rather than a split in an existing one. Do not
+  pool cases across deployments, and read `guidelinesVersion` off whichever contract
+  produced them.
 
 ## The one thing that cannot wait for the testnet
 
 **Write the guidelines you intend to ship, first.**
 
-The testnet measures whatever text moderators were reading. A rewrite partway
-through splits the data into two underpowered samples instead of one usable one —
-and until the version is recorded per case (above), it splits it *invisibly*,
-which is worse than splitting it. A rewrite is cheap, entirely within our control,
-and closes one of the two failure modes outright:
+The testnet measures whatever text moderators were reading, and the text is fixed for
+the life of a deployment. So a rewrite partway through is not a silent split in one
+dataset — it is a second deployment and a second dataset, and the first one stops
+growing. Either way you get two underpowered samples instead of one usable one. A
+rewrite is cheap, entirely within our control, and closes one of the two failure modes
+outright:
 
 - readers disagree with **each other** → the sentence is ambiguous → rewrite it
 - readers agree with each other but not the **truth** → the sentence is clear and
@@ -114,8 +120,7 @@ Note that clarity of the *instruction* is not determinacy of the *answer*.
 unclear is the answer for a borderline image, and no rewrite reaches that. The
 alternative — enumerating what to reject — produces a rulebook that is harder to
 apply identically than one sentence, has gaps that are judgment calls again, and
-turns every clarification into a governance event once versions are pinned per
-case at all.
+turns every clarification into a redeployment now that the version is pinned.
 
 ## What the model path is for, and it is not this
 

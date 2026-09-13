@@ -99,6 +99,12 @@ contract LifecycleTest is Test {
     ///      shape it had before the floor existed. The floor itself is tested at
     ///      its deployed value in `RevealFloor.t.sol`.
     uint256 constant FLOOR = 1;
+    /// @dev This suite is about the lifecycle, not the guidelines pin; any non-zero
+    ///      pair satisfies the constructor. `Integration.t.sol` is where the pin is
+    ///      checked against the real document.
+    uint32 constant GUIDELINES_VERSION = 1;
+    bytes32 constant GUIDELINES_HASH = keccak256("guidelines-v1-test");
+
 
     address submitter = address(0x5011);
     address[8] mods;
@@ -136,7 +142,9 @@ contract LifecycleTest is Test {
             FREEZE,
             SEED_LAG,
             FEE,
-            FLOOR
+            FLOOR,
+            GUIDELINES_VERSION,
+            GUIDELINES_HASH
         );
 
         for (uint256 i; i < mods.length; ++i) {

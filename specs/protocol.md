@@ -39,10 +39,23 @@ A frozen moderator is not eligible for any case until the total elapses.
 **The stake is never taken.** It is not slashed, not redistributed, not
 transferred to another moderator. Time is the only currency of penalty.
 
+**What they judge against is fixed for the life of the deployment.** A moderator is
+paid for coherence with the outcome, and the outcome is other moderators' reading of
+`MODERATION_GUIDELINES.md` — so which text is in force is part of what a case means.
+The contract carries the guidelines **version and the document's keccak-256 hash as
+immutables**: every case in a deployment was judged under exactly one text, by
+construction, and anyone can check which.
+
+Immutable rather than governed. A settable pointer means somebody can change what
+every open case means, which is a trusted party in a design that has none. The cost
+is that **a guidelines revision is a new deployment**; index continuity across one is
+a client concern, by the same principle §7 already uses for what an entry means.
+
 | parameter | value |
 |---|---|
 | `STAKE` | *(open)* |
 | `FREEZE_PER_LOSS` | *(open — §11)* |
+| `guidelinesVersion`, `guidelinesHash` | immutable, per deployment |
 
 ## 3. Eligibility
 
@@ -312,12 +325,10 @@ Not decided, and each needs a number before deployment.
   participation the design needs anyway and a bad one below it. It is a constructor
   argument, so the testnet can move it without a rewrite.
 - **What "anonymous" means** in §7.
-- **Binding the guidelines to the chain.** Moderators are paid for coherence with
-  each other's reading of `MODERATION_GUIDELINES.md`, so which text was in force is
-  part of what a case means. Nothing records it: no version integer, no hash of the
-  document, nothing pinned at submission. Editing the guidelines silently changes
-  how every open case should be judged, and a settled case carries no evidence of
-  the standard it was settled under. The mechanism is small — store a version and
-  hash on the case at `submit` — but it is neither specified above nor implemented.
+- **Who decides that a guidelines revision is warranted.** The *binding* is settled
+  (§2): the version and hash are immutable, a deployment judges against one text, and
+  `script/Deploy.s.sol` refuses a stack whose pin is not the document. What is open is
+  the process around a revision — a new deployment is something anyone can make, and
+  moderators and clients can decline to use, which may or may not be enough.
 - **`prior`** — how often a moderator's judgment matches the truth. Unmeasured,
   and `simulation/FINDINGS-floor.md` shows it decides whether any of this works.

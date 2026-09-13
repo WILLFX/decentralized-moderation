@@ -13,6 +13,14 @@ rather than a necessity — it stays on because the shipped profile and the test
 profile should be the same bytecode. (It was once a necessity: the contract these
 replaced was 25,986 B legacy and undeployable.)
 
+**The guidelines are pinned here, not governed.** `Moderation` carries
+`guidelinesVersion` and `guidelinesHash` as immutables, so every case in a deployment
+was judged under exactly one text by construction — and `Deploy` **refuses a stack
+whose hash is not the keccak-256 of `MODERATION_GUIDELINES.md`**, which is the only
+place that can be checked since the contract has no filesystem. Immutable rather than
+settable because a settable pointer means somebody can change what every open case
+means; the cost is that a guidelines revision is a new deployment.
+
 `script/Deploy.s.sol` deploys and links all three. **`verify()` is the
 deliverable there, not `run()`**: both registries hold a one-shot `moderation`
 address and `Moderation` holds theirs as immutables, so an unlinked stack
@@ -24,7 +32,7 @@ is watching. Every link is asserted in both directions, and a test proves
 
 ## Tests
 
-119 tests across thirteen suites.
+123 tests across thirteen suites.
 
 | suite | what it is for |
 |---|---|

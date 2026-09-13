@@ -42,7 +42,7 @@ contract FixedCount {
 ///         not checked somewhere.
 contract BitsHarness is Moderation {
     constructor(address t, address s, address i)
-        Moderation(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1)
+        Moderation(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g"))
     {}
 
     function eligBits() external view returns (uint8) {
@@ -114,7 +114,8 @@ contract EligibilityTest is Test {
         index = new MockIndex();
         mod = new Moderation(
             address(token), address(stakes), address(index),
-            15 minutes, REVEAL_WINDOW, 1 hours, MAX_WAIT, 8 days, SEED_LAG, FEE, 1
+            15 minutes, REVEAL_WINDOW, 1 hours, MAX_WAIT, 8 days, SEED_LAG, FEE, 1,
+            1, keccak256("g")
         );
         for (uint256 i; i < STAKED; ++i) {
             address m = address(uint160(0x30000 + i));

@@ -27,6 +27,12 @@ contract RemovalTest is Test {
     ///      shape it had before the floor existed. The floor itself is tested at
     ///      its deployed value in `RevealFloor.t.sol`.
     uint256 constant FLOOR = 1;
+    /// @dev This suite is about the lifecycle, not the guidelines pin; any non-zero
+    ///      pair satisfies the constructor. `Integration.t.sol` is where the pin is
+    ///      checked against the real document.
+    uint32 constant GUIDELINES_VERSION = 1;
+    bytes32 constant GUIDELINES_HASH = keccak256("guidelines-v1-test");
+
 
     uint8 constant APPROVE = 1;
     uint8 constant REJECT = 2;
@@ -53,7 +59,9 @@ contract RemovalTest is Test {
             FREEZE,
             SEED_LAG,
             FEE,
-            FLOOR
+            FLOOR,
+            GUIDELINES_VERSION,
+            GUIDELINES_HASH
         );
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x1000 + i));

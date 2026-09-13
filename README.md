@@ -237,7 +237,7 @@ M3 (moderator interface) → testnet → prior, turnout, reveal rate
                                    → M4 mainnet
 ```
 
-The independent review is a gate within M4 rather than a separate milestone. It
+An independent review is a gate within M4 rather than a separate milestone. It
 assesses the contracts and cannot supply a measurement, so nothing downstream of it
 proceeds until the measured values exist. Conducting it earlier yields an earlier
 answer on the code without shortening the sequence above.

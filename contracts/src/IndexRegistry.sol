@@ -162,6 +162,12 @@ contract IndexRegistry {
     {
         if (limit == 0) revert BadPage();
         bytes32[] storage l = listing[topicKey];
+
+        // Both boundaries below are EQUIVALENT mutants and mutation testing reports
+        // both as survivors forever. At `offset == l.length`, `>=` returns the empty
+        // page and `>` falls through to `n = 0` and builds the same empty page. At
+        // `n == limit`, `>` leaves `n` alone and `>=` assigns it its own value. Do
+        // not chase either; neither changes what a caller observes.
         if (offset >= l.length) return new bytes32[](0);
 
         uint256 n = l.length - offset;

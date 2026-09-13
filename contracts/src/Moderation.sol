@@ -703,6 +703,11 @@ contract Moderation is ReentrancyGuard {
                     )
                 )
             );
+            // `<` against `<=` is an EQUIVALENT mutant in every practical sense:
+            // the two differ only when `u * den` exactly equals `num << 128`, which
+            // for a uniform 128-bit `u` happens with probability about 2^-128.
+            // Mutation testing reports it as a survivor and no test can honestly
+            // kill it. Do not chase it.
             if (u * den < num << 128) tickets += 1;
         }
         outcome = tickets >= 2 ? uint8(Outcome.APPROVE) : uint8(Outcome.REJECT);

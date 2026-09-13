@@ -135,11 +135,31 @@ An earlier generation of harnesses here counted INVALID as killed, which inflate
 the rate with mutants no test could have caught. The rate is
 `killed / (killed + survived)` and INVALID is printed beside it.
 
-**The previous entry here said the survivors were "not a to-do list" and mostly
-equivalent mutants. That was wrong, and the campaign after §4.4 landed showed how
-wrong.** Of 34 survivors on `Moderation`, 19 were real and killable. Five were
-outright holes, each confirmed by applying the mutant and watching the whole suite
-pass:
+Latest full sweep — 243 mutants, no sampling:
+
+| | killed | survived | INVALID | rate |
+|---|---:|---:|---:|---:|
+| `Moderation` | 180 | 4 | 6 | **97.8%** |
+| `IndexRegistry` | 34 | 2 | 1 | **94.4%** |
+| `StakeRegistry` | 15 | 1 | 0 | **93.8%** |
+| **combined** | **229** | **7** | **7** | **97.0%** |
+
+**Every one of the seven survivors is annotated where a reader meets it in the
+source, and none is a to-do.** Two are unreachable by construction — `challenge`'s
+cap guard, because `draw` finalizes at the cap so no state reaches that branch, and
+`_eligible`'s `sb == 0`, because both callers ask only about the current phase,
+whose seed is armed before that phase exists. Both are kept as defence in depth.
+The other five are genuinely equivalent: `bits > 5` against `>=` (both yield 0 at
+`bits == 5`), the draw's `u * den < num << 128` (differs on an equality of
+probability 2⁻¹²⁸), `StakeRegistry`'s freeze-base ternary at the boundary, and
+`IndexRegistry`'s two pagination bounds, which return the same empty page either
+way.
+
+That sentence is only worth writing because it was earned. **The previous entry
+here said the survivors were "not a to-do list" and mostly equivalent mutants, and
+it had not checked.** Of 34 survivors on `Moderation` at the time, 19 were real and
+killable. Five were outright holes, each confirmed by applying the mutant and
+watching the whole suite pass:
 
 | mutant | what it costs |
 |---|---|
@@ -159,7 +179,14 @@ test submitted listings together or removals together, so nothing checked that a
 removal leaves the counter where the next listing can use it — under the mutant a
 removal hands the next submission an id already in use and **a live case is
 overwritten**. The other two are the same guard shapes on functions that had been
-missed: `reveal` at exactly its deadline, and `draw`'s own blockhash horizon. The
+missed: `reveal` at exactly its deadline, and `draw`'s own blockhash horizon.
+
+I had also told myself that first one was already killed. It was not, and the
+reason is worth keeping: the probe used `sed` and replaced **both** occurrences of
+`nextCaseId++` at once, which reverts on the second submit and fails loudly. The
+harness mutates one line at a time, and the single-line mutation in `submitRemoval`
+is silent. **A probe must mutate exactly what the campaign mutates, or it measures
+a different program.** The
 new code from §4.4 needed none of them — all eleven mutants on the floor
 condition, the round-0/challenge branch, the non-reveal freeze and the constructor
 guard were killed by `RevealFloor.t.sol` and `ThreeVote.t.sol` first time.

@@ -500,8 +500,8 @@ contract SettlementTest is Test {
     }
 
     /// @dev Two distinct submissions must get two distinct case ids. Kills
-    ///      `nextCaseId++` -> `--`, under which the second case collides with and
-    ///      overwrites the first.
+    ///      `nextCaseId++` -> `--` in `submit`, under which the second case collides
+    ///      with and overwrites the first.
     function test_caseIdsAreDistinctAndAscending() public {
         uint256 a = _submit();
         uint256 b = _submit();
@@ -509,5 +509,103 @@ contract SettlementTest is Test {
         assertEq(b, 2, "the counter rises");
         assertEq(mod.caseInfo(a).pot, FEE, "and the first case still holds its own fee");
         assertEq(mod.caseInfo(b).pot, FEE);
+    }
+
+    /// @dev **A removal allocates from the same counter, and that was untested.**
+    ///      `submitRemoval` has its own `nextCaseId++`, and mutating THAT one
+    ///      survived a full campaign: every existing test submits listings together
+    ///      or removals together, so nothing ever checked that a removal leaves the
+    ///      counter where the next listing can use it. Under the mutant a removal
+    ///      hands the next submission an id that is already in use, and the new case
+    ///      overwrites a live one — a listing in mid-flight silently becomes a
+    ///      different case.
+    function test_aRemovalDoesNotRewindTheCaseCounter() public {
+        uint256 listing = _finalizedCase(APPROVE);
+
+        vm.prank(submitter);
+        uint256 removal = mod.submitRemoval(listing, FEE);
+        assertGt(removal, listing, "a removal takes a fresh id");
+
+        // and the case after it must not land on anything that already exists
+        uint256 next = _submit();
+        assertGt(next, removal, "the counter still rises");
+        assertTrue(
+            next != listing && next != removal, "a new case may not reuse a live id"
+        );
+
+        // the earlier cases are still themselves
+        assertEq(mod.caseInfo(listing).phase, uint8(Moderation.Phase.FINALIZED));
+        assertEq(mod.caseInfo(removal).actionType, mod.ACTION_REMOVE());
+        assertEq(mod.caseInfo(removal).targetCaseId, listing);
+    }
+
+    /// @dev A reveal must not land at the instant the reveal window shuts. Kills
+    ///      `block.timestamp >= c.phaseDeadline` -> `>` in `reveal` — the same shape
+    ///      as the guard in `commit`, which was tested, on a function that was not.
+    function test_revealAtExactlyTheDeadlineIsTooLate() public {
+        uint256 id = _submit();
+        _advance(SEED_LAG + 1);
+        _commit(id, mods[0], APPROVE);
+        _wait(MAX_WAIT + 1);
+        mod.closeCommitA(id);
+        _advance(SEED_LAG + 1);
+        _commit(id, mods[1], APPROVE);
+        _wait(MAX_WAIT + 1);
+        mod.closeCommitB(id);
+
+        vm.warp(mod.caseInfo(id).phaseDeadline); // exactly, not past
+        vm.prank(mods[0]);
+        vm.expectRevert(Moderation.TooLate.selector);
+        mod.reveal(id, APPROVE, bytes32("s"));
+    }
+
+    /// @dev `draw` has its own blockhash horizon and its own boundary. Kills
+    ///      `block.number > sb + BLOCKHASH_HORIZON` -> `>=` there: the horizon is
+    ///      inclusive, so at exactly the last addressable block the draw must still
+    ///      happen rather than stranding the case one block early.
+    function test_theDrawsSeedHorizonIsInclusive() public {
+        uint256 id = _submit();
+        _advance(SEED_LAG + 1);
+        _commit(id, mods[0], APPROVE);
+        _wait(MAX_WAIT + 1);
+        mod.closeCommitA(id);
+        _advance(SEED_LAG + 1);
+        _commit(id, mods[1], APPROVE);
+        _wait(MAX_WAIT + 1);
+        mod.closeCommitB(id);
+        _reveal(id, mods[0], APPROVE);
+        _reveal(id, mods[1], APPROVE);
+        _wait(REVEAL_WINDOW + 1);
+        mod.closeReveal(id);
+
+        uint256 sb = mod.caseInfo(id).outcomeSeedBlock;
+        uint256 horizon = mod.BLOCKHASH_HORIZON();
+
+        vm.roll(sb + horizon); // the last block whose hash is still addressable
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).preliminary, APPROVE, "drawn at the horizon itself");
+    }
+
+    /// @dev The other side of it: past the horizon the seed is gone and the draw
+    ///      must say so rather than resolve on `blockhash` returning zero.
+    function test_pastTheHorizonTheDrawRefuses() public {
+        uint256 id = _submit();
+        _advance(SEED_LAG + 1);
+        _commit(id, mods[0], APPROVE);
+        _wait(MAX_WAIT + 1);
+        mod.closeCommitA(id);
+        _advance(SEED_LAG + 1);
+        _commit(id, mods[1], APPROVE);
+        _wait(MAX_WAIT + 1);
+        mod.closeCommitB(id);
+        _reveal(id, mods[0], APPROVE);
+        _reveal(id, mods[1], APPROVE);
+        _wait(REVEAL_WINDOW + 1);
+        mod.closeReveal(id);
+
+        uint256 sb = mod.caseInfo(id).outcomeSeedBlock;
+        vm.roll(sb + mod.BLOCKHASH_HORIZON() + 1);
+        vm.expectRevert(Moderation.SeedUnavailable.selector);
+        mod.draw(id);
     }
 }

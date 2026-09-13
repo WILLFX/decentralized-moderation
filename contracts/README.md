@@ -24,7 +24,7 @@ is watching. Every link is asserted in both directions, and a test proves
 
 ## Tests
 
-115 tests across thirteen suites.
+119 tests across thirteen suites.
 
 | suite | what it is for |
 |---|---|
@@ -149,8 +149,17 @@ pass:
 | `challenge`'s seed `+` → `-` | the challenge round's committee A seed becomes a **past** block, so the challenger can compute that committee at the moment they challenge. The staging property, gone. |
 | `draw`'s cap `>=` → `>` | the challenge cap becomes three rather than two. |
 
-`test/Settlement.t.sol` is the answer to them: sixteen tests, each written against
-a named mutant, each verified to fail on that mutant and pass on clean code. The
+`test/Settlement.t.sol` is the answer to them: twenty tests, each written against a
+named mutant, each verified to fail on that mutant and pass on clean code.
+
+**Three of those twenty came from re-reading the survivors instead of trusting the
+classification above**, and one mattered: `submitRemoval` has its own
+`nextCaseId++`, and mutating *that* one survived a full campaign. Every existing
+test submitted listings together or removals together, so nothing checked that a
+removal leaves the counter where the next listing can use it — under the mutant a
+removal hands the next submission an id already in use and **a live case is
+overwritten**. The other two are the same guard shapes on functions that had been
+missed: `reveal` at exactly its deadline, and `draw`'s own blockhash horizon. The
 new code from §4.4 needed none of them — all eleven mutants on the floor
 condition, the round-0/challenge branch, the non-reveal freeze and the constructor
 guard were killed by `RevealFloor.t.sol` and `ThreeVote.t.sol` first time.

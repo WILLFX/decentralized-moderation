@@ -215,11 +215,19 @@ mutation score of 97.0% with each surviving mutant accounted for in the source, 
 two independent differentials — on the draw and on eligibility — each of which
 verifies that a deliberately broken derivation would be detected.
 
-**M3 — Interfaces. Not started.** In dependency order: the moderator interface, since
-without moderators no case is judged; then the submit interface, so publishers can
-supply cases; then the search application, which realizes the value of the index.
-Delivered through [weeb-3](https://github.com/lat-murmeldjur/weeb-3) rather than as
-three standalone applications.
+**M3 — Interfaces. Not started.** Three separate Swarm websites, in dependency order:
+
+- A moderator Swarm website for retrieving and reviewing submissions, committing
+  and revealing votes, challenging outcomes, and claiming rewards so moderators can
+  profit from judging submissions.
+- A publisher/submitter Swarm website for creating and uploading metadata,
+  validating it against the uniform metadata format, and submitting content for
+  moderation.
+- A default search/start page Swarm website for discovering approved content through
+  the topic-indexed registry.
+
+Each website is hosted on Swarm and accessible through a Bee node, a gateway, or a
+compatible Swarm client such as [weeb-3](https://github.com/lat-murmeldjur/weeb-3).
 
 **M4 — Launch.**deployment to Chiado (the Gnosis testnet), then a guarded mainnet launch with
 conservative caps.
@@ -257,3 +265,4 @@ answer on the code without shortening the sequence above.
 **No deployment with material funds, and the index is not presented as reliable
 safe-search certification, until `prior` is measured and an independent review of
 the contracts passes against a named commit.**
+

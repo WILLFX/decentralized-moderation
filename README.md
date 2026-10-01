@@ -203,52 +203,32 @@ one is a client concern, consistent with §6.
 
 ## 8. Roadmap
 
-**M1 — Specification and simulation. Complete.** The normative specification, the
-metadata schema, the guidelines document, and the measurements behind the working
-values: `simulation/FINDINGS-floor.md` (the separability bound),
-`FINDINGS-staged.md` (staging is neutral with respect to capture), and
-`FINDINGS-floor-price.md` (the per-committee threshold priced).
+**Current design work — two-committee moderation design.** Explore how the initial
+committees should work together, including committee sizing, randomness, incentives,
+phase advancement, challenges, and failure cases. The scope and resulting contract
+boundaries remain open.
 
-**M2 — Contracts. Complete.** `Moderation`, `StakeRegistry` and `IndexRegistry`, with
-a deploy script that verifies its own links. 123 tests across thirteen suites, a
-mutation score of 97.0% with each surviving mutant accounted for in the source, and
-two independent differentials — on the draw and on eligibility — each of which
-verifies that a deliberately broken derivation would be detected.
+**Parallel design question — metadata and approved index structure.** Define the
+uniform metadata format, topics, categories, and approved index registries. This
+includes a feasibility study of [OntoDAG](https://github.com/petfold/ontodag) or
+another suitable category/topic model.
 
-**M3 — Interfaces. Not started.** Three separate Swarm websites, in dependency order:
+**M2-M4 — Interfaces. Not started.** Three separate Swarm websites, in dependency order:
 
-- A moderator Swarm website for retrieving and reviewing submissions, committing
-  and revealing votes, challenging outcomes, and claiming rewards so moderators can
-  profit from judging submissions.
-- A publisher/submitter Swarm website for creating and uploading metadata,
-  validating it against the uniform metadata format, and submitting content for
-  moderation.
+- A moderator Swarm website for retrieving and reviewing submissions, committing and
+  revealing votes, challenging outcomes, and claiming rewards so moderators can profit
+  from judging submissions.
+- A publisher/submitter Swarm website for creating and uploading metadata, validating
+  it against the uniform metadata format, and submitting content for moderation.
 - A default search/start page Swarm website for discovering approved content through
   the topic-indexed registry.
 
 Each website is hosted on Swarm and accessible through a Bee node, a gateway, or a
 compatible Swarm client such as [weeb-3](https://github.com/lat-murmeldjur/weeb-3).
 
-**M4 — Launch.**deployment to Chiado (the Gnosis testnet), then a guarded mainnet launch with
-conservative caps.
-
-### Dependency order
-
-The remaining open parameters are measurements rather than decisions. `prior`, turnout
-and the reveal rate can only be obtained from a running testnet
-(`measurement/prior/`), a testnet requires moderators, and moderators require an
-interface:
-
-```
-M3 (moderator interface) → testnet → prior, turnout, reveal rate
-                                   → MIN_REVEALS, STAKE, FREEZE_PER_LOSS, the fee
-                                   → M4 mainnet
-```
-
-An independent review is a gate within M4 rather than a separate milestone. It
-assesses the contracts and cannot supply a measurement, so nothing downstream of it
-proceeds until the measured values exist. Conducting it earlier yields an earlier
-answer on the code without shortening the sequence above.
+**M5 — Launch.** Deployment to Chiado, the Gnosis testnet, followed by a guarded
+mainnet launch with conservative caps. The testnet phase will provide measurements on
+turnout, reveal rate, accuracy, correlated error, liveness, usability, and gas burden.
 
 ## 9. Repository layout
 

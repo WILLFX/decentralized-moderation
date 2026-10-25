@@ -11,10 +11,14 @@ on.
 [`specs/protocol.md`](specs/protocol.md) is normative. Where this document disagrees
 with it, the specification governs.
 
-**Status.** Milestones M1 and M2 are complete; M3 is next (§8). The three contracts
-implement the protocol, with 123 tests, a mutation score of 97.0%, and independent
-differentials on both the verdict draw and eligibility. Several parameters have no
-value yet; §7 lists them.
+**Status: under development.** The contracts implement the adopted committee
+scheduling and N-4 eligibility rules. Moderator, publisher and search are three
+separate Rust/Wasm websites. Node tools support packaging, tests and local uploads.
+This is not a public deployment or completed security review.
+
+Start with [architecture](docs/ARCHITECTURE.md),
+[build and test](docs/BUILD_AND_TEST.md), and [status](docs/STATUS.md).
+`specs/protocol.md` remains normative.
 
 ---
 
@@ -58,12 +62,14 @@ rather than forfeit.
 For each case and each committee, a moderator is eligible when
 
 ```
-hash( case , moderator , R )   has at least   N − 5   leading zero bits
+hash( case , moderator , R )   has at least   max(N − 4, 0)   leading zero bits
 ```
 
-with `N` set so the registry size lies in `[2^N, 2^(N+1))`. Committee size therefore
-follows from the rule rather than being chosen, and falls between 32 and 64 by
-construction.
+with `N = floor(log2(max(S,1)))`, where S is the total staked-address count pinned
+at case opening and retained through challenges. Frozen callers are rejected
+separately. Expected raw eligibility is 16 to fewer than 32 addresses for S at
+least 16; below 32 all addresses pass the lottery. Actual participation and
+case-wide vote exclusions can reduce the number of reviewers.
 
 Eligibility creates no obligation. A moderator who is eligible and does nothing
 suffers nothing; there is no no-show penalty. Eligibility is publicly computable: any
@@ -179,12 +185,11 @@ the measurement instrument; see `measurement/prior/`.
 
 **`MIN_REVEALS` is set conditionally.** Each committee must finish a round with at
 least 3 revealed votes or no outcome is drawn (spec §4.4).
-`simulation/FINDINGS-floor-price.md` prices this at 0.9% of cases unresolvable given
-20% turnout and a 75% reveal rate, against approximately 96 identities an attacker
-must hold in place of 3. Below roughly 10% turnout no value satisfies both
-requirements: a threshold of 3 leaves 28% of cases unresolvable there. Turnout is
-unmeasured, so the current value is defensible at the participation level the design
-requires in any case, and unsuitable below it.
+The approved smaller lottery retains this floor. Smaller eligible populations
+can miss the floor more often when participation is low. The earlier 0.9% and
+28% failure figures in `simulation/FINDINGS-floor-price.md` concern the larger
+lottery and do not describe current N-4 operating rates. Turnout and reveal
+success remain unmeasured; this implementation is not deployment calibration.
 
 **The threshold reduces the cost of capture rather than preventing it.** A clique
 fielding 3 revealing identities in each committee still takes a unanimous case with
@@ -203,28 +208,13 @@ one is a client concern, consistent with §6.
 
 ## 8. Roadmap
 
-**Current design work — two-committee moderation design.** Explore how the initial
-committees should work together, including committee sizing, randomness, incentives,
-phase advancement, challenges, and failure cases. The scope and resulting contract
-boundaries remain open.
+**Current implementation.** Complete verification of the adopted protocol and
+three Rust/Wasm websites, then prepare reviewed public Chiado operation. Full
+human timed voting and deployment configuration remain required; see the status.
 
-**Parallel design question — metadata and approved index structure.** Define the
-uniform metadata format, topics, categories, and approved index registries. This
-includes a feasibility study of [OntoDAG](https://github.com/petfold/ontodag) or
-another suitable category/topic model.
-
-**M2-M4 — Interfaces. Not started.** Three separate Swarm websites, in dependency order:
-
-- A moderator Swarm website for retrieving and reviewing submissions, committing and
-  revealing votes, challenging outcomes, and claiming rewards so moderators can profit
-  from judging submissions.
-- A publisher/submitter Swarm website for creating and uploading metadata, validating
-  it against the uniform metadata format, and submitting content for moderation.
-- A default search/start page Swarm website for discovering approved content through
-  the topic-indexed registry.
-
-Each website is hosted on Swarm and accessible through a Bee node, a gateway, or a
-compatible Swarm client such as [weeb-3](https://github.com/lat-murmeldjur/weeb-3).
+**Deferred feature work.** Persistent registries across business-logic upgrades,
+separate reward credits/withdrawal, reputation policy and further removal work
+remain post-MVP work. Ontology integration is outside the current scope.
 
 **M5 — Launch.** Deployment to Chiado, the Gnosis testnet, followed by a guarded
 mainnet launch with conservative caps. The testnet phase will provide measurements on
@@ -235,7 +225,9 @@ turnout, reveal rate, accuracy, correlated error, liveness, usability, and gas b
 | | |
 |---|---|
 | `specs/protocol.md` | normative, and the only design document |
-| `contracts/` | the three contracts, tests, and mutation harness |
+| `contracts/` | adopted contracts, normal tests and audit regressions |
+| `websites/` | three Rust/Wasm sites, shared Rust crates, and native checkpoint processor |
+| `tools/` | shared build/upload utilities and ignored local runtime data |
 | `simulation/` | the measurements, each with its findings |
 | `measurement/prior/` | how `prior` is measured, and why a testnet is the instrument |
 | `MODERATION_GUIDELINES.md` | the standard moderators apply |

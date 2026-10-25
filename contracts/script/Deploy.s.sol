@@ -68,7 +68,7 @@ contract Deploy is Script {
     /// @dev Relative to `contracts/`, which is where forge runs.
     string internal constant GUIDELINES = "../MODERATION_GUIDELINES.md";
 
-    function deploy(Params memory p) public returns (Stack memory s) {
+    function deploy(Params memory p) public virtual returns (Stack memory s) {
         if (p.token == address(0)) revert BadParams("token");
         if (p.stakeAmount == 0) revert BadParams("stakeAmount");
         if (p.seedLag == 0) revert BadParams("seedLag");
@@ -131,7 +131,7 @@ contract Deploy is Script {
         if (address(s.moderation.token()) != address(s.stakes.token())) revert NotLinked("token mismatch");
     }
 
-    function run() external returns (Stack memory s) {
+    function run() external virtual returns (Stack memory s) {
         address token = vm.envAddress("TOKEN");
         vm.startBroadcast();
         s = deploy(defaults(token));

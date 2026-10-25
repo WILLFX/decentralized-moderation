@@ -15,3 +15,25 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/
 contracts/.gas-snapshot.tmp
+contracts/out-experiments/
+contracts/cache-experiments/
+contracts/out-boundaries/
+contracts/cache-boundaries/
+contracts/out-costs/
+contracts/cache-costs/
+
+# Dependency installs, local tooling, and temporary verification
+**/node_modules/
+**/.tools/
+**/.validation/
+**/target/
+contracts/out-*/
+contracts/cache-*/
+# Source fixtures are intentionally tracked; real session material is not.
+/tools/local-session/local-config.json
+/tools/local-session/current/
+/tools/local-session/runs/
+/tools/local-session/resume-check-*/
+/websites/dist/
+/websites/receipts/
+/tools/local-session/preflight/

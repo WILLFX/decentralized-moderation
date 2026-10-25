@@ -232,9 +232,5 @@ turnout, reveal rate, accuracy, correlated error, liveness, usability, and gas b
 | `measurement/prior/` | how `prior` is measured, and why a testnet is the instrument |
 | `MODERATION_GUIDELINES.md` | the standard moderators apply |
 
-## 10. Standing constraint
 
-**No deployment with material funds, and the index is not presented as reliable
-safe-search certification, until `prior` is measured and an independent review of
-the contracts passes against a named commit.**
 

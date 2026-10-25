@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 
 import {Test, console} from "forge-std/Test.sol";
 import {Moderation} from "../src/Moderation.sol";
@@ -34,8 +35,8 @@ contract FixedCount {
 ///         be planted at a chosen bit width.
 ///
 ///         Planting is what makes the differential mean anything. A real registry
-///         puts `eligBits` at 1 for any size from 64 to 127, and reaching 5 bits
-///         needs 2,048 staked identities — so the narrowing hash would only ever be
+///         puts `eligBits` at 2 for any size from 64 to 127, and reaching 5 bits
+///         needs 512 staked identities — so the narrowing hash would only ever be
 ///         compared at ONE width, and a mistake in the shift would be tested
 ///         exactly once. The threshold itself is pinned separately by
 ///         `test_eligBitsAcrossTheWholeRange`, so nothing is assumed here that is
@@ -67,12 +68,11 @@ contract BitsHarness is Moderation {
 
 /// @notice §3 — eligibility, pinned against an independent derivation.
 ///
-/// `Integration.t.sol` checks that eligibility narrows: at 64 staked, fewer than 64
-/// are eligible and roughly half are. That constrains the COUNT and nothing else,
-/// and a mutation campaign showed what hides behind it — inverting the predicate,
-/// `h >> (256 - eligBits) == 0` to `!= 0`, survived the whole suite. It has to: the
-/// complement of a half-sized set is also half-sized, and every test commits
-/// *whoever is eligible* rather than a set decided in advance.
+/// `Integration.t.sol` checks that eligibility narrows: at 64 staked, roughly a
+/// quarter are eligible under N−4. That constrains the COUNT and nothing else.
+/// The historical N−5 suite admitted an inverted predicate because the complement
+/// of a half-sized set was also half-sized. The differential pins WHICH identities
+/// pass, so it also detects preimage errors that leave the expected count intact.
 ///
 /// This suite closes that the way `Draw.t.sol` plus `simulation/check_draw_vectors.py`
 /// closed the same gap on the draw:
@@ -86,16 +86,16 @@ contract BitsHarness is Moderation {
 ///   differential takes as given.
 /// - the rest are the seed-window boundaries, which a differential cannot reach
 ///   because they are about reverting rather than about the hash.
-contract EligibilityTest is Test {
+contract EligibilityTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
     MockIndex index;
 
     address submitter = address(0x5011);
-    /// @dev 64 staked puts `eligBits` at 1, which is the smallest registry where
-    ///      the narrowing hash runs at all. Every mock suite below this size skips
-    ///      it via the `eligBits == 0` short-circuit.
+    /// @dev 64 staked puts `eligBits` at 2 under N−4. Narrowing first applies at
+    ///      32 staked; the 64 identities here cover both accepted and rejected
+    ///      identities in each committee.
     uint256 constant STAKED = 64;
     address[] mods;
 
@@ -147,17 +147,18 @@ contract EligibilityTest is Test {
     // --------------------------------------------------- the threshold itself
 
     /// @dev §3 says `N` is chosen so the registry lies in `[2^N, 2^(N+1))` and the
-    ///      threshold is `N − 5`, so the committee is 32 to 64 by construction. The
-    ///      loop implementing it survives two mutants (`n > 1` -> `>=`, `n > 1` ->
-    ///      `n > 0`) and a third on `bits > 5`, each of which moves the threshold by
-    ///      a whole bit — doubling or halving every committee. Nothing pinned it.
+    ///      threshold is `max(N − 4, 0)`. The expected eligible population is
+    ///      [16, 32) for S >= 16, before frozen, prior-vote and turnout exclusions.
+    ///      Literal boundaries pin both the floor-log2 step and subtraction.
     ///
     ///      The expected values here are computed from the DEFINITION, not copied
     ///      from the loop: `N` is the index of the highest set bit.
     function test_eligBitsAcrossTheWholeRange() public {
-        uint256[12] memory sizes =
-            [uint256(0), 1, 2, 31, 32, 33, 63, 64, 100, 1000, 5000, 65536];
-        uint8[12] memory want = [0, 0, 0, 0, 0, 0, 0, 1, 1, 4, 7, 11];
+        uint256[19] memory sizes = [
+            uint256(0), 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100,
+            511, 512, 1000, 1023, 1024, 65536
+        ];
+        uint8[19] memory want = [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 4, 5, 5, 5, 6, 12];
 
         for (uint256 k; k < sizes.length; ++k) {
             BitsHarness h = new BitsHarness(
@@ -173,16 +174,17 @@ contract EligibilityTest is Test {
 
     /// @dev The consequence §3 claims, stated as a range rather than a count: the
     ///      expected committee is `registry * 2^-bits`, which the threshold keeps
-    ///      inside [32, 64) for every registry of 64 or more.
-    function test_theCommitteeIsThirtyTwoToSixtyFourByConstruction() public {
-        uint256[5] memory sizes = [uint256(64), 100, 1000, 5000, 65536];
+    ///      inside [16, 32) for every registry of 16 or more. This is eligibility,
+    ///      not a guarantee of participation or three reveals per committee.
+    function test_expectedEligiblePopulationIsSixteenToThirtyTwo() public {
+        uint256[11] memory sizes = [uint256(16), 31, 32, 63, 64, 100, 511, 512, 1000, 1024, 65536];
         for (uint256 k; k < sizes.length; ++k) {
             BitsHarness h = new BitsHarness(
                 address(token), address(new FixedCount(sizes[k])), address(index)
             );
             uint256 expected = sizes[k] >> h.eligBits();
-            assertGe(expected, 32, string.concat("too narrow at ", vm.toString(sizes[k])));
-            assertLt(expected, 64, string.concat("too wide at ", vm.toString(sizes[k])));
+            assertGe(expected, 16, string.concat("too narrow at ", vm.toString(sizes[k])));
+            assertLt(expected, 32, string.concat("too wide at ", vm.toString(sizes[k])));
         }
     }
 
@@ -200,6 +202,8 @@ contract EligibilityTest is Test {
         BitsHarness h = new BitsHarness(address(token), address(stakes), address(index));
         _advance(5);
         uint40 sb = uint40(block.number - 3);
+        _recordHistory(sb, keccak256("committee history"));
+        vm.setBlockhash(sb, keccak256("committee history"));
         h.plantCase(1, 1, sb);
 
         assertEq(h.committeeOf(uint8(Moderation.Phase.COMMIT_A)), 1, "COMMIT_A is committee 1");
@@ -248,6 +252,7 @@ contract EligibilityTest is Test {
         }
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.COMMIT_B));
 
@@ -306,8 +311,8 @@ contract EligibilityTest is Test {
     }
 
     /// @dev The same predicate across BIT WIDTHS, which a real registry cannot
-    ///      reach: `eligBits` is 1 for every registry from 64 to 127, and 5 bits
-    ///      needs 2,048 staked. Without this the narrowing hash is compared at one
+    ///      reach: `eligBits` is 2 for every registry from 64 to 127, and 5 bits
+    ///      needs 512 staked. Without this the narrowing hash is compared at one
     ///      width only, and the shift is tested exactly once.
     ///
     ///      Both committee numbers are swept at every width, because the committee
@@ -318,6 +323,9 @@ contract EligibilityTest is Test {
         // a seed block in the past, inside the horizon, so `blockhash` answers
         _advance(5);
         uint40 sb = uint40(block.number - 3);
+
+        _recordHistory(sb, keccak256("width history"));
+        vm.setBlockhash(sb, keccak256("width history"));
 
         // Written line by line, not built up with `string.concat`. Concatenating
         // hundreds of records is quadratic in memory and this test died of
@@ -418,6 +426,7 @@ contract EligibilityTest is Test {
         }
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         for (uint256 i; i < mods.length && mod.caseInfo(id).commitsB < 1; ++i) {
             if (!mod.isEligible(id, mods[i])) continue;

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
@@ -35,7 +36,7 @@ contract ShareHarness is Moderation {
 /// mutants had been dismissed as equivalent and are not: `vt.settled = false`
 /// lets a coherent voter claim the pot repeatedly, and turning `claim`'s guard
 /// from `||` to `&&` lets anyone freeze any address they choose.
-contract SettlementTest is Test {
+contract SettlementTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
@@ -113,6 +114,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], v);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], v);
         _wait(MAX_WAIT + 1);
@@ -196,6 +198,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], v);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], v);
         _wait(MAX_WAIT + 1);
@@ -261,6 +264,7 @@ contract SettlementTest is Test {
         _commit(id, a, v);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, b, v);
         _wait(MAX_WAIT + 1);
@@ -288,6 +292,7 @@ contract SettlementTest is Test {
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
         assertGt(mod.caseInfo(id).seedBlockB, block.number, "committee B, at commit-A close");
+        blk = _readyB(mod, id);
 
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], APPROVE);
@@ -327,8 +332,8 @@ contract SettlementTest is Test {
         mod.submit(keccak256("c2"), keccak256("m"), tooMany, FEE);
     }
 
-    /// @dev The commit window is closed AT its deadline, not after it. Kills
-    ///      `block.timestamp >= c.phaseDeadline` -> `>` in `commit`.
+    /// @dev At A's deadline the next commitment belongs to B, whose target has
+    ///      not arrived in this fixture. It cannot be recorded as an A vote.
     function test_commitAtExactlyTheDeadlineIsTooLate() public {
         uint256 id = _submit();
         _advance(SEED_LAG + 1);
@@ -337,8 +342,10 @@ contract SettlementTest is Test {
         vm.warp(mod.caseInfo(id).phaseDeadline); // exactly, not past
         bytes32 h = mod.commitHash(id, 0, mods[1], APPROVE, bytes32("s"));
         vm.prank(mods[1]);
-        vm.expectRevert(Moderation.TooLate.selector);
+        vm.expectRevert(Moderation.SeedUnavailable.selector);
         mod.commit(id, h);
+        assertEq(mod.caseInfo(id).commitsA, 1);
+        assertEq(mod.caseInfo(id).commitsB, 0);
     }
 
     /// @dev And the mirror: a phase may be closed AT its deadline. Kills
@@ -352,6 +359,7 @@ contract SettlementTest is Test {
 
         vm.warp(mod.caseInfo(id).phaseDeadline);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.COMMIT_B));
 
         _advance(SEED_LAG + 1);
@@ -392,6 +400,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], APPROVE);
         _wait(MAX_WAIT + 1);
@@ -439,6 +448,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
@@ -474,6 +484,7 @@ contract SettlementTest is Test {
         m2.commit(id, h);
         _wait(MAX_WAIT + 1);
         m2.closeCommitA(id);
+        blk = _readyB(m2, id);
         _advance(SEED_LAG + 1);
         h = m2.commitHash(id, 0, mods[1], APPROVE, bytes32("s"));
         vm.prank(mods[1]);
@@ -567,6 +578,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], APPROVE);
         _wait(MAX_WAIT + 1);
@@ -588,6 +600,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], APPROVE);
         _wait(MAX_WAIT + 1);
@@ -613,6 +626,7 @@ contract SettlementTest is Test {
         _commit(id, mods[0], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[1], APPROVE);
         _wait(MAX_WAIT + 1);

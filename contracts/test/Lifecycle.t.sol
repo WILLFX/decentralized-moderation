@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 
@@ -81,7 +82,7 @@ contract MockIndex {
     }
 }
 
-contract LifecycleTest is Test {
+contract LifecycleTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
@@ -191,17 +192,18 @@ contract LifecycleTest is Test {
 
         Moderation.Case memory c = mod.caseInfo(id);
         assertGt(c.seedBlockA, 0, "A seeded at submission");
-        assertEq(c.seedBlockB, 0, "B NOT seeded while A commits");
+        assertGt(c.seedBlockB, blk, "fallback target is still future");
 
         _commit(id, mods[0], APPROVE, 0);
         _commit(id, mods[1], APPROVE, 0);
         _commit(id, mods[2], APPROVE, 0);
 
         c = mod.caseInfo(id);
-        assertEq(c.seedBlockB, 0, "still not seeded after A's third commit");
+        assertGt(c.seedBlockB, blk, "revised target is still future");
 
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         c = mod.caseInfo(id);
         assertGt(c.seedBlockB, 0, "seeded only once A closed");
@@ -236,6 +238,7 @@ contract LifecycleTest is Test {
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE, 0);
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         _advance(SEED_LAG + 1);
         for (uint256 i = 3; i < 6; ++i) _commit(id, mods[i], APPROVE, 0);
@@ -276,6 +279,7 @@ contract LifecycleTest is Test {
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE, 0);
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         // committee B must hold somebody or the reveal floor stops the case
         _commit(id, mods[3], REJECT, 0);
@@ -307,6 +311,7 @@ contract LifecycleTest is Test {
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE, 0);
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[3], APPROVE, 0); // committee B, for the reveal floor
         _wait(MAX_WAIT + 1);
@@ -328,7 +333,7 @@ contract LifecycleTest is Test {
         assertEq(c.challenges, 1);
         assertTrue(c.everChallenged, "the objection is on record for good");
         assertEq(c.phase, uint8(Moderation.Phase.COMMIT_A), "a fresh staged pair");
-        assertEq(c.seedBlockB, 0, "B unknowable again");
+        assertGt(c.seedBlockB, blk, "new pair target is future");
         assertEq(c.commitsA, 0, "per-committee counts reset, tally does not");
     }
 
@@ -343,6 +348,7 @@ contract LifecycleTest is Test {
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.UNRESOLVED));
         assertEq(mod.refundOwed(id), FEE);

@@ -238,6 +238,14 @@ contract SystemHandler is CommonBase, StdCheats, StdUtils {
         if (w == 0) {
             try mod.closeCommitA(id) {
                 _hit("closeCommitA");
+                if (mod.caseInfo(id).phase == uint8(Moderation.Phase.COMMIT_B)) {
+                    uint256 target = mod.caseInfo(id).seedBlockB;
+                    if (blk <= target) blk = target + 1;
+                    vm.roll(blk);
+                    address history = mod.BLOCK_HISTORY();
+                    vm.etch(history, hex"3373fffffffffffffffffffffffffffffffffffffffe14604657602036036042575f35600143038111604257611fff81430311604257611fff9006545f5260205ff35b5f5ffd5b5f35611fff60014303065500");
+                    vm.store(history, bytes32(target % 8191), keccak256(abi.encode("handler history", target)));
+                }
             } catch {
                 _missed("closeCommitA");
             }

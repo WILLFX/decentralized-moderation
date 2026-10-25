@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
@@ -11,7 +12,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 /// Moderation scored 73.2% with 49 survivors. Most were one of three kinds:
 /// state that no on-chain rule reads, guards that no test tried to violate, and
 /// equivalent mutants. These close the first two.
-contract GuardsTest is Test {
+contract GuardsTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
@@ -98,6 +99,7 @@ contract GuardsTest is Test {
 
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         for (uint256 i = 4; i < 7; ++i) _commit(id, mods[i], APPROVE);
         c = mod.caseInfo(id);
@@ -130,6 +132,7 @@ contract GuardsTest is Test {
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[3], APPROVE);
         _wait(MAX_WAIT + 1);
@@ -167,6 +170,7 @@ contract GuardsTest is Test {
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _commit(id, mods[4], APPROVE); // committee B, for the reveal floor
         _wait(MAX_WAIT + 1);
@@ -206,6 +210,7 @@ contract GuardsTest is Test {
         for (uint256 i; i < 3; ++i) _commit(id, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
@@ -226,7 +231,8 @@ contract GuardsTest is Test {
         uint256 id = _submit();
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
-        mod.closeCommitA(id); // nobody committed: UNRESOLVED
+        mod.closeCommitA(id);
+        blk = _readyB(mod, id); // nobody committed: UNRESOLVED
 
         assertEq(mod.refundOwed(id), FEE);
         mod.withdrawRefund(id);
@@ -247,6 +253,7 @@ contract GuardsTest is Test {
         for (uint256 i; i < 2; ++i) _commit(listing, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(listing);
+        blk = _readyB(mod, listing);
         _advance(SEED_LAG + 1);
         for (uint256 i = 2; i < 4; ++i) _commit(listing, mods[i], APPROVE);
         _wait(MAX_WAIT + 1);
@@ -270,6 +277,7 @@ contract GuardsTest is Test {
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(rem);
+        blk = _readyB(mod, rem);
         assertEq(mod.caseInfo(rem).phase, uint8(Moderation.Phase.UNRESOLVED));
         assertEq(mod.openRemovalOf(listing), 0, "hold released by the dead case");
 
@@ -284,6 +292,7 @@ contract GuardsTest is Test {
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         assertEq(mod.caseInfo(id).pot, 0, "the pot is emptied into the refund");
         assertEq(mod.refundOwed(id), FEE);

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Deploy} from "../script/Deploy.s.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
@@ -15,7 +16,7 @@ import {MockBZZ} from "./mocks/MockBZZ.sol";
 /// interfaces `Moderation` calls through are declared locally — so a signature
 /// that drifts from the real contract compiles and reverts at runtime. Nothing
 /// below would survive that.
-contract IntegrationTest is Test {
+contract IntegrationTest is HistoryFixture {
     Deploy deployer;
     Deploy.Stack s;
     MockBZZ token;
@@ -169,6 +170,7 @@ contract IntegrationTest is Test {
     function test_eligibilityActuallyNarrows() public {
         assertEq(s.stakes.stakedCount(), 64);
         uint256 id = _submit();
+        assertEq(s.moderation.caseInfo(id).eligBits, 2, "64 staked uses N-4");
         _advance(3);
 
         uint256 eligible;
@@ -186,8 +188,10 @@ contract IntegrationTest is Test {
 
         _advance(3);
         uint256 nA = _commitEligible(id, APPROVE);
-        _wait(2 hours);
+        ts = uint256(s.moderation.pairScheduleOf(id).deadlineA) + 1;
+        vm.warp(ts);
         s.moderation.closeCommitA(id);
+        blk = _readyB(s.moderation, id);
 
         _advance(3);
         uint256 nB = _commitEligible(id, APPROVE);
@@ -242,8 +246,10 @@ contract IntegrationTest is Test {
         uint256 n = _commitEligible(id, APPROVE);
         assertGt(n, 0);
 
-        _wait(2 hours);
+        ts = uint256(s.moderation.pairScheduleOf(id).deadlineA) + 1;
+        vm.warp(ts);
         s.moderation.closeCommitA(id);
+        blk = _readyB(s.moderation, id);
         _advance(3);
         _wait(2 hours);
         s.moderation.closeCommitB(id);
@@ -304,8 +310,10 @@ contract IntegrationTest is Test {
         }
         require(dissenter != address(0), "need an eligible dissenter");
 
-        _wait(2 hours);
+        ts = uint256(s.moderation.pairScheduleOf(id).deadlineA) + 1;
+        vm.warp(ts);
         s.moderation.closeCommitA(id);
+        blk = _readyB(s.moderation, id);
 
         // committee B has to hold somebody: `isEligible` now answers for committee
         // B's seed, and a moderator who already voted in A cannot vote again

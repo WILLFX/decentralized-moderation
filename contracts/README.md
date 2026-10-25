@@ -3,17 +3,22 @@
 Solidity implementation of [`specs/protocol.md`](../specs/protocol.md), which is
 normative.
 
-| File | Runtime (shipped, `via_ir`) | legacy | Role |
-|---|---:|---:|---|
-| `src/Moderation.sol` | 11,753 B | 13,730 B | the case state machine — §3 through §8 |
-| `src/StakeRegistry.sol` | 2,396 B | 2,778 B | stake custody and frozen time — §2 |
-| `src/IndexRegistry.sol` | 2,504 B | 2,899 B | the topic → entry index — §7 |
+| File | Role |
+|---|---|
+| `src/Moderation.sol` | adopted case state machine — §3 through §8 |
+| `src/StakeRegistry.sol` | stake custody and frozen time — §2 |
+| `src/IndexRegistry.sol` | approved topic index |
+
+The recorded 17 October via-IR production measurement was 13,696 bytes for
+Moderation, below EIP-170's 24,576-byte limit. This is dated component evidence;
+rebuild this checkout before claiming a new runtime measurement. Older size,
+mutation and performance results below describe their original campaigns.
 
 ## Compiler pipelines
 
-Both columns clear EIP-170's 24,576 B limit with wide margin, so `via_ir` is not
-required for size. It remains enabled so that the shipped profile and the test profile
-produce the same bytecode.
+The recorded current runtime fits EIP-170 under the configured via-IR profile.
+Keep the compiler settings used for tests and deployment aligned. Historical legacy
+pipeline measurements do not replace a current build.
 
 The legacy pipeline must nonetheless keep working, because `tools/mutate.py` compiles
 through it for speed: 4.6 s per mutant against 30 s. A contract that only `via_ir` can
@@ -46,7 +51,7 @@ guidelines revision requires a new deployment.
 
 ## Tests
 
-123 tests across thirteen suites.
+Run the suites using [BUILD_AND_TEST.md](../docs/BUILD_AND_TEST.md).
 
 | suite | scope |
 |---|---|
@@ -63,14 +68,17 @@ guidelines revision requires a new deployment.
 | `RevealFloor.t.sol` | §4.4 — the threshold and its two failure paths |
 | `Settlement.t.sol` | settlement safety, actor guards, and stated boundaries |
 | `Eligibility.t.sol` | §3 — the threshold, the seed window, and the vector emitters |
+| `InputAndClaimRegression.t.sol` | zero topics/commitments and accurate unresolved freeze events |
+| `ProductionScheduling.t.sol` | fallback/revision/history caching and phase boundaries with real registries |
+| `N4Eligibility.t.sol` | adopted threshold boundaries and pinned eligibility with real registries |
 
 Four of these require explanation.
 
-`Integration.t.sol` uses no mocks. Every other suite substitutes a mock registry or
-index, and `Moderation` calls both through locally declared interfaces, so a signature
-that drifts from the real contract compiles and fails only at runtime. It also runs at
-64 staked moderators rather than 8, which is the only configuration where `eligBits`
-is non-zero and §3's narrowing hash executes.
+`Integration.t.sol`, `ProductionScheduling.t.sol` and `N4Eligibility.t.sol`
+exercise real registry wiring. Smaller mock-based tests isolate individual rules;
+those tests alone cannot establish interface agreement. Integration uses 64 staked
+moderators to exercise nonzero eligibility bits rather than only all-selected
+small fixtures.
 
 `Invariant.t.sol` guards against vacuity. A handler whose calls all revert satisfies
 every invariant by doing nothing. The coverage check cannot be an `invariant_*`
@@ -228,17 +236,16 @@ bear directly on this code.
 
 `minRevealsPerCommittee = 3` is conditional rather than settled, and is a constructor
 argument so that a testnet can change it. `simulation/FINDINGS-floor-price.md` prices
-it at 0.9% of cases unresolvable given 20% turnout and a 75% reveal rate, and at 28%
-given 10% turnout. Below roughly 10% turnout no value both deters a small clique and
-leaves ordinary cases resolvable. Turnout is unmeasured.
+the earlier N-5 lottery at 0.9% of cases unresolvable given 20% turnout and a 75% reveal rate, and at 28%
+given 10% turnout. Those figures do not calibrate the adopted N-4 lottery. The earlier study's low-turnout conclusions apply to its historical lottery/model,
+not a calibrated operating boundary for current N-4. Turnout remains unmeasured.
 
 Identity rotation is untouched by anything here. A frozen moderator can leave the
 frozen stake idle and stake a fresh address, so escaping a freeze costs one stake tied
 up for the freeze duration — the same cost as serving it. `StakeRegistry`'s closing
 comment records this where a reader of the contract will encounter it.
 
-Two deliberate deviations from the specification are marked in the code rather than
-left implicit: eligibility bits are derived from the staked count rather than the
-non-frozen count §3 names, because a freeze expires on a clock with no transaction to
-observe; and a moderator votes once per case rather than once per committee, which §3
-does not decide either way.
+The adopted eligibility denominator is the total staked count pinned at case
+opening, as stated in protocol §3. Frozen callers are rejected separately. A
+moderator may vote once per case, not once per committee. Historical discussions
+of a non-frozen denominator do not override those current rules.

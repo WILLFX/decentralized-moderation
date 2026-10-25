@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
@@ -10,7 +11,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 ///
 /// This suite used to pin the opposite: three identities that were the only
 /// committers took a case with probability 1, forty times out of forty. That was
-/// a tripwire on §11's undecided per-committee minimum. The minimum has since
+/// a tripwire on Â§11's undecided per-committee minimum. The minimum has since
 /// landed, counted on REVEALS, and these two tests are what replaced it.
 ///
 /// They are deliberately a pair, because the floor is easy to overstate in both
@@ -26,7 +27,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 /// `simulation/FINDINGS-floor-price.md` prices, and nothing about it removes the
 /// fact that `A/N` makes a unanimous tally certain. If anyone later reads the
 /// floor as having closed capture, the second test is the correction.
-contract ThreeVoteTest is Test {
+contract ThreeVoteTest is HistoryFixture {
     MockBZZ token;
     MockStakes stakes;
     MockIndex index;
@@ -90,7 +91,7 @@ contract ThreeVoteTest is Test {
 
     /// @dev The attack this suite was built to pin, re-run at the weakest floor
     ///      the contract will accept. It depended on committee B being empty, and
-    ///      `k = 1` already demands one revealed vote in EACH committee — so the
+    ///      `k = 1` already demands one revealed vote in EACH committee â€” so the
     ///      case terminates UNRESOLVED with the fee refunded and nothing listed.
     ///      Forty trials, because the claim being refuted was a claim of certainty.
     function test_emptySecondCommitteeNoLongerDecidesACase() public {
@@ -105,6 +106,7 @@ contract ThreeVoteTest is Test {
             ts += 2 hours;
             vm.warp(ts);
             mod.closeCommitA(id);
+            blk = _readyB(mod, id);
             blk += 3;
             vm.roll(blk);
             ts += 2 hours;
@@ -126,8 +128,8 @@ contract ThreeVoteTest is Test {
         }
     }
 
-    /// @dev The other half, and the uncomfortable one. Six identities — three
-    ///      revealing in each committee — clear a floor of 3 and take the case with
+    /// @dev The other half, and the uncomfortable one. Six identities â€” three
+    ///      revealing in each committee â€” clear a floor of 3 and take the case with
     ///      certainty, because `A/N` on a unanimous tally is still 1 and `f(1) = 1`.
     ///      The floor converted "3 identities" into "2k revealed, liable
     ///      identities"; it did not convert certainty into a probability.
@@ -141,9 +143,10 @@ contract ThreeVoteTest is Test {
             uint256 id = _submit(mod, t);
 
             _commitAll(mod, id, a, 0, 3); // committee A
-            ts += 2 hours;
+            ts = uint256(mod.pairScheduleOf(id).deadlineA) + 1;
             vm.warp(ts);
             mod.closeCommitA(id);
+            blk = _readyB(mod, id);
             blk += 3;
             vm.roll(blk);
             _commitAll(mod, id, a, 3, 6); // committee B

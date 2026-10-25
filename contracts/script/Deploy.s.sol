@@ -51,12 +51,10 @@ contract Deploy is Script {
         p.freezePerLoss = 8 days; // §11 — undecided
         p.seedLag = 2;
         p.feeMin = 1e14;
-        // §11's per-committee minimum, on REVEALS. `simulation/FINDINGS-floor-price.md`
-        // prices it: k = 3 costs 0.9% of cases at 20% turnout and a 75% reveal
-        // rate, and forces a clique that would decide a case alone to hold on the
-        // order of 96 identities instead of 3. Below 10% turnout no k both stops a
-        // small clique and leaves ordinary cases resolvable, so this value is
-        // conditional on turnout the testnet has not measured yet.
+        // Development default: three REVEALS per committee. Current N-4 turnout,
+        // capture risk and economic parameters still require calibration.
+        // FINDINGS-floor-price.md studies the superseded N-5 population model;
+        // its failure rates and identity-cost estimates do not justify this default.
         p.minRevealsPerCommittee = 3;
 
         // Read from the document rather than hardcoded. A constant here would be a

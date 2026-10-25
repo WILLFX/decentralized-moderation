@@ -1,11 +1,31 @@
 # Moderation Protocol — Specification
 
-**Status:** Normative. This is the design. Where anything else in the repository
-disagrees with it, this file wins.
+**Status: under development.** This document records the baseline and explicitly
+adopted revisions, not completion of the whole paired-committee milestone.
+Production code now contains vote-carried B scheduling and the approved smaller
+eligibility rule. Remaining progress economics and operational requirements are
+not settled by those implementations. See the
+[implementation status](../docs/STATUS.md).
 
-**Implemented.** `contracts/src/` implements this document. §10 lists every place
-it does not: what is specified here and not built, what deviates deliberately, and
-what the code requires that this document does not state.
+The baseline rules below remain the reference until explicitly revised. Code and
+passing tests are evidence of current behavior, not proof that all agreed
+requirements are implemented. §10 records known differences and unfinished work;
+it is not an exhaustive correctness claim.
+
+**17 October eligibility revision:** the user approved N-4 with the existing
+staked-count snapshot, three reveals per committee, membership and all other
+rules unchanged. The agreed user-run WSL verification passes 231 distinct
+Solidity tests, three Python tests, fresh vector comparison and both existing
+harness-based local integrations. See implementation status for evidence and
+scope. The 228-test result below is the earlier scheduling checkpoint.
+
+**17 October scheduling revision:** the user approved fallback scheduling with
+one third-commit revision and the Gnosis/Chiado history/timing basis. The rules
+in §4.1 below record that bounded change. Its production source and tests are
+written and the agreed regression sequence passed in user-run WSL output on
+17 October: 228 distinct Solidity tests and two existing harness-based local
+integrations. See implementation status for scope. Other experimental policies
+are not adopted by this revision.
 
 ---
 
@@ -62,11 +82,20 @@ a client concern, by the same principle §7 already uses for what an entry means
 For a case `c`, moderator `m` is eligible for committee `k` when
 
 ```
-hash( c , m , R_k )   has at least   N − 5   leading zero bits
+hash( c , m , R_k )   has at least   max(N − 4, 0)   leading zero bits
 ```
 
-where `N` is chosen such that the count of non-frozen moderators lies between
-`2^N` and `2^(N+1)`, and `R_k` is the randomness for that committee (§4).
+where `N = floor(log2(max(S,1)))` and S is the total staked-address count at case
+opening. The threshold is pinned for the whole case, including both challenges;
+new stakes, withdrawals and freeze changes do not recalculate it. A commitment
+still requires its sender to be staked and non-frozen at that time. `R_k` is the
+randomness for that committee (§4). No new admission cutoff is introduced.
+
+For S at least 16, expected raw eligibility is 16 to fewer than 32 addresses per
+committee before freezes, participation and used-address exclusions. Below 32,
+every address passes the lottery; the clamp prevents negative bit counts. At
+1,000 staked addresses the expected raw count is 31.25 rather than the previous
+62.5. These are expectations, not fixed committee sizes or guaranteed reveals.
 
 Eligibility creates **no obligation**. A moderator who is eligible and does
 nothing suffers nothing. There is no no-show penalty anywhere in this design.
@@ -80,11 +109,11 @@ identities as soon as `R_k` exists.
 
 ```
 submit
-  │   R₁ = randao at submission
+  │   R₁ = future execution block hash scheduled at submission
   ├── committee 1 eligible, commits
   │     closes 15 minutes after the 3rd commit
   │
-  │   R₂ = randomness available after committee 1's last commit
+  │   R₂ = scheduled future hash, cached by the first valid committee 2 vote
   ├── committee 2 eligible, commits
   │     closes 15 minutes after the 3rd commit
   │
@@ -94,9 +123,42 @@ submit
       → PRELIMINARY OUTCOME
 ```
 
-**Committee 2 is not knowable when committee 1 commits.** Its randomness does not
-exist until committee 1's commit phase has closed. So a moderator committing in
-committee 1 accepts exposure without knowing who else will review the case.
+**Committee 2's target is fixed before its hash exists.** Each pair opens with a
+fallback future target. Only the third valid committee 1 commitment may revise
+it, once, while the fallback and replacement targets are still future and unused.
+Under the approved minimum five-second block timestamp-step assumption, the
+target hash arrives after committee 1's last admissible commitment. The target
+height is public; the hash is not yet available. This does not establish producer
+impartiality or finality.
+
+Let M be `maxWaitForThird`, W be `commitWindow`, and g be `seedLag` (positive).
+At pair opening `(b0,t0)`, set A's deadline to `t0+M`, B's deadline to `t0+2M`,
+and B's fallback target to `b0+ceil(M/5)+g`. The third valid A commitment at
+`(b3,t3)` sets these to `t3+W`, `t3+W+M`, and `b3+ceil(W/5)+g`, respectively.
+The fourth and later A commitments change none of them.
+
+At A's deadline, `commit` routes to committee B without requiring a separate
+`closeCommitA` transaction. The first valid B commitment reads the exact target
+from the EIP-2935 history contract and caches it atomically with the vote.
+History ages 1 through 8,191 are accepted; absent, malformed, zero or expired
+history rejects entry. Invalid or ineligible commits do not cache a hash, record
+a vote, or activate B. Eligibility views do not change state. Later B votes use
+the cached hash, including after its history entry expires.
+
+The first two B commitments keep its scheduled deadline. Its third valid commit
+sets the deadline to that transaction's timestamp plus W, as in the existing
+third-commit clock. Later commitments cannot move it. No commitment is accepted
+at or after its committee's effective deadline. `pairScheduleOf` exposes both
+deadlines, the cached B hash and the revision flag. Stored phase may remain
+`COMMIT_A` during B's logical admission interval until an accepted vote or an
+optional close call synchronizes it.
+
+`closeCommitA` remains an optional phase synchronization call. It cannot select
+a hash or restart B's clock. If nobody activates B, `closeCommitB` is callable
+from either stored commit phase after B's deadline. It still opens a full reveal
+window at the caller's timestamp. Missing history does not select a replacement
+target or extend B's admission window; insufficient B reveals follow §4.4.
+Initial zero-A failure remains callable at A's deadline through `closeCommitA`.
 
 **Neither committee sees the other's votes.** Both reveal in the same phase, so
 committee 2 commits without a tally to follow. This is what the staging is for:
@@ -272,8 +334,11 @@ means on a client's behalf.
 A removal case targets an entry already listed and runs through the same engine,
 the same committees, the same tickets. Approve means remove.
 
-The fee is paid whether the removal succeeds or fails, so a speculative removal
-costs its submitter every time.
+For a finalized removal, the fee is spent whether the result removes the
+listing or keeps it listed. If the initial round produces no outcome and the
+case becomes unresolved, the existing §4.4 refund path also applies to removal.
+This describes the current contract behavior; no separate removal-refund rule
+is introduced here.
 
 ## 9. What is deliberately not here
 
@@ -291,13 +356,25 @@ costs its submitter every time.
 
 ## 10. Distance from the current implementation
 
-`contracts/src/` implements this document. What follows is every place it does
-not, read from the code rather than assembled from anyone's objections — an
-objection list stops wherever the reader stopped.
+The source contains portions of this baseline design. The list below records known
+differences; it does not certify the design or implementation as complete.
 
 ### 10.1 Specified here, not implemented
 
-Nothing. Every section above has code behind it.
+The revised C1+C2 milestone remains under development:
+
+- The user-approved smaller eligibility rule is now `max(N - 4, 0)` in source
+  and §3. The recorded N-4 regression sequence passes. The per-committee
+  three-reveal floor is retained; smaller raw eligibility can increase floor
+  failures when participation is low. This is not testnet turnout calibration.
+- The 17 October production change moves B scheduling and activation into valid
+  voting transactions. No dedicated arm reward is added. First-entry cost,
+  willingness to pay and other progress callers remain economic questions;
+  implementation of this slice does not establish unconditional progress.
+- A challenge must open C3+C4, applying the same revised staging rules. The source
+  now resets the fallback schedule, revision flag and B cache for each pair.
+  This behavior has passed the recorded regression checks and does not
+  complete the revised milestone.
 
 The two entries that stood here — the per-committee minimum and a cost for
 non-reveal — are implemented as §4.4 and §6. They were one decision rather than
@@ -309,8 +386,9 @@ have resolved. Deciding either alone leaves a hole the other one opens.
 
 | | |
 |---|---|
-| **eligibility bits** | §3 derives `N` from the count of NON-FROZEN moderators. That count falls and rises with no transaction to observe — a freeze expires on a clock — so it cannot be maintained on chain. `Moderation._eligBits` pins it from the STAKED count, which is exact, and `commit` rejects a frozen caller separately. The threshold sits slightly wide while part of the registry is frozen. |
-| **one vote per case, not per committee** | A moderator eligible for both committees of a round votes in whichever they reach first, and cannot vote twice. §3 does not say which way this should go. At the eligibility rates §3 produces the overlap is small — around 0.4% of the registry at 1,000 — so it is not material to §4.4's floor, but it is a choice the document does not make. |
+| **staked-count eligibility** | The adopted N-4 rule uses the total STAKED count at case opening, as now stated in §3. Frozen callers are rejected separately. This preserves the existing implementation's denominator and case-wide snapshot; it is not a non-frozen population snapshot. |
+| **one vote per case, not per committee** | A moderator eligible for both committees of a round votes in whichever they reach first, and cannot vote twice. §3 does not say which way this should go. At 1,000 staked addresses the adopted N-4 rule uses five bits. Under independent seeds the raw probability of selection in both committees is 1/1024 (about 0.098%) before case-wide vote exclusion. This estimate does not establish participation or reveal-floor success. |
+| **entropy and timing basis** | A and outcome seeds retain future execution block hashes and the existing 250-block horizon. B uses exact-target EIP-2935 history and caching. Scheduling assumes the approved Gnosis/Chiado minimum five-second timestamp step. The positive seed lag is lookahead, not a finality rule. Unsupported timing/history environments are outside this implementation basis. |
 
 ### 10.3 Required by the code, not by this document
 
@@ -333,14 +411,13 @@ Not decided, and each needs a number before deployment.
 - `STAKE`, `FREEZE_PER_LOSS`, fee level and its split, and `MAX_WAIT` — the
   longest a case may sit before a third commit arrives. The mechanism exists; the
   durations are placeholders.
-- **`MIN_REVEALS`, and it is conditional rather than merely undecided.** §4.4 sets
-  it to 3. `simulation/FINDINGS-floor-price.md` prices that at 0.9% of cases
-  unresolvable given 20% turnout and a 75% reveal rate, against roughly 96 identities
-  an attacker must hold. **Below about 10% turnout no value both stops a small clique
-  and leaves ordinary cases resolvable** — at 10% turnout a floor of 3 leaves 28% of
-  cases unresolvable. Turnout is unmeasured, so 3 is a defensible choice at the
-  participation the design needs anyway and a bad one below it. It is a constructor
-  argument, so the testnet can move it without a rewrite.
+- **`MIN_REVEALS` remains 3 per committee for current development.** The approved
+  N-4 change does not lower this floor. Real turnout is unmeasured, and smaller
+  raw eligibility can increase unresolved initial cases or failed challenges.
+  The older 0.9% and 28% failure figures in `simulation/FINDINGS-floor-price.md`
+  concern the larger-committee rule and must not be reused as operating rates
+  for N-4. The floor remains a constructor argument; testnet calibration and
+  deployment parameters are not decided by this source change.
 - **Who decides that a guidelines revision is warranted.** The *binding* is settled
   (§2): the version and hash are immutable, a deployment judges against one text, and
   `script/Deploy.s.sol` refuses a stack whose pin is not the document. What is open is
@@ -348,3 +425,7 @@ Not decided, and each needs a number before deployment.
   moderators and clients can decline to use, which may or may not be enough.
 - **`prior`** — how often a moderator's judgment matches the truth. Unmeasured,
   and `simulation/FINDINGS-floor.md` shows it decides whether any of this works.
+
+The [security and operating basis](../docs/SECURITY_AND_OPERATING_BASIS.md)
+records current trust assumptions and unresolved operating failures, including
+permanent REVEAL after outcome-seed expiry. It does not change protocol rules.

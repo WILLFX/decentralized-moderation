@@ -2,12 +2,12 @@
 
 Run, from the repository root:
 
-    cd contracts && forge test --match-test test_emitEligibilityVectors
+    (cd contracts && forge test --match-test 'test_emitEligibility(Width)?Vectors')
     python3 simulation/check_eligibility_vectors.py
 
-**Why this exists.** `Integration.t.sol` checks that eligibility narrows — at 64
-staked, fewer than 64 identities are eligible and roughly half are. That constrains
-the COUNT and nothing else. A mutation campaign showed what hides behind it:
+**Why this exists.** `Integration.t.sol` checks that eligibility narrows — under
+N−4, roughly a quarter of 64 staked identities are eligible. A count check does
+not establish WHICH identities are selected. A historical N−5 campaign showed it:
 inverting the predicate, `h >> (256 - eligBits) == 0` to `!= 0`, survived the entire
 suite. It has to. The complement of a half-sized set is also half-sized, and every
 test in the repository commits *whoever is eligible* rather than a set it decided in
@@ -77,7 +77,7 @@ def _load_widths() -> tuple[dict, list[dict]]:
 def _compare_widths(header: dict, recs: list[dict]) -> list[str]:
     """The same predicate at several bit widths.
 
-    A real registry cannot supply them: `eligBits` is 1 for every size from 64 to
+    A single real registry cannot supply them: `eligBits` is 2 for every size from 64 to
     127, so the narrowing shift would be compared at exactly one width. These
     vectors come from a planted case at widths 1 through 4, both committees, and the
     threshold they use is pinned separately by `test_eligBitsAcrossTheWholeRange`.
@@ -148,7 +148,7 @@ def _check_committees_differ(blob: dict) -> str | None:
     This is the property the staging rests on, and it is invisible to any count: a
     wrong committee number produces a set of the right size, uniformly distributed.
     Here both committees of ONE case are compared identity by identity, and they are
-    required to disagree somewhere. With ~32 eligible of 64 per committee, agreeing
+    required to disagree somewhere. With ~16 eligible of 64 per committee, agreeing
     everywhere by chance is out of the question.
     """
     by_phase: dict[int, dict[str, bool]] = {}
@@ -227,7 +227,7 @@ def main() -> int:
         print(
             "REFUSING TO PASS: eligBits is 0, so the contract short-circuits and the\n"
             "narrowing hash never runs. These vectors prove nothing. Emit them from a\n"
-            "registry of 64 or more.",
+            "registry of 32 or more.",
             file=sys.stderr,
         )
         return 4

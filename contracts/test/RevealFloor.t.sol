@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
@@ -19,7 +20,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 ///   would let any challenger destroy a decided case by challenging and then
 ///   bringing nobody, so the standing outcome finalizes instead — and the
 ///   challenger is frozen for a vote that changed nothing.
-contract RevealFloorTest is Test {
+contract RevealFloorTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
@@ -111,6 +112,7 @@ contract RevealFloorTest is Test {
         for (uint256 i; i < aCount; ++i) _commit(id, mods[aFrom + i], v, round);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         _advance(SEED_LAG + 1);
         for (uint256 i; i < bCount; ++i) _commit(id, mods[bFrom + i], v, round);
@@ -182,6 +184,7 @@ contract RevealFloorTest is Test {
         for (uint256 i; i < FLOOR + 2; ++i) _commit(id, mods[i], APPROVE, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         _advance(SEED_LAG + 1);
         for (uint256 i; i < FLOOR + 2; ++i) _commit(id, mods[6 + i], APPROVE, 0);
@@ -215,6 +218,7 @@ contract RevealFloorTest is Test {
         for (uint256 i; i < FLOOR; ++i) _commit(id, mods[i], APPROVE, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         for (uint256 i; i < FLOOR; ++i) _commit(id, mods[6 + i], APPROVE, 0);
         _wait(MAX_WAIT + 1);
@@ -251,6 +255,7 @@ contract RevealFloorTest is Test {
         _commit(id, mods[5], REJECT, 0); // will withhold
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         for (uint256 i; i < FLOOR; ++i) _commit(id, mods[6 + i], APPROVE, 0);
         _wait(MAX_WAIT + 1);
@@ -298,6 +303,7 @@ contract RevealFloorTest is Test {
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);

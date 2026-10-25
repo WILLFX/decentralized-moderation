@@ -35,7 +35,7 @@ interface IIndexRegistry {
 ///     submit
 ///       │  R_A = blockhash at submission
 ///       ├── committee A commits      closes 15 min after the 3rd commit
-///       │  R_B = blockhash after A's commit phase closed
+///       │  R_B = scheduled future history hash, cached by the first valid B vote
 ///       ├── committee B commits      closes 15 min after the 3rd commit
 ///       ├── A and B reveal together  30 min
 ///       ├── 3 tickets on the combined tally -> PRELIMINARY OUTCOME (published)
@@ -45,9 +45,10 @@ interface IIndexRegistry {
 ///
 /// Two properties carry the design and are worth naming where they live:
 ///
-/// **Committee B is unknowable while committee A commits** (`closeCommitA`). Its
-/// seed is a block height armed only when A's commit phase closes, so nobody
-/// deciding whether to commit in A can see who else will review the case.
+/// **Committee B's target is scheduled before its hash exists.** Pair opening
+/// sets a fallback; the third valid A commitment can revise it once. Under the
+/// five-second minimum timestamp-step assumption, its hash arrives after A closes.
+/// The first valid B commitment caches that exact hash and activates B.
 ///
 /// **Neither committee sees the other's votes.** Both reveal in the same phase
 /// (`Phase.REVEAL`), so B commits with no tally to follow. Payment is for
@@ -92,7 +93,7 @@ contract Moderation is ReentrancyGuard {
         uint40 seedBlockA;
         uint40 seedBlockB;
         uint40 outcomeSeedBlock; // armed when REVEAL closes; fresh each round
-        uint8 eligBits; // N-5, pinned at submission
+        uint8 eligBits; // N-4, pinned at submission from the staked count
         // --- per-committee counts, current round only. Kept APART because §4.4's
         // floor is per committee: a combined count cannot tell 6-and-0 from 3-and-3.
         uint32 commitsA;
@@ -117,6 +118,13 @@ contract Moderation is ReentrancyGuard {
         bool settled;
     }
 
+    struct PairSchedule {
+        uint40 deadlineA;
+        uint40 deadlineB;
+        bytes32 entropyB;
+        bool revised;
+    }
+
     // ------------------------------------------------------------ constants
 
     bytes32 internal constant ELIGIBILITY_DOMAIN = keccak256("eligibility");
@@ -129,10 +137,12 @@ contract Moderation is ReentrancyGuard {
     uint8 public constant MAX_CHALLENGES = 2;
     uint256 public constant MAX_TOPICS = 5;
 
-    /// @dev Only 256 block hashes are addressable. Every seed must be consumed
-    ///      inside this horizon or the phase cannot proceed. Public because a
-    ///      client computing its own eligibility needs to know when a seed dies.
+    /// @dev A and outcome seeds retain the existing opcode-based horizon.
+    ///      Committee B uses the separate history window and caches its hash.
     uint256 public constant BLOCKHASH_HORIZON = 250;
+    address public constant BLOCK_HISTORY = 0x0000F90827F1C53a10cb7A02335B175320002935;
+    uint256 public constant BLOCK_HISTORY_WINDOW = 8191;
+    uint256 public constant MIN_BLOCK_SECONDS = 5;
 
     // ------------------------------------------------------------ immutables
 
@@ -183,6 +193,7 @@ contract Moderation is ReentrancyGuard {
 
     uint256 public nextCaseId = 1;
     mapping(uint256 => Case) internal cases;
+    mapping(uint256 => PairSchedule) internal pairSchedules;
 
     mapping(uint256 => bytes32[MAX_TOPICS]) internal caseTopics;
     mapping(uint256 => mapping(address => Vote)) internal votes;
@@ -205,6 +216,7 @@ contract Moderation is ReentrancyGuard {
     event Challenged(uint256 indexed caseId, address indexed by, uint8 against);
     event Finalized(uint256 indexed caseId, uint8 outcome);
     event Unresolved(uint256 indexed caseId);
+    event PairScheduled(uint256 indexed caseId, uint8 indexed round, uint256 targetB, uint256 deadlineA, uint256 deadlineB);
     event Claimed(uint256 indexed caseId, address indexed m, uint256 paid, bool frozen);
 
     // --------------------------------------------------------------- errors
@@ -228,6 +240,7 @@ contract Moderation is ReentrancyGuard {
     error BadFloor();
     error FeeTooLarge();
     error BadGuidelines();
+    error BadSchedule();
 
     /// @dev The constructor's arguments, as a struct rather than thirteen positional
     ///      parameters. Two reasons, and the first is not style.
@@ -260,6 +273,7 @@ contract Moderation is ReentrancyGuard {
     }
 
     constructor(Config memory cfg) {
+        if (cfg.seedLag == 0 || cfg.commitWindow == 0 || cfg.maxWaitForThird == 0) revert BadSchedule();
         token = IERC20(cfg.token);
         stakes = IStakeRegistry(cfg.stakes);
         index = IIndexRegistry(cfg.index);
@@ -298,6 +312,9 @@ contract Moderation is ReentrancyGuard {
         returns (uint256 caseId)
     {
         if (topics.length == 0 || topics.length > MAX_TOPICS) revert BadTopics();
+        for (uint256 i; i < topics.length; ++i) {
+            if (topics[i] == bytes32(0)) revert BadTopics();
+        }
         if (fee < feeMin) revert FeeTooLow();
 
         caseId = nextCaseId++;
@@ -370,17 +387,32 @@ contract Moderation is ReentrancyGuard {
         c.eligBits = _eligBits();
         c.phase = uint8(Phase.COMMIT_A);
         c.seedBlockA = uint40(block.number + seedLag);
-        c.phaseDeadline = uint40(block.timestamp + maxWaitForThird);
+        _schedulePair(caseId);
         address(token).safeTransferFrom(msg.sender, address(this), fee);
     }
 
-    /// @dev §3 derives `N` from the count of NON-FROZEN moderators. That count
-    ///      falls and rises without any transaction — a freeze expires on a clock,
-    ///      and no one is obliged to report it — so it cannot be maintained on
-    ///      chain. `N` is pinned here from the count of STAKED moderators, which
-    ///      is exact, and `commit` rejects a frozen caller separately. The
-    ///      threshold is therefore calibrated slightly wide whenever part of the
-    ///      registry is frozen. Recorded in `specs/protocol.md` §10.2.
+    function _schedulePair(uint256 caseId) internal {
+        Case storage c = cases[caseId];
+        uint256 deadlineA = block.timestamp + maxWaitForThird;
+        uint256 deadlineB = deadlineA + maxWaitForThird;
+        uint256 target = _futureTarget(maxWaitForThird);
+        pairSchedules[caseId] = PairSchedule(uint40(deadlineA), uint40(deadlineB), bytes32(0), false);
+        c.seedBlockB = uint40(target);
+        c.phaseDeadline = uint40(deadlineA);
+        emit PairScheduled(caseId, c.challenges, target, deadlineA, deadlineB);
+    }
+
+    function _futureTarget(uint256 window) internal view returns (uint256 target) {
+        target = block.number + window / MIN_BLOCK_SECONDS
+            + (window % MIN_BLOCK_SECONDS == 0 ? 0 : 1) + seedLag;
+        if (target > type(uint40).max || block.timestamp + window + maxWaitForThird > type(uint40).max) {
+            revert BadSchedule();
+        }
+    }
+
+    /// @dev Pin N-4 from the total STAKED count at submission. Commit rejects
+    ///      frozen callers separately. Challenges retain the original threshold,
+    ///      even if moderators later stake, leave, freeze or thaw.
     function _eligBits() internal view returns (uint8) {
         uint256 n = stakes.stakedCount();
         uint8 bits;
@@ -388,10 +420,10 @@ contract Moderation is ReentrancyGuard {
             n >>= 1;
             ++bits;
         }
-        // `>` against `>=` here is an EQUIVALENT mutant: at `bits == 5` both
-        // branches yield 0, because `5 - 5` is the same as the else. Mutation
+        // `>` against `>=` here is an EQUIVALENT mutant: at `bits == 4` both
+        // branches yield 0, because `4 - 4` is the same as the else. Mutation
         // testing will report it as a survivor forever. Do not chase it.
-        return bits > 5 ? bits - 5 : 0;
+        return bits > 4 ? bits - 4 : 0;
     }
 
     // ------------------------------------------------------------- voting
@@ -402,12 +434,15 @@ contract Moderation is ReentrancyGuard {
     ///      committee A forfeits committee B — is open (`specs/protocol.md` §10.2).
     function commit(uint256 caseId, bytes32 h) external {
         Case storage c = cases[caseId];
-        uint8 committee = _committeeOf(c.phase);
+        uint8 committee = _currentCommittee(caseId);
         if (committee == 0) revert BadPhase();
-        if (block.timestamp >= c.phaseDeadline) revert TooLate();
+        if (h == bytes32(0)) revert NoCommitment();
+        PairSchedule storage schedule = pairSchedules[caseId];
+        if (block.timestamp >= (committee == 1 ? schedule.deadlineA : schedule.deadlineB)) revert TooLate();
         if (!stakes.isActive(msg.sender) || stakes.isFrozen(msg.sender)) revert NotEligible();
         if (votes[caseId][msg.sender].commitment != bytes32(0)) revert AlreadyVoted();
-        if (!_eligible(caseId, msg.sender, committee)) revert NotEligible();
+        bytes32 entropy = _eligibilitySeed(caseId, committee);
+        if (!_matchesEligibility(caseId, msg.sender, committee, entropy)) revert NotEligible();
 
         votes[caseId][msg.sender] =
             Vote({commitment: h, committee: committee, round: c.challenges, revealed: 0, settled: false});
@@ -417,13 +452,28 @@ contract Moderation is ReentrancyGuard {
         uint32 n;
         if (committee == 1) {
             n = ++c.commitsA;
+            if (n == 3) {
+                if (schedule.revised || block.number >= c.seedBlockB || schedule.entropyB != bytes32(0)) {
+                    revert SeedUnavailable();
+                }
+                uint256 target = _futureTarget(commitWindow);
+                schedule.deadlineA = uint40(block.timestamp + commitWindow);
+                schedule.deadlineB = uint40(block.timestamp + commitWindow + maxWaitForThird);
+                schedule.revised = true;
+                c.seedBlockB = uint40(target);
+                c.phaseDeadline = schedule.deadlineA;
+                emit PairScheduled(caseId, c.challenges, target, schedule.deadlineA, schedule.deadlineB);
+            }
         } else {
+            if (c.phase == uint8(Phase.COMMIT_A)) {
+                c.phase = uint8(Phase.COMMIT_B);
+                emit PhaseChanged(caseId, uint8(Phase.COMMIT_A), uint8(Phase.COMMIT_B));
+            }
+            schedule.entropyB = entropy;
             n = ++c.commitsB;
+            if (n == 3) schedule.deadlineB = uint40(block.timestamp + commitWindow);
+            c.phaseDeadline = schedule.deadlineB;
         }
-
-        // §4.1 — three commitments START the clock. They are not a quorum, and
-        // later commits never extend the deadline once it is pinned.
-        if (n == 3) c.phaseDeadline = uint40(block.timestamp + commitWindow);
 
         emit Committed(caseId, msg.sender, committee, c.challenges);
     }
@@ -460,9 +510,8 @@ contract Moderation is ReentrancyGuard {
 
     // ------------------------------------------------------- phase advance
 
-    /// @dev Arming committee B's seed HERE, and not before, is the whole point of
-    ///      the staging: while committee A was committing this height did not
-    ///      exist, so committee B was not computable by anyone.
+    /// @dev Optional phase synchronization. The target and deadlines are already
+    ///      scheduled; a first valid B commitment can perform this transition.
     function closeCommitA(uint256 caseId) external {
         Case storage c = cases[caseId];
         if (c.phase != uint8(Phase.COMMIT_A)) revert BadPhase();
@@ -471,19 +520,20 @@ contract Moderation is ReentrancyGuard {
         if (c.commitsA == 0 && c.challenges == 0) return _toUnresolved(caseId);
 
         c.phase = uint8(Phase.COMMIT_B);
-        c.seedBlockB = uint40(block.number + seedLag);
-        c.phaseDeadline = uint40(block.timestamp + maxWaitForThird);
+        c.phaseDeadline = pairSchedules[caseId].deadlineB;
         emit PhaseChanged(caseId, uint8(Phase.COMMIT_A), uint8(Phase.COMMIT_B));
     }
 
     function closeCommitB(uint256 caseId) external {
         Case storage c = cases[caseId];
-        if (c.phase != uint8(Phase.COMMIT_B)) revert BadPhase();
-        if (block.timestamp < c.phaseDeadline) revert TooEarly();
+        if (c.phase != uint8(Phase.COMMIT_A) && c.phase != uint8(Phase.COMMIT_B)) revert BadPhase();
+        if (block.timestamp < pairSchedules[caseId].deadlineB) revert TooEarly();
+        if (c.commitsA == 0 && c.challenges == 0) return _toUnresolved(caseId);
 
+        uint8 previousPhase = c.phase;
         c.phase = uint8(Phase.REVEAL);
         c.phaseDeadline = uint40(block.timestamp + revealWindow);
-        emit PhaseChanged(caseId, uint8(Phase.COMMIT_B), uint8(Phase.REVEAL));
+        emit PhaseChanged(caseId, previousPhase, uint8(Phase.REVEAL));
     }
 
     /// @dev The outcome seed is armed at reveal close and consumed by `draw`, so
@@ -513,6 +563,9 @@ contract Moderation is ReentrancyGuard {
     function closeReveal(uint256 caseId) external {
         Case storage c = cases[caseId];
         if (c.phase != uint8(Phase.REVEAL)) revert BadPhase();
+        // Keep the first target even after its hash is known or expired.
+        // `challenge` clears it when opening the next round.
+        if (c.outcomeSeedBlock != 0) revert BadPhase();
         if (block.timestamp < c.phaseDeadline) revert TooEarly();
 
         uint256 k = minRevealsPerCommittee;
@@ -593,11 +646,10 @@ contract Moderation is ReentrancyGuard {
         c.commitsB = 0;
         c.revealsA = 0;
         c.revealsB = 0;
-        c.seedBlockB = 0;
         c.outcomeSeedBlock = 0;
         c.phase = uint8(Phase.COMMIT_A);
         c.seedBlockA = uint40(block.number + seedLag);
-        c.phaseDeadline = uint40(block.timestamp + maxWaitForThird);
+        _schedulePair(caseId);
 
         emit Challenged(caseId, msg.sender, against);
     }
@@ -701,7 +753,7 @@ contract Moderation is ReentrancyGuard {
         stakes.settle(m, frozen, freezePerLoss);
 
         if (!resolved) {
-            emit Claimed(caseId, m, 0, false);
+            emit Claimed(caseId, m, 0, frozen);
             return;
         }
 
@@ -784,39 +836,58 @@ contract Moderation is ReentrancyGuard {
 
     // ------------------------------------------------------- eligibility
 
-    /// @dev §3. `hash(case, moderator, seed)` must carry at least `eligBits`
-    ///      leading zeros. Publicly computable the moment the seed exists — which
-    ///      for committee B is not until committee A has closed.
-    function _eligible(uint256 caseId, address m, uint8 committee) internal view returns (bool) {
+    function _historyB(uint256 height) internal view returns (bytes32 value) {
+        if (height == 0 || block.number <= height || block.number - height > BLOCK_HISTORY_WINDOW) {
+            revert SeedUnavailable();
+        }
+        (bool ok, bytes memory result) = BLOCK_HISTORY.staticcall(abi.encode(height));
+        if (!ok || result.length != 32) revert SeedUnavailable();
+        value = abi.decode(result, (bytes32));
+        if (value == bytes32(0)) revert SeedUnavailable();
+    }
+
+    function _eligibilitySeed(uint256 caseId, uint8 committee) internal view returns (bytes32) {
         Case storage c = cases[caseId];
-        uint256 sb = committee == 1 ? c.seedBlockA : c.seedBlockB;
+        if (committee == 2) {
+            bytes32 cached = pairSchedules[caseId].entropyB;
+            return cached == bytes32(0) ? _historyB(c.seedBlockB) : cached;
+        }
+        uint256 sb = c.seedBlockA;
+        if (sb == 0 || block.number <= sb || block.number > sb + BLOCKHASH_HORIZON) {
+            revert SeedUnavailable();
+        }
+        return blockhash(sb);
+    }
 
-        // `sb == 0` is UNREACHABLE through either caller and kept as defence in
-        // depth. `commit` and `isEligible` both ask only about the CURRENT phase's
-        // committee: `seedBlockA` is armed in `submit` and `seedBlockB` in
-        // `closeCommitA`, so by the time a phase can be asked about, its seed
-        // exists. Mutation testing will always report that clause's mutants as
-        // survivors for this reason; the `block.number <= sb` half is reachable and
-        // is tested. Do not delete it — it is what stops a future caller reaching
-        // past the current phase from hashing against `blockhash(0)`, which every
-        // identity would pass identically.
-        if (sb == 0 || block.number <= sb) revert SeedUnavailable();
-        if (block.number > sb + BLOCKHASH_HORIZON) revert SeedUnavailable();
-
-        // a registry of 32 or fewer needs no narrowing at all, and the shift
-        // below is only defined for 1..255
+    function _matchesEligibility(uint256 caseId, address m, uint8 committee, bytes32 seed)
+        internal view returns (bool)
+    {
+        Case storage c = cases[caseId];
         if (c.eligBits == 0) return true;
-
-        bytes32 seed = blockhash(sb);
         uint256 h = uint256(
             keccak256(abi.encode(ELIGIBILITY_DOMAIN, block.chainid, address(this), caseId, committee, seed, m))
         );
         return h >> (256 - c.eligBits) == 0;
     }
 
+    function _eligible(uint256 caseId, address m, uint8 committee) internal view returns (bool) {
+        return _matchesEligibility(caseId, m, committee, _eligibilitySeed(caseId, committee));
+    }
+
+    function _currentCommittee(uint256 caseId) internal view returns (uint8) {
+        Case storage c = cases[caseId];
+        if (c.phase == uint8(Phase.COMMIT_B)) return 2;
+        if (c.phase != uint8(Phase.COMMIT_A)) return 0;
+        if (block.timestamp < pairSchedules[caseId].deadlineA) return 1;
+        if (c.challenges == 0 && c.commitsA == 0) return 0;
+        return 2;
+    }
+
     function isEligible(uint256 caseId, address m) external view returns (bool) {
-        uint8 committee = _committeeOf(cases[caseId].phase);
+        uint8 committee = _currentCommittee(caseId);
         if (committee == 0) return false;
+        PairSchedule storage schedule = pairSchedules[caseId];
+        if (block.timestamp >= (committee == 1 ? schedule.deadlineA : schedule.deadlineB)) return false;
         return _eligible(caseId, m, committee);
     }
 
@@ -827,6 +898,10 @@ contract Moderation is ReentrancyGuard {
     }
 
     // ------------------------------------------------------------- views
+
+    function pairScheduleOf(uint256 caseId) external view returns (PairSchedule memory) {
+        return pairSchedules[caseId];
+    }
 
     function caseInfo(uint256 caseId) external view returns (Case memory) {
         return cases[caseId];

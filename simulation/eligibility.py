@@ -1,11 +1,10 @@
 """§3's eligibility, derived independently of the contract.
 
-`Integration.t.sol` checks that eligibility *narrows* — that at 64 staked
-moderators fewer than 64 are eligible, and roughly half. That is a real check and
-it is not enough, for the same reason the rate check on the draw was not enough:
-it constrains the COUNT and says nothing about WHICH identities.
+`Integration.t.sol` checks that eligibility *narrows* — under N−4, roughly a
+quarter of 64 staked moderators are eligible. A count check is useful but cannot
+establish WHICH identities the domain-separated hash selects.
 
-A mutation campaign made the gap concrete. Inverting the predicate —
+A historical N−5 mutation campaign made the gap concrete. Inverting the predicate —
 `h >> (256 - eligBits) == 0` to `!= 0` — survived the entire suite. It has to: the
 complement of a half-sized set is also half-sized, and every test commits
 *whoever is eligible* rather than a set it decided in advance. The same is true of
@@ -36,9 +35,10 @@ committee number produces a set of the right size, uniformly distributed, passin
 every count check — and quietly makes the two committees correlated.
 
 And `_eligBits` is derived here too, not read from the contract, because the
-threshold is the other half of the predicate: at one bit too few the committee
-doubles, at one too many it halves, and §3's "32 to 64 by construction" is exactly
-the claim those loop bounds make.
+threshold is the other half of the predicate: at one bit too few the expected
+eligible population doubles, and at one too many it halves. The approved N−4 rule
+keeps that expectation in [16, 32) for a staked count of at least 16. It does not
+guarantee participation or the three-reveal floor in either committee.
 """
 
 from __future__ import annotations
@@ -73,20 +73,20 @@ def _address_word(address: str | int) -> bytes:
 
 
 def elig_bits(staked_count: int) -> int:
-    """`N − 5` from the staked count, as §3 defines it.
+    """`max(N − 4, 0)` from the staked count, as §3 defines it.
 
     Derived from the definition rather than transcribed from the loop in
     `Moderation._eligBits`: `N` is the position of the highest set bit, i.e. the
-    unique `N` with `2^N <= staked < 2^(N+1)`, and the threshold is `max(N-5, 0)`.
+    unique `N` with `2^N <= staked < 2^(N+1)`, and the threshold is `max(N-4, 0)`.
 
-    `staked <= 1` gives `N = 0`. A registry of 32 or fewer needs no narrowing at
+    `staked <= 1` gives `N = 0`. A registry of at most 31 needs no narrowing at
     all, and the contract's shift is only defined for 1..255, which is why zero is
     a real case and not an edge to be tidied away.
     """
     if staked_count < 0:
         raise ValueError(f"negative registry: {staked_count}")
     n = max(staked_count, 1).bit_length() - 1
-    return max(n - 5, 0)
+    return max(n - 4, 0)
 
 
 def committee_of_phase(phase: int) -> int:

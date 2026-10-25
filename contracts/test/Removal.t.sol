@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
@@ -9,7 +10,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 /// @notice §8 — a removal targets a listed entry and runs through the same
 ///         engine. **Approve means remove.** The fee is paid whichever way it
 ///         goes, which is what stops removal being free censorship.
-contract RemovalTest is Test {
+contract RemovalTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
@@ -108,6 +109,7 @@ contract RemovalTest is Test {
         for (uint256 i; i < inA; ++i) _commit(id, mods[i], v, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         _advance(SEED_LAG + 1);
         for (uint256 i = inA; i < n; ++i) _commit(id, mods[i], v, 0);
@@ -190,10 +192,11 @@ contract RemovalTest is Test {
         uint256 rem = mod.submitRemoval(listing, FEE);
 
         _advance(SEED_LAG + 1);
-        assertEq(mod.caseInfo(rem).seedBlockB, 0, "B unknowable during A");
+        assertGt(mod.caseInfo(rem).seedBlockB, blk, "B target is future during A");
         for (uint256 i; i < 3; ++i) _commit(rem, mods[i], APPROVE, 0);
         _wait(COMMIT_WINDOW + 1);
         mod.closeCommitA(rem);
+        blk = _readyB(mod, rem);
         assertGt(mod.caseInfo(rem).seedBlockB, 0, "seeded only once A closed");
     }
 

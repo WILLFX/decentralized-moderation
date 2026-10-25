@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
@@ -13,7 +14,7 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 /// through to a second draw, so a mutant that made the second draw impossible
 /// survived, as did one that decremented the tally when a Reject outcome was
 /// challenged.
-contract ChallengeRoundTest is Test {
+contract ChallengeRoundTest is HistoryFixture {
     Moderation mod;
     MockBZZ token;
     MockStakes stakes;
@@ -88,12 +89,20 @@ contract ChallengeRoundTest is Test {
     ///      least `FLOOR` revealed votes or the round does not resolve, so putting
     ///      the whole range in committee A would test a shape the design rejects.
     function _round(uint256 id, uint8 round, uint256 from, uint256 to, uint8 v) internal {
+        _armOutcome(id, round, from, to, v);
+        _advance(SEED_LAG + 1);
+        mod.draw(id);
+    }
+
+    /// @dev Runs the public voting path up to the pending outcome draw.
+    function _armOutcome(uint256 id, uint8 round, uint256 from, uint256 to, uint8 v) internal {
         uint256 mid = from + (to - from) / 2;
 
         _advance(SEED_LAG + 1);
         for (uint256 i = from; i < mid; ++i) _commit(id, mods[i], v, round);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
 
         _advance(SEED_LAG + 1);
         for (uint256 i = mid; i < to; ++i) _commit(id, mods[i], v, round);
@@ -106,11 +115,80 @@ contract ChallengeRoundTest is Test {
         }
         _wait(REVEAL_WINDOW + 1);
         mod.closeReveal(id);
-        _advance(SEED_LAG + 1);
-        mod.draw(id);
     }
 
     // -----------------------------------------------------------------
+
+    function _assertRearmRejected(uint256 id) internal {
+        bytes32 beforeState = keccak256(abi.encode(mod.caseInfo(id)));
+        vm.prank(address(0xBAD));
+        vm.expectRevert(Moderation.BadPhase.selector);
+        mod.closeReveal(id);
+        assertEq(keccak256(abi.encode(mod.caseInfo(id))), beforeState, "case state is unchanged");
+    }
+
+    function test_closeRevealPreservesFirstSeedBeforeTargetBlock() public {
+        uint256 id = _submit();
+        _armOutcome(id, 0, 0, 4, APPROVE);
+        uint256 firstSeed = mod.caseInfo(id).outcomeSeedBlock;
+        assertGt(firstSeed, blk);
+
+        _assertRearmRejected(id);
+        _advance(SEED_LAG);
+        assertEq(blk, firstSeed);
+        _assertRearmRejected(id);
+
+        vm.expectRevert(Moderation.TooEarly.selector);
+        mod.draw(id);
+        _advance(1);
+        vm.setBlockhash(firstSeed, keccak256("first outcome"));
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).outcomeSeedBlock, firstSeed);
+        assertEq(mod.caseInfo(id).preliminary, APPROVE);
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.CHALLENGE));
+    }
+
+    function test_closeRevealCannotReplaceExpiredOutcomeSeed() public {
+        uint256 id = _submit();
+        _armOutcome(id, 0, 0, 4, APPROVE);
+        uint256 firstSeed = mod.caseInfo(id).outcomeSeedBlock;
+        _advance(SEED_LAG + mod.BLOCKHASH_HORIZON() + 1);
+
+        _assertRearmRejected(id);
+        assertEq(mod.caseInfo(id).outcomeSeedBlock, firstSeed);
+        vm.expectRevert(Moderation.SeedUnavailable.selector);
+        mod.draw(id);
+    }
+
+    function test_bothChallengesAllowFreshOutcomeSeedsAndRejectRearming() public {
+        uint256 id = _submit();
+        uint256 previousSeed;
+        for (uint8 round; round < 3; ++round) {
+            // Two fresh committee voters per round meet this fixture's floor.
+            _armOutcome(id, round, uint256(round) * 2, uint256(round) * 2 + 2, APPROVE);
+            uint256 seed = mod.caseInfo(id).outcomeSeedBlock;
+            assertGt(seed, previousSeed, "each round arms a fresh target");
+            _assertRearmRejected(id);
+            _advance(SEED_LAG + 1);
+            vm.setBlockhash(seed, keccak256(abi.encode("round outcome", round)));
+            _assertRearmRejected(id);
+            mod.draw(id);
+            assertEq(mod.caseInfo(id).outcomeSeedBlock, seed);
+            assertEq(mod.caseInfo(id).challenges, round);
+            assertEq(mod.caseInfo(id).pot, FEE);
+
+            if (round < 2) {
+                assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.CHALLENGE));
+                vm.prank(mods[10 + round]);
+                mod.challenge(id);
+                assertEq(mod.caseInfo(id).outcomeSeedBlock, 0, "challenge clears the prior target");
+                assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.COMMIT_A));
+            } else {
+                assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.FINALIZED));
+            }
+            previousSeed = seed;
+        }
+    }
 
     /// @dev **The whole second round.** A challenge resets the per-committee
     ///      counters and the outcome seed; if the reset left the seed unusable,
@@ -181,6 +259,7 @@ contract ChallengeRoundTest is Test {
         for (uint256 i; i < 4; ++i) _commit(id, mods[i], REJECT, 0);
         _wait(MAX_WAIT + 1);
         mod.closeCommitA(id);
+        blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         // the lone dissenter, voting Approve — placed in committee B so the
         // reveal floor is met there too
@@ -225,9 +304,8 @@ contract ChallengeRoundTest is Test {
         assertGt(mod.caseInfo(id).seedBlockB, atClose, "seed B is ahead of A's close");
     }
 
-    /// @dev Nobody may commit once the deadline has arrived — at it, not after
-    ///      it. The comparison is `>=`, and a mutant relaxing it to `>` bought an
-    ///      extra block that no test noticed.
+    /// @dev At A's deadline a call can only enter B. In this fixture B's target
+    ///      has not arrived, so the attempted vote must not enter either committee.
     function test_cannotCommitAtTheDeadlineItself() public {
         uint256 id = _submit();
         _advance(SEED_LAG + 1);
@@ -240,8 +318,10 @@ contract ChallengeRoundTest is Test {
         vm.warp(deadline);
         bytes32 h = mod.commitHash(id, 0, mods[4], APPROVE, bytes32("s"));
         vm.prank(mods[4]);
-        vm.expectRevert(Moderation.TooLate.selector);
+        vm.expectRevert(Moderation.SeedUnavailable.selector);
         mod.commit(id, h);
+        assertEq(mod.caseInfo(id).commitsA, 4);
+        assertEq(mod.caseInfo(id).commitsB, 0);
     }
 
     function test_topicCountIsBounded() public {

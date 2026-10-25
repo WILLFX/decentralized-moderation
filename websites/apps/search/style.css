@@ -1,0 +1,20 @@
+:root { font-family: system-ui, sans-serif; color: #20333c; background: #f6f7f2; }
+body { margin: 0; }
+main { max-width: 920px; margin: auto; padding: 2rem 1.25rem 4rem; }
+h1 { margin-bottom: .3rem; } h2 { font-size: 1.2rem; }
+section { background: white; border: 1px solid #d6ddd6; border-radius: .7rem; padding: 1.25rem; margin-top: 1.2rem; }
+label { display: block; font-weight: 600; margin: 1rem 0 .5rem; }
+input { box-sizing: border-box; max-width: 100%; padding: .65rem; }
+button { background: #216e65; color: white; border: 0; padding: .8rem 1rem; border-radius: .35rem; cursor: pointer; margin: .5rem .5rem .5rem 0; font: inherit; }
+button:disabled { background: #758381; cursor: wait; }
+button:focus-visible, input:focus-visible { outline: 3px solid #d49a24; outline-offset: 3px; }
+.scope { border-left: 4px solid #216e65; padding-left: 1rem; }
+.status { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.muted { color: #53686e; } #notice { padding: 1rem 0; font-weight: 600; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font: inherit; }
+input[type="password"], #receipt-hash { width: 100%; }
+input[type="checkbox"] { margin-right: .5rem; }
+button:disabled { cursor: not-allowed; }
+
+summary { cursor: pointer; font-weight: 600; padding: 1rem 0; }
+summary:focus-visible { outline: 3px solid #d49a24; outline-offset: 3px; }

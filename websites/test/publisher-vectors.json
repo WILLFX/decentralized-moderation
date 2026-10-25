@@ -1,0 +1,72 @@
+[
+  {
+    "contentReference": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "metadata": {
+      "type": "article",
+      "title": " local bee browser submission ",
+      "topics": [
+        " Biology "
+      ],
+      "contentType": "text/plain"
+    },
+    "expectedBytes": "{\"schemaVersion\":1,\"type\":\"article\",\"title\":\" local bee browser submission \",\"topics\":[\"biology\"],\"contentType\":\"text/plain\"}",
+    "metaHash": "0x4f739cef314f324ef9f83c8960304a09b3be2a9f9d087ede711d9fc1673ca934",
+    "topicKeys": [
+      "0x27828dc0c6305ec2398aa92c13291c7a253aad96e2822a5a511d0a60f07a4384"
+    ]
+  },
+  {
+    "contentReference": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "metadata": {
+      "schemaVersion": 1,
+      "type": "article",
+      "title": "  Cells and\n DNA  ",
+      "description": "  Inherited information  ",
+      "topics": [
+        "ΒΙΟΛΟΓΊΑ",
+        "Café"
+      ],
+      "language": "en",
+      "contentType": "text/plain",
+      "source": "https://example.org/article"
+    },
+    "expectedBytes": "{\"schemaVersion\":1,\"type\":\"article\",\"title\":\"  Cells and\\n DNA  \",\"description\":\"  Inherited information  \",\"topics\":[\"βιολογία\",\"café\"],\"language\":\"en\",\"contentType\":\"text/plain\",\"source\":\"https://example.org/article\"}",
+    "metaHash": "0x899b0033978047ac3bade262f69453d250eac6c8f3b7835495876ae0891f71e1",
+    "topicKeys": [
+      "0x811ae3e9fa29daff5661b37b2dcbede51bddc7fae16847b007e8b98d1f34b456",
+      "0x9513447e2d376aacd434727887590dd448cda8f2d30c4ace903d31fe209f8ad8"
+    ]
+  },
+  {
+    "contentReference": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "metadata": {
+      "type": "article",
+      "title": "Greek final sigma",
+      "topics": [
+        "ΟΣ"
+      ],
+      "contentType": "text/plain"
+    },
+    "expectedBytes": "{\"schemaVersion\":1,\"type\":\"article\",\"title\":\"Greek final sigma\",\"topics\":[\"ος\"],\"contentType\":\"text/plain\"}",
+    "metaHash": "0x62b6645285088a810cf4c45aa9731b4d8e585d6d3a003a49f046cb6dd35cec84",
+    "topicKeys": [
+      "0x2b4ae84b48b16f51853e8721966c077e140ac2b8425009c28d836f8458a4be87"
+    ]
+  },
+  {
+    "contentReference": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "metadata": {
+      "type": "article",
+      "title": "DNA 🧬",
+      "topics": [
+        "plant biology"
+      ],
+      "contentType": "text/plain"
+    },
+    "expectedBytes": "{\"schemaVersion\":1,\"type\":\"article\",\"title\":\"DNA 🧬\",\"topics\":[\"plant biology\"],\"contentType\":\"text/plain\"}",
+    "metaHash": "0xaeb4ed3df67a7780edc430c3cfc88a91da67521f6976fbbfdf44a0da1d4165fb",
+    "topicKeys": [
+      "0x529c49a9eff909c22db5df3df07d973431f5ad7871649291b04ed73bed41df28"
+    ]
+  }
+]

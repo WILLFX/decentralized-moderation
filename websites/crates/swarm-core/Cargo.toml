@@ -1,0 +1,12 @@
+[package]
+name = "swarm-core"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+hex.workspace = true
+url.workspace = true
+unicode-normalization = "=0.1.25"

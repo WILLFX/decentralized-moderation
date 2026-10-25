@@ -1,0 +1,35 @@
+{
+  "description": "Synthetic encrypted format-v1 test vector. Contains no real account or recovery data.",
+  "envelope": {
+    "format": "moderator-vote-vault",
+    "version": 1,
+    "kdf": {
+      "name": "PBKDF2",
+      "hash": "SHA-256",
+      "iterations": 310000,
+      "salt": "40eb573ee72530de45424c61b109edce"
+    },
+    "cipher": {
+      "name": "AES-GCM",
+      "iv": "82a78de1c27562ddefce0015",
+      "data": "d618623b9d053a9ed18a4ef45560fd8fb5d4be26b3a052ce97f479bc19257995e2af6e2c427471b402f82a88d7b79c2691229887c466a4bd2463c6231c98016a8b7b23f4bed311d011187ad3630beebdc8df2eea0645e424002c1514a1b5a1c6cf3da498b2f70bfbe655bbb18df3f8d0d1833ca1b9cdb172203d1560779788df03aee26a93254c321180146e018d40b2b254efbc9e14ac7c531b6c44af13310feaa07a1a99ddccd4d91440097bdeb21983a2ffa1bcd9eede2e904b3bd2464405330c02ddc1e787d7196124ccf1f490ed3deb7a20f0553f3ab1b4fe2cd34c3e9f888f57bb37e75dcab8e77b3ab111ef2e276cc76e17345f258516652d1c94dc19e5da0b0ff2974e9058541a067cb2707f8c6b3ef7b885eb1c4b9fcd93f66c083954b54b930476c37e557a1b4818fe67db795f08a104e8792b42e90549557c4bb9462f9a758803346a8fa40dd73b74fce603e2e2576e5165cf11e5c7b2c52eb744f2e5ed411de99f94c10a90f7124f0c0b2d5b6462c87da427b831163028572a3efc63"
+    }
+  },
+  "payload": {
+    "version": 1,
+    "votes": [
+      {
+        "chainId": "10200",
+        "contract": "0x1111111111111111111111111111111111111111",
+        "voter": "0x2222222222222222222222222222222222222222",
+        "caseId": "9",
+        "round": 0,
+        "committee": 1,
+        "commitment": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "vote": 1,
+        "salt": "0x4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    ],
+    "backedUp": []
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "deployment": {
+    "chainId": "10200",
+    "moderation": {
+      "address": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+      "codeHash": "0x1a8ace9d2c1da5d2063690ff54cc5d3d4420b93dc342a1a8e32e18d3688b84b9"
+    },
+    "stakes": {
+      "address": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+      "codeHash": "0xedfda132fb5ece8c7a2feb1cf0d1f95c5ae24753974f2b512b898641294f66e4"
+    },
+    "index": {
+      "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+      "codeHash": "0xaffc0cd41d241fc0d08351db485ecf859d33c836a2c7e4963f62a8725716f2c1"
+    },
+    "token": {
+      "address": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      "codeHash": "0x10c16e707764bb0825d188f28f3c8e70461dddcc5e2dfd7455b0a22fe32e374e"
+    },
+    "guidelines": {
+      "version": "1",
+      "hash": "0x780247619462ac3dcc846780bffd6e527329ff20673bafe0e33ffc6ecd23b00f"
+    }
+  },
+  "rpcUrl": "http://127.0.0.1:51282",
+  "guidelinesUrl": "./MODERATION_GUIDELINES.md",
+  "gatewayUrl": "http://127.0.0.1:51281",
+  "metadataPath": "bytes",
+  "contentPath": "bytes",
+  "timing": {
+    "clockErrorSeconds": 5,
+    "maxEvidenceAgeSeconds": 30,
+    "maxHeadLagSeconds": 30,
+    "inclusionBudgetSeconds": 120
+  },
+  "display": {
+    "decimals": 0,
+    "symbol": "TEST"
+  }
+}

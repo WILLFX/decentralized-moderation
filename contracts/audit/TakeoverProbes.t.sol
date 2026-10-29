@@ -204,8 +204,9 @@ contract TakeoverProbes is HistoryFixture {
         uint256 id = _submit(TOPIC);
         _round(id, 6, true);
         _draw(id, APPROVE);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
         vm.prank(members[23]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
         _time(WAIT + 1);
         mod.closeCommitA(id);
         height = _readyB(mod, id);

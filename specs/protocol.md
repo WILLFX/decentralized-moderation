@@ -177,6 +177,17 @@ The preliminary outcome is published. A **one hour** challenge window follows.
 discloses its direction — you cannot challenge an Approve by approving. The
 challenger's vote counts once and carries the ordinary vote liability.
 
+A challenge must be bound at execution to the round and preliminary outcome the
+caller reviewed. `challenge(caseId, expectedRound, expectedPreliminary)` checks
+both before recording a vote or changing any tally, liability or phase. The
+expected round is the current round before the challenge increments it; the
+public opposing vote belongs to that reviewed round. Only Approve or Reject is a
+valid expected preliminary outcome. A mismatch rejects the whole transaction.
+The old `challenge(caseId)` entry point rejects; it cannot infer intent from the
+state at mining time. This interface change applies to new deployments. A client
+must authenticate the runtime and check the supported interface; a version marker
+alone is not evidence of correct contract code.
+
 If a challenge is registered:
 
 ```
@@ -201,6 +212,57 @@ A case finalizes when the last challenge window closes with no challenge, or whe
 the second challenge has resolved.
 
 **No payout happens before finalization.** Preliminary outcomes move no money.
+
+### 4.3.1 Original outcome-hash recovery and expiry
+
+Closing a sufficient reveal phase arms one future outcome target. It emits
+`OutcomeDrawArmed`, not a transition to CHALLENGE: the stored phase remains REVEAL
+until the draw succeeds. The target cannot be replaced or rearmed within a round.
+
+`draw` and permissionless `cacheOutcome` use only that original target's hash.
+They use an existing round-scoped cache first, then the execution block hash
+through age 256, then the fixed EIP-2935 history contract through age 8,191
+inclusive. No caller supplies a hash. Caching emits `OutcomeHashCached` and moves
+no fee. A cached original hash remains drawable indefinitely, including after the
+history window closes. Each challenge has its own cache; an earlier round's hash
+cannot supply a later draw. The draw algorithm and pooled tally are unchanged.
+
+The recovery boundary is on chain: `block.number > target + 8191`, with no
+original hash in that round's cache. Before that boundary, an absent, zero,
+malformed or reverting history read only prevents recovery; it never enables
+terminal expiry. `expireOutcome(caseId, expectedRound, expectedTarget)` binds the
+reviewed round and original target, and only succeeds in the armed REVEAL phase
+beyond the boundary with no cache. No replacement draw, replacement seed or new
+challenge window is created by expiry.
+
+- Initial round: UNRESOLVED, full submission fee withdrawable by its submitter.
+  Revealed votes receive no reward or outcome-based freeze; non-reveal penalties
+  remain. Each vote still needs one permissionless settlement to release its
+  open-vote count.
+- Either challenge round: FINALIZED against the last completed outcome. Ordinary
+  pooled settlement applies to all recorded votes, including the initiating public
+  challenger (whose stored round is the reviewed earlier round). Coherent revealers
+  share the original fee; contrary votes and non-revealers receive the configured
+  freeze. There is no publisher refund. Integer-division dust remains in contract.
+
+**Settlement against the fallback outcome does not prove participant wrongdoing
+or responsibility for the failure to draw.** It is the adopted responsibility
+rule, not a finding of misconduct. No new challenger bond, slashing rule or fee
+is introduced.
+
+Both terminal paths release an open REMOVE slot. An initial unresolved removal
+leaves the listing unchanged; challenge expiry applies the standing removal
+outcome. `OutcomeDrawExpired` identifies case, round, original target, fallback
+outcome and terminal phase. `PhaseChanged` reports actual stored transitions.
+Expiry never emits a fabricated new `PreliminaryOutcome`. Monetary claims remain
+pull-based, exactly once per vote; refunds are withdrawable exactly once.
+
+Clients authenticate the deployment runtime and read version-1
+`outcomeRecoveryOf(caseId)` at the same canonical block as the case. Unknown or
+failed capability reads cannot enable expiry. An uncached boundary read is not
+an estimate in minutes; transaction inclusion may miss the last recovery block.
+After expiry the interface identifies the fallback and its settlement effect.
+Legacy immutable deployments do not acquire recovery from a new client build.
 
 ### 4.4 The per-committee floor
 
@@ -388,7 +450,7 @@ have resolved. Deciding either alone leaves a hole the other one opens.
 |---|---|
 | **staked-count eligibility** | The adopted N-4 rule uses the total STAKED count at case opening, as now stated in §3. Frozen callers are rejected separately. This preserves the existing implementation's denominator and case-wide snapshot; it is not a non-frozen population snapshot. |
 | **one vote per case, not per committee** | A moderator eligible for both committees of a round votes in whichever they reach first, and cannot vote twice. §3 does not say which way this should go. At 1,000 staked addresses the adopted N-4 rule uses five bits. Under independent seeds the raw probability of selection in both committees is 1/1024 (about 0.098%) before case-wide vote exclusion. This estimate does not establish participation or reveal-floor success. |
-| **entropy and timing basis** | A and outcome seeds retain future execution block hashes and the existing 250-block horizon. B uses exact-target EIP-2935 history and caching. Scheduling assumes the approved Gnosis/Chiado minimum five-second timestamp step. The positive seed lag is lookahead, not a finality rule. Unsupported timing/history environments are outside this implementation basis. |
+| **entropy and timing basis** | A retains the 250-block eligibility horizon. Outcome targets use their original hash, round-scoped caching and the exact 8,191-block history recovery boundary (section 4.3.1). B uses exact-target EIP-2935 history and caching. Scheduling assumes the approved Gnosis/Chiado minimum five-second timestamp step. The positive seed lag is lookahead, not a finality rule. Unsupported timing/history environments are outside this implementation basis. |
 
 ### 10.3 Required by the code, not by this document
 
@@ -427,5 +489,5 @@ Not decided, and each needs a number before deployment.
   and `simulation/FINDINGS-floor.md` shows it decides whether any of this works.
 
 The [security and operating basis](../docs/SECURITY_AND_OPERATING_BASIS.md)
-records current trust assumptions and unresolved operating failures, including
-permanent REVEAL after outcome-seed expiry. It does not change protocol rules.
+records current trust assumptions, original-hash recovery and expiry obligations,
+and the stranded-case risk in older immutable deployments. It does not change protocol rules.

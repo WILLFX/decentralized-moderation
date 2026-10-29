@@ -295,8 +295,9 @@ contract RevealFloorTest is HistoryFixture {
         assertEq(mod.caseInfo(id).preliminary, APPROVE, "the outcome that must survive");
 
         address challenger = mods[15];
+        Moderation.Case memory challengeIntent2 = mod.caseInfo(id);
         vm.prank(challenger);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent2.challenges, challengeIntent2.preliminary);
         assertEq(mod.caseInfo(id).challenges, 1);
 
         // the challenge round draws nobody at all
@@ -331,9 +332,10 @@ contract RevealFloorTest is HistoryFixture {
         _advance(SEED_LAG + 1);
         mod.draw(id);
         assertEq(mod.caseInfo(id).preliminary, REJECT);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
 
         vm.prank(mods[15]);
-        mod.challenge(id); // an Approve vote
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary); // an Approve vote
         assertEq(mod.caseInfo(id).pooledApprove, 1);
 
         // staffed from moderators who did not vote in round 0

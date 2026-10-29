@@ -343,8 +343,9 @@ contract ProductionSchedulingTest is HistoryFixture {
             assertEq(mod.caseInfo(id).pooledApprove, approvalsBefore + 6);
             previousTarget = mod.caseInfo(id).seedBlockB;
             if (round < 2) {
+                Moderation.Case memory challengeIntent2 = mod.caseInfo(id);
                 vm.prank(members[22 + round]);
-                mod.challenge(id);
+                mod.challenge(id, challengeIntent2.challenges, challengeIntent2.preliminary);
                 assertEq(mod.caseInfo(id).outcomeSeedBlock, 0);
             }
         }
@@ -368,8 +369,9 @@ contract ProductionSchedulingTest is HistoryFixture {
         uint256 id = _submit();
         _finishPair(id, 0);
         assertEq(mod.caseInfo(id).preliminary, 1);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
         vm.prank(members[22]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
         vm.roll(uint256(mod.caseInfo(id).seedBlockA) + 1);
         for (uint256 i = 6; i < 9; ++i) _commit(id, i);
         vm.warp(mod.pairScheduleOf(id).deadlineB);

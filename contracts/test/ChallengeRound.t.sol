@@ -152,7 +152,7 @@ contract ChallengeRoundTest is HistoryFixture {
         uint256 id = _submit();
         _armOutcome(id, 0, 0, 4, APPROVE);
         uint256 firstSeed = mod.caseInfo(id).outcomeSeedBlock;
-        _advance(SEED_LAG + mod.BLOCKHASH_HORIZON() + 1);
+        _advance(SEED_LAG + mod.BLOCK_HISTORY_WINDOW() + 1);
 
         _assertRearmRejected(id);
         assertEq(mod.caseInfo(id).outcomeSeedBlock, firstSeed);
@@ -179,8 +179,9 @@ contract ChallengeRoundTest is HistoryFixture {
 
             if (round < 2) {
                 assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.CHALLENGE));
+                Moderation.Case memory challengeIntent3 = mod.caseInfo(id);
                 vm.prank(mods[10 + round]);
-                mod.challenge(id);
+                mod.challenge(id, challengeIntent3.challenges, challengeIntent3.preliminary);
                 assertEq(mod.caseInfo(id).outcomeSeedBlock, 0, "challenge clears the prior target");
                 assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.COMMIT_A));
             } else {
@@ -198,9 +199,10 @@ contract ChallengeRoundTest is HistoryFixture {
         uint256 id = _submit();
         _round(id, 0, 0, 4, APPROVE);
         assertEq(mod.caseInfo(id).preliminary, APPROVE);
+        Moderation.Case memory challengeIntent2 = mod.caseInfo(id);
 
         vm.prank(mods[11]);
-        mod.challenge(id); // a Reject vote, against the Approve outcome
+        mod.challenge(id, challengeIntent2.challenges, challengeIntent2.preliminary); // a Reject vote, against the Approve outcome
 
         Moderation.Case memory c = mod.caseInfo(id);
         assertEq(c.challenges, 1);
@@ -240,8 +242,9 @@ contract ChallengeRoundTest is HistoryFixture {
         assertEq(mod.caseInfo(id).preliminary, REJECT);
 
         uint32 before = mod.caseInfo(id).pooledApprove;
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
         vm.prank(mods[11]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
 
         Moderation.Case memory c = mod.caseInfo(id);
         assertEq(c.pooledApprove, before + 1, "the challenge voted Approve");

@@ -12,12 +12,20 @@ blocks, unavailable history and delayed calls can prevent progress. A positive
 seed lag gives lookahead; it does not establish finality. Validate timestamp,
 history and RPC behavior on the intended network before public deployment.
 
-A and outcome entropy have a 250-block horizon. The outcome target is single-shot:
-closeReveal cannot replace an already scheduled target. Once that target expires,
-draw rejects it. The case can remain in REVEAL permanently; claim and publisher
-refund require a terminal case. Fees and open-vote stake locks can therefore remain
-stranded. There is no timeout escape. A policy for this failure needs review before
-public deployment. Restoring reseeding would reopen outcome-selection risk.
+A retains the 250-block eligibility horizon. An armed outcome target cannot be
+replaced. Outcome recovery uses its round-scoped cache, BLOCKHASH through age 256,
+or the original target's EIP-2935 hash through age 8,191 inclusive. A cached original
+remains drawable after that window. The boundary is based on chain height, not a
+failed RPC/history read. The source follows the [EIP-2935 history window](https://eips.ethereum.org/EIPS/eip-2935).
+
+Beyond target + 8,191, an uncached armed draw can terminate: initial expiry is
+unresolved/refundable; either challenge expiry finalizes the last completed outcome
+with ordinary pooled settlement. Non-reveal penalties remain. Outcome-based freezes
+against a preserved fallback do not prove wrongdoing or responsibility for draw
+failure. Permissionless recovery still needs a caller, gas and inclusion; the new
+terminal exit releases fee/refund and vote settlement paths, not automatic payments.
+Cached state survives only on the canonical chain. Older immutable deployments
+still have their original stranded-case risk; client updates cannot repair them.
 
 ## Eligibility and participation
 

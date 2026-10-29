@@ -109,8 +109,9 @@ contract N4EligibilityTest is HistoryFixture {
         for (uint256 i; i < 64; ++i) {
             address member = _member(i);
             if (mod.voteOf(id, member).commitment != bytes32(0)) continue;
+            Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
             vm.prank(member);
-            mod.challenge(id);
+            mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
             return;
         }
         revert("fixture needs a fresh challenger");

@@ -145,9 +145,10 @@ contract GuardsTest is HistoryFixture {
         mod.closeReveal(id);
         _advance(SEED_LAG + 1);
         mod.draw(id);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
 
         vm.prank(mods[11]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
 
         Moderation.Case memory c = mod.caseInfo(id);
         assertEq(c.commitsA, 0);

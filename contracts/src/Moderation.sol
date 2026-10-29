@@ -137,8 +137,8 @@ contract Moderation is ReentrancyGuard {
     uint8 public constant MAX_CHALLENGES = 2;
     uint256 public constant MAX_TOPICS = 5;
 
-    /// @dev A and outcome seeds retain the existing opcode-based horizon.
-    ///      Committee B uses the separate history window and caches its hash.
+    /// @dev Committee A retains its eligibility horizon. Outcome recovery uses
+    ///      the original opcode/history hash and a separate round-scoped cache.
     uint256 public constant BLOCKHASH_HORIZON = 250;
     address public constant BLOCK_HISTORY = 0x0000F90827F1C53a10cb7A02335B175320002935;
     uint256 public constant BLOCK_HISTORY_WINDOW = 8191;
@@ -198,6 +198,9 @@ contract Moderation is ReentrancyGuard {
     mapping(uint256 => bytes32[MAX_TOPICS]) internal caseTopics;
     mapping(uint256 => mapping(address => Vote)) internal votes;
     mapping(uint256 => uint256) public refundOwed;
+    // Round-scoped original hashes survive all history windows. Never accept a caller hash.
+    mapping(uint256 => mapping(uint8 => bytes32)) internal outcomeHashes;
+    mapping(uint256 => bool) public outcomeExpired;
 
     /// @dev A listing may have at most one removal case open at a time, and a
     ///      listing already removed cannot be removed again.
@@ -218,6 +221,9 @@ contract Moderation is ReentrancyGuard {
     event Unresolved(uint256 indexed caseId);
     event PairScheduled(uint256 indexed caseId, uint8 indexed round, uint256 targetB, uint256 deadlineA, uint256 deadlineB);
     event Claimed(uint256 indexed caseId, address indexed m, uint256 paid, bool frozen);
+    event OutcomeDrawArmed(uint256 indexed caseId, uint8 indexed round, uint256 targetBlock, uint256 recoverUntil);
+    event OutcomeHashCached(uint256 indexed caseId, uint8 indexed round, uint256 targetBlock, bytes32 originalHash);
+    event OutcomeDrawExpired(uint256 indexed caseId, uint8 indexed round, uint256 targetBlock, uint8 fallbackOutcome, uint8 terminalPhase);
 
     // --------------------------------------------------------------- errors
 
@@ -234,6 +240,8 @@ contract Moderation is ReentrancyGuard {
     error BadTopics();
     error FeeTooLow();
     error ChallengeExhausted();
+    error ChallengeIntentRequired();
+    error ChallengeIntentChanged();
     error NotARemovableListing();
     error RemovalAlreadyOpen();
     error AlreadyRemoved();
@@ -241,6 +249,8 @@ contract Moderation is ReentrancyGuard {
     error FeeTooLarge();
     error BadGuidelines();
     error BadSchedule();
+    error OutcomeRecoverable();
+    error OutcomeIntentChanged();
 
     /// @dev The constructor's arguments, as a struct rather than thirteen positional
     ///      parameters. Two reasons, and the first is not style.
@@ -386,6 +396,7 @@ contract Moderation is ReentrancyGuard {
         c.pot = uint128(fee);
         c.eligBits = _eligBits();
         c.phase = uint8(Phase.COMMIT_A);
+        emit PhaseChanged(caseId, uint8(Phase.NONE), uint8(Phase.COMMIT_A));
         c.seedBlockA = uint40(block.number + seedLag);
         _schedulePair(caseId);
         address(token).safeTransferFrom(msg.sender, address(this), fee);
@@ -559,7 +570,8 @@ contract Moderation is ReentrancyGuard {
     ///      The challenger is not let off. Their vote was opposite the outcome
     ///      that now finalizes, so `claim` settles them as incoherent and freezes
     ///      them — a vote that changed nothing and still cost the ordinary
-    ///      liability, which is the whole price of a frivolous challenge.
+    ///      liability. This fallback settlement does not establish who caused
+    ///      the round to fail.
     function closeReveal(uint256 caseId) external {
         Case storage c = cases[caseId];
         if (c.phase != uint8(Phase.REVEAL)) revert BadPhase();
@@ -575,7 +587,59 @@ contract Moderation is ReentrancyGuard {
         }
 
         c.outcomeSeedBlock = uint40(block.number + seedLag);
-        emit PhaseChanged(caseId, uint8(Phase.REVEAL), uint8(Phase.CHALLENGE));
+        emit OutcomeDrawArmed(caseId, c.challenges, c.outcomeSeedBlock,
+            uint256(c.outcomeSeedBlock) + BLOCK_HISTORY_WINDOW);
+    }
+
+    /// @notice Capability/data for a runtime-authenticated client. No external history read.
+    function outcomeRecoveryOf(uint256 caseId) external view returns
+        (uint8 version, bytes32 originalHash, uint256 recoverUntil, bool expired)
+    {
+        Case storage c = cases[caseId];
+        return (1, outcomeHashes[caseId][c.challenges],
+            c.outcomeSeedBlock == 0 ? 0 : uint256(c.outcomeSeedBlock) + BLOCK_HISTORY_WINDOW,
+            outcomeExpired[caseId]);
+    }
+
+    /// @dev Only the target chosen by closeReveal is recoverable. Opcode first,
+    /// then the chain's EIP-2935 history. A missing/reverting/malformed read is
+    /// unavailable evidence, never permission to terminate early.
+    function _originalOutcomeHash(uint256 caseId) internal view returns (bytes32 value) {
+        Case storage c = cases[caseId];
+        value = outcomeHashes[caseId][c.challenges];
+        if (value != bytes32(0)) return value;
+        uint256 target = c.outcomeSeedBlock;
+        if (target == 0 || block.number <= target) revert TooEarly();
+        if (block.number - target <= 256) value = blockhash(target);
+        if (value == bytes32(0)) value = _historyB(target);
+    }
+
+    /// @notice Preserve the original hash without drawing or moving funds.
+    function cacheOutcome(uint256 caseId) external {
+        Case storage c = cases[caseId];
+        if (c.phase != uint8(Phase.REVEAL)) revert BadPhase();
+        bytes32 value = _originalOutcomeHash(caseId);
+        if (outcomeHashes[caseId][c.challenges] == bytes32(0)) {
+            outcomeHashes[caseId][c.challenges] = value;
+            emit OutcomeHashCached(caseId, c.challenges, c.outcomeSeedBlock, value);
+        }
+    }
+
+    /// @notice Terminal fallback only beyond the original history boundary and
+    /// with no cached hash. Bind the reviewed round and target; never reroll.
+    /// Ordinary challenge settlement follows the last completed outcome. A loss
+    /// against that fallback does not establish responsibility for draw failure.
+    function expireOutcome(uint256 caseId, uint8 expectedRound, uint40 expectedTarget) external {
+        Case storage c = cases[caseId];
+        if (c.phase != uint8(Phase.REVEAL)) revert BadPhase();
+        if (c.challenges != expectedRound || c.outcomeSeedBlock != expectedTarget) revert OutcomeIntentChanged();
+        uint256 target = c.outcomeSeedBlock;
+        if (target == 0 || block.number <= target + BLOCK_HISTORY_WINDOW) revert TooEarly();
+        if (outcomeHashes[caseId][c.challenges] != bytes32(0)) revert OutcomeRecoverable();
+        outcomeExpired[caseId] = true;
+        if (c.challenges == 0) _toUnresolved(caseId);
+        else _finalize(caseId);
+        emit OutcomeDrawExpired(caseId, c.challenges, target, c.preliminary, c.phase);
     }
 
     /// @dev Permissionless. Publishes the preliminary outcome and opens the
@@ -585,9 +649,12 @@ contract Moderation is ReentrancyGuard {
         if (c.phase != uint8(Phase.REVEAL)) revert BadPhase();
         uint256 sb = c.outcomeSeedBlock;
         if (sb == 0 || block.number <= sb) revert TooEarly();
-        if (block.number > sb + BLOCKHASH_HORIZON) revert SeedUnavailable();
-
-        (uint8 outcome, uint8 tickets) = _decide(caseId, blockhash(sb));
+        bytes32 originalHash = _originalOutcomeHash(caseId);
+        if (outcomeHashes[caseId][c.challenges] == bytes32(0)) {
+            outcomeHashes[caseId][c.challenges] = originalHash;
+            emit OutcomeHashCached(caseId, c.challenges, sb, originalHash);
+        }
+        (uint8 outcome, uint8 tickets) = _decide(caseId, originalHash);
         c.preliminary = outcome;
         c.ticketsApprove = tickets;
 
@@ -596,6 +663,7 @@ contract Moderation is ReentrancyGuard {
         } else {
             c.phase = uint8(Phase.CHALLENGE);
             c.phaseDeadline = uint40(block.timestamp + challengeWindow);
+            emit PhaseChanged(caseId, uint8(Phase.REVEAL), uint8(Phase.CHALLENGE));
         }
         emit PreliminaryOutcome(caseId, outcome, tickets, c.challenges);
     }
@@ -606,10 +674,28 @@ contract Moderation is ReentrancyGuard {
     ///      outcome by construction. It discloses its direction, counts once, and
     ///      carries the ordinary liability: an incoherent challenger is frozen
     ///      like any other incoherent voter.
-    function challenge(uint256 caseId) external {
+    /// @notice Version 1 binds the reviewed current round and preliminary outcome.
+    /// Runtime pins must still authenticate the implementation; this marker alone does not.
+    function challengeIntentVersion() external pure returns (uint256) {
+        return 1;
+    }
+
+    /// @notice Legacy requests lack reviewed intent and can never cast a vote.
+    function challenge(uint256) external pure {
+        revert ChallengeIntentRequired();
+    }
+
+    function challenge(uint256 caseId, uint8 expectedRound, uint8 expectedPreliminary) external {
         Case storage c = cases[caseId];
         if (c.phase != uint8(Phase.CHALLENGE)) revert BadPhase();
         if (block.timestamp >= c.phaseDeadline) revert TooLate();
+
+        if (expectedPreliminary != uint8(Outcome.APPROVE) && expectedPreliminary != uint8(Outcome.REJECT)) {
+            revert BadOutcome();
+        }
+        if (c.challenges != expectedRound || c.preliminary != expectedPreliminary) {
+            revert ChallengeIntentChanged();
+        }
 
         // UNREACHABLE BY CONSTRUCTION, and kept as defence in depth. `draw` only
         // opens `Phase.CHALLENGE` while `c.challenges < MAX_CHALLENGES` and
@@ -648,6 +734,7 @@ contract Moderation is ReentrancyGuard {
         c.revealsB = 0;
         c.outcomeSeedBlock = 0;
         c.phase = uint8(Phase.COMMIT_A);
+        emit PhaseChanged(caseId, uint8(Phase.CHALLENGE), uint8(Phase.COMMIT_A));
         c.seedBlockA = uint40(block.number + seedLag);
         _schedulePair(caseId);
 
@@ -665,7 +752,9 @@ contract Moderation is ReentrancyGuard {
 
     function _finalize(uint256 caseId) internal {
         Case storage c = cases[caseId];
+        uint8 previousPhase = c.phase;
         c.phase = uint8(Phase.FINALIZED);
+        emit PhaseChanged(caseId, previousPhase, c.phase);
         c.finalizedAt = uint40(block.timestamp);
 
         bytes32[MAX_TOPICS] storage t = caseTopics[caseId];
@@ -701,7 +790,9 @@ contract Moderation is ReentrancyGuard {
     function _toUnresolved(uint256 caseId) internal {
         Case storage c = cases[caseId];
         if (c.actionType == ACTION_REMOVE) openRemovalOf[c.targetCaseId] = 0;
+        uint8 previousPhase = c.phase;
         c.phase = uint8(Phase.UNRESOLVED);
+        emit PhaseChanged(caseId, previousPhase, c.phase);
         c.finalizedAt = uint40(block.timestamp);
         refundOwed[caseId] += c.pot;
         c.pot = 0;

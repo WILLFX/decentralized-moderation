@@ -49,6 +49,41 @@ guidelines revision requires a new deployment.
 
 ---
 
+## Bound challenge interface
+
+New deployments expose `challenge(caseId, expectedRound, expectedPreliminary)`.
+Both values describe the published outcome BEFORE the round increments. Invalid
+or stale intent reverts before vote, tally, stake-counter or phase changes. The
+legacy `challenge(caseId)` entry point always reverts `ChallengeIntentRequired`,
+including calls with extra trailing words. There is no legacy fallback.
+
+`challengeIntentVersion()` returns 1 for this interface. Clients must verify their
+runtime/code-hash and deployment pins before treating that marker as support.
+Earlier immutable deployments do not acquire this fix.
+
+## Original outcome recovery and expiry
+
+An outcome target is single-shot. `cacheOutcome(caseId)` saves only that target's
+on-chain original hash, and `draw` uses it regardless of cache age. Without a cache,
+recovery uses BLOCKHASH through age 256 and EIP-2935 history through age 8,191
+inclusive. A failed history read does not authorize terminal expiry.
+
+Only `block.number > target + 8191` with no cached original permits
+`expireOutcome(caseId, expectedRound, expectedTarget)`. Initial expiry is unresolved
+and refundable; revealers receive no outcome-based reward or freeze. Challenge
+expiry finalizes the last completed outcome with ordinary pooled settlement,
+including the challenger. Non-reveal liability remains. A fallback loss is not
+proof of wrongdoing or responsibility for draw failure. Both terminal paths
+release an open removal slot. See protocol section 4.3.1 for exact semantics.
+
+`OutcomeDrawArmed`, `OutcomeHashCached` and `OutcomeDrawExpired` distinguish arming,
+recovery and terminal fallback. `PhaseChanged` reports actual stored transitions.
+The normal audit gate includes `test_regression*` from ChallengeIntentProbe,
+CompletionReviewProbes and OutcomeRecoveryTest, covering LIST/REMOVE, every round,
+cache boundaries, settlement and truthful events. Old expiry/event witnesses have
+been converted to regressions. These changes require a new linked deployment and
+matching runtime-pinned profiles; existing immutable stacks are unchanged.
+
 ## Tests
 
 Run the suites using [BUILD_AND_TEST.md](../docs/BUILD_AND_TEST.md).

@@ -280,8 +280,9 @@ contract SystemHandler is CommonBase, StdCheats, StdUtils {
         uint256 id = _case(caseSeed);
         if (id == 0) return;
         address m = _actor(seed);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
         vm.prank(m);
-        try mod.challenge(id) {
+        try mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary) {
             ++ghostUnsettled[m];
             _hit("challenge");
         } catch {

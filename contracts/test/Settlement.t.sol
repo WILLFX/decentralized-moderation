@@ -217,9 +217,10 @@ contract SettlementTest is HistoryFixture {
     ///      no stake at all could buy a case two more committees.
     function test_unstakedAddressCannotChallenge() public {
         uint256 id = _toChallengeWindow(APPROVE);
+        Moderation.Case memory challengeIntent8 = mod.caseInfo(id);
         vm.prank(outsider);
         vm.expectRevert(Moderation.NotEligible.selector);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent8.challenges, challengeIntent8.preliminary);
     }
 
     /// @dev The other half of the same guard: a frozen moderator is serving a
@@ -228,10 +229,11 @@ contract SettlementTest is HistoryFixture {
         uint256 id = _toChallengeWindow(APPROVE);
         stakes.settle(mods[5], true, FREEZE); // freeze mods[5] directly
         assertTrue(stakes.isFrozen(mods[5]));
+        Moderation.Case memory challengeIntent7 = mod.caseInfo(id);
 
         vm.prank(mods[5]);
         vm.expectRevert(Moderation.NotEligible.selector);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent7.challenges, challengeIntent7.preliminary);
     }
 
     /// @dev Kills `c.challenges >= MAX_CHALLENGES` -> `>` in `challenge`. At `>`
@@ -239,24 +241,27 @@ contract SettlementTest is HistoryFixture {
     ///      existing cap test walks two challenges and never attempts a third.
     function test_aThirdChallengeIsRejected() public {
         uint256 id = _toChallengeWindow(APPROVE);
+        Moderation.Case memory challengeIntent6 = mod.caseInfo(id);
 
         // challenge 1
         vm.prank(mods[6]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent6.challenges, challengeIntent6.preliminary);
         _runChallengeRoundTo(id, mods[2], mods[3], APPROVE);
+        Moderation.Case memory challengeIntent5 = mod.caseInfo(id);
 
         // challenge 2 — the cap
         vm.prank(mods[7]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent5.challenges, challengeIntent5.preliminary);
         assertEq(mod.caseInfo(id).challenges, 2);
         _runChallengeRoundTo(id, mods[4], mods[5], APPROVE);
 
         // the second challenge's draw finalizes the case at the cap, so a third
         // challenge has no open window to arrive in
         assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.FINALIZED), "finalized at the cap");
+        Moderation.Case memory challengeIntent4 = mod.caseInfo(id);
         vm.prank(mods[8]);
         vm.expectRevert(Moderation.BadPhase.selector);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent4.challenges, challengeIntent4.preliminary);
     }
 
     function _runChallengeRoundTo(uint256 id, address a, address b, uint8 v) internal {
@@ -306,8 +311,9 @@ contract SettlementTest is HistoryFixture {
 
         _advance(SEED_LAG + 1);
         mod.draw(id);
+        Moderation.Case memory challengeIntent3 = mod.caseInfo(id);
         vm.prank(mods[6]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent3.challenges, challengeIntent3.preliminary);
         assertGt(
             mod.caseInfo(id).seedBlockA, block.number, "committee A of the CHALLENGE round"
         );
@@ -386,9 +392,10 @@ contract SettlementTest is HistoryFixture {
     function test_challengeAtExactlyTheDeadlineIsTooLate() public {
         uint256 id = _toChallengeWindow(APPROVE);
         vm.warp(mod.caseInfo(id).phaseDeadline);
+        Moderation.Case memory challengeIntent2 = mod.caseInfo(id);
         vm.prank(mods[6]);
         vm.expectRevert(Moderation.TooLate.selector);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent2.challenges, challengeIntent2.preliminary);
     }
 
     /// @dev A seed cannot be consumed at its own block: `blockhash(block.number)`
@@ -427,8 +434,9 @@ contract SettlementTest is HistoryFixture {
     ///      help satisfy a floor they are not part of.
     function test_aChallengerIsRecordedInNoCommittee() public {
         uint256 id = _toChallengeWindow(APPROVE);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
         vm.prank(mods[6]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
 
         Moderation.Vote memory v = mod.voteOf(id, mods[6]);
         assertEq(v.committee, 0, "a challenger is in neither committee");
@@ -637,7 +645,7 @@ contract SettlementTest is HistoryFixture {
         mod.closeReveal(id);
 
         uint256 sb = mod.caseInfo(id).outcomeSeedBlock;
-        vm.roll(sb + mod.BLOCKHASH_HORIZON() + 1);
+        vm.roll(sb + mod.BLOCK_HISTORY_WINDOW() + 1);
         vm.expectRevert(Moderation.SeedUnavailable.selector);
         mod.draw(id);
     }

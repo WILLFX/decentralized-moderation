@@ -323,9 +323,10 @@ contract LifecycleTest is HistoryFixture {
         mod.draw(id);
 
         assertEq(mod.caseInfo(id).preliminary, APPROVE);
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
 
         vm.prank(mods[7]);
-        mod.challenge(id);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
 
         Moderation.Case memory c = mod.caseInfo(id);
         assertEq(c.pooledReject, 1, "the challenge counted as a Reject");

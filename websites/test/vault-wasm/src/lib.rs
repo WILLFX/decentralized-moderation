@@ -55,6 +55,28 @@ mod lifecycle {
                 serde_json::from_str(record).map_err(|_| error("TEST_RECORD"))?;
             self.0.save_vote(record).await.map(|_| ()).map_err(error)
         }
+        pub fn correctable(&self, record: &str) -> Result<bool, JsValue> {
+            let record: VoteRecord =
+                serde_json::from_str(record).map_err(|_| error("TEST_RECORD"))?;
+            Ok(self.0.can_correct(&record))
+        }
+        pub fn seal(&self, record: &str) -> Result<(), JsValue> {
+            let record: VoteRecord =
+                serde_json::from_str(record).map_err(|_| error("TEST_RECORD"))?;
+            self.0.seal_choice(&record);
+            Ok(())
+        }
+        pub async fn correct(&self, original: &str, replacement: &str) -> Result<(), JsValue> {
+            let original: VoteRecord =
+                serde_json::from_str(original).map_err(|_| error("TEST_RECORD"))?;
+            let replacement: VoteRecord =
+                serde_json::from_str(replacement).map_err(|_| error("TEST_RECORD"))?;
+            self.0
+                .correct_vote(&original, replacement)
+                .await
+                .map(|_| ())
+                .map_err(error)
+        }
         pub async fn export_backup(&self) -> Result<String, JsValue> {
             self.0.export_backup().await.map_err(error)
         }

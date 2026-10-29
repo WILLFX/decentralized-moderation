@@ -1,4 +1,4 @@
-//! Version-one encrypted vote recovery data.
+//! Encrypted vote recovery data. Envelope v1 also carries payload v2 archives.
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -103,6 +103,8 @@ pub struct Payload {
     pub version: u8,
     pub votes: Vec<VoteRecord>,
     pub backed_up: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived_votes: Vec<VoteRecord>,
 }
 impl Payload {
     pub fn empty() -> Self {
@@ -110,11 +112,61 @@ impl Payload {
             version: 1,
             votes: vec![],
             backed_up: vec![],
+            archived_votes: vec![],
         }
+    }
+    pub fn all_votes(&self) -> impl Iterator<Item = &VoteRecord> {
+        self.votes.iter().chain(self.archived_votes.iter())
+    }
+    /// Replace only the exact active record. The caller must also prove it unsent.
+    pub fn corrected(&self, original: &VoteRecord, replacement: VoteRecord) -> Result<Self> {
+        let replacement = replacement.normalized()?;
+        let index = self
+            .votes
+            .iter()
+            .position(|v| v == original)
+            .ok_or(CoreError("SECRET_MISMATCH"))?;
+        if original.context() != replacement.context()
+            || original.vote == replacement.vote
+            || original.salt == replacement.salt
+            || original.commitment == replacement.commitment
+        {
+            return Err(CoreError("INVALID_CORRECTION"));
+        }
+        if self.all_votes().count() >= MAX_RECORDS {
+            return Err(CoreError("VAULT_FULL"));
+        }
+        let mut next = self.clone();
+        next.version = 2;
+        next.archived_votes.push(original.clone());
+        next.votes[index] = replacement;
+        Self::parse(&serde_json::to_vec(&next).map_err(|_| CoreError("INVALID_BACKUP"))?)
+    }
+    pub fn merged(&self, incoming: &Self) -> Result<Self> {
+        let mut next = self.clone();
+        for v in &incoming.votes {
+            // An old file may contain an earlier active choice that is now archived.
+            if !next.all_votes().any(|old| old == v) {
+                next.votes = merge(&next.votes, &[v.clone()])?;
+            }
+        }
+        for v in &incoming.archived_votes {
+            if !next.all_votes().any(|old| old == v) {
+                next.archived_votes.push(v.clone());
+            }
+        }
+        if !next.archived_votes.is_empty() {
+            next.version = 2;
+        }
+        Self::parse(&serde_json::to_vec(&next).map_err(|_| CoreError("INVALID_BACKUP"))?)
     }
     pub fn parse(raw: &[u8]) -> Result<Self> {
         let mut p: Self = serde_json::from_slice(raw).map_err(|_| CoreError("INVALID_BACKUP"))?;
-        if p.version != 1 || p.votes.len() > MAX_RECORDS || p.backed_up.len() > MAX_RECORDS {
+        if ![1, 2].contains(&p.version)
+            || p.version == 1 && !p.archived_votes.is_empty()
+            || p.votes.len() + p.archived_votes.len() > MAX_RECORDS
+            || p.backed_up.len() > MAX_RECORDS
+        {
             return Err(CoreError("INVALID_BACKUP"));
         }
         p.votes = p
@@ -122,6 +174,17 @@ impl Payload {
             .into_iter()
             .map(VoteRecord::normalized)
             .collect::<Result<_>>()?;
+        p.archived_votes = p
+            .archived_votes
+            .into_iter()
+            .map(VoteRecord::normalized)
+            .collect::<Result<_>>()?;
+        let mut records = HashSet::new();
+        for v in p.all_votes() {
+            if !records.insert(v.json_bytes()) {
+                return Err(CoreError("INVALID_BACKUP"));
+            }
+        }
         let mut ids = HashSet::new();
         for v in &p.votes {
             if !ids.insert(v.context().identity()?) {

@@ -56,12 +56,14 @@ fn rejects_duplicate_context_and_bad_coverage() {
     let p = Payload {
         version: 1,
         votes: vec![v.clone(), v],
+        archived_votes: vec![],
         backed_up: vec![],
     };
     assert!(Payload::parse(&serde_json::to_vec(&p).unwrap()).is_err());
     let p = Payload {
         version: 1,
         votes: vec![],
+        archived_votes: vec![],
         backed_up: vec!["A".repeat(64)],
     };
     assert!(Payload::parse(&serde_json::to_vec(&p).unwrap()).is_err());
@@ -114,4 +116,68 @@ fn rejects_unknown_record_fields_and_invalid_shapes() {
     let mut v = record();
     v.round = 3;
     assert!(v.normalized().is_err());
+}
+
+#[test]
+fn correction_retains_exact_old_record_and_coverage() {
+    let old = record();
+    let mut p = Payload::empty();
+    p.votes.push(old.clone());
+    p.backed_up.push("ab".repeat(32));
+    let mut new = old.clone();
+    new.vote = 2;
+    new.salt = format!("0x{}", "44".repeat(32));
+    new.commitment = format!("0x{}", "55".repeat(32));
+    let next = p.corrected(&old, new.clone()).unwrap();
+    assert_eq!(next.version, 2);
+    assert!(next.votes[0] == new);
+    assert!(next.archived_votes[0] == old);
+    assert!(p.votes[0] == old);
+    assert_eq!(next.backed_up, p.backed_up);
+    assert!(
+        next.merged(&p).unwrap().votes[0] == new,
+        "old backup must not undo a correction"
+    );
+    assert!(
+        p.merged(&next).is_err(),
+        "conflicting active choices need deliberate resolution"
+    );
+    let parsed = Payload::parse(&serde_json::to_vec(&next).unwrap()).unwrap();
+    assert_eq!(parsed.all_votes().count(), 2);
+}
+#[test]
+fn correction_rejects_bad_context_reused_randomness_and_capacity() {
+    let old = record();
+    let mut p = Payload::empty();
+    p.votes.push(old.clone());
+    let mut new = old.clone();
+    new.vote = 2;
+    assert!(p.corrected(&old, new.clone()).is_err());
+    new.salt = format!("0x{}", "44".repeat(32));
+    new.commitment = format!("0x{}", "55".repeat(32));
+    let mut wrong = new.clone();
+    wrong.case_id = "3".into();
+    assert!(p.corrected(&old, wrong).is_err());
+    p.archived_votes = vec![old.clone(); MAX_RECORDS - 1];
+    assert_eq!(p.corrected(&old, new).err().unwrap().0, "VAULT_FULL");
+}
+#[test]
+fn payload_versions_and_total_record_limit_are_strict() {
+    let mut p = Payload::empty();
+    p.votes.push(record());
+    p.archived_votes.push(record());
+    assert!(Payload::parse(&serde_json::to_vec(&p).unwrap()).is_err());
+    p.version = 2;
+    assert!(
+        Payload::parse(&serde_json::to_vec(&p).unwrap()).is_err(),
+        "duplicate archived bytes rejected"
+    );
+    p.archived_votes.clear();
+    p.version = 3;
+    assert!(Payload::parse(&serde_json::to_vec(&p).unwrap()).is_err());
+    let legacy = r#"{"version":1,"votes":[],"backedUp":[]}"#;
+    assert!(Payload::parse(legacy.as_bytes())
+        .unwrap()
+        .archived_votes
+        .is_empty());
 }

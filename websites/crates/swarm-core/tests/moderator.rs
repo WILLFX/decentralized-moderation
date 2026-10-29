@@ -50,6 +50,7 @@ fn snapshot() -> CaseSnapshot {
     values[11] = 80;
     values[12] = 90;
     CaseSnapshot {
+        outcome_recovery: None,
         case_id: Uint256::from_u64(2),
         source: SourceBlock {
             number: 100,
@@ -278,7 +279,7 @@ fn all_action_calldata_matches_existing_ethers_interface() {
                 Action::Claim,
                 vec!["0x1111111111111111111111111111111111111111".into()],
             ),
-            "Challenge" => (Action::Challenge, vec![]),
+            "Challenge" => (Action::Challenge, vec!["0".into(), "1".into()]),
             "CloseCommitA" => (Action::CloseCommitA, vec![]),
             "CloseCommitB" => (Action::CloseCommitB, vec![]),
             "CloseReveal" => (Action::CloseReveal, vec![]),
@@ -437,4 +438,173 @@ fn reveal_guard_rejects_changed_identity_phase_and_source_order() {
         check_reveal(&f, &h, &input, &timing(), 1_000_000, 0).reason,
         "HEAD_CLOCK_AHEAD"
     );
+}
+
+#[test]
+fn challenge_codec_requires_both_reviewed_arguments_and_strict_capability() {
+    let id = Uint256::from_u64(2);
+    assert!(encode_action(Action::Challenge, id, &[]).is_err());
+    for values in [
+        ["2", "1"],
+        ["256", "1"],
+        ["0", "0"],
+        ["0", "3"],
+        ["-1", "1"],
+    ] {
+        assert!(encode_action(Action::Challenge, id, &values.map(String::from)).is_err());
+    }
+    for round in 0..2 {
+        for outcome in 1..3 {
+            let data = encode_action(
+                Action::Challenge,
+                id,
+                &[round.to_string(), outcome.to_string()],
+            )
+            .unwrap();
+            assert_eq!(data.len(), 202);
+            assert!(data.ends_with(&format!(
+                "{}{}",
+                Uint256::from_u64(round).abi(),
+                Uint256::from_u64(outcome).abi()
+            )));
+        }
+    }
+    assert!(challenge_intent_supported(&format!(
+        "0x{}",
+        Uint256::from_u64(1).abi()
+    )));
+    for raw in ["0x", "0x1", "0x01", "bad"] {
+        assert!(!challenge_intent_supported(raw));
+    }
+    for n in [0, 2, 255] {
+        assert!(!challenge_intent_supported(&format!(
+            "0x{}",
+            Uint256::from_u64(n).abi()
+        )));
+    }
+}
+
+#[test]
+fn challenge_preflight_encodes_and_rejects_changed_reviewed_context() {
+    let mut s = snapshot();
+    s.case.phase = 4;
+    s.case.phase_deadline = 1100;
+    s.case.preliminary = 1;
+    s.vote.commitment = hash(0);
+    let mut i = ActionInput {
+        action: Action::Challenge,
+        case_id: s.case_id,
+        voter: "0x1111111111111111111111111111111111111111",
+        beneficiary: None,
+        expected_round: Some(0),
+        expected_committee: None,
+        expected_outcome: Some(1),
+        commitment: None,
+        vote: None,
+        salt: None,
+    };
+    let target = "0x2222222222222222222222222222222222222222";
+    let data = prepare_action(10200, target, &s, Eligibility::NotOpen, &i).unwrap();
+    assert_eq!(
+        data,
+        encode_action(Action::Challenge, s.case_id, &["0".into(), "1".into()]).unwrap()
+    );
+    s.case.challenges = 1;
+    assert_eq!(
+        prepare_action(10200, target, &s, Eligibility::NotOpen, &i)
+            .unwrap_err()
+            .0,
+        "CONTEXT_CHANGED_ROUND"
+    );
+    s.case.challenges = 0;
+    s.case.preliminary = 2;
+    assert_eq!(
+        prepare_action(10200, target, &s, Eligibility::NotOpen, &i)
+            .unwrap_err()
+            .0,
+        "CONTEXT_CHANGED_OUTCOME"
+    );
+    s.case.preliminary = 1;
+    i.expected_outcome = None;
+    assert!(prepare_action(10200, target, &s, Eligibility::NotOpen, &i).is_err());
+}
+
+#[test]
+fn recovery_boundary_and_cached_original_are_distinct_from_read_failures() {
+    let mut s = snapshot();
+    s.case.phase = 3;
+    s.case.outcome_seed_block = 100;
+    let zero = format!("0x{}", "00".repeat(32));
+    s.outcome_recovery = Some(OutcomeRecovery {
+        original_hash: zero,
+        recover_until: 8291,
+        expired: false,
+    });
+    for (height, draw, expire) in [
+        (100, false, false),
+        (101, true, false),
+        (356, true, false),
+        (357, true, false),
+        (8291, true, false),
+        (8292, false, true),
+    ] {
+        s.source.number = height;
+        let a = case_actions(&s, Eligibility::NotOpen);
+        assert_eq!(a.allowed(Action::Draw), draw);
+        assert_eq!(a.allowed(Action::ExpireOutcome), expire);
+    }
+    s.outcome_recovery.as_mut().unwrap().original_hash = hash(9);
+    s.source.number = 100000;
+    assert!(case_actions(&s, Eligibility::NotOpen).allowed(Action::Draw));
+    assert!(!case_actions(&s, Eligibility::NotOpen).allowed(Action::ExpireOutcome));
+    s.outcome_recovery = None; // failed/unknown capability never authorizes expiry
+    assert!(!case_actions(&s, Eligibility::NotOpen).allowed(Action::ExpireOutcome));
+}
+#[test]
+fn recovery_decoder_rejects_unknown_malformed_and_wrong_boundaries() {
+    let mut c = snapshot().case;
+    c.outcome_seed_block = 100;
+    let raw = format!(
+        "0x{}{}{}{}",
+        Uint256::from_u64(1).abi(),
+        Uint256::ZERO.abi(),
+        Uint256::from_u64(8291).abi(),
+        Uint256::ZERO.abi()
+    );
+    assert!(decode_outcome_recovery(&raw, &c).is_ok());
+    assert!(decode_outcome_recovery("0x1", &c).is_err());
+    for (version, until, expired) in [(2, 8291, 0), (1, 8292, 0), (1, 8291, 2), (1, 8291, 1)] {
+        let bad = format!(
+            "0x{}{}{}{}",
+            Uint256::from_u64(version).abi(),
+            Uint256::ZERO.abi(),
+            Uint256::from_u64(until).abi(),
+            Uint256::from_u64(expired).abi()
+        );
+        assert!(decode_outcome_recovery(&bad, &c).is_err());
+    }
+}
+#[test]
+fn expiry_calldata_requires_bound_round_and_original_target() {
+    assert!(encode_action(Action::ExpireOutcome, Uint256::from_u64(1), &[]).is_err());
+    assert!(encode_action(
+        Action::ExpireOutcome,
+        Uint256::from_u64(1),
+        &["3".into(), "100".into()]
+    )
+    .is_err());
+    assert!(encode_action(
+        Action::ExpireOutcome,
+        Uint256::from_u64(1),
+        &["1".into(), "0".into()]
+    )
+    .is_err());
+    let data = encode_action(
+        Action::ExpireOutcome,
+        Uint256::from_u64(1),
+        &["1".into(), "100".into()],
+    )
+    .unwrap();
+    assert_eq!(data.len(), 202);
+    assert!(data.ends_with(&Uint256::from_u64(100).abi()));
 }

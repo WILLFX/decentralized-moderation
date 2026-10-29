@@ -190,6 +190,7 @@ struct State {
     payload: Option<Payload>,
     fingerprints: Vec<String>,
     stored: Option<String>,
+    fresh: Vec<VoteRecord>,
 }
 #[derive(Clone, Default)]
 pub struct VoteVault(Rc<RefCell<State>>);
@@ -256,12 +257,14 @@ impl VoteVault {
         ))
     }
     pub fn list_votes(&self) -> BrowserResult<Vec<VoteRecord>> {
-        Ok(self.active()?.2.votes)
+        Ok(self.active()?.2.all_votes().cloned().collect())
     }
     pub fn get_vote(&self, context: &VoteContext) -> BrowserResult<Option<VoteRecord>> {
         let id = context.identity().map_err(|e| e.0)?;
         Ok(self
-            .list_votes()?
+            .active()?
+            .2
+            .votes
             .into_iter()
             .find(|v| v.context().identity().ok().as_ref() == Some(&id)))
     }
@@ -277,7 +280,7 @@ impl VoteVault {
     async fn persist(&self, payload: Payload, op: &Operation) -> BrowserResult<()> {
         let (key, kdf, _) = self.active()?;
         let mut fingerprints = vec![];
-        for v in &payload.votes {
+        for v in payload.all_votes() {
             fingerprints.push(fingerprint(v).await?);
         }
         op.current()?;
@@ -317,7 +320,7 @@ impl VoteVault {
             None => Payload::empty(),
         };
         let mut fingerprints = vec![];
-        for v in &payload.votes {
+        for v in payload.all_votes() {
             fingerprints.push(fingerprint(v).await?);
         }
         if payload.backed_up.iter().any(|f| !fingerprints.contains(f)) {
@@ -356,7 +359,36 @@ impl VoteVault {
         }
         p.votes = recovery::merge(&p.votes, &[record.clone()]).map_err(|e| e.0)?;
         self.persist(p, &op).await?;
+        self.0.borrow_mut().fresh.push(record.clone());
         Ok(record)
+    }
+    /// No reload/import/journal absence can recreate this capability.
+    pub fn can_correct(&self, record: &VoteRecord) -> bool {
+        let s = self.0.borrow();
+        s.key.is_some() && s.fresh.contains(record) && read().is_ok_and(|raw| raw == s.stored)
+    }
+    pub fn seal_choice(&self, record: &VoteRecord) {
+        self.0.borrow_mut().fresh.retain(|v| v != record);
+    }
+    pub async fn correct_vote(
+        &self,
+        original: &VoteRecord,
+        replacement: VoteRecord,
+    ) -> BrowserResult<VoteRecord> {
+        let op = self.begin(false)?;
+        if !self.can_correct(original) {
+            return Err("CHOICE_PROTECTED");
+        }
+        let p = self
+            .active()?
+            .2
+            .corrected(original, replacement.clone())
+            .map_err(|e| e.0)?;
+        self.persist(p, &op).await?;
+        // Persist checks generation and cross-tab storage before writing.
+        self.seal_choice(original);
+        self.0.borrow_mut().fresh.push(replacement.clone());
+        Ok(replacement)
     }
     pub async fn export_backup(&self) -> BrowserResult<String> {
         let op = self.begin(false)?;
@@ -384,9 +416,8 @@ impl VoteVault {
         let backup = self.open_backup(text, password).await?;
         let mut p = self.active()?.2;
         let matches = p
-            .votes
-            .iter()
-            .filter(|v| backup.votes.contains(v))
+            .all_votes()
+            .filter(|v| backup.all_votes().any(|b| b == *v))
             .cloned()
             .collect::<Vec<_>>();
         for v in &matches {
@@ -400,6 +431,7 @@ impl VoteVault {
     }
     pub async fn import_backup(&self, text: &str, password: Option<&str>) -> BrowserResult<usize> {
         let op = self.begin(true)?;
+        self.0.borrow_mut().fresh.clear();
         if !self.is_unlocked() {
             if read()?.is_some() {
                 return Err("VAULT_LOCKED");
@@ -408,7 +440,7 @@ impl VoteVault {
             let key = derive(password.ok_or("BACKUP_PASSWORD_REQUIRED")?, &envelope.kdf).await?;
             let mut p = decrypt(&envelope, &key).await?;
             let mut fingerprints = vec![];
-            for v in &p.votes {
+            for v in p.all_votes() {
                 fingerprints.push(fingerprint(v).await?);
             }
             p.backed_up = fingerprints.clone();
@@ -429,8 +461,8 @@ impl VoteVault {
         }
         let backup = self.open_backup(text, password).await?;
         let mut p = self.active()?.2;
-        p.votes = recovery::merge(&p.votes, &backup.votes).map_err(|e| e.0)?;
-        for v in &backup.votes {
+        p = p.merged(&backup).map_err(|e| e.0)?;
+        for v in backup.all_votes() {
             let f = fingerprint(v).await?;
             if !p.backed_up.contains(&f) {
                 p.backed_up.push(f);

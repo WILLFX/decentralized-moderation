@@ -126,15 +126,17 @@ pub(super) async fn case(
     ))
 }
 pub(super) async fn upload(config: &Value, draft: &Draft) -> Result<()> {
+    upload_bytes(config, &draft.bytes, &draft.meta_hash).await
+}
+pub(super) async fn upload_bytes(config: &Value, bytes: &[u8], reference: &str) -> Result<()> {
     let endpoint = config["endpoint"]
         .as_str()
         .ok_or("UPLOAD_CONFIG_REQUIRED")?;
-    let url =
-        swarm_core::review::resource_url(endpoint, "bytes", &draft.meta_hash).map_err(|e| e.0)?;
+    let url = swarm_core::review::resource_url(endpoint, "bytes", reference).map_err(|e| e.0)?;
     let post = url.rsplit_once('/').ok_or("INVALID_UPLOAD_ENDPOINT")?.0;
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
-    let data = js_sys::Uint8Array::from(draft.bytes.as_slice());
+    let data = js_sys::Uint8Array::from(bytes);
     init.set_body(data.as_ref());
     let h = web_sys::Headers::new().map_err(|_| "UPLOAD_FAILED")?;
     for (k, v) in [
@@ -162,7 +164,7 @@ pub(super) async fn upload(config: &Value, draft: &Draft) -> Result<()> {
     if result["reference"]
         .as_str()
         .map(|s| format!("0x{}", s.to_ascii_lowercase()))
-        != Some(draft.meta_hash.clone())
+        != Some(reference.to_owned())
     {
         return Err("UPLOAD_REFERENCE_MISMATCH");
     }
@@ -180,24 +182,42 @@ pub(super) async fn upload(config: &Value, draft: &Draft) -> Result<()> {
             .map_err(|_| "UPLOAD_FAILED")?;
     }
     get.set_headers(read_headers.as_ref());
-    let (status, bytes) = crate::transport::fetch_with_status(
+    let (status, readback) = crate::transport::fetch_with_status(
         &url,
         &get,
         swarm_core::review::MAX_REVIEW_BYTES,
         60000,
     )
     .await?;
-    if status != 200 || bytes != draft.bytes {
+    if status != 200 || readback != bytes {
         return Err("UPLOAD_CONTENT_MISMATCH");
     }
     Ok(())
+}
+pub(super) async fn content_bytes(config: &Value, reference: &str) -> Result<Vec<u8>> {
+    let endpoint = config["endpoint"]
+        .as_str()
+        .ok_or("UPLOAD_CONFIG_REQUIRED")?;
+    let url = swarm_core::review::resource_url(endpoint, "bytes", reference).map_err(|e| e.0)?;
+    let init = web_sys::RequestInit::new();
+    let h = web_sys::Headers::new().map_err(|_| "RESOURCE_READ_FAILED")?;
+    h.set("Accept", "application/octet-stream")
+        .map_err(|_| "RESOURCE_READ_FAILED")?;
+    h.set("swarm-redundancy-level", "0")
+        .map_err(|_| "RESOURCE_READ_FAILED")?;
+    if let Some(auth) = config["authorization"].as_str() {
+        h.set("Authorization", auth)
+            .map_err(|_| "RESOURCE_READ_FAILED")?;
+    }
+    init.set_headers(h.as_ref());
+    crate::transport::fetch(&url, &init, swarm_core::review::MAX_REVIEW_BYTES).await
 }
 pub(super) async fn submission_receipt(
     p: &ModeratorProfile,
     receipt: &Value,
     intent: &Value,
     who: &str,
-) -> Result<String> {
+) -> Result<Uint256> {
     let block = rpc(
         p,
         "eth_getBlockByNumber",
@@ -284,9 +304,5 @@ pub(super) async fn submission_receipt(
         found = Some(id);
     }
     finish(p, &ctx).await?;
-    Ok(format!(
-        "Submission confirmed and exact intent matched: Case {} at canonical block {}.",
-        found.ok_or("SUBMITTED_EVENT_MISSING")?,
-        ctx.source["number"]
-    ))
+    found.ok_or("SUBMITTED_EVENT_MISSING")
 }

@@ -13,7 +13,7 @@ pub struct Draft {
     pub bytes: Vec<u8>,
     pub changes: Vec<String>,
 }
-fn hash(value: &str) -> Result<String> {
+pub fn normalize_reference(value: &str) -> Result<String> {
     let s = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -23,8 +23,23 @@ fn hash(value: &str) -> Result<String> {
     }
     Ok(format!("0x{}", s.to_ascii_lowercase()))
 }
+fn hash(value: &str) -> Result<String> {
+    normalize_reference(value)
+}
 fn whitespace(c: char) -> bool {
     matches!(c,'\u{0009}'..='\u{000d}'|'\u{0020}'|'\u{00a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}')
+}
+fn normalize_topic(value: &str) -> String {
+    value
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .nfc()
+        .collect::<String>()
+        .split(whitespace)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 pub fn create_draft(content: &str, metadata: &Value) -> Result<Draft> {
     let content_hash = hash(content)?;
@@ -53,16 +68,7 @@ pub fn create_draft(content: &str, metadata: &Value) -> Result<Draft> {
     let mut topics = vec![];
     for item in input {
         let original = item.as_str().ok_or(CoreError("INVALID_TOPICS"))?;
-        let normalized = original
-            .nfc()
-            .collect::<String>()
-            .to_lowercase()
-            .nfc()
-            .collect::<String>()
-            .split(whitespace)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let normalized = normalize_topic(original);
         if topics.contains(&normalized) {
             return Err(CoreError("DUPLICATE_TOPICS"));
         }
@@ -224,6 +230,51 @@ pub struct AuthorFields {
     pub source: String,
 }
 impl AuthorFields {
+    pub fn field_issues(&self) -> Vec<crate::review::FieldIssue> {
+        let topics = self
+            .topics
+            .iter()
+            .map(|s| normalize_topic(s))
+            .collect::<Vec<_>>();
+        let optional = |s: &String| if s.is_empty() { None } else { Some(s.clone()) };
+        let m = crate::review::Metadata {
+            schema_version: 1,
+            entry_type: self.entry_type.clone(),
+            title: self.title.clone(),
+            topics: topics.clone(),
+            content_type: self.content_type.clone(),
+            description: optional(&self.description),
+            language: optional(&self.language),
+            source: optional(&self.source),
+        };
+        let mut issues = crate::review::metadata_field_issues(&m);
+        if topics
+            .iter()
+            .any(|t| !(1..=64).contains(&t.chars().count()))
+        {
+            issues.push(crate::review::FieldIssue {
+                field: "topics",
+                code: "TOPIC_LENGTH",
+            });
+        }
+        if topics
+            .iter()
+            .enumerate()
+            .any(|(i, t)| topics[..i].contains(t))
+        {
+            issues.push(crate::review::FieldIssue {
+                field: "topics",
+                code: "DUPLICATE_TOPICS",
+            });
+        }
+        if self.metadata().is_err() {
+            issues.push(crate::review::FieldIssue {
+                field: "title",
+                code: "METADATA_SIZE",
+            });
+        }
+        issues
+    }
     pub fn metadata(&self) -> Result<Value> {
         let total = self.entry_type.len()
             + self.title.len()
@@ -251,6 +302,44 @@ impl AuthorFields {
 #[cfg(test)]
 mod field_tests {
     use super::*;
+    #[test]
+    fn authoring_reports_multiple_fields_without_changing_values() {
+        let fields = AuthorFields {
+            entry_type: "unknown".into(),
+            title: "".into(),
+            topics: vec![" Biology ".into(), "BIOLOGY".into()],
+            language: "English".into(),
+            content_type: "Text/Plain".into(),
+            ..AuthorFields::default()
+        };
+        let errors = fields.field_issues();
+        for field in ["entrytype", "title", "topics", "language", "contenttype"] {
+            assert!(errors.iter().any(|e| e.field == field), "{field}");
+        }
+        assert_eq!(fields.topics[0], " Biology ");
+        assert_eq!(fields.content_type, "Text/Plain");
+    }
+    #[test]
+    fn author_feedback_and_metadata_parser_agree_at_unicode_boundaries() {
+        let mut fields = AuthorFields {
+            entry_type: "article".into(),
+            title: "🧬".repeat(200),
+            topics: vec!["biology".into()],
+            content_type: "text/plain".into(),
+            ..AuthorFields::default()
+        };
+        assert!(fields.field_issues().is_empty());
+        create_draft(&"11".repeat(32), &fields.metadata().unwrap()).unwrap();
+        fields.title.push('x');
+        assert!(fields.field_issues().iter().any(|e| e.field == "title"));
+        assert!(create_draft(&"11".repeat(32), &fields.metadata().unwrap()).is_err());
+        fields.title = "Cells".into();
+        fields.topics = vec!["é".into(), "e\u{301}".into()];
+        assert!(fields
+            .field_issues()
+            .iter()
+            .any(|e| e.code == "DUPLICATE_TOPICS"));
+    }
     #[test]
     fn authoring_form_preserves_text_and_omits_empty_optional_fields() {
         let fields = AuthorFields {

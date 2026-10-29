@@ -1,1 +1,64 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https: http://127.0.0.1:* http://localhost:* http://[::1]:*; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'"><meta name="referrer" content="no-referrer"><title>Swarm Search</title><link rel="stylesheet" href="./style.css"></head><body><main><h1>Swarm Search</h1><p id="boot">Loading…</p><p>Read-only discovery through the selected RPC. Runtime hashes and canonical block checks verify deployment identity and consistency, not blockchain consensus. Registry membership is not a guarantee of content safety.</p><section><h2>Deployment configuration</h2><label for="profile">Current search JSON profile</label><input type="file" id="profile" accept="application/json,.json"><button id="load-profile">Load search profile</button></section><section><h2>Exact topic</h2><label for="topic">Topic</label><input id="topic" value="biology" maxlength="4096"><button id="search">Search exact topic</button><p id="notice" role="status" aria-live="polite"></p></section><details><summary>Optional category query</summary><section><h2>Category query</h2><p>A local category graph expands explicit topic queries. It does not create listings or moderation approval.</p><label for="graph">Category graph JSON</label><input type="file" id="graph" accept="application/json,.json"><button id="load-graph">Load category graph</button><fieldset><legend>Choose up to five categories</legend><div id="categories"><p>Load a category graph to see its categories.</p></div></fieldset><label><input type="checkbox" id="expanded" checked>Include descendants</label><label><input type="checkbox" id="all" checked>Match all selected categories (uncheck for any)</label><button id="category-search">Search categories</button></section></details><section><h2>Results</h2><button id="continue">Continue bounded scan</button><button id="next">Next page</button><button id="retry">Retry metadata on this page</button><button id="cancel">Cancel and clear results</button><div id="results"></div></section></main><script type="module" src="./loader.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https: http://127.0.0.1:* http://localhost:* http://[::1]:*; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Swarm Search</title><link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <a class="skip" href="#query">Skip to search</a>
+  <header class="site-header"><div class="header-inner"><a class="brand" href="#query">Swarm <span>Search</span></a><span id="source-summary">No source selected</span><a id="source-link" href="#source-settings">Source</a></div></header>
+  <main>
+    <p id="boot" role="status">Loading search…</p>
+    <details id="source-settings" open>
+      <summary>Search source <span id="source-state">· choose once for this tab</span></summary>
+      <div class="settings">
+        <p>Get a public search profile and its fingerprint from the deployment operator you intend to use. A profile selects the chain, contracts and gateways. No wallet is needed.</p>
+        <div class="source-grid"><div>
+          <label for="profile-url">Public profile URL</label><input id="profile-url" type="url" placeholder="https://…/search-profile.json" autocomplete="off" aria-describedby="source-help">
+          <label for="profile-pin">Expected fingerprint</label><input id="profile-pin" spellcheck="false" autocomplete="off" placeholder="0x…" aria-describedby="source-help">
+          <p id="source-help" class="hint">Use the Keccak-256 fingerprint supplied through a source you trust. A matching file does not prove who operates it.</p>
+          <button id="load-profile-url" class="secondary">Read public profile</button>
+        </div><div>
+          <label for="profile">Or choose a search profile file</label><input type="file" id="profile" accept="application/json,.json">
+          <p class="hint">The file is read when selected. Profiles stay in this tab; reload requires setup again.</p>
+        </div></div>
+        <p id="source-feedback" role="status" aria-live="polite"></p>
+        <div id="candidate" hidden><h2>Review this source</h2><pre id="profile-review"></pre><details><summary>Full profile identity</summary><pre id="profile-pins"></pre></details><label class="check"><input id="trust-profile" type="checkbox">This is the deployment I intend to search.</label><button id="use-profile">Use this source</button></div>
+        <details id="active-details" hidden><summary>Active source details</summary><pre id="active-profile"></pre><p class="hint">Runtime and canonical-block checks verify identity and consistency through this RPC. They do not independently verify blockchain consensus.</p></details>
+      </div>
+    </details>
+    <section id="query" class="query" aria-labelledby="query-heading">
+      <h1 id="query-heading">Find content</h1>
+      <label for="topic">Topic</label>
+      <div class="query-line"><input id="topic" placeholder="e.g. biology" maxlength="4096" aria-describedby="topic-help topic-feedback"><button id="search">Search topic</button></div>
+      <p id="topic-help" class="hint">Matches a complete topic, such as “biology”. Case and extra spaces are normalized.</p>
+      <p id="topic-feedback" role="status" aria-live="polite"></p>
+      <details id="category-query"><summary>Search categories instead</summary>
+        <label for="graph">Local category graph</label><input type="file" id="graph" accept="application/json,.json">
+        <p class="hint">Get the graph from your chosen source. It groups topic queries; it does not create listings or moderation approval.</p>
+        <fieldset><legend>Choose up to five categories</legend><div id="categories">Choose a graph to see its categories.</div></fieldset>
+        <label class="check"><input type="checkbox" id="expanded" checked>Include descendants</label>
+        <label class="check"><input type="checkbox" id="all" checked>Match every selected group (uncheck for any group)</label>
+        <p id="category-preview" class="hint"></p><details><summary>Expanded topic keys</summary><pre id="category-keys"></pre></details><p id="category-feedback" role="status" aria-live="polite"></p>
+        <button id="category-search">Search categories</button>
+      </details>
+      <p id="pending-query" class="hint" role="status" aria-live="polite"></p>
+    </section>
+    <section id="result-section" aria-labelledby="results-heading">
+      <div class="result-heading"><h2 id="results-heading" tabindex="-1">Results</h2><span id="range"></span></div>
+      <p id="applied-query"></p><p id="read-context" class="hint"></p>
+      <p id="notice" role="status" aria-live="polite">Choose a source to start.</p>
+      <p id="search-error" class="error" role="alert"></p>
+      <div id="results"></div>
+      <div class="navigation" aria-label="Search progress and pages">
+        <button id="continue" hidden>Continue collecting</button><button id="previous" class="secondary" hidden>Previous page</button><button id="next" hidden>Next page</button><button id="retry" class="secondary" hidden>Retry metadata on this page</button><button id="cancel" class="secondary" hidden>Cancel read</button><button id="fresh" class="secondary" hidden>Search again at a fresh block</button>
+      </div>
+    </section>
+    <footer>Read-only discovery. Authenticated metadata and registry membership do not certify content safety. Content opens separately after a current listing check.</footer>
+  </main>
+  <script type="module" src="./loader.js"></script>
+</body>
+</html>

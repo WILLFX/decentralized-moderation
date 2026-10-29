@@ -1,12 +1,10 @@
 use crate::{
-    case::case_facts,
     transport::{as_str, quantity, rpc},
     BrowserResult as Result,
 };
 use serde_json::{json, Value};
 use swarm_core::{
-    decode_uint, link_checks, selector, verify_guidelines, verify_link, verify_runtime,
-    ModeratorProfile,
+    link_checks, selector, verify_guidelines, verify_link, verify_runtime, ModeratorProfile,
 };
 async fn view(
     profile: &ModeratorProfile,
@@ -25,7 +23,7 @@ async fn view(
     Ok(as_str(&raw)?.to_owned())
 }
 
-pub(crate) async fn verification(profile: &ModeratorProfile, voter: &str) -> Result<String> {
+pub(crate) async fn verification(profile: &ModeratorProfile, _voter: &str) -> Result<String> {
     if quantity(as_str(&rpc(profile, "eth_chainId", json!([])).await?)?)?
         != profile.deployment.chain_id
     {
@@ -63,29 +61,6 @@ pub(crate) async fn verification(profile: &ModeratorProfile, voter: &str) -> Res
     let guideline_hash = view(profile, &d.moderation.address, "guidelinesHash()", "", &pin).await?;
     verify_guidelines(d, &version, &guideline_hash)
         .map_err(|_| "DEPLOYMENT_GUIDELINES_MISMATCH")?;
-    // Query only Case 2 in this initial shell. Every call uses the same source.
-    let next_case = view(profile, &d.moderation.address, "nextCaseId()", "", &pin).await?;
-    let mut facts = String::from("Case 2 is not present in this deployment.");
-    if decode_uint(&next_case).map_err(|_| "INVALID_ABI_RESULT")? > 2 {
-        let case_args = format!("{:064x}", 2);
-        let c = view(
-            profile,
-            &d.moderation.address,
-            "caseInfo(uint256)",
-            &case_args,
-            &pin,
-        )
-        .await?;
-        let v = view(
-            profile,
-            &d.moderation.address,
-            "voteOf(uint256,address)",
-            &format!("{case_args}{:0>64}", &voter[2..]),
-            &pin,
-        )
-        .await?;
-        facts = case_facts(&c, &v)?;
-    }
     // Re-read the source height and chain before publishing any evidence.
     let canonical = rpc(
         profile,
@@ -102,5 +77,5 @@ pub(crate) async fn verification(profile: &ModeratorProfile, voter: &str) -> Res
     if quantity(as_str(&rpc(profile, "eth_chainId", json!([])).await?)?)? != d.chain_id {
         return Err("SOURCE_CHAIN_CHANGED");
     }
-    Ok(format!("Deployment verified at block {height}.\nFour runtime hashes match. Six contract links match.\nPinned guidelines version {} and hash match the contract.\nThis checks identity only; guideline content is not loaded in this shell.\n\n{facts}", d.guidelines.version))
+    Ok(format!("Deployment verified at block {height}.\nFour runtime hashes and six contract links match.\nPinned guidelines version {} and hash match the contract.\nNext: open My work or select a case from the review queue. Load its review documents to read the pinned guidelines.", d.guidelines.version))
 }

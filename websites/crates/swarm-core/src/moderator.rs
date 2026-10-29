@@ -306,6 +306,39 @@ pub struct CaseSnapshot {
     pub schedule: PairSchedule,
     pub moderator: StakeInfo,
     pub refund_owed: Uint256,
+    pub outcome_recovery: Option<OutcomeRecovery>,
+}
+/// Present only after a pinned, strictly decoded version-1 capability read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeRecovery {
+    pub original_hash: String,
+    pub recover_until: u64,
+    pub expired: bool,
+}
+impl OutcomeRecovery {
+    pub fn cached(&self) -> bool {
+        nonzero_hash(&self.original_hash)
+    }
+}
+pub fn decode_outcome_recovery(raw: &str, c: &CaseInfo) -> Result<OutcomeRecovery> {
+    let w = words(raw, 4)?;
+    if w[0] != Uint256::from_u64(1) {
+        return Err(CoreError("RECOVERY_UNSUPPORTED"));
+    }
+    let r = OutcomeRecovery {
+        original_hash: bytes32(w[1]),
+        recover_until: w[2].as_u64()?,
+        expired: boolean(w[3])?,
+    };
+    let expected = if c.outcome_seed_block == 0 {
+        0
+    } else {
+        c.outcome_seed_block + 8191
+    };
+    if r.recover_until != expected || r.expired && (!matches!(c.phase, 5 | 6) || r.cached()) {
+        return Err(CoreError("INVALID_ABI_RESULT"));
+    }
+    Ok(r)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Eligibility {
@@ -324,20 +357,29 @@ pub enum Action {
     CloseCommitB,
     CloseReveal,
     Draw,
+    CacheOutcome,
+    ExpireOutcome,
     CloseChallenge,
     WithdrawRefund,
+}
+/// A marker is only a capability hint after runtime and deployment verification.
+/// Legacy, unknown versions and malformed ABI replies stay unsupported.
+pub fn challenge_intent_supported(raw: &str) -> bool {
+    raw.len() == 66 && Uint256::hex(raw).is_ok_and(|n| n == Uint256::from_u64(1))
 }
 impl Action {
     pub fn signature(self) -> &'static str {
         match self {
             Self::Commit => "commit(uint256,bytes32)",
             Self::Reveal => "reveal(uint256,uint8,bytes32)",
-            Self::Challenge => "challenge(uint256)",
+            Self::Challenge => "challenge(uint256,uint8,uint8)",
             Self::Claim => "claim(uint256,address)",
             Self::CloseCommitA => "closeCommitA(uint256)",
             Self::CloseCommitB => "closeCommitB(uint256)",
             Self::CloseReveal => "closeReveal(uint256)",
             Self::Draw => "draw(uint256)",
+            Self::CacheOutcome => "cacheOutcome(uint256)",
+            Self::ExpireOutcome => "expireOutcome(uint256,uint8,uint40)",
             Self::CloseChallenge => "closeChallenge(uint256)",
             Self::WithdrawRefund => "withdrawRefund(uint256)",
         }
@@ -448,8 +490,31 @@ pub fn case_actions(s: &CaseSnapshot, eligibility: Eligibility) -> CaseActions {
             c.phase == 3
                 && c.outcome_seed_block != 0
                 && height > c.outcome_seed_block
-                && height.saturating_sub(c.outcome_seed_block) <= 250,
+                && s.outcome_recovery
+                    .as_ref()
+                    .map_or(height.saturating_sub(c.outcome_seed_block) <= 250, |r| {
+                        r.cached() || height <= r.recover_until
+                    }),
             "OUTCOME_NOT_DRAWABLE",
+        ),
+        (
+            Action::CacheOutcome,
+            c.phase == 3
+                && c.outcome_seed_block != 0
+                && height > c.outcome_seed_block
+                && s.outcome_recovery
+                    .as_ref()
+                    .is_some_and(|r| !r.cached() && height <= r.recover_until),
+            "ORIGINAL_HASH_NOT_CACHEABLE",
+        ),
+        (
+            Action::ExpireOutcome,
+            c.phase == 3
+                && c.outcome_seed_block != 0
+                && s.outcome_recovery
+                    .as_ref()
+                    .is_some_and(|r| !r.cached() && height > r.recover_until),
+            "ORIGINAL_HASH_RECOVERY_NOT_EXHAUSTED",
         ),
         (
             Action::CloseChallenge,
@@ -470,7 +535,12 @@ pub fn case_actions(s: &CaseSnapshot, eligibility: Eligibility) -> CaseActions {
         },
         3 => {
             if c.outcome_seed_block != 0 {
-                if height.saturating_sub(c.outcome_seed_block) > 250 {
+                if s.outcome_recovery
+                    .as_ref()
+                    .map_or(height.saturating_sub(c.outcome_seed_block) > 250, |r| {
+                        !r.cached() && height > r.recover_until
+                    })
+                {
                     "OUTCOME_EXPIRED"
                 } else {
                     "OUTCOME_PENDING"
@@ -524,8 +594,33 @@ pub fn encode_action(action: Action, case_id: Uint256, extra: &[String]) -> Resu
             }
             format!("{}{}", v.abi(), hash(&extra[1], true)?)
         }
+        Action::Challenge if extra.len() == 2 => {
+            let round = Uint256::decimal(&extra[0])?;
+            let outcome = Uint256::decimal(&extra[1])?;
+            if round > Uint256::from_u64(1)
+                || ![Uint256::from_u64(1), Uint256::from_u64(2)].contains(&outcome)
+            {
+                return Err(CoreError("INVALID_INPUT"));
+            }
+            format!("{}{}", round.abi(), outcome.abi())
+        }
+        Action::ExpireOutcome if extra.len() == 2 => {
+            let round = Uint256::decimal(&extra[0])?;
+            let target = Uint256::decimal(&extra[1])?;
+            if round > Uint256::from_u64(2)
+                || target == Uint256::ZERO
+                || target.as_u64()? >= (1u64 << 40)
+            {
+                return Err(CoreError("INVALID_INPUT"));
+            }
+            format!("{}{}", round.abi(), target.abi())
+        }
         Action::Claim if extra.len() == 1 => address(&extra[0])?,
-        Action::Commit | Action::Reveal | Action::Claim => return Err(CoreError("INVALID_INPUT")),
+        Action::Commit
+        | Action::Reveal
+        | Action::Challenge
+        | Action::ExpireOutcome
+        | Action::Claim => return Err(CoreError("INVALID_INPUT")),
         _ if extra.is_empty() => String::new(),
         _ => return Err(CoreError("INVALID_INPUT")),
     };
@@ -568,7 +663,13 @@ pub fn prepare_action(
     }
     if i.expected_round
         .is_some_and(|round| round != s.case.challenges)
-        || [Action::Commit, Action::Reveal, Action::Challenge].contains(&i.action)
+        || [
+            Action::Commit,
+            Action::Reveal,
+            Action::Challenge,
+            Action::ExpireOutcome,
+        ]
+        .contains(&i.action)
             && i.expected_round.is_none()
     {
         return Err(CoreError("CONTEXT_CHANGED_ROUND"));
@@ -601,8 +702,19 @@ pub fn prepare_action(
             if i.expected_outcome != Some(s.case.preliminary) || i.expected_outcome == Some(0) {
                 return Err(CoreError("CONTEXT_CHANGED_OUTCOME"));
             }
-            vec![]
+            vec![
+                i.expected_round
+                    .ok_or(CoreError("INVALID_INPUT"))?
+                    .to_string(),
+                i.expected_outcome
+                    .ok_or(CoreError("INVALID_INPUT"))?
+                    .to_string(),
+            ]
         }
+        Action::ExpireOutcome => vec![
+            s.case.challenges.to_string(),
+            s.case.outcome_seed_block.to_string(),
+        ],
         Action::Claim => vec![i.beneficiary.unwrap_or(i.voter).to_string()],
         _ => vec![],
     };

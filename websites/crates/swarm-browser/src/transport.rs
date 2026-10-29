@@ -13,6 +13,7 @@ pub(crate) async fn rpc(profile: &ModeratorProfile, method: &str, params: Value)
         "eth_call",
         "eth_getTransactionReceipt",
         "eth_getTransactionByHash",
+        "eth_getTransactionCount",
     ]
     .contains(&method)
     {

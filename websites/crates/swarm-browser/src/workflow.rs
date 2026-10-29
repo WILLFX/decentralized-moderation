@@ -16,10 +16,24 @@ pub(crate) struct Session {
     pub voter: String,
     pub vault: VoteVault,
     pub active: Rc<dyn Fn() -> bool>,
+    pub request_boundary: Option<(u64, u64)>,
 }
 pub(crate) struct Broadcast {
     pub hash: String,
     pub warning: Option<&'static str>,
+}
+/// Read-only observation for presentation. Sending never consumes this report.
+pub(crate) struct RevealReport {
+    pub ready: bool,
+    pub reason: &'static str,
+    pub remaining_seconds: Option<i128>,
+    pub checked_wall_ms: u64,
+    pub elapsed_ms: u64,
+    pub finalized: SourceBlock,
+    pub latest: SourceBlock,
+    pub deadline: u64,
+    pub budget: u64,
+    pub clock_error: u64,
 }
 impl Session {
     pub fn current(&self) -> Result<()> {
@@ -64,7 +78,11 @@ impl Session {
     fn stored(&self, v: &VoteRecord, backup: bool) -> Result<()> {
         self.current()?;
         self.record(v)?;
-        if self.vault.get_vote(&v.context())?.as_ref() != Some(v) {
+        if if backup {
+            self.vault.get_vote(&v.context())?.as_ref() != Some(v)
+        } else {
+            !self.vault.list_votes()?.contains(v)
+        } {
             return Err("SECRET_MISMATCH");
         }
         if backup && !self.vault.is_backed_up(&v.context())? {
@@ -73,6 +91,19 @@ impl Session {
         Ok(())
     }
     pub async fn draft(&self, id: Uint256, vote: u8) -> Result<VoteRecord> {
+        self.save_choice(id, vote, None).await
+    }
+    pub async fn change_choice(&self, original: &VoteRecord, vote: u8) -> Result<VoteRecord> {
+        let id = self.record(original)?;
+        self.save_choice(id, vote, Some(original)).await
+    }
+    async fn save_choice(
+        &self,
+        id: Uint256,
+        vote: u8,
+        original: Option<&VoteRecord>,
+    ) -> Result<VoteRecord> {
+        crate::moderator_requests::ensure_clear(&self.profile, &self.voter)?;
         if !self.vault.is_unlocked() {
             return Err("VAULT_LOCKED");
         }
@@ -98,7 +129,11 @@ impl Session {
             round: e.snapshot.case.challenges,
             committee,
         };
-        if let Some(v) = self.vault.get_vote(&context)? {
+        if let Some(original) = original {
+            if original.context() != context || !self.vault.can_correct(original) {
+                return Err("CHOICE_PROTECTED");
+            }
+        } else if let Some(v) = self.vault.get_vote(&context)? {
             self.record(&v)?;
             if v.vote != vote {
                 return Err("VOTE_CONFLICT");
@@ -130,7 +165,12 @@ impl Session {
             salt,
         };
         self.current()?;
-        let saved = self.vault.save_vote(v).await?;
+        crate::moderator_requests::ensure_clear(&self.profile, &self.voter)?;
+        let saved = if let Some(original) = original {
+            self.vault.correct_vote(original, v).await?
+        } else {
+            self.vault.save_vote(v).await?
+        };
         self.current()?;
         Ok(saved)
     }
@@ -193,8 +233,65 @@ impl Session {
         }
         self.current()
     }
+    /// Advisory read only. Sending a reveal still repeats the full guard.
+    pub async fn check_reveal(&self, id: Uint256) -> Result<RevealReport> {
+        let evidence = self.read(id, "latest").await?;
+        let record = self.saved_for(&evidence)?;
+        self.stored(&record, false)?;
+        // Collect display evidence separately: the disclosure guard above stays unchanged.
+        let clock = web_sys::window()
+            .ok_or("CLOCK_INVALID")?
+            .performance()
+            .ok_or("CLOCK_INVALID")?;
+        let start = clock.now();
+        let finalized = self.read(id, "finalized").await?;
+        let latest = self.read(id, "latest").await?;
+        let end = clock.now();
+        let wall = Date::now();
+        if !start.is_finite()
+            || !end.is_finite()
+            || end < start
+            || !wall.is_finite()
+            || wall < 0.0
+            || wall > 9_007_199_254_740_991.0
+            || end - start > 9_007_199_254_740_991.0
+        {
+            return Err("CLOCK_INVALID");
+        }
+        let input = GuardInput {
+            case_id: id,
+            voter: &self.voter,
+            commitment: &record.commitment,
+            expected_round: record.round,
+        };
+        let wall_ms = wall.floor() as u64;
+        let elapsed_ms = (end - start).ceil() as u64;
+        let decision = check_reveal(
+            &finalized.snapshot,
+            &latest.snapshot,
+            &input,
+            &self.profile.timing,
+            wall_ms,
+            elapsed_ms,
+        );
+        self.current()?;
+        Ok(RevealReport {
+            ready: decision.ready,
+            reason: decision.reason,
+            remaining_seconds: decision.remaining_seconds,
+            checked_wall_ms: wall_ms,
+            elapsed_ms,
+            finalized: finalized.snapshot.source,
+            latest: latest.snapshot.source,
+            deadline: latest.snapshot.case.phase_deadline,
+            budget: self.profile.timing.inclusion_budget_seconds,
+            clock_error: self.profile.timing.clock_error_seconds,
+        })
+    }
     pub async fn commit(&self, v: &VoteRecord) -> Result<Broadcast> {
         self.stored(v, true)?;
+        // Consume before any attempt. Rejection or absent chain state cannot restore it.
+        self.vault.seal_choice(v);
         let id = self.record(v)?;
         let e = self.read(id, "latest").await?;
         let input = ActionInput {
@@ -231,6 +328,7 @@ impl Session {
         let e = self.read(id, "latest").await?;
         let v = self.saved_for(&e)?;
         self.stored(&v, false)?;
+        self.vault.seal_choice(&v);
         // Strong guard first, then intent preparation, then a SECOND guard after
         // wallet reads and immediately before disclosing calldata to the wallet.
         self.reveal_ready(&v).await?;
@@ -257,16 +355,32 @@ impl Session {
         .map_err(|e| e.0)?;
         wallet::check(self.profile.deployment.chain_id, &self.voter).await?;
         self.stored(&v, false)?;
-        self.reveal_ready(&v).await?;
-        self.stored(&v, false)?;
-        self.broadcast(
+        // Complete durable IO BEFORE the final guard. Even synchronous storage
+        // can stall long enough to consume the disclosure budget.
+        let request = self.reserve(
             &self.profile.deployment.moderation.address,
             &data,
             "reveal",
             Some(id),
+        )?;
+        if let Err(error) = self
+            .reveal_ready(&v)
+            .await
+            .and_then(|()| self.stored(&v, false))
+        {
+            crate::moderator_requests::not_sent(&self.profile, &self.voter, request)?;
+            return Err(error);
+        }
+        self.broadcast_reserved(
+            &self.profile.deployment.moderation.address,
+            &data,
+            "reveal",
+            Some(id),
+            request,
         )
         .await
     }
+
     pub async fn action(
         &self,
         id: Uint256,
@@ -278,6 +392,14 @@ impl Session {
             return Err("EXPLICIT_VOTE_FLOW_REQUIRED");
         }
         let e = self.read(id, "latest").await?;
+        if action == Action::Challenge && !e.challenge_bound {
+            return Err("CHALLENGE_INTENT_UNSUPPORTED");
+        }
+        if [Action::Draw, Action::CacheOutcome].contains(&action) {
+            if let Some(reason) = crate::moderator_view::draw_request_hold(&e.snapshot) {
+                return Err(reason);
+            }
+        }
         let input = ActionInput {
             action,
             case_id: id,
@@ -340,6 +462,18 @@ impl Session {
         self.current()?;
         self.broadcast(&to, &data, action, None).await
     }
+    fn reserve(&self, to: &str, data: &str, action: &str, id: Option<Uint256>) -> Result<usize> {
+        self.current()?;
+        crate::moderator_requests::begin(
+            &self.profile,
+            &self.voter,
+            to,
+            data,
+            action,
+            id.map(|v| v.to_decimal()),
+            self.request_boundary.ok_or("REQUEST_BOUNDARY_REQUIRED")?,
+        )
+    }
     async fn broadcast(
         &self,
         to: &str,
@@ -347,9 +481,41 @@ impl Session {
         action: &str,
         id: Option<Uint256>,
     ) -> Result<Broadcast> {
-        self.current()?;
-        let hash =
-            wallet::send_prepared(self.profile.deployment.chain_id, &self.voter, to, data).await?;
+        let request = self.reserve(to, data, action, id)?;
+        self.broadcast_reserved(to, data, action, id, request).await
+    }
+    async fn broadcast_reserved(
+        &self,
+        to: &str,
+        data: &str,
+        action: &str,
+        id: Option<Uint256>,
+        request: usize,
+    ) -> Result<Broadcast> {
+        if let Err(error) = self.current() {
+            crate::moderator_requests::not_sent(&self.profile, &self.voter, request)?;
+            return Err(error);
+        }
+        // Success path: no journal IO, RPC read or timer before wallet disclosure.
+        let boundary = self.request_boundary.ok_or("REQUEST_BOUNDARY_REQUIRED")?;
+        let hash = match wallet::send_journaled(
+            self.profile.deployment.chain_id,
+            &self.voter,
+            to,
+            data,
+            boundary.1,
+        )
+        .await
+        {
+            Ok(hash) => hash,
+            Err("WALLET_REJECTED") => {
+                crate::moderator_requests::rejected(&self.profile, &self.voter, request)?;
+                return Err("WALLET_REJECTED");
+            }
+            Err(_) => return Err("REQUEST_UNRESOLVED"),
+        };
+        let journal_saved =
+            crate::moderator_requests::sent(&self.profile, &self.voter, request, &hash);
         // A wallet prompt can outlive a context change. Always preserve a valid
         // returned broadcast hash; a reset cannot cancel an already sent tx.
         let item = json!({"hash":hash,"action":action,"caseId":id.map(|v|v.to_decimal()),
@@ -358,7 +524,7 @@ impl Session {
         let saved = save_public_transaction(item);
         let warning = if !(self.active)() {
             Some("CONTEXT_CHANGED_AFTER_SEND")
-        } else if saved.is_err() {
+        } else if journal_saved.is_err() || saved.is_err() {
             Some("TRANSACTION_HISTORY_NOT_SAVED")
         } else {
             None
@@ -389,7 +555,7 @@ fn save_public_transaction(item: Value) -> Result<()> {
         )
         .map_err(|_| "STORAGE_FAILED")
 }
-pub(crate) fn public_history(profile: &ModeratorProfile, voter: &str) -> Result<Vec<String>> {
+fn history_rows(profile: &ModeratorProfile, voter: &str) -> Result<Vec<Value>> {
     let storage = web_sys::window()
         .ok_or("STORAGE_FAILED")?
         .local_storage()
@@ -419,7 +585,7 @@ pub(crate) fn public_history(profile: &ModeratorProfile, voter: &str) -> Result<
                     .as_str()
                     .is_some_and(|s| s.eq_ignore_ascii_case(voter))
         })
-        .filter_map(|r| {
+        .filter(|r| {
             r["hash"]
                 .as_str()
                 .filter(|s| {
@@ -427,10 +593,45 @@ pub(crate) fn public_history(profile: &ModeratorProfile, voter: &str) -> Result<
                         && s.starts_with("0x")
                         && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
                 })
-                .map(str::to_owned)
+                .is_some()
         })
         .collect())
 }
+pub(crate) fn public_history(profile: &ModeratorProfile, voter: &str) -> Result<Vec<String>> {
+    Ok(history_rows(profile, voter)?
+        .iter()
+        .map(|r| {
+            format!(
+                "{} · Case {}\n{}",
+                r["action"].as_str().unwrap_or("Transaction"),
+                r["caseId"].as_str().unwrap_or("not applicable"),
+                r["hash"].as_str().unwrap_or("")
+            )
+        })
+        .collect())
+}
+pub(crate) fn public_case_ids(profile: &ModeratorProfile, voter: &str) -> Result<Vec<Uint256>> {
+    let mut ids: Vec<Uint256> = history_rows(profile, voter)?
+        .iter()
+        .filter_map(|r| {
+            r["caseId"]
+                .as_str()
+                .and_then(|id| Uint256::decimal(id).ok())
+        })
+        .collect();
+    ids.extend(
+        crate::moderator_requests::load(profile, voter)?
+            .iter()
+            .filter_map(|r| {
+                r.case_id
+                    .as_deref()
+                    .and_then(|id| Uint256::decimal(id).ok())
+            }),
+    );
+    ids.retain(|id| *id != Uint256::ZERO);
+    Ok(ids)
+}
+
 pub(crate) async fn receipt(profile: &ModeratorProfile, hash: &str) -> Result<&'static str> {
     if hash.len() != 66
         || !hash.starts_with("0x")
@@ -460,7 +661,11 @@ pub(crate) async fn receipt(profile: &ModeratorProfile, hash: &str) -> Result<&'
     )
     .await?;
     let chain = rpc(profile, "eth_chainId", json!([])).await?;
-    canonical_receipt_status(&raw, hash, &canonical, profile.deployment.chain_id, &chain)
+    let status =
+        canonical_receipt_status(&raw, hash, &canonical, profile.deployment.chain_id, &chain)?;
+    Ok(crate::moderator_requests::reconcile(profile, hash, &raw)
+        .await?
+        .unwrap_or(status))
 }
 
 fn check_receipt_chain(expected: u64, observed: &Value) -> Result<()> {
@@ -491,7 +696,7 @@ fn receipt_anchor(raw: &Value, hash: &str) -> Result<(u64, String)> {
 }
 
 /// A successful status is a canonical observation, not a finality guarantee.
-fn canonical_receipt_status(
+pub(crate) fn canonical_receipt_status(
     raw: &Value,
     hash: &str,
     canonical: &Value,

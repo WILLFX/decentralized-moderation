@@ -139,6 +139,56 @@ fn mime(s: &str) -> bool {
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldIssue {
+    pub field: &'static str,
+    pub code: &'static str,
+}
+/// Shared field rules for parsed metadata and human authoring feedback.
+pub fn metadata_field_issues(m: &Metadata) -> Vec<FieldIssue> {
+    let mut issues = vec![];
+    for (field, code, invalid) in [
+        (
+            "entrytype",
+            "TYPE",
+            ![
+                "article", "post", "comment", "image", "video", "audio", "document", "dataset",
+                "other",
+            ]
+            .contains(&m.entry_type.as_str()),
+        ),
+        ("title", "TITLE", !bounded(&m.title, 1, 200)),
+        (
+            "description",
+            "DESCRIPTION",
+            m.description.as_ref().is_some_and(|s| !bounded(s, 0, 5000)),
+        ),
+        (
+            "language",
+            "LANGUAGE",
+            m.language
+                .as_ref()
+                .is_some_and(|s| !bounded(s, 0, 35) || !language(s)),
+        ),
+        (
+            "contenttype",
+            "CONTENT_TYPE",
+            !bounded(&m.content_type, 0, 255) || !mime(&m.content_type),
+        ),
+        (
+            "source",
+            "SOURCE",
+            m.source.as_ref().is_some_and(|s| !bounded(s, 0, 2048)),
+        ),
+        ("topics", "TOPIC_COUNT", !(1..=5).contains(&m.topics.len())),
+    ] {
+        if invalid {
+            issues.push(FieldIssue { field, code });
+        }
+    }
+    issues
+}
+
 /// Serde's struct decoder rejects duplicate fields, escaped duplicates, unknown
 /// fields and invalid UTF-8 before these semantic checks run.
 pub fn parse_metadata(
@@ -153,25 +203,7 @@ pub fn parse_metadata(
     let metadata: Metadata = serde_json::from_slice(without_initial_bom(bytes))
         .map_err(|_| CoreError("INVALID_METADATA_JSON"))?;
     if metadata.schema_version != 1
-        || ![
-            "article", "post", "comment", "image", "video", "audio", "document", "dataset", "other",
-        ]
-        .contains(&metadata.entry_type.as_str())
-        || !bounded(&metadata.title, 1, 200)
-        || metadata
-            .description
-            .as_ref()
-            .is_some_and(|s| !bounded(s, 0, 5000))
-        || metadata
-            .language
-            .as_ref()
-            .is_some_and(|s| !bounded(s, 0, 35) || !language(s))
-        || !bounded(&metadata.content_type, 0, 255)
-        || !mime(&metadata.content_type)
-        || metadata
-            .source
-            .as_ref()
-            .is_some_and(|s| !bounded(s, 0, 2048))
+        || !metadata_field_issues(&metadata).is_empty()
         || !(1..=5).contains(&topic_keys.len())
         || metadata.topics.len() != topic_keys.len()
     {

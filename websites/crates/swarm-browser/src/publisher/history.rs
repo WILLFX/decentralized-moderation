@@ -15,11 +15,20 @@ fn storage() -> Result<web_sys::Storage> {
         .ok_or("HISTORY_UNAVAILABLE")
 }
 pub(super) fn validate(raw: &str, p: &ModeratorProfile, who: &str) -> Result<Vec<Value>> {
-    if raw.len() > 256 * 1024 {
+    validate_retained(raw, p, who, ledger::ACTIVE_COUNT, ledger::ACTIVE_BYTES)
+}
+pub(super) fn validate_retained(
+    raw: &str,
+    p: &ModeratorProfile,
+    who: &str,
+    max_count: usize,
+    max_bytes: usize,
+) -> Result<Vec<Value>> {
+    if raw.len() > max_bytes {
         return Err("HISTORY_SIZE_LIMIT");
     }
     let records: Vec<Value> = serde_json::from_str(raw).map_err(|_| "INVALID_HISTORY")?;
-    if records.len() > 100 {
+    if records.len() > max_count {
         return Err("HISTORY_SIZE_LIMIT");
     }
     for r in &records {
@@ -37,6 +46,12 @@ pub(super) fn validate(raw: &str, p: &ModeratorProfile, who: &str) -> Result<Vec
                 "state",
                 "hash",
                 "requestId",
+                "nonce",
+                "anchor",
+                "resolution",
+                "candidateHash",
+                "caseEvidence",
+                "caseHint",
             ]
             .contains(&k.as_str())
         }) {
@@ -53,6 +68,7 @@ pub(super) fn validate(raw: &str, p: &ModeratorProfile, who: &str) -> Result<Vec
                 "confirmed",
                 "failed",
                 "rejected",
+                "cancelled",
             ]
             .contains(&r["state"].as_str().unwrap_or(""))
         {
@@ -169,12 +185,27 @@ pub(super) fn validate(raw: &str, p: &ModeratorProfile, who: &str) -> Result<Vec
         if !same_hex_bytes(&r["to"], &json!(target), Some(20)) {
             return Err("INVALID_HISTORY");
         }
+        recovery::validate_fields(r)?;
+        publications::validate(r)?;
     }
     Ok(records)
 }
 /// Merge record identity without deleting uncertain broadcasts or promoting imported status.
 /// The later slice contains explicit local receipt updates and therefore wins for the same request.
 pub(super) fn merge(base: &[Value], updates: &[Value]) -> Result<Vec<Value>> {
+    let result = merge_retaining(base, updates)?;
+    if result.len() > ledger::TOTAL_COUNT
+        || serde_json::to_vec(&result)
+            .map_err(|_| "INVALID_HISTORY")?
+            .len()
+            > ledger::TOTAL_BYTES
+    {
+        return Err("HISTORY_STORAGE_CAPACITY");
+    }
+    Ok(result)
+}
+// Capacity failure must never erase a hash already returned by the wallet.
+fn merge_retaining(base: &[Value], updates: &[Value]) -> Result<Vec<Value>> {
     let mut result = Vec::<Value>::new();
     for update in base.iter().chain(updates.iter()) {
         let index = result.iter().position(|old| {
@@ -183,6 +214,12 @@ pub(super) fn merge(base: &[Value], updates: &[Value]) -> Result<Vec<Value>> {
         });
         if let Some(index) = index {
             let old = &result[index];
+            if !old["requestId"].is_null()
+                && !update["requestId"].is_null()
+                && old["requestId"] != update["requestId"]
+            {
+                return Err("HISTORY_CONFLICT");
+            }
             if [
                 "chainId",
                 "contract",
@@ -202,6 +239,25 @@ pub(super) fn merge(base: &[Value], updates: &[Value]) -> Result<Vec<Value>> {
                 return Err("HISTORY_CONFLICT");
             }
             let mut next = update.clone();
+            for field in ["nonce", "anchor"] {
+                if !old[field].is_null() && !next[field].is_null() && old[field] != next[field] {
+                    return Err("HISTORY_CONFLICT");
+                }
+                if next[field].is_null() && !old[field].is_null() {
+                    next[field] = old[field].clone();
+                }
+            }
+            if next["resolution"].is_null() && !old["resolution"].is_null() {
+                next["resolution"] = old["resolution"].clone();
+                next["state"] = old["state"].clone();
+            }
+            if next["caseEvidence"].is_null()
+                && !old["caseEvidence"].is_null()
+                && !["failed", "cancelled", "rejected"]
+                    .contains(&next["state"].as_str().unwrap_or(""))
+            {
+                next["caseEvidence"] = old["caseEvidence"].clone();
+            }
             if next["hash"].is_null() && !old["hash"].is_null() {
                 next["hash"] = old["hash"].clone();
                 next["state"] = old["state"].clone();
@@ -211,40 +267,145 @@ pub(super) fn merge(base: &[Value], updates: &[Value]) -> Result<Vec<Value>> {
             result.push(update.clone());
         }
     }
-    if result.len() > 100
-        || serde_json::to_vec(&result)
-            .map_err(|_| "INVALID_HISTORY")?
-            .len()
-            > 256 * 1024
-    {
-        return Err("HISTORY_SIZE_LIMIT");
-    }
     Ok(result)
 }
-fn disk(p: &ModeratorProfile, who: &str) -> Result<Vec<Value>> {
+fn disk(p: &ModeratorProfile, who: &str) -> Result<ledger::Ledger> {
     let raw = storage()?
         .get_item(&key(p, who))
         .map_err(|_| "HISTORY_UNAVAILABLE")?
         .unwrap_or_else(|| "[]".into());
-    validate(&raw, p, who)
+    ledger::Ledger::parse(&raw, p, who)
 }
 pub(super) fn has_fault(a: &Rc<RefCell<App>>, p: &ModeratorProfile, who: &str) -> bool {
     a.borrow().history_faults.contains(&key(p, who))
+}
+pub(super) fn load_store(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+) -> Result<ledger::Ledger> {
+    let mut store = disk(p, who)?;
+    // Clean tab caches are snapshots, never instructions to overwrite newer disk state.
+    let k = key(p, who);
+    if has_fault(a, p, who) {
+        let cached = a.borrow().history_cache.get(&k).cloned();
+        if let Some(cached) = cached {
+            let base = a
+                .borrow()
+                .history_bases
+                .get(&k)
+                .cloned()
+                .unwrap_or_default();
+            store.records = merge_cache(&store.records, &base, &cached)?;
+            store.reconcile();
+        }
+    }
+    Ok(store)
 }
 pub(super) fn load_current(
     a: &Rc<RefCell<App>>,
     p: &ModeratorProfile,
     who: &str,
 ) -> Result<Vec<Value>> {
-    let k = key(p, who);
-    let cached = a.borrow().history_cache.get(&k).cloned();
-    match disk(p, who) {
-        Ok(saved) => merge(&saved, cached.as_deref().unwrap_or(&[])),
+    match load_store(a, p, who) {
+        Ok(store) => {
+            if !has_fault(a, p, who) {
+                a.borrow_mut()
+                    .history_bases
+                    .insert(key(p, who), store.records.clone());
+            }
+            Ok(store.records)
+        }
         Err(error) => {
-            a.borrow_mut().history_faults.insert(k);
-            cached.ok_or(error)
+            let k = key(p, who);
+            a.borrow_mut().history_faults.insert(k.clone());
+            a.borrow().history_cache.get(&k).cloned().ok_or(error)
         }
     }
+}
+// Three-way merge: unchanged cached rows cannot overwrite a newer tab's work.
+fn merge_cache(disk: &[Value], base: &[Value], cached: &[Value]) -> Result<Vec<Value>> {
+    let mut updates = Vec::new();
+    for r in cached {
+        let id = recovery::identity(r);
+        let original = base.iter().find(|old| recovery::identity(old) == id);
+        if original == Some(r) && disk.iter().any(|old| recovery::identity(old) == id) {
+            continue;
+        }
+        if let Some(current) = disk.iter().find(|old| recovery::identity(old) == id) {
+            if original != Some(current) && current != r {
+                if ledger::resolved(current)
+                    && !ledger::resolved(r)
+                    && same_hex_bytes(&current["hash"], &r["hash"], Some(32))
+                {
+                    continue;
+                }
+                if ledger::resolved(current)
+                    && ledger::resolved(r)
+                    && current["state"] != r["state"]
+                {
+                    return Err("HISTORY_CONCURRENT_CHANGE");
+                }
+                if !current["resolution"].is_null()
+                    && !r["resolution"].is_null()
+                    && current["resolution"] != r["resolution"]
+                {
+                    return Err("HISTORY_CONCURRENT_CHANGE");
+                }
+                if !current["caseEvidence"].is_null()
+                    && !r["caseEvidence"].is_null()
+                    && current["caseEvidence"] != r["caseEvidence"]
+                {
+                    return Err("HISTORY_CONCURRENT_CHANGE");
+                }
+            }
+        }
+        updates.push(r.clone());
+    }
+    merge_retaining(disk, &updates)
+}
+fn stage(a: &Rc<RefCell<App>>, k: &str, records: Vec<Value>) {
+    let mut state = a.borrow_mut();
+    state.history_cache.insert(k.into(), records);
+    state.history_faults.insert(k.into());
+}
+fn persist_with(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+    mut store: ledger::Ledger,
+    write: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let k = key(p, who);
+    stage(a, &k, store.records.clone());
+    store.reconcile();
+    store.revision = store
+        .revision
+        .checked_add(1)
+        .ok_or("HISTORY_REVISION_LIMIT")?;
+    let raw = store.encode(p, who)?;
+    write(&raw)?;
+    a.borrow_mut()
+        .history_bases
+        .insert(k.clone(), store.records.clone());
+    a.borrow_mut().history_faults.remove(&k);
+    Ok(())
+}
+pub(super) fn persist(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+    store: ledger::Ledger,
+) -> Result<()> {
+    if !a.borrow().history_write_lock {
+        return Err("HISTORY_COORDINATION_UNAVAILABLE");
+    }
+    let k = key(p, who);
+    persist_with(a, p, who, store, |raw| {
+        storage()?
+            .set_item(&k, raw)
+            .map_err(|_| "HISTORY_SAVE_FAILED")
+    })
 }
 pub(super) fn save(
     a: &Rc<RefCell<App>>,
@@ -253,26 +414,93 @@ pub(super) fn save(
     records: &[Value],
 ) -> Result<()> {
     let k = key(p, who);
+    let cached = if has_fault(a, p, who) {
+        a.borrow()
+            .history_cache
+            .get(&k)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let incoming = merge_retaining(&cached, records)?;
+    // Stage before bounds, parsing, quota or disk failures. Export sees all known hashes.
+    stage(a, &k, incoming.clone());
+    let mut store = disk(p, who)?;
+    let base = a
+        .borrow()
+        .history_bases
+        .get(&k)
+        .cloned()
+        .unwrap_or_default();
+    store.records = merge_cache(&store.records, &base, &incoming)?;
+    persist(a, p, who, store)
+}
+fn rebase_checked(base: &mut Vec<Value>, disk: &[Value], id: &str) {
+    base.retain(|r| recovery::identity(r) != id);
+    if let Some(r) = disk.iter().find(|r| recovery::identity(r) == id) {
+        base.push(r.clone());
+    }
+}
+// Only the canonical receipt checker calls this after its final context checks.
+// Rebase that one checked identity; unrelated dirty rows still undergo conflict checks.
+pub(super) fn save_checked(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+    records: &[Value],
+    checked: &Value,
+) -> Result<()> {
+    if !a.borrow().history_write_lock {
+        return Err("HISTORY_COORDINATION_UNAVAILABLE");
+    }
+    let k = key(p, who);
     let cached = a
         .borrow()
         .history_cache
         .get(&k)
         .cloned()
         .unwrap_or_default();
-    let incoming = merge(&cached, records)?; // Retain uncertain hashes before every fallible storage operation.
-    a.borrow_mut()
-        .history_cache
-        .insert(k.clone(), incoming.clone());
-    a.borrow_mut().history_faults.insert(k.clone());
-    let saved = disk(p, who)?;
-    let full = merge(&saved, &incoming)?;
-    let raw = serde_json::to_string(&full).map_err(|_| "INVALID_HISTORY")?;
-    validate(&raw, p, who)?;
-    a.borrow_mut().history_cache.insert(k.clone(), full.clone());
-    storage()?
-        .set_item(&k, &raw)
-        .map_err(|_| "HISTORY_SAVE_FAILED")?;
-    a.borrow_mut().history_faults.remove(&k);
+    stage(a, &k, merge_retaining(&cached, records)?);
+    let current = disk(p, who)?;
+    rebase_checked(
+        a.borrow_mut().history_bases.entry(k).or_default(),
+        &current.records,
+        &recovery::identity(checked),
+    );
+    save(a, p, who, records)
+}
+pub(super) fn ensure_room(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+    reservation: &Value,
+) -> Result<()> {
+    load_store(a, p, who)?.room(reservation)
+}
+pub(super) fn import_room(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+    records: &[Value],
+) -> Result<()> {
+    let mut store = load_store(a, p, who)?;
+    let previous = store.active();
+    let before_count = previous.len();
+    let before_bytes = serde_json::to_vec(&previous)
+        .map_err(|_| "INVALID_HISTORY")?
+        .len();
+    store.records = records.to_vec();
+    store.reconcile();
+    let active = store.active();
+    let after_bytes = serde_json::to_vec(&active)
+        .map_err(|_| "INVALID_HISTORY")?
+        .len();
+    if (active.len() > ledger::ACTIVE_COUNT && active.len() > before_count)
+        || (after_bytes > ledger::ACTIVE_BYTES && after_bytes > before_bytes)
+    {
+        return Err("HISTORY_IMPORT_CAPACITY");
+    }
     Ok(())
 }
 /// Called only when persistence failed before opening a wallet prompt.
@@ -286,7 +514,8 @@ pub(super) fn cancel_unsent(
         records.retain(|r| r["requestId"] != reservation["requestId"] || !r["hash"].is_null());
     }
 }
-pub(super) fn guard(records: &[Value], action: &str, intent: &Value, caseid: &str) -> Result<()> {
+fn guard_state(records: &[Value], action: &str, intent: &Value, caseid: &str) -> Result<bool> {
+    let mut repeated = false;
     for r in records {
         let matching = match action {
             "approve" => r["action"] == "approve",
@@ -301,12 +530,18 @@ pub(super) fn guard(records: &[Value], action: &str, intent: &Value, caseid: &st
             _ => false,
         };
         if matching
-            && !["confirmed", "failed", "rejected"].contains(&r["state"].as_str().unwrap_or(""))
+            && !["confirmed", "failed", "rejected", "cancelled"]
+                .contains(&r["state"].as_str().unwrap_or(""))
         {
             return Err("CHECK_PRIOR_TRANSACTION_BEFORE_RESENDING");
         }
-        if matching&&r["state"]=="confirmed"&&r["action"]=="submit"&&action=="submit"&&!web_sys::window().unwrap().confirm_with_message("This exact publication already has a confirmed submission. Submit it again deliberately?").map_err(|_|"CONFIRMATION_FAILED")?{return Err("RESUBMISSION_CANCELLED");}
+        repeated |=
+            matching && r["state"] == "confirmed" && r["action"] == "submit" && action == "submit";
     }
+    Ok(repeated)
+}
+pub(super) fn guard(records: &[Value], action: &str, intent: &Value, caseid: &str) -> Result<()> {
+    if guard_state(records,action,intent,caseid)? && !web_sys::window().unwrap().confirm_with_message("This exact publication already has a confirmed submission. Submit it again deliberately?").map_err(|_|"CONFIRMATION_FAILED")? {return Err("RESUBMISSION_CANCELLED");}
     Ok(())
 }
 pub(super) fn record(
@@ -325,6 +560,16 @@ mod tests {
     use super::*;
     fn intent(fee: &str) -> Value {
         json!({"contentHash":"content","metaHash":"meta","topics":["biology"],"fee":fee})
+    }
+    #[test]
+    fn archived_duplicates_need_one_confirmation_but_later_unknown_still_blocks() {
+        let done = json!({"action":"submit","state":"confirmed","intent":intent("1200")});
+        assert!(guard_state(&[done.clone(), done.clone()], "submit", &intent("1400"), "").unwrap());
+        let later = json!({"action":"submit","state":"unknown","intent":intent("1300")});
+        assert_eq!(
+            guard_state(&[done, later], "submit", &intent("1400"), "").unwrap_err(),
+            "CHECK_PRIOR_TRANSACTION_BEFORE_RESENDING"
+        );
     }
     #[test]
     fn pending_submission_cannot_be_bypassed_by_fee_change() {
@@ -410,6 +655,116 @@ mod recovery_tests {
         let a = record("r1", json!(format!("0x{}", "66".repeat(32))), "unchecked");
         let b = record("r1", json!(format!("0x{}", "77".repeat(32))), "unchecked");
         assert_eq!(merge(&[a], &[b]).unwrap_err(), "HISTORY_CONFLICT");
+    }
+    #[test]
+    fn dirty_snapshot_preserves_other_tabs_newer_confirmation_and_archive() {
+        let old = record("r1", json!(format!("0x{}", "66".repeat(32))), "unchecked");
+        let other = record("r2", Value::Null, "requesting");
+        let mut returned = other.clone();
+        returned["hash"] = json!(format!("0x{}", "77".repeat(32)));
+        returned["state"] = json!("unchecked");
+        let mut checked = old.clone();
+        checked["state"] = json!("confirmed");
+        let mut disk = ledger::Ledger {
+            records: vec![checked.clone(), other.clone()],
+            ..ledger::Ledger::default()
+        };
+        disk.archive(&[checked]).unwrap();
+        disk.records = merge_cache(
+            &disk.records,
+            &[old.clone(), other],
+            &[old, returned.clone()],
+        )
+        .unwrap();
+        disk.reconcile();
+        assert_eq!(disk.records[0]["state"], "confirmed");
+        assert_eq!(disk.archived.len(), 1);
+        assert_eq!(disk.active(), vec![returned]);
+    }
+    #[test]
+    fn newer_confirmation_of_a_dirty_broadcast_wins_but_conflicting_receipts_refuse() {
+        let mut base = record("r1", Value::Null, "requesting");
+        let mut cache = base.clone();
+        cache["hash"] = json!(format!("0x{}", "66".repeat(32)));
+        cache["state"] = json!("unchecked");
+        let mut disk = cache.clone();
+        disk["state"] = json!("confirmed");
+        assert_eq!(
+            merge_cache(&[disk.clone()], &[base.clone()], &[cache.clone()]).unwrap()[0]["state"],
+            "confirmed"
+        );
+        base["hash"] = cache["hash"].clone();
+        base["state"] = json!("unchecked");
+        cache["state"] = json!("failed");
+        assert_eq!(
+            merge_cache(&[disk], &[base], &[cache]).unwrap_err(),
+            "HISTORY_CONCURRENT_CHANGE"
+        );
+    }
+    #[test]
+    fn concurrent_resolution_proofs_require_a_fresh_check_of_only_that_identity() {
+        let base = record("r1", json!(format!("0x{}", "66".repeat(32))), "unchecked");
+        let mut left = base.clone();
+        left["state"] = json!("confirmed");
+        left["resolution"] = json!({"hash":"one"});
+        let mut right = left.clone();
+        right["resolution"] = json!({"hash":"two"});
+        assert_eq!(
+            merge_cache(&[left.clone()], &[base.clone()], &[right.clone()]).unwrap_err(),
+            "HISTORY_CONCURRENT_CHANGE"
+        );
+        let unrelated = record("r2", Value::Null, "unknown");
+        let mut baseline = vec![base, unrelated.clone()];
+        rebase_checked(&mut baseline, &[left.clone()], &recovery::identity(&right));
+        let resolved =
+            merge_cache(&[left], &baseline, &[right.clone(), unrelated.clone()]).unwrap();
+        assert_eq!(resolved[0], right);
+        assert!(baseline.contains(&unrelated));
+        assert!(resolved.contains(&unrelated));
+    }
+    #[test]
+    fn failed_disk_write_keeps_returned_hash_in_exportable_cache_and_blocks_sends() {
+        let p = fixture_profile();
+        let a = Rc::new(RefCell::new(App::default()));
+        let sent = record(
+            "returned",
+            json!(format!("0x{}", "66".repeat(32))),
+            "unchecked",
+        );
+        let who = sent["publisher"].as_str().unwrap();
+        let store = ledger::Ledger {
+            records: vec![sent.clone()],
+            ..ledger::Ledger::default()
+        };
+        assert_eq!(
+            persist_with(&a, &p, who, store, |_| Err("HISTORY_SAVE_FAILED")).unwrap_err(),
+            "HISTORY_SAVE_FAILED"
+        );
+        assert!(has_fault(&a, &p, who));
+        assert_eq!(
+            a.borrow().history_cache[&key(&p, who)][0]["hash"],
+            sent["hash"]
+        );
+    }
+    #[test]
+    fn broadcast_growth_must_remain_exportable_past_active_byte_limit() {
+        let mut before = record("large-legacy", Value::Null, "requesting");
+        let base = serde_json::to_vec(&vec![before.clone()]).unwrap().len();
+        // This field was accepted in old public history. Exercise the exact byte edge.
+        before["caseId"] = json!("x".repeat(256 * 1024 - 20 - base));
+        let raw = serde_json::to_string(&vec![before.clone()]).unwrap();
+        validate(
+            &raw,
+            &fixture_profile(),
+            before["publisher"].as_str().unwrap(),
+        )
+        .unwrap();
+        let mut broadcast = before.clone();
+        broadcast["hash"] = json!(format!("0x{}", "66".repeat(32)));
+        broadcast["state"] = json!("unchecked");
+        let retained =
+            merge(&[before], &[broadcast.clone()]).expect("a returned hash must remain exportable");
+        assert_eq!(retained[0]["hash"], broadcast["hash"]);
     }
 }
 /// Ethereum hex is an encoding of bytes: letter case is not part of identity.
@@ -588,4 +943,75 @@ mod receipt_resolution_tests {
             "HISTORY_AMBIGUOUS_TRANSACTION"
         );
     }
+}
+
+// Serialize all journal writers across tabs. A busy lock refuses instead of queuing a send.
+pub(super) async fn coordinated(a: &Rc<RefCell<App>>, action: &'static str) -> Result<()> {
+    if ![
+        "approve",
+        "submit",
+        "refund",
+        "receipt",
+        "approvalreceipt",
+        "submissionreceipt",
+        "publication",
+        "importhistory",
+        "savehistory",
+        "commitarchive",
+    ]
+    .contains(&action)
+    {
+        return run(a, action).await;
+    }
+    let epoch = a.borrow().epoch;
+    let navigator = js_sys::Reflect::get(web_sys::window().unwrap().as_ref(), &"navigator".into())
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
+    let locks = js_sys::Reflect::get(&navigator, &"locks".into())
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
+    let request = js_sys::Reflect::get(&locks, &"request".into())
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
+    let result = Rc::new(RefCell::new(None));
+    let output = result.clone();
+    let state = a.clone();
+    let callback = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(move |lock: JsValue| {
+        let output = output.clone();
+        let state = state.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let r = if lock.is_null() {
+                Err("HISTORY_BUSY_IN_ANOTHER_TAB")
+            } else if let Err(e) = active(&state, epoch) {
+                Err(e)
+            } else {
+                state.borrow_mut().history_write_lock = true;
+                let result = run(&state, action).await;
+                state.borrow_mut().history_write_lock = false;
+                result
+            };
+            *output.borrow_mut() = Some(r);
+            Ok(JsValue::UNDEFINED)
+        })
+    });
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &"ifAvailable".into(), &JsValue::TRUE)
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
+    let promise = request
+        .call3(
+            &locks,
+            &"swarm-publisher-history-v2".into(),
+            &options,
+            callback.as_ref(),
+        )
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?
+        .dyn_into::<js_sys::Promise>()
+        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
+    JsFuture::from(promise)
+        .await
+        .map_err(|_| "HISTORY_COORDINATION_FAILED")?;
+    let r = result
+        .borrow_mut()
+        .take()
+        .ok_or("HISTORY_COORDINATION_FAILED")?;
+    r
 }

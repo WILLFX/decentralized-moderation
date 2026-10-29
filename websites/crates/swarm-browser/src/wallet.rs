@@ -5,20 +5,13 @@ use serde_json::{json, Value};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+#[path = "wallet/discovery.rs"]
+mod discovery;
+pub(crate) use discovery::{
+    discover, needs_selection, picker_choice, render_picker, select, selected_id,
+};
 pub(crate) fn provider() -> Result<JsValue> {
-    let window = web_sys::window().ok_or("WALLET_UNAVAILABLE")?;
-    let p = Reflect::get(window.as_ref(), &"ethereum".into()).map_err(|_| "WALLET_UNAVAILABLE")?;
-    if p.is_null() || p.is_undefined() {
-        return Err("WALLET_UNAVAILABLE");
-    }
-    if !Reflect::get(&p, &"isMetaMask".into())
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        return Err("METAMASK_PROVIDER_REQUIRED");
-    }
-    Ok(p)
+    discovery::provider()
 }
 async fn request(method: &str, params: Value) -> Result<JsValue> {
     let p = provider()?;
@@ -89,6 +82,20 @@ pub(crate) async fn check(chain: u64, voter: &str) -> Result<()> {
 /// Caller must check wallet, fresh evidence and its context generation immediately
 /// before this call. No extra asynchronous read may delay the final reveal guard.
 pub(crate) async fn send_prepared(chain: u64, from: &str, to: &str, data: &str) -> Result<String> {
+    send(chain, from, to, data, None).await
+}
+/// Moderator write-ahead recovery binds this nonce to the actual wallet request.
+/// No asynchronous reads may be added here after the final reveal guard.
+pub(crate) async fn send_journaled(
+    chain: u64,
+    from: &str,
+    to: &str,
+    data: &str,
+    nonce: u64,
+) -> Result<String> {
+    send(chain, from, to, data, Some(nonce)).await
+}
+fn transaction(chain: u64, from: &str, to: &str, data: &str, nonce: Option<u64>) -> Result<Value> {
     check_hex(from, 20, true)?;
     check_hex(to, 20, true)?;
     if data.len() < 10
@@ -98,14 +105,47 @@ pub(crate) async fn send_prepared(chain: u64, from: &str, to: &str, data: &str) 
     {
         return Err("INVALID_TRANSACTION");
     }
-    let hash = request(
-        "eth_sendTransaction",
-        json!([{"chainId":format!("0x{chain:x}"),
-        "from":from,"to":to,"data":data,"value":"0x0"}]),
-    )
-    .await?
-    .as_string()
-    .ok_or("INVALID_TRANSACTION_HASH")?;
+    let mut tx =
+        json!({"chainId":format!("0x{chain:x}"),"from":from,"to":to,"data":data,"value":"0x0"});
+    if let Some(nonce) = nonce {
+        tx["nonce"] = json!(format!("0x{nonce:x}"));
+    }
+    Ok(tx)
+}
+async fn send(chain: u64, from: &str, to: &str, data: &str, nonce: Option<u64>) -> Result<String> {
+    let tx = transaction(chain, from, to, data, nonce)?;
+    let hash = request("eth_sendTransaction", json!([tx]))
+        .await?
+        .as_string()
+        .ok_or("INVALID_TRANSACTION_HASH")?;
     check_hex(&hash, 32, true)?;
     Ok(hash.to_ascii_lowercase())
+}
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    #[test]
+    fn durable_nonce_is_in_the_wallet_envelope_and_cannot_change_value_or_recipient_checks() {
+        let from = format!("0x{}", "11".repeat(20));
+        let to = format!("0x{}", "22".repeat(20));
+        let tx = transaction(10200, &from, &to, "0x12345678", Some(u64::MAX)).unwrap();
+        assert_eq!(tx["nonce"], "0xffffffffffffffff");
+        assert_eq!(tx["from"], from);
+        assert_eq!(tx["to"], to);
+        assert_eq!(tx["value"], "0x0");
+        assert_eq!(tx["chainId"], "0x27d8");
+        assert!(transaction(10200, &from, &to, "0x12345678", None)
+            .unwrap()
+            .get("nonce")
+            .is_none());
+        assert!(transaction(
+            10200,
+            &from,
+            &format!("0x{}", "00".repeat(20)),
+            "0x12345678",
+            Some(9)
+        )
+        .is_err());
+        assert!(transaction(10200, &from, &to, "0x123", Some(9)).is_err());
+    }
 }

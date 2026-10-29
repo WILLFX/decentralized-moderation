@@ -29,6 +29,7 @@ pub(crate) struct CaseEvidence {
     pub topics: Vec<String>,
     pub eligibility: Eligibility,
     pub funds: ModeratorFunds,
+    pub challenge_bound: bool,
 }
 pub(crate) struct CasePage {
     pub source: SourceBlock,
@@ -226,7 +227,17 @@ async fn case_at(
     let refund_owed =
         Uint256::hex(&view(profile, ctx, target, "refundOwed(uint256)", &args).await?)
             .map_err(|e| e.0)?;
+    // Never add a capability/history read to the successful reveal path.
+    let outcome_recovery = if case.outcome_seed_block != 0 && [3, 5, 6].contains(&case.phase) {
+        view(profile, ctx, target, "outcomeRecoveryOf(uint256)", &args)
+            .await
+            .ok()
+            .and_then(|raw| decode_outcome_recovery(&raw, &case).ok())
+    } else {
+        None
+    };
     let snapshot = CaseSnapshot {
+        outcome_recovery,
         case_id: id,
         source: ctx.source.clone(),
         case,
@@ -258,7 +269,15 @@ async fn case_at(
             Err(e) => return Err(e),
         }
     };
+    let challenge_bound = if snapshot.case.phase == 4 {
+        view(profile, ctx, target, "challengeIntentVersion()", "")
+            .await
+            .is_ok_and(|raw| challenge_intent_supported(&raw))
+    } else {
+        false
+    };
     Ok(CaseEvidence {
+        challenge_bound,
         snapshot,
         topics,
         eligibility,

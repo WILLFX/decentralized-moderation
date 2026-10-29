@@ -1,0 +1,158 @@
+<a id="publisher-skip" class="skip" href="#editor-heading">Skip to current task</a>
+<header class="site-header"><a class="brand" href="#editor" data-view-link="editor">Swarm <span>Publish</span></a><p id="publisher-context">No source selected · draft editing is available</p><a href="#setup-task" data-view-link="source">Source &amp; wallet</a></header>
+<nav class="task-nav" aria-label="Publisher tasks"><a href="#editor" data-view-link="editor">Editor</a><a href="#review" data-view-link="review">Review &amp; submit</a><a href="#my-publications" data-view-link="publications">My publications</a><a href="#transaction-recovery" data-view-link="records">Saved requests</a></nav>
+<section id="wallet-request" class="wallet-banner" hidden tabindex="-1" aria-labelledby="wallet-request-title"><h2 id="wallet-request-title">Saved wallet request</h2><p id="wallet-request-note" role="status" aria-live="polite"></p><pre id="wallet-short"></pre><details><summary>Full saved request</summary><pre id="wallet-intent"></pre></details><a id="recover-pending" href="#transaction-recovery" data-view-link="records">Check this saved request</a></section>
+<p id="publisher-activity" class="hint" role="status" aria-live="polite"></p>
+<p id="history-attention" role="alert">Some request history could not be saved. Keep this tab open and use <a href="#transaction-recovery" data-view-link="records">Saved requests</a> to export or retry saving. Uncertain requests remain guarded.</p>
+<p id="notice" class="notice" role="status" aria-live="polite"></p>
+<section id="editor" data-view="editor"><h1 id="editor-heading" tabindex="-1">Create a publication</h1><p class="hint">Start with content and its description. Wallet setup comes when you are ready to publish.</p>
+<div class="editor-layout"><div id="content-task"><h2>Content</h2><div class="route-choice" role="group" aria-label="Content starting point"><button type="button" id="choose-file">Upload a file</button><button type="button" id="choose-reference">Use an existing reference</button></div>
+<div id="file-route"><label for="contentfile">Local content file</label><input id="contentfile" type="file" aria-describedby="content-file-note contentfile-error"><p id="content-file-note" class="hint">Selecting a file uploads nothing.</p><p id="contentfile-error" class="field-error"></p><p class="hint">Public, unencrypted raw upload · up to 256 KiB · uses your Bee postage.</p><button id="uploadcontent">Upload public content and verify readback</button><p id="upload-prerequisite" class="hint"></p></div>
+<div id="reference-route" hidden><p class="hint">Paste a reference from your upload workflow. For larger files or collections, use <a href="https://docs.ethswarm.org/docs/desktop/upload-content/" target="_blank" rel="noopener noreferrer">Swarm Desktop</a> first.</p></div>
+<label for="reference">Content reference</label><input id="reference" spellcheck="false" aria-describedby="reference-error reference-help"><p id="reference-help" class="hint">64 hexadecimal digits, with optional 0x. A verified upload fills this field.</p><p id="reference-error" class="field-error"></p>
+<details id="inspection-tools"><summary>Inspect the current content</summary><label for="contentgateway">Separate content gateway URL</label><input id="contentgateway" type="url" aria-describedby="contentgateway-error"><p id="contentgateway-error" class="field-error"></p><label class="check"><input id="contentcollection" type="checkbox">File or collection reference (/bzz)</label><p class="hint">Raw files use /bytes. Collections open their root/default document; no inner path is selected. This app does not authenticate all bytes of larger content or collections.</p><div class="actions"><button id="checkcontent" class="secondary">Check raw reference bytes (up to 256 KiB)</button><button id="downloadcontent" class="secondary">Download checked content</button></div><p><a id="contentviewer" target="_blank" rel="noopener noreferrer">Open current content separately</a></p><details><summary>Content address</summary><p id="content-view-address" class="long-value"></p></details></details>
+<label class="check"><input id="contentack" type="checkbox">I inspected this exact content and the description below matches it.</label><p id="contentack-error" class="field-error"></p><p id="content-feedback" role="status" aria-live="polite"></p><a href="#setup-task" data-view-link="source">Bee settings</a></div>
+<div id="draft-task"><h2>Description</h2><p class="hint">Title: 1–200 characters. Description: up to 5000. One to five topics, each 1–64 characters after normalization.</p><div id="field-summary" role="alert" tabindex="-1"></div>
+  <label for="entrytype">Category</label>
+  <select id="entrytype" aria-describedby="entrytype-help entrytype-error">
+    <option value="article">Article</option>
+    <option value="post">Post</option>
+    <option value="comment">Comment</option>
+    <option value="image">Image</option>
+    <option value="video">Video</option>
+    <option value="audio">Audio</option>
+    <option value="document">Document</option>
+    <option value="dataset">Dataset</option>
+    <option value="other">Other</option>
+  </select>
+  <p id="entrytype-help">Category describes the work; format describes the file. Category does not set its format.</p>
+  <p id="entrytype-error" class="field-error"></p>
+  <label for="title">Title</label>
+  <input id="title" aria-describedby="title-error">
+  <p id="title-error" class="field-error"></p>
+  <label for="description">Description (optional)</label>
+  <textarea id="description" rows="4" aria-describedby="description-error"></textarea>
+  <p id="description-error" class="field-error"></p>
+  <label for="topics">Topics — one per line, up to five</label>
+  <textarea id="topics" rows="5" aria-describedby="topics-error"></textarea>
+  <p id="topics-error" class="field-error"></p>
+  <label for="mimechoice">Common file format</label>
+  <select id="mimechoice">
+    <option value="">Choose a format suggestion</option>
+    <option value="text/plain">Plain text</option>
+    <option value="text/markdown">Markdown</option>
+    <option value="text/html">HTML</option>
+    <option value="application/pdf">PDF</option>
+    <option value="image/png">PNG image</option>
+    <option value="image/jpeg">JPEG image</option>
+    <option value="image/gif">GIF image</option>
+    <option value="image/webp">WebP image</option>
+    <option value="image/svg+xml">SVG image</option>
+    <option value="audio/mpeg">MP3 audio</option>
+    <option value="audio/ogg">Ogg audio</option>
+    <option value="video/mp4">MP4 video</option>
+    <option value="video/webm">WebM video</option>
+    <option value="application/json">JSON</option>
+    <option value="text/csv">CSV table</option>
+    <option value="application/octet-stream">Other binary file</option>
+  </select>
+  <button id="usemimetype">Use selected format</button>
+  <p>Apply a suggestion deliberately. It changes the exact MIME field and requires a new review; it does not verify the format.</p>
+  <label for="contenttype">Exact content type (MIME)</label>
+  <input id="contenttype" value="text/plain" aria-describedby="contenttype-help contenttype-error">
+  <p id="contenttype-help">For example text/plain or application/pdf. A browser-declared type is a clue, not verified format detection.</p>
+  <p id="contenttype-error" class="field-error"></p>
+<details><summary>Optional language and source</summary>  <label for="language">Language (optional, for example en)</label>
+  <input id="language" aria-describedby="language-error">
+  <p id="language-error" class="field-error"></p>
+  <label for="source">Source (optional)</label>
+  <input id="source" aria-describedby="source-error">
+  <p id="source-error" class="field-error"></p>
+</details></div></div>
+<p id="authoring-note" class="hint" role="status" aria-live="polite"></p><div class="actions"><button id="draft">Review publication</button><button id="exportdraft" class="secondary">Save draft file</button></div><details><summary>Load an authoring draft</summary><label for="draftfile">Saved authoring or older draft file</label><input id="draftfile" type="file" accept=".json"><button id="importdraft">Load as unreviewed text</button></details></section>
+<section id="review" data-view="review" hidden><div class="heading-line"><h1 id="review-heading" tabindex="-1">Review &amp; submit</h1><a href="#editor" data-view-link="editor">Edit publication</a></div><p id="review-empty">Build a review from the editor first. Editing clears the earlier review and upload checks.</p>
+<article id="publication-review" hidden><h2 id="review-title"></h2><p id="review-description"></p><p id="review-attributes" class="hint"></p><p id="review-source" class="hint"></p><p id="review-changes" class="hint"></p><p id="review-content-state"></p><details><summary>Exact metadata, references and normalization</summary><pre id="preview"></pre></details></article>
+<div class="review-layout"><section class="review-checks"><h2 id="progress-title">Check before publishing</h2><p id="publisher-next" class="next-step" role="status" aria-live="polite"></p><a id="review-setup" href="#setup-task" data-view-link="source">Choose source or connect wallet</a><a id="review-inspect" href="#editor" data-view-link="editor">Inspect content in the editor</a><button id="loadguidelines">Load and verify pinned guidelines</button><details><summary>Verified guidelines text</summary><pre id="guidelines"></pre></details><label class="check" id="metadata-ack"><input type="checkbox" id="ack">I reviewed this exact metadata and the verified guidelines.</label><p id="metadata-upload-effect" class="hint">Publishes metadata using Bee postage. This does not submit or pay the moderation fee.</p><button id="upload">Upload and verify public metadata</button><p id="draft-feedback" role="status" aria-live="polite"></p><details><summary>Prerequisite checklist</summary><ol id="publisher-steps"></ol></details></section>
+<section id="payment-task"><h2>Publication fee</h2><p id="review-account" class="context"></p><p id="review-cost"></p><button id="paymentfunds" class="secondary">Refresh fee and balances</button><button id="useminimum" class="secondary">Use current minimum fee</button><label for="fee" id="fee-label">Publication fee</label><input id="fee" inputmode="decimal" aria-describedby="fee-exact fee-error"><p id="fee-error" class="field-error"></p><details><summary>Exact token amounts and read source</summary><p id="token-context"></p><pre id="funds"></pre><p id="fee-exact"></p></details><p id="funds-feedback" role="status" aria-live="polite"></p><p class="hint">Wallet gas is separate. This call sends zero native coins as value.</p><p id="approval-note"></p><div class="actions"><button id="approve">Approve exact fee in wallet</button><button id="approvalreceipt" class="secondary">Check fee approval receipt</button></div><label id="resubmit-label" class="check"><input id="resubmit" type="checkbox" disabled>Deliberately submit this exact publication again and pay another fee. The earlier case stays unchanged.</label><p id="submission-note"></p><div class="actions"><button id="submit">Submit publication in wallet</button><button id="submissionreceipt" class="secondary">Check submission receipt</button></div><p id="payment-next" class="hint"></p><p id="transaction-feedback" tabindex="-1" role="status" aria-live="polite"></p><a href="#transaction-recovery" data-view-link="records">Open saved requests and recovery</a></section></div></section>
+<section id="setup-task" data-view="source" hidden><h1 id="source-heading" tabindex="-1">Source &amp; wallet</h1><p class="hint">Choose the deployment source you trust. The fingerprint verifies supplied bytes, not an operator's identity.</p>
+  <details open>
+    <summary>Load a public profile URL or setup link</summary>
+    <p>Copy both values from the deployment source you trust. A setup link fills the fields; it does not fetch or accept a profile.</p>
+    <label for="profileurl">Public publisher profile URL</label>
+    <input id="profileurl" type="url" maxlength="4096" aria-describedby="profileurl-error">
+    <p id="profileurl-error" class="field-error"></p>
+    <label for="profilepin">Expected profile fingerprint (Keccak-256)</label>
+    <input id="profilepin" maxlength="66" aria-describedby="profilepin-error">
+    <p id="profilepin-error" class="field-error"></p>
+    <button id="fetchprofile">Fetch profile for review</button>
+  </details>
+  <p>Or choose a local profile file. Local files may contain your private Bee access settings; do not share those files as public setup profiles.</p>
+  <label>Publisher JSON profile <input id="profile" type="file" accept=".json" aria-describedby="profile-error">
+  </label>
+  <p id="profile-error" class="field-error"></p>
+  <button id="loadprofilefile">Review selected profile file</button>
+<div id="profile-candidate-controls">
+  <p id="source-candidate" class="context" tabindex="-1"></p><details><summary>Full candidate identity</summary><pre id="profile-review"></pre></details>
+  <label class="check"><input id="trustprofile" type="checkbox">This candidate matches the deployment source I trust.</label>
+  <button id="useprofile">Use reviewed profile</button>
+</div>
+  <details><summary>Public setup link</summary><p id="setup-link" class="long-value"></p></details>
+  <details><summary>I operate a deployment and need to provide setup links</summary>
+    <p>Publish a public publisher JSON profile on a service your users trust. Exclude private RPC access settings and upload authorization. From this repository, generate the exact-byte fingerprint and link with:</p>
+    <pre>python tools/publisher_setup.py --profile public-profile.json --profile-url https://your-service.example/publisher.json --app-url https://your-publisher.example/</pre>
+    <p>Distribute the link through your deployment's announcement channel. Users still review its chain and contract pins. Each user may apply their own Bee settings below.</p>
+  </details>
+<details><summary>Active deployment details</summary><pre id="config">No profile.</pre><pre id="active-pins"></pre></details><label for="wallet-picker">Wallet</label><select id="wallet-picker"><option value="">Choose a wallet</option></select><div class="actions"><button id="connect">Connect or refresh wallet</button><button id="readfunds" class="secondary">Verify deployment and read fee</button></div><p id="wallet">Not connected.</p><p id="wallet-capability" class="hint"></p><p id="setup-feedback" tabindex="-1" role="status" aria-live="polite"></p><a id="source-funding-details" href="#review" data-view-link="review" hidden>Exact fee amounts and read details</a>  <details><summary>Use my own Bee node</summary>
+    <p>These local access settings may differ from the public profile. Applying them clears earlier content/review checks and does not change the chain or contract pins. Your node needs a usable postage batch.</p>
+    <label for="beeendpoint">Bee API base URL</label><input id="beeendpoint" type="url" aria-describedby="beeendpoint-error"><p id="beeendpoint-error" class="field-error"></p>
+    <label for="beebatch">Postage batch ID</label><input id="beebatch" maxlength="64" aria-describedby="beebatch-error"><p id="beebatch-error" class="field-error"></p>
+    <label for="beeauth">Authorization header (optional, local only)</label><input id="beeauth" type="password" autocomplete="off" aria-describedby="beeauth-error"><p id="beeauth-error" class="field-error"></p>
+    <button id="applybee">Apply my Bee settings</button><p id="bee-feedback" tabindex="-1" role="status" aria-live="polite"></p>
+  </details>
+<a id="source-return" href="#editor" data-view-link="editor">Continue in editor</a></section>
+<section id="my-publications" data-view="publications" hidden><h1 id="publications-heading" tabindex="-1">My publications</h1><p class="hint">Submitted does not mean listed. Open a saved publication to check its moderation and current index state.</p><p id="publication-list-note">Connect the intended account to read its saved submissions.</p><div id="publication-list"></div><p id="publication-page"></p><div class="actions"><button id="publicationprev" disabled class="secondary">Previous publications</button><button id="publicationnext" disabled class="secondary">Next publications</button></div><p id="publication-feedback" role="status" aria-live="polite"></p><article id="publication-current" hidden><h2 id="publication-current-heading" tabindex="-1"></h2><p id="publication-current-state"></p><p id="publication-current-membership"></p><p id="publication-current-next"></p><p id="publication-current-source" class="hint"></p><button id="refresh-publication" class="secondary">Refresh publication status</button><button id="refund" disabled>Withdraw existing refund to original submitter</button><p id="case-feedback" role="status" aria-live="polite"></p><details><summary>Full checked case evidence</summary><pre id="publication-status" tabindex="-1">No publication status read.</pre></details></article><a id="publication-connect" href="#setup-task" data-view-link="source">Connect the intended account</a><a href="#transaction-recovery" data-view-link="records">Recover a missing or interrupted submission</a></section>
+<section id="transaction-recovery" data-view="records" hidden><h1 id="records-heading" tabindex="-1">Saved requests</h1><p class="hint">Check an interrupted request. A receipt check never resends.</p><p id="records-limit-note" role="status">History cannot accept a new request in this context. Resolve its storage/capacity problem below; uncertain requests remain protected.</p>
+  <pre id="selected-request-short">Select a saved request to check.</pre><details><summary>Full selected request</summary><pre id="selected-request">No saved request selected.</pre></details>
+  <label>Original, replacement or cancellation transaction hash <input id="txhash">
+  </label>
+  <button id="receipt">Check receipt</button>
+  <p id="recovery-feedback" role="status" aria-live="polite"></p>
+  <pre id="transaction"></pre>
+<h2>Requests in this account</h2><p id="request-list-note">Connect the intended account to read saved requests.</p>  <p id="history-page"></p><button id="historyprev" disabled>Previous history page</button><button id="historynext" disabled>Next history page</button>
+  <div id="request-list"></div>
+<details id="history-maintenance"><summary>History files and capacity</summary>  <p id="history-capacity" role="status"></p>
+  <details><summary>Back up and archive resolved records</summary>
+    <p>Archiving frees active request slots. Full records stay in this browser for recovery, saved publication links and duplicate checks. First download a backup, select that saved file, verify it, then archive explicitly. Uncertain requests cannot be archived. A confirmed submission can still need moderation or a refund.</p>
+    <button id="preparearchive" disabled>Download archive backup</button>
+    <label>Saved archive backup <input id="archivefile" type="file" accept=".json"></label>
+    <button id="verifyarchive" disabled>Verify saved archive backup</button>
+    <button id="commitarchive" disabled>Archive verified resolved records</button>
+    <p id="archive-feedback" tabindex="-1" role="status" aria-live="polite">No archive prepared. A download request alone does not retire records.</p>
+  </details>
+  <button id="history">Read my public transaction history</button>
+  <button id="exporthistory">Export displayed history page</button>
+  <button id="savehistory">Retry saving public history</button>
+  <label>Saved public history <input id="historyfile" type="file" accept=".json">
+  </label>
+  <button id="importhistory">Merge public history</button><p id="history-feedback" tabindex="-1" role="status" aria-live="polite"></p>
+
+  <p>Every transaction needs your action and wallet confirmation. No automatic retries. The selected RPC supplies these results; runtime checks do not independently verify consensus.</p>
+</details><details class="utility"><summary>Find a case missing from saved publications</summary>
+
+  <details>
+    <summary>Find a case missing from local history</summary>
+    <label>Own submission scan cursor <input id="cursor" value="1">
+    </label>
+    <button id="loadowned">Scan next 20 case IDs for my submissions</button>
+    <pre id="owned"></pre>
+  </details>
+  <label>Case ID <input id="caseid">
+  </label>
+  <button id="readcase">Read case</button>
+  <pre id="case"></pre>
+
+
+</details>
+
+</section>
+<footer>Profiles and private Bee access stay in memory. Draft text is per tab; saved public requests stay in this browser. Metadata upload does not prove persistence or replication.</footer>

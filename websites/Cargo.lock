@@ -440,6 +440,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "js-sys",
+ "serde",
  "serde_json",
  "swarm-core",
  "wasm-bindgen",

@@ -31,28 +31,20 @@ pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
         );
         return Ok(());
     }
-    if action == "exportdraft" {
-        let d = a.borrow().draft.clone().ok_or("DRAFT_REQUIRED")?;
-        let metadata: Value = serde_json::from_slice(&d.bytes).map_err(|_| "INVALID_DRAFT")?;
-        return download("swarm-publication-draft.json",&json!({"format":"swarm-publication-draft","version":1,"chainId":p.deployment.chain_id,"contract":p.deployment.moderation.address,"publisher":who,"contentReference":d.content_hash,"metaHash":d.meta_hash,"metadata":metadata}).to_string());
-    }
     if action == "exporthistory" {
         let records = history::load_current(a, &p, &who)?;
+        let (page, _) = archive::page(&records, a.borrow().history_page);
         return download(
-            "swarm-publisher-public-history.json",
-            &serde_json::to_string(&records).map_err(|_| "EXPORT_FAILED")?,
+            "swarm-publisher-history-page.json",
+            &archive::file(&page, &p, &who, "swarm-publisher-history-page")?,
         );
     }
-    let id = if action == "importdraft" {
-        "draftfile"
-    } else {
-        "historyfile"
-    };
+    let id = "historyfile";
     let f = input(id)
         .files()
         .and_then(|f| f.get(0))
         .ok_or("FILE_REQUIRED")?;
-    if f.size() > 512.0 * 1024.0 {
+    if f.size() > ledger::FILE_BYTES as f64 {
         return Err("IMPORT_SIZE_LIMIT");
     }
     let raw = JsFuture::from(f.text())
@@ -63,92 +55,32 @@ pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
     active(a, epoch)?;
     wallet::check(p.deployment.chain_id, &who).await?;
     active(a, epoch)?;
-    if action == "importdraft" {
-        let d = parse_draft_file(&raw, &p, &who)?;
-        invalidate(a);
-        input("reference").set_value(&d.content_hash);
-        let metadata: Value = serde_json::from_slice(&d.bytes).map_err(|_| "INVALID_DRAFT")?;
-        fill_authoring(&metadata);
-        text(
-            "preview",
-            &format!(
-                "Imported draft {}. Upload and guideline acknowledgements must be repeated.\n{}",
-                d.meta_hash,
-                String::from_utf8_lossy(&d.bytes)
-            ),
-        );
-        a.borrow_mut().draft = Some(d);
-    } else {
-        let mut imported = parse_history_file(&raw, &p, &who)?;
-        let mut records = history::load_current(a, &p, &who)?;
-        for record in &mut imported {
-            record["state"] = json!(if record["hash"].is_null() {
-                "unknown"
-            } else {
-                "unchecked"
-            });
-            if !records.iter().any(|old| {
-                (!record["hash"].is_null() && old["hash"] == record["hash"])
-                    || (record["hash"].is_null()
-                        && old["data"] == record["data"]
-                        && old["to"] == record["to"])
-            }) {
-                records.push(record.clone());
-            }
-        }
-        if records.len() > 100 {
-            return Err("HISTORY_SIZE_LIMIT");
-        }
-        history::save(a, &p, &who, &records)?;
-        text("transaction","Public transaction history merged. Imported receipts require fresh verification before another matching send.");
-    }
+    let imported = parse_history_file(&raw, &p, &who)?;
+    let records = merge_import(&history::load_current(a, &p, &who)?, imported)?;
+    history::import_room(a, &p, &who, &records)?;
+    history::save(a, &p, &who, &records)?;
+    text("transaction","Public transaction history merged. Imported receipts require fresh verification before another matching send.");
     Ok(())
 }
-/// Accept a metadata authoring file as well as a context-bound draft envelope.
-pub(super) fn parse_draft_file(raw: &str, p: &ModeratorProfile, who: &str) -> Result<Draft> {
-    if raw.len() > 512 * 1024 {
-        return Err("IMPORT_SIZE_LIMIT");
+/// Equal calldata is not request identity: a later uncertain approval must survive import.
+pub(super) fn merge_import(existing: &[Value], imported: Vec<Value>) -> Result<Vec<Value>> {
+    let mut records = existing.to_vec();
+    for mut record in imported {
+        recovery::reset_import(&mut record);
+        if let Some(old) = records.iter().find(|old| {
+            recovery::identity(old) == recovery::identity(&record)
+                || history::same_hex_bytes(&old["hash"], &record["hash"], Some(32))
+        }) {
+            history::merge(&[old.clone()], &[record])?;
+            // An imported hint cannot replace locally checked status or nonce evidence.
+        } else {
+            records = history::merge(&records, &[record])?;
+        }
     }
-    let v: Value = serde_json::from_str(raw).map_err(|_| "INVALID_DRAFT")?;
-    let obj = v.as_object().ok_or("INVALID_DRAFT")?;
-    let legacy = !obj.contains_key("format");
-    let allowed = if legacy {
-        vec!["version", "contentReference", "metadata"]
-    } else {
-        vec![
-            "format",
-            "version",
-            "chainId",
-            "contract",
-            "publisher",
-            "contentReference",
-            "metaHash",
-            "metadata",
-        ]
-    };
-    if obj.keys().any(|k| !allowed.contains(&k.as_str())) || v["version"] != 1 {
-        return Err("INVALID_DRAFT");
-    }
-    if !legacy
-        && (v["format"] != "swarm-publication-draft"
-            || v["chainId"] != p.deployment.chain_id
-            || v["contract"] != p.deployment.moderation.address
-            || v["publisher"] != who)
-    {
-        return Err("DRAFT_CONTEXT_MISMATCH");
-    }
-    let draft = create_draft(
-        v["contentReference"].as_str().ok_or("INVALID_DRAFT")?,
-        &v["metadata"],
-    )
-    .map_err(|e| e.0)?;
-    if !legacy && draft.meta_hash != v["metaHash"] {
-        return Err("INVALID_DRAFT");
-    }
-    Ok(draft)
+    Ok(records)
 }
 pub(super) fn parse_history_file(raw: &str, p: &ModeratorProfile, who: &str) -> Result<Vec<Value>> {
-    if raw.len() > 256 * 1024 {
+    if raw.len() > ledger::FILE_BYTES {
         return Err("HISTORY_SIZE_LIMIT");
     }
     let v: Value = serde_json::from_str(raw).map_err(|_| "INVALID_HISTORY")?;
@@ -156,6 +88,35 @@ pub(super) fn parse_history_file(raw: &str, p: &ModeratorProfile, who: &str) -> 
         return history::merge(&[], &history::validate(raw, p, who)?);
     }
     let envelope = v.as_object().ok_or("INVALID_HISTORY")?;
+    if [
+        Some("swarm-publisher-archive"),
+        Some("swarm-publisher-history-page"),
+    ]
+    .contains(&v["format"].as_str())
+    {
+        if envelope.keys().any(|k| {
+            ![
+                "format",
+                "version",
+                "chainId",
+                "contract",
+                "publisher",
+                "records",
+            ]
+            .contains(&k.as_str())
+        }) || v["version"] != 1
+            || v["chainId"] != p.deployment.chain_id
+            || v["contract"] != p.deployment.moderation.address
+            || v["publisher"] != who
+        {
+            return Err("INVALID_HISTORY_CONTEXT");
+        }
+        let raw = v["records"].to_string();
+        return history::merge(
+            &[],
+            &history::validate_retained(&raw, p, who, ledger::ACTIVE_COUNT, ledger::FILE_BYTES)?,
+        );
+    }
     if envelope
         .keys()
         .any(|k| !["version", "records"].contains(&k.as_str()))
@@ -307,17 +268,6 @@ pub(super) fn parse_history_file(raw: &str, p: &ModeratorProfile, who: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn imports_authoring_file_without_credentials() {
-        let p = history::fixture_profile();
-        let who = format!("0x{}", "55".repeat(20));
-        let legacy = json!({"version":1,"contentReference":format!("0x{}","66".repeat(32)),"metadata":{"schemaVersion":1,"type":"article","title":"Cells","topics":["biology"],"contentType":"text/plain"}});
-        let draft = parse_draft_file(&legacy.to_string(), &p, &who).unwrap();
-        assert_eq!(draft.topic_keys.len(), 1);
-        let mut unsafe_file = legacy;
-        unsafe_file["authorization"] = json!("must not export");
-        assert!(parse_draft_file(&unsafe_file.to_string(), &p, &who).is_err());
-    }
     #[test]
     fn imports_public_history_with_exact_calldata_and_unchecked_receipts() {
         let p = history::fixture_profile();

@@ -10,8 +10,9 @@ browser-check = []
 [dependencies]
 swarm-core = { path = "../swarm-core" }
 serde_json.workspace = true
+serde.workspace = true
 hex.workspace = true
 wasm-bindgen = "=0.2.118"
 wasm-bindgen-futures = "=0.4.68"
 js-sys = "=0.3.95"
-web-sys = { version = "=0.3.95", features = ["Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "HtmlAnchorElement", "Event", "EventTarget", "FileList", "File", "Blob", "BlobPropertyBag", "Url", "Storage", "Location", "Performance", "Request", "RequestInit", "RequestMode", "RequestCache", "RequestCredentials", "RequestRedirect", "ReferrerPolicy", "Response", "Headers", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader"] }
+web-sys = { version = "=0.3.95", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCollection", "NodeList", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "HtmlAnchorElement", "KeyboardEvent", "Event", "EventTarget", "FileList", "File", "Blob", "BlobPropertyBag", "Url", "UrlSearchParams", "Storage", "Location", "Performance", "Request", "RequestInit", "RequestMode", "RequestCache", "RequestCredentials", "RequestRedirect", "ReferrerPolicy", "Response", "Headers", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader"] }

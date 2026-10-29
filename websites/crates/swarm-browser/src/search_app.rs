@@ -1,6 +1,10 @@
-//! Separate read-only search application. No wallet, transaction, or private storage API.
+//! Read-only reader journey. No wallet, transaction or private storage API.
 #[path = "search/reader.rs"]
 mod reader;
+#[path = "search/setup.rs"]
+mod setup;
+#[path = "search/view.rs"]
+mod view;
 use crate::{transport::fetch, BrowserResult as Result};
 use reader::{Context, Reader};
 use std::{
@@ -9,14 +13,14 @@ use std::{
     rc::Rc,
 };
 use swarm_core::{
-    moderator::{decode_bool, decode_case, decode_topics, Uint256},
+    moderator::{decode_bool, decode_case, decode_topics, SourceBlock, Uint256},
     review::{parse_metadata, resource_url, separate_content_url, Metadata, MAX_REVIEW_BYTES},
     search::*,
 };
-
+use view::*;
 use wasm_bindgen::{closure::Closure, prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{Document, HtmlAnchorElement, HtmlInputElement, RequestInit};
+use web_sys::{Document, HtmlInputElement, RequestInit};
 #[derive(Clone)]
 struct Row {
     entry: String,
@@ -25,6 +29,14 @@ struct Row {
     metadata: Option<Metadata>,
     error: Option<&'static str>,
     link: Option<String>,
+    checked: Option<(SourceBlock, f64)>,
+}
+#[derive(Clone)]
+struct Query {
+    plan: CategoryPlan,
+    category: bool,
+    label: String,
+    signature: String,
 }
 #[derive(Clone)]
 struct Session {
@@ -33,11 +45,13 @@ struct Session {
     ctx: Context,
     plan: CategoryPlan,
     category: bool,
+    query: Query,
     next_case: Uint256,
     next_scan: Uint256,
     bindings: Vec<Binding>,
     binding_limit: bool,
     row_limit: bool,
+    blocked: bool,
     topic_index: usize,
     offset: Uint256,
     rows: Vec<Row>,
@@ -46,14 +60,31 @@ struct Session {
     seen: BTreeSet<String>,
     counts: BTreeMap<String, Uint256>,
 }
+#[derive(Clone, Copy, PartialEq)]
+enum Task {
+    Source,
+    Graph,
+    Search,
+    Collect,
+    Page,
+    Metadata,
+    Row(usize),
+}
 struct App {
     document: Document,
     generation: Rc<Cell<u64>>,
+    focus_revision: Rc<Cell<u64>>,
     profile: Option<SearchProfile>,
+    candidate: Option<setup::Candidate>,
+    active_summary: String,
     graph: Option<Graph>,
+    graph_fingerprint: String,
     category_choices: Vec<(String, HtmlInputElement)>,
+    category_callbacks: Vec<Closure<dyn FnMut()>>,
     session: Option<Session>,
-    busy: bool,
+    last_query: Option<Query>,
+    editing_category: bool,
+    busy: Option<Task>,
     row_callbacks: Vec<Closure<dyn FnMut()>>,
 }
 type Shared = Rc<RefCell<App>>;
@@ -66,157 +97,257 @@ fn element(app: &Shared, id: &str) -> web_sys::Element {
 fn input(app: &Shared, id: &str) -> HtmlInputElement {
     element(app, id).unchecked_into()
 }
-fn notice(app: &Shared, text: &str) {
-    element(app, "notice").set_text_content(Some(text));
-}
 fn invalidate(app: &Shared) {
     let mut a = app.borrow_mut();
     a.generation.set(a.generation.get().wrapping_add(1));
     a.session = None;
-    a.busy = false;
+    a.busy = None;
     drop(a);
     element(app, "results").set_text_content(None);
-    notice(app, "Previous evidence cleared.");
+    text(app, "search-error", "");
+    refresh(app);
 }
-fn button<F>(app: &Shared, id: &str, run: F) -> std::result::Result<(), JsValue>
+fn cancel(app: &Shared) {
+    let mut a = app.borrow_mut();
+    let task = a.busy;
+    let next = a.generation.get().wrapping_add(1);
+    a.generation.set(next);
+    a.busy = None;
+    if let Some(s) = &mut a.session {
+        s.reader.expected = next;
+    }
+    drop(a);
+    refresh(app);
+    match task {
+        Some(Task::Source) => text(
+            app,
+            "source-feedback",
+            "Profile read cancelled. The active source has not changed.",
+        ),
+        Some(Task::Graph) => text(
+            app,
+            "category-feedback",
+            "Graph read cancelled. The active graph has not changed.",
+        ),
+        _ => {
+            text(app,"search-error","Read cancelled. Previously completed results remain at their stated block. Continue or retry when ready.");
+            focus(app, "results-heading");
+        }
+    }
+}
+fn event<F>(app: &Shared, id: &str, name: &str, run: F) -> std::result::Result<(), JsValue>
 where
     F: Fn(Shared) + 'static,
 {
     let a = app.clone();
     let c = Closure::<dyn FnMut()>::new(move || run(a.clone()));
-    element(app, id).add_event_listener_with_callback("click", c.as_ref().unchecked_ref())?;
+    element(app, id).add_event_listener_with_callback(name, c.as_ref().unchecked_ref())?;
     c.forget();
     Ok(())
 }
-fn start_work<F, Fut>(app: Shared, work: F)
+fn button<F>(app: &Shared, id: &str, run: F) -> std::result::Result<(), JsValue>
+where
+    F: Fn(Shared) + 'static,
+{
+    event(app, id, "click", run)
+}
+// User activity revokes an asynchronous action's permission to move focus.
+// Capture listeners run before Enter launches a query from the topic field.
+fn bind_focus_intent(app: &Shared) -> std::result::Result<(), JsValue> {
+    for name in [
+        "focusin",
+        "input",
+        "change",
+        "pointerdown",
+        "keydown",
+        "visibilitychange",
+    ] {
+        let revision = app.borrow().focus_revision.clone();
+        let changed = Closure::<dyn FnMut()>::new(move || {
+            revision.set(revision.get().wrapping_add(1));
+        });
+        app.borrow()
+            .document
+            .add_event_listener_with_callback_and_bool(
+                name,
+                changed.as_ref().unchecked_ref(),
+                true,
+            )?;
+        changed.forget();
+    }
+    let revision = app.borrow().focus_revision.clone();
+    let blurred = Closure::<dyn FnMut()>::new(move || {
+        revision.set(revision.get().wrapping_add(1));
+    });
+    web_sys::window()
+        .unwrap()
+        .add_event_listener_with_callback("blur", blurred.as_ref().unchecked_ref())?;
+    blurred.forget();
+    Ok(())
+}
+fn start_work<F, Fut>(app: Shared, task: Task, work: F)
 where
     F: FnOnce(Shared) -> Fut + 'static,
     Fut: std::future::Future<Output = Result<()>> + 'static,
 {
-    if app.borrow().busy {
-        notice(
-            &app,
-            "A read is in progress. Cancel it before starting another.",
-        );
+    if app.borrow().busy.is_some() {
         return;
     }
-    app.borrow_mut().busy = true;
+    let focus_revision = app.borrow().focus_revision.get();
+    app.borrow_mut().busy = Some(task);
     let generation = app.borrow().generation.get();
-    notice(&app, "Reading and verifying…");
+    if let Task::Row(i) = task {
+        if let Some(row) = app
+            .borrow_mut()
+            .session
+            .as_mut()
+            .and_then(|s| s.rows.get_mut(i))
+        {
+            row.link = None;
+            row.checked = None;
+            row.error = None;
+        }
+        update_row(&app, i);
+    }
+    text(&app, "search-error", "");
+    refresh(&app);
     spawn_local(async move {
-        if let Some(s) = &mut app.borrow_mut().session {
-            for r in &mut s.rows {
-                r.link = None;
-            }
+        if generation != app.borrow().generation.get() {
+            return;
         }
-        if app.borrow().session.is_some() {
-            render(&app);
-            notice(&app, "Reading and verifying…");
+        let result = work(app.clone()).await;
+        let succeeded = result.is_ok();
+        if generation != app.borrow().generation.get() {
+            return;
         }
-        let r = work(app.clone()).await;
-        if app.borrow().generation.get() == generation {
-            app.borrow_mut().busy = false;
-            if let Err(e) = r {
-                notice(&app, e)
-            }
+        app.borrow_mut().busy = None;
+        if let Err(code) = result {
+            show_failure(&app, task, code);
+        }
+        refresh(&app);
+        let still_owns_focus = app.borrow().focus_revision.get() == focus_revision;
+        if still_owns_focus
+            && ((succeeded && matches!(task, Task::Search | Task::Page))
+                || matches!(task, Task::Collect | Task::Metadata)
+                || app.borrow().session.as_ref().is_some_and(|s| s.blocked))
+        {
+            focus(&app, "results-heading");
         }
     });
 }
-async fn file_text(app: &Shared, id: &str, limit: u64) -> Result<String> {
+async fn file_bytes(app: &Shared, id: &str) -> Result<Vec<u8>> {
     let f = input(app, id)
         .files()
         .and_then(|f| f.get(0))
         .ok_or("SELECT_FILE")?;
-    if f.size() > limit as f64 {
+    if f.size() > 65536.0 {
         return Err("FILE_TOO_LARGE");
     }
-    JsFuture::from(f.text())
+    let data = JsFuture::from(f.array_buffer())
         .await
-        .map_err(|_| "FILE_READ_FAILED")?
-        .as_string()
-        .ok_or("FILE_READ_FAILED")
-}
-async fn load_profile(app: Shared) -> Result<()> {
-    let epoch = app.borrow().generation.get();
-    let t = file_text(&app, "profile", 65536).await?;
-    if epoch != app.borrow().generation.get() {
-        return Err("CANCELLED");
+        .map_err(|_| "FILE_READ_FAILED")?;
+    let bytes = js_sys::Uint8Array::new(&data).to_vec();
+    if bytes.len() > 65536 {
+        return Err("FILE_TOO_LARGE");
     }
-    let p = parse_profile(&t).map_err(|e| e.0)?;
-    app.borrow_mut().profile = Some(p);
-    notice(
-        &app,
-        "Search profile loaded. Search uses read-only RPC; no wallet connection is required.",
-    );
-    Ok(())
+    Ok(bytes)
 }
-async fn load_graph(app: Shared) -> Result<()> {
-    let epoch = app.borrow().generation.get();
-    let t = file_text(&app, "graph", 65536).await?;
-    if epoch != app.borrow().generation.get() {
-        return Err("CANCELLED");
-    }
-    let g = Graph::parse(t.as_bytes()).map_err(|e| e.0)?;
-    let root = element(&app, "categories");
-    root.set_text_content(None);
-    let document = app.borrow().document.clone();
-    let mut choices = Vec::new();
-    for (index, category) in g.categories.iter().enumerate() {
-        let label = document
-            .create_element("label")
-            .map_err(|_| "RENDER_FAILED")?;
-        let choice = document
-            .create_element("input")
-            .map_err(|_| "RENDER_FAILED")?
-            .dyn_into::<HtmlInputElement>()
-            .map_err(|_| "RENDER_FAILED")?;
-        choice.set_type("checkbox");
-        choice.set_id(&format!("category-choice-{index}"));
-        let text = document
-            .create_element("span")
-            .map_err(|_| "RENDER_FAILED")?;
-        text.set_text_content(Some(&category.label));
-        label.append_child(&choice).map_err(|_| "RENDER_FAILED")?;
-        label.append_child(&text).map_err(|_| "RENDER_FAILED")?;
-        root.append_child(&label).map_err(|_| "RENDER_FAILED")?;
-        choices.push((category.id.clone(), choice));
-    }
-    let mut state = app.borrow_mut();
-    state.graph = Some(g);
-    state.category_choices = choices;
-    drop(state);
-    notice(&app,"Category graph loaded as local query data. Its relationships do not prove moderation approval.");
-    Ok(())
-}
-async fn begin(app: Shared, category: bool) -> Result<()> {
-    let p = app.borrow().profile.clone().ok_or("LOAD_SEARCH_PROFILE")?;
-    let plan = if category {
-        let ids: Vec<String> = app
-            .borrow()
+fn query(app: &Shared, category: bool) -> Result<Query> {
+    if category {
+        let a = app.borrow();
+        let ids = a
             .category_choices
             .iter()
-            .filter(|(_, choice)| choice.checked())
+            .filter(|(_, c)| c.checked())
             .map(|(id, _)| id.clone())
-            .collect();
-        app.borrow()
-            .graph
-            .as_ref()
-            .ok_or("LOAD_CATEGORY_GRAPH")?
-            .plan(
-                &ids,
-                input(&app, "expanded").checked(),
-                input(&app, "all").checked(),
-            )
-            .map_err(|e| e.0)?
+            .collect::<Vec<_>>();
+        let graph = a.graph.as_ref().ok_or("LOAD_CATEGORY_GRAPH")?;
+        let expanded = input(app, "expanded").checked();
+        let all = input(app, "all").checked();
+        let plan = graph.plan(&ids, expanded, all).map_err(|e| e.0)?;
+        let names = ids
+            .iter()
+            .map(|id| {
+                graph
+                    .categories
+                    .iter()
+                    .find(|c| &c.id == id)
+                    .unwrap()
+                    .label
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let label = format!(
+            "{} groups: {} · descendants {}",
+            if all { "All" } else { "Any" },
+            names.join(", "),
+            if expanded { "included" } else { "excluded" }
+        );
+        let signature = serde_json::json!([ids, expanded, all, a.graph_fingerprint]).to_string();
+        Ok(Query {
+            plan,
+            category,
+            label,
+            signature,
+        })
     } else {
-        let (t, key) = normalize_topic(&input(&app, "topic").value()).map_err(|e| e.0)?;
-        input(&app, "topic").set_value(&t);
-        CategoryPlan {
-            terms: vec![vec![key.clone()]],
-            topics: vec![key],
-            all: true,
+        let (topic, key) = normalize_topic(&input(app, "topic").value()).map_err(|e| e.0)?;
+        Ok(Query {
+            plan: CategoryPlan {
+                terms: vec![vec![key.clone()]],
+                topics: vec![key],
+                all: true,
+            },
+            category,
+            label: format!("Topic “{topic}”"),
+            signature: topic,
+        })
+    }
+}
+fn launch_query(app: Shared, category: bool) {
+    if app.borrow().busy.is_some() {
+        return;
+    }
+    if app.borrow().profile.is_none() {
+        text(&app, "topic-feedback", "Choose a search source first.");
+        set_open(&app, "source-settings", true);
+        focus(&app, "profile-url");
+        return;
+    }
+    let q = match query(&app, category) {
+        Ok(q) => q,
+        Err(e) => {
+            if !category {
+                let _ = element(&app, "topic").set_attribute("aria-invalid", "true");
+            }
+            text(
+                &app,
+                if category {
+                    "category-feedback"
+                } else {
+                    "topic-feedback"
+                },
+                &message(e),
+            );
+            return;
         }
     };
+    app.borrow_mut().editing_category = category;
+    if !category {
+        input(&app, "topic").set_value(&q.signature);
+    }
+    text(&app, "topic-feedback", "");
+    text(&app, "category-feedback", "");
+    launch_spec(app, q);
+}
+fn launch_spec(app: Shared, q: Query) {
+    invalidate(&app);
+    app.borrow_mut().last_query = Some(q.clone());
+    text(&app, "applied-query", &q.label);
+    start_work(app, Task::Search, move |a| begin(a, q));
+}
+async fn begin(app: Shared, query: Query) -> Result<()> {
+    let p = app.borrow().profile.clone().ok_or("LOAD_SEARCH_PROFILE")?;
     let generation = app.borrow().generation.clone();
     let expected = generation.get();
     let reader = Reader {
@@ -240,7 +371,7 @@ async fn begin(app: Shared, category: bool) -> Result<()> {
         return Err("INVALID_CONTRACT_STATE");
     }
     let mut counts = BTreeMap::new();
-    for topic in &plan.topics {
+    for topic in &query.plan.topics {
         let n = Uint256::hex(
             &reader
                 .call(
@@ -260,13 +391,15 @@ async fn begin(app: Shared, category: bool) -> Result<()> {
         profile: p,
         reader,
         ctx,
-        plan,
-        category,
+        plan: query.plan.clone(),
+        category: query.category,
+        query,
         next_case,
         next_scan: Uint256::from_u64(1),
         bindings: Vec::new(),
         binding_limit: false,
         row_limit: false,
+        blocked: false,
         topic_index: 0,
         offset: Uint256::ZERO,
         rows: Vec::new(),
@@ -276,7 +409,8 @@ async fn begin(app: Shared, category: bool) -> Result<()> {
         counts,
     };
     app.borrow_mut().session = Some(s);
-    advance(app).await
+    advance(app.clone()).await?;
+    Ok(())
 }
 async fn advance(app: Shared) -> Result<()> {
     let mut s = app.borrow().session.clone().ok_or("SEARCH_FIRST")?;
@@ -354,7 +488,7 @@ async fn advance(app: Shared) -> Result<()> {
     s.reader.finish(&ctx).await?;
     s.reader.live()?;
     app.borrow_mut().session = Some(s);
-    render(&app);
+    render_rows(&app);
     Ok(())
 }
 async fn read_rows(
@@ -409,6 +543,7 @@ async fn read_rows(
             metadata: None,
             error: None,
             link: None,
+            checked: None,
         });
     }
     Ok(rows)
@@ -531,47 +666,79 @@ async fn hydrate(s: &mut Session) -> Result<()> {
                 Err("CANCELLED") => return Err("CANCELLED"),
                 Err(e) => {
                     s.rows[i].error = Some(e);
-                    s.rows[i].metadata = None
+                    s.rows[i].metadata = None;
+                    s.rows[i].link = None;
+                    s.rows[i].checked = None
                 }
             }
         }
     }
     Ok(())
 }
-async fn next(app: Shared) -> Result<()> {
+async fn page(app: Shared, forward: bool) -> Result<()> {
     let mut s = app.borrow().session.clone().ok_or("SEARCH_FIRST")?;
-    if s.category && s.done {
-        if (s.page + 1) * s.profile.page_size < s.rows.len() {
-            s.page += 1;
-            hydrate(&mut s).await?;
-            s.reader.finish(&s.ctx).await?;
-            s.reader.live()?;
-            app.borrow_mut().session = Some(s);
-            render(&app);
-            Ok(())
-        } else {
-            Err("NO_NEXT_PAGE")
-        }
-    } else if s.done {
-        Err("NO_NEXT_PAGE")
-    } else {
-        advance(app).await
+    if s.blocked || collecting(&s) {
+        return Err("INCOMPLETE_SEARCH_RESULT");
     }
+    let destination = if forward {
+        s.page.checked_add(1).ok_or("NO_NEXT_PAGE")?
+    } else {
+        s.page.checked_sub(1).ok_or("NO_PREVIOUS_PAGE")?
+    };
+    let ctx = s.reader.begin(Some(&s.ctx)).await?;
+    if s.category {
+        if destination * s.profile.page_size >= s.rows.len() {
+            return Err("NO_NEXT_PAGE");
+        }
+        s.page = destination;
+    } else {
+        if forward && s.done {
+            return Err("NO_NEXT_PAGE");
+        }
+        let offset = destination
+            .checked_mul(s.profile.page_size)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or("INVALID_SEARCH_LIMIT")?;
+        let topic = s.plan.topics[0].clone();
+        s.rows = read_rows(
+            &s,
+            &ctx,
+            &topic,
+            Uint256::from_u64(offset),
+            s.profile.page_size,
+        )
+        .await?;
+        s.page = destination;
+        s.offset = Uint256::from_u64(offset);
+        for _ in &s.rows {
+            s.offset = increment(s.offset).map_err(|e| e.0)?;
+        }
+        s.done = s.offset >= s.counts[&topic];
+    }
+    hydrate(&mut s).await?;
+    s.reader.finish(&ctx).await?;
+    s.reader.live()?;
+    app.borrow_mut().session = Some(s);
+    render_rows(&app);
+    Ok(())
 }
 async fn retry(app: Shared) -> Result<()> {
     let mut s = app.borrow().session.clone().ok_or("SEARCH_FIRST")?;
+    if s.blocked || collecting(&s) {
+        return Err("INCOMPLETE_SEARCH_RESULT");
+    }
     s.reader.begin(Some(&s.ctx)).await?;
     hydrate(&mut s).await?;
     s.reader.finish(&s.ctx).await?;
     s.reader.live()?;
     app.borrow_mut().session = Some(s);
-    render(&app);
+    render_rows(&app);
     Ok(())
 }
 async fn open(app: Shared, index: usize) -> Result<()> {
     let mut s = app.borrow().session.clone().ok_or("SEARCH_FIRST")?;
     let row = s.rows.get(index).ok_or("INVALID_ROW")?.clone();
-    if s.binding_limit || s.row_limit {
+    if s.blocked || s.binding_limit || s.row_limit {
         return Err("INCOMPLETE_SEARCH_RESULT");
     }
     let b = match &row.resolution {
@@ -657,114 +824,13 @@ async fn open(app: Shared, index: usize) -> Result<()> {
     s.reader.live()?;
     s.rows[index].metadata = Some(metadata);
     s.rows[index].link = Some(link);
+    s.rows[index].error = None;
+    s.rows[index].checked = Some((ctx.source.clone(), js_sys::Date::now()));
     app.borrow_mut().session = Some(s);
-    render(&app);
-    notice(&app,"Current membership rechecked. Use the separate content link. Metadata authentication does not certify content safety.");
+    update_row(&app, index);
     Ok(())
 }
-fn render(app: &Shared) {
-    let Some(s) = app.borrow().session.clone() else {
-        return;
-    };
-    let root = element(app, "results");
-    root.set_text_content(None);
-    app.borrow_mut().row_callbacks.clear();
-    let scanning = s.next_scan < s.next_case && s.counts.values().any(|n| *n != Uint256::ZERO);
-    notice(
-        app,
-        &format!(
-            "Pinned source block {}. {}",
-            s.ctx.source.number,
-            if s.binding_limit {
-                format!("Binding limit reached ({}). Provenance is incomplete at case {}. Rows remain unresolved; no content action is available. Registry pagination can continue.", MAX_BINDINGS, s.next_scan)
-            } else if s.row_limit {
-                format!("Category row limit reached ({}). The category result is incomplete; rows remain non-actionable.", MAX_CATEGORY_ROWS)
-            } else if scanning {
-                format!(
-                    "Provenance scan next case {} of {}. Continue scan to resolve rows.",
-                    s.next_scan, s.next_case
-                )
-            } else if s.category && !s.done {
-                format!(
-                    "Collecting category topic {} of {}. Continue scan.",
-                    s.topic_index + 1,
-                    s.plan.topics.len()
-                )
-            } else {
-                format!(
-                    "{} rows on this result set. {}",
-                    s.rows.len(),
-                    if s.done {
-                        "Collection complete."
-                    } else {
-                        "Next page available."
-                    }
-                )
-            }
-        ),
-    );
-    // Incomplete and capped queries deliberately show non-actionable rows.
 
-    let lo = if s.category {
-        s.page * s.profile.page_size
-    } else {
-        0
-    };
-    let hi = (lo + s.profile.page_size).min(s.rows.len());
-    for i in lo..hi {
-        let r = &s.rows[i];
-        let d = app.borrow().document.clone();
-        let article = d.create_element("article").unwrap();
-        let title = d.create_element("h3").unwrap();
-        title.set_text_content(Some(
-            r.metadata
-                .as_ref()
-                .map(|m| m.title.as_str())
-                .unwrap_or("Unverified metadata"),
-        ));
-        article.append_child(&title).unwrap();
-        let detail = d.create_element("p").unwrap();
-        detail.set_text_content(Some(&format!(
-            "Entry {} · {}",
-            r.entry,
-            match &r.resolution {
-                Resolution::Unresolved => "UNRESOLVED",
-                Resolution::Ambiguous => "AMBIGUOUS",
-                Resolution::Resolved(_) => r.error.unwrap_or(if r.metadata.is_some() {
-                    "Authenticated metadata and historical LIST provenance"
-                } else {
-                    "Historical LIST binding; metadata not loaded"
-                }),
-            }
-        )));
-        article.append_child(&detail).unwrap();
-        if r.metadata.is_some() && !s.binding_limit && !s.row_limit {
-            let b = d.create_element("button").unwrap();
-            b.set_text_content(Some("Recheck current membership for content"));
-            let a = app.clone();
-            let cb = Closure::<dyn FnMut()>::new(move || {
-                let x = a.clone();
-                start_work(x, move |app| open(app, i));
-            });
-            b.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())
-                .unwrap();
-            app.borrow_mut().row_callbacks.push(cb);
-            article.append_child(&b).unwrap();
-        }
-        if let Some(url) = &r.link {
-            let a = d
-                .create_element("a")
-                .unwrap()
-                .unchecked_into::<HtmlAnchorElement>();
-            a.set_href(url);
-            a.set_target("_blank");
-            a.set_rel("noopener noreferrer");
-            a.set_text_content(Some("Open content separately"));
-            article.append_child(&a).unwrap();
-        }
-        root.append_child(&article).unwrap();
-    }
-}
 pub fn start_search() -> std::result::Result<(), JsValue> {
     let document = web_sys::window()
         .ok_or_else(|| JsValue::from_str("WINDOW_UNAVAILABLE"))?
@@ -773,37 +839,86 @@ pub fn start_search() -> std::result::Result<(), JsValue> {
     let app = Rc::new(RefCell::new(App {
         document,
         generation: Rc::new(Cell::new(0)),
+        focus_revision: Rc::new(Cell::new(0)),
         profile: None,
+        candidate: None,
+        active_summary: String::new(),
         graph: None,
+        graph_fingerprint: String::new(),
         category_choices: Vec::new(),
+        category_callbacks: Vec::new(),
         session: None,
-        busy: false,
+        last_query: None,
+        editing_category: false,
+        busy: None,
         row_callbacks: Vec::new(),
     }));
-    button(&app, "load-profile", |a| {
-        invalidate(&a);
-        a.borrow_mut().profile = None;
-        start_work(a, load_profile)
+    bind_focus_intent(&app)?;
+    event(&app, "profile", "change", |a| {
+        start_work(a, Task::Source, |a| setup::load(a, false))
     })?;
-    button(&app, "load-graph", |a| {
-        invalidate(&a);
-        a.borrow_mut().graph = None;
-        a.borrow_mut().category_choices.clear();
-        element(&a, "categories").set_text_content(None);
-        start_work(a, load_graph)
+    button(&app, "load-profile-url", |a| {
+        start_work(a, Task::Source, |a| setup::load(a, true))
     })?;
-    button(&app, "search", |a| {
-        invalidate(&a);
-        start_work(a, |a| begin(a, false))
+    button(&app, "use-profile", setup::accept)?;
+    event(&app, "trust-profile", "change", |a| refresh(&a))?;
+    for id in ["profile-url", "profile-pin"] {
+        event(&app, id, "input", |a| {
+            a.borrow_mut().candidate = None;
+            hidden(&a, "candidate", true);
+            refresh(&a);
+        })?;
+    }
+    event(&app, "graph", "change", |a| {
+        start_work(a, Task::Graph, setup::load_graph)
     })?;
-    button(&app, "category-search", |a| {
-        invalidate(&a);
-        start_work(a, |a| begin(a, true))
+    button(&app, "source-link", |a| {
+        set_open(&a, "source-settings", true)
     })?;
-    button(&app, "continue", |a| start_work(a, advance))?;
-    button(&app, "next", |a| start_work(a, next))?;
-    button(&app, "retry", |a| start_work(a, retry))?;
-    button(&app, "cancel", |a| invalidate(&a))?;
-    element(&app, "boot").set_text_content(Some("Load your current search JSON profile."));
+    button(&app, "search", |a| launch_query(a, false))?;
+    button(&app, "category-search", |a| launch_query(a, true))?;
+    event(&app, "topic", "input", |a| {
+        a.borrow_mut().editing_category = false;
+        text(&a, "topic-feedback", "");
+        let _ = element(&a, "topic").remove_attribute("aria-invalid");
+        refresh(&a);
+    })?;
+    for id in ["expanded", "all"] {
+        event(&app, id, "change", |a| {
+            a.borrow_mut().editing_category = true;
+            category_preview(&a);
+            refresh(&a);
+        })?;
+    }
+    // A key handler avoids form navigation: the static site's CSP forbids form actions.
+    let a = app.clone();
+    let enter =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            if e.key() == "Enter" && !e.is_composing() {
+                e.prevent_default();
+                launch_query(a.clone(), false);
+            }
+        });
+    element(&app, "topic")
+        .add_event_listener_with_callback("keydown", enter.as_ref().unchecked_ref())?;
+    enter.forget();
+    button(&app, "continue", |a| start_work(a, Task::Collect, advance))?;
+    button(&app, "previous", |a| {
+        start_work(a, Task::Page, |a| page(a, false))
+    })?;
+    button(&app, "next", |a| {
+        start_work(a, Task::Page, |a| page(a, true))
+    })?;
+    button(&app, "retry", |a| start_work(a, Task::Metadata, retry))?;
+    button(&app, "cancel", |a| cancel(&a))?;
+    button(&app, "fresh", |a| {
+        let query = a.borrow().last_query.clone();
+        if let Some(q) = query {
+            launch_spec(a, q);
+        }
+    })?;
+    setup::from_link(&app);
+    text(&app, "boot", "");
+    refresh(&app);
     Ok(())
 }

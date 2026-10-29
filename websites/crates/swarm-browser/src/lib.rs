@@ -1,10 +1,13 @@
 //! Browser adapters and explicit workflows for the separate Swarm websites.
-mod case;
+mod moderator_view;
 mod registration;
 mod saved_vote;
 mod state;
 
 pub(crate) type BrowserResult<T> = std::result::Result<T, &'static str>;
+
+#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
+mod token_amounts;
 
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
 mod app;
@@ -56,3 +59,7 @@ pub fn start_search() -> Result<(), wasm_bindgen::JsValue> {
     any(target_arch = "wasm32", feature = "browser-check")
 ))]
 pub use vault::VoteVault;
+
+#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
+#[path = "moderator/requests.rs"]
+mod moderator_requests;

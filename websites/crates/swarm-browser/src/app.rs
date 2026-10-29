@@ -17,6 +17,7 @@ type Result<T> = std::result::Result<T, &'static str>;
 #[derive(Default)]
 struct App {
     profile: Option<ModeratorProfile>,
+    candidate: Option<ModeratorProfile>,
     wallet: WalletState,
     busy: bool,
     wallet_events_bound: bool,
@@ -43,37 +44,22 @@ fn text(id: &str, value: &str) {
 }
 fn notice(value: &str) {
     text("notice", value);
+    controls::show_notice(value);
 }
 
 pub fn start() -> std::result::Result<(), JsValue> {
-    element("app").set_inner_html(r#"
-      <header><h1>Swarm Review</h1></header>
-      <p class="scope">Verify the selected deployment,
-      review cases, keep encrypted vote recovery and prepare transactions for MetaMask.
-      Each transaction requires an explicit action and wallet confirmation.</p>
-      <div id="notice" role="status" aria-live="polite">Choose the current moderator profile to begin.</div>
-      <section><h2>Deployment configuration</h2>
-      <label for="profile">Moderator JSON profile</label>
-      <input id="profile" type="file" accept=".json,application/json">
-      <p id="configuration" class="status">No profile loaded.</p></section>
-      <section><h2>Wallet</h2><p id="wallet" class="status">Not connected.</p>
-      <button id="connect" type="button">Connect MetaMask</button>
-      <p class="muted">Requests account access only. No signature or transaction is requested.
-      No automatic network switch is made.</p></section>
-      <section><h2>Verified contract state</h2>
-      <button id="refresh" type="button">Verify deployment and read Case 2</button>
-      <p id="verification" class="status">Not checked.</p>
-      <p class="muted">The selected RPC supplies this evidence. Runtime pins and canonical-block
-      checks do not independently verify blockchain consensus.</p></section>
-    "#);
+    element("app").set_inner_html(include_str!("moderator/view.html"));
     let app = Rc::new(RefCell::new(App::default()));
+    let discovery_app = app.clone();
+    let _ = crate::wallet::discover(Rc::new(move || controls::render(&discovery_app.borrow())));
     controls::mount(app.clone());
     bind_profile(app.clone());
+    controls::install_journey(app.clone());
+    bind_wallet_picker(app.clone());
     bind_connect(app.clone());
     bind_refresh(app.clone());
-    // No wallet is required to read the scope or load a configuration. A
-    // missing provider is reported if the user explicitly requests connection.
-    let _ = bind_wallet_events(&app);
+    // Discovery never requests accounts. Subscribe to a chosen provider only
+    // when the person explicitly connects it.
     Ok(())
 }
 
@@ -99,7 +85,7 @@ fn update_wallet(app: &App) {
         if app.wallet.connected {
             "Refresh wallet connection"
         } else {
-            "Connect MetaMask"
+            "Connect wallet"
         },
     );
     controls::render(app);
@@ -107,7 +93,7 @@ fn update_wallet(app: &App) {
 
 fn busy(app: &Rc<RefCell<App>>, value: bool) {
     app.borrow_mut().busy = value;
-    for id in ["connect", "refresh", "profile"] {
+    for id in ["connect", "refresh", "profile", "use-profile"] {
         if value {
             element(id).set_attribute("disabled", "").unwrap();
         } else {
@@ -115,12 +101,11 @@ fn busy(app: &Rc<RefCell<App>>, value: bool) {
         }
     }
     controls::set_busy(value);
-    if !value {
-        controls::render(&app.borrow());
-    }
+    controls::render(&app.borrow());
 }
 
 fn bind_profile(app: Rc<RefCell<App>>) {
+    let accepted = app.clone();
     let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
         if app.borrow().busy {
             return;
@@ -129,17 +114,21 @@ fn bind_profile(app: Rc<RefCell<App>>) {
         let Some(file) = input.files().and_then(|files| files.get(0)) else {
             return;
         };
+        clear_wallet_guidance();
         // Clear old evidence before reading or validating a replacement file.
         {
             let mut s = app.borrow_mut();
             s.profile = None;
+            s.candidate = None;
             s.wallet.invalidate();
             s.vault.lock();
             s.controls.clear_context();
+            s.controls.journey_cancelled();
             update_wallet(&s);
         }
         controls::clear_dom();
-        text("configuration", "No profile loaded.");
+        text("configuration", "No profile accepted.");
+        text("profile-review", "Reading the selected file…");
         text("verification", "Not checked for this profile.");
         if file.size() > 65536.0 {
             notice("Profile rejected: file exceeds 64 KiB.");
@@ -158,17 +147,21 @@ fn bind_profile(app: Rc<RefCell<App>>) {
             match result {
                 Ok(profile) => {
                     text(
-                        "configuration",
+                        "profile-review",
                         &format!(
-                            "Configured chain: {}\nModeration: {}\nRPC: {}\nBee gateway: {}",
+                            "Chain: {}\nModeration: {}\nRPC: {}\nBee gateway: {}\nToken: {}\nStake registry: {}\nIndex: {}\nGuidelines hash: {}",
                             profile.deployment.chain_id,
                             profile.deployment.moderation.address,
                             redact_url(&profile.rpc_url),
-                            redact_url(&profile.gateway_url)
+                            redact_url(&profile.gateway_url),
+                            profile.deployment.token.address,
+                            profile.deployment.stakes.address,
+                            profile.deployment.index.address,
+                            profile.deployment.guidelines.hash
                         ),
                     );
-                    app.borrow_mut().profile = Some(profile);
-                    notice("Profile loaded. Connect your intended wallet account next.");
+                    app.borrow_mut().candidate = Some(profile);
+                    notice("Profile checked. Compare its deployment with your intended operator, then use it explicitly.");
                 }
                 Err(code) => notice(code),
             }
@@ -177,6 +170,28 @@ fn bind_profile(app: Rc<RefCell<App>>) {
     });
     element("profile")
         .add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())
+        .unwrap();
+    handler.forget();
+    let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        if accepted.borrow().busy {
+            return;
+        }
+        let Some(profile) = accepted.borrow_mut().candidate.take() else {
+            return;
+        };
+        let report = element("profile-review").text_content().unwrap_or_default();
+        accepted.borrow_mut().profile = Some(profile);
+        text("configuration", &report);
+        notice("Profile accepted. Connect your intended account.");
+        controls::render(&accepted.borrow());
+        controls::focus_source(if crate::wallet::needs_selection() {
+            "wallet-picker"
+        } else {
+            "connect"
+        });
+    });
+    element("use-profile")
+        .add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())
         .unwrap();
     handler.forget();
 }
@@ -191,6 +206,70 @@ fn redact_url(url: &str) -> String {
     format!("{scheme}://{authority} (endpoint path hidden)")
 }
 
+fn clear_wallet_guidance() {
+    text("wallet-guidance", "");
+    let _ = element("wallet-recovery-route").set_attribute("hidden", "");
+}
+fn show_wallet_guidance(code: &str) -> bool {
+    let Some(message) = crate::moderator_view::wallet_guidance(code) else {
+        return false;
+    };
+    text("wallet-guidance", message);
+    if code == "WALLET_SELECTION_REQUIRED" {
+        let _ = element("wallet-recovery-route").set_attribute("hidden", "");
+    } else {
+        let _ = element("wallet-recovery-route").remove_attribute("hidden");
+    }
+    text("notice-source", "");
+    true
+}
+
+fn choose_wallet(app: &Rc<RefCell<App>>) -> Result<bool> {
+    let id = crate::wallet::picker_choice("wallet-picker")?;
+    if crate::wallet::selected_id() == Some(id) {
+        return Ok(false);
+    }
+    {
+        let mut s = app.borrow_mut();
+        s.wallet.invalidate();
+        s.wallet.account = None;
+        s.wallet.chain = None;
+        s.vault.lock();
+        s.controls.clear_context();
+        s.controls.journey_cancelled();
+        s.wallet_events_bound = false;
+    }
+    controls::clear_dom();
+    text("verification", "Not checked for this wallet selection.");
+    cleanup_wallet_events(app)?;
+    crate::wallet::select(id)?;
+    update_wallet(&app.borrow());
+    Ok(true)
+}
+fn bind_wallet_picker(app: Rc<RefCell<App>>) {
+    let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        if controls::wallet_selection_locked(&app.borrow()) {
+            controls::render(&app.borrow());
+            return;
+        }
+        clear_wallet_guidance();
+        match choose_wallet(&app) {
+            Ok(true) => notice("Wallet selected. Connect your intended account."),
+            Ok(false) => {}
+            Err(code) => {
+                if !show_wallet_guidance(code) {
+                    notice(code);
+                }
+            }
+        }
+        update_wallet(&app.borrow());
+    });
+    element("wallet-picker")
+        .add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())
+        .unwrap();
+    handler.forget();
+}
+
 fn bind_connect(app: Rc<RefCell<App>>) {
     let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
         if app.borrow().busy {
@@ -201,6 +280,19 @@ fn bind_connect(app: Rc<RefCell<App>>) {
             return;
         };
         let app = app.clone();
+        clear_wallet_guidance();
+        if let Err(code) = choose_wallet(&app) {
+            if !show_wallet_guidance(code) {
+                notice(code);
+            }
+            update_wallet(&app.borrow());
+            controls::focus_source(if code == "WALLET_SELECTION_REQUIRED" {
+                "wallet-picker"
+            } else {
+                "wallet-guidance"
+            });
+            return;
+        }
         busy(&app, true);
         // A provider can be injected after the module starts.
         if let Err(code) = bind_wallet_events(&app) {
@@ -210,12 +302,15 @@ fn bind_connect(app: Rc<RefCell<App>>) {
                 "verification",
                 "Not checked: wallet events are not safely registered.",
             );
-            notice(code);
+            if !show_wallet_guidance(code) {
+                notice(code);
+            }
             busy(&app, false);
+            controls::focus_source("wallet-guidance");
             return;
         }
         text("verification", "Not checked for this wallet connection.");
-        notice("Waiting for MetaMask account access…");
+        notice("Waiting for wallet account access…");
         spawn_local(async move {
             let result: Result<()> = async {
                 let selected = account(&wallet_request("eth_requestAccounts").await?)?;
@@ -228,9 +323,7 @@ fn bind_connect(app: Rc<RefCell<App>>) {
                         .ok_or("INVALID_WALLET_CHAIN")?,
                 )?;
                 if chain != profile.deployment.chain_id {
-                    return Err(
-                        "WALLET_CHAIN_MISMATCH: select the configured network in MetaMask.",
-                    );
+                    return Err("WALLET_CHAIN_MISMATCH: select the configured network in wallet.");
                 }
                 let current = account(&wallet_request("eth_accounts").await?)?;
                 if selected != current || epoch != app.borrow().wallet.epoch {
@@ -243,6 +336,9 @@ fn bind_connect(app: Rc<RefCell<App>>) {
                     s.wallet.invalidate();
                     s.vault.lock();
                     s.controls.clear_context();
+                    if !s.busy {
+                        s.controls.journey_cancelled();
+                    }
                     controls::clear_dom();
                 }
                 s.wallet.account = Some(current);
@@ -260,13 +356,25 @@ fn bind_connect(app: Rc<RefCell<App>>) {
                         s.wallet.invalidate();
                         s.vault.lock();
                         s.controls.clear_context();
+                        if !s.busy {
+                            s.controls.journey_cancelled();
+                        }
                     }
                     controls::clear_dom();
                     update_wallet(&app.borrow());
-                    notice(code);
+                    if !show_wallet_guidance(code) {
+                        notice(code);
+                    }
                 }
             }
             busy(&app, false);
+            if !element("wallet-guidance")
+                .text_content()
+                .unwrap_or_default()
+                .is_empty()
+            {
+                controls::focus_source("wallet-guidance");
+            }
         });
     });
     element("connect")
@@ -341,6 +449,9 @@ fn bind_wallet_events(app: &Rc<RefCell<App>>) -> Result<()> {
                     let mut s = app.borrow_mut();
                     s.vault.lock();
                     s.controls.clear_context();
+                    if !s.busy {
+                        s.controls.journey_cancelled();
+                    }
                 }
                 controls::clear_dom();
                 update_wallet(&app.borrow());
@@ -417,7 +528,7 @@ fn bind_refresh(app: Rc<RefCell<App>>) {
                 match result {
                     Ok(report) => {
                         text("verification", &report);
-                        notice("Read-only deployment and case check passed.");
+                        notice("Deployment verified. Open My work or choose a case from the review queue.");
                     }
                     Err(code) => {
                         text(

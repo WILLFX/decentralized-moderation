@@ -180,3 +180,86 @@ try {
 await vault.unlock('synthetic-local-password');
 assert.deepEqual(records(vault), [record], 'interrupted save never persists the new secret');
 console.log('PASS lock during production asynchronous encryption prevents secret persistence');
+
+// M7: exercise the production encrypted vault, not a parallel JavaScript model.
+vault = fresh();
+await vault.unlock(password);
+await vault.save(json(record));
+assert.equal(vault.correctable(json(record)), true);
+const beforeChangeBackup = await vault.export_backup();
+await vault.verify(beforeChangeBackup);
+const originalFingerprint = JSON.parse(await wasm.decrypt_test(storage.get(key), password)).backedUp[0];
+const corrected = {...record, vote:record.vote === 1 ? 2 : 1, salt:'0x'+'ab'.repeat(32), commitment:'0x'+'cd'.repeat(32)};
+const beforeCorrection = storage.get(key);
+failWrite = true;
+await rejects(vault.correct(json(record),json(corrected)), 'STORAGE_FAILED');
+assert.equal(storage.get(key), beforeCorrection);
+assert.deepEqual(records(vault), [record]);
+assert.equal(vault.correctable(json(record)), true);
+failWrite = false;
+await vault.correct(json(record),json(corrected));
+assert.deepEqual(records(vault), [corrected,record]);
+assert.equal(vault.correctable(json(record)), false);
+assert.equal(vault.correctable(json(corrected)), true);
+assert.equal(vault.covered(json(corrected)), false);
+let correctedPayload = JSON.parse(await wasm.decrypt_test(storage.get(key), password));
+assert.equal(correctedPayload.version,2);
+assert.deepEqual(correctedPayload.archivedVotes,[record]);
+assert.deepEqual(correctedPayload.backedUp,[originalFingerprint]);
+assert.equal(await vault.verify(beforeChangeBackup),1);
+assert.equal(vault.covered(json(corrected)),false,'old recovery never covers a replacement');
+const afterChangeBackup = await vault.export_backup();
+assert.equal(await vault.verify(afterChangeBackup),2);
+assert.equal(vault.covered(json(corrected)),true);
+assert.equal(JSON.parse(await wasm.decrypt_test(storage.get(key),password)).backedUp.length,2);
+console.log('PASS M7 correction retains exact old bytes and coverage; replacement requires new recovery');
+
+await vault.import_backup(beforeChangeBackup,password);
+assert.deepEqual(records(vault),[corrected,record],'old import does not roll active choice back');
+assert.equal(vault.correctable(json(corrected)),false,'import does not mint correction authority');
+await rejects(vault.correct(json(corrected),json(record)), 'CHOICE_PROTECTED');
+vault.lock(); await vault.unlock(password);
+assert.equal(vault.correctable(json(corrected)),false,'unlock cannot infer unsent from absent journal');
+assert.deepEqual(records(vault),[corrected,record]);
+vault = fresh();
+await vault.import_backup(afterChangeBackup,password);
+assert.deepEqual(records(vault),[corrected,record]);
+assert.equal(vault.correctable(json(corrected)),false);
+assert.equal(vault.covered(json(corrected)),true);
+console.log('PASS M7 v2 round trip retains both secrets; reload/import cannot recreate unsent authority');
+
+vault = fresh(); await vault.unlock(password); await vault.save(json(record));
+vault.seal(json(record));
+await rejects(vault.correct(json(record),json(corrected)), 'CHOICE_PROTECTED');
+await vault.verify(await vault.export_backup());
+assert.equal(vault.correctable(json(record)),false,'verifying recovery cannot clear an attempted send');
+assert.deepEqual(records(vault),[record]);
+vault = fresh(); await vault.unlock(password); await vault.save(json(record));
+const concurrent = new wasm.LifecycleVault(); await concurrent.unlock(password); await concurrent.save(json(second));
+assert.equal(vault.correctable(json(record)),false);
+await rejects(vault.correct(json(record),json(corrected)), 'CHOICE_PROTECTED');
+assert.deepEqual(JSON.parse(await wasm.decrypt_test(storage.get(key),password)).votes,[record,second]);
+console.log('PASS M7 attempted send and cross-tab changes block correction without deleting secrets');
+
+// An interrupted correction must not persist a replacement or mint authority.
+vault = fresh(); await vault.unlock(password); await vault.save(json(record));
+const beforeInterruptedCorrection = storage.get(key);
+let correctionEntered, correctionRelease;
+const correctionReached = new Promise(resolve=>{correctionEntered=resolve;});
+const correctionDelay = new Promise(resolve=>{correctionRelease=resolve;});
+const correctionSubtle = new Proxy(webcrypto.subtle,{get(target,name){
+ if(name==='encrypt') return async (...args)=>{correctionEntered();await correctionDelay;return target.encrypt(...args);};
+ const value=Reflect.get(target,name);return typeof value==='function'?value.bind(target):value;
+}});
+Object.defineProperty(globalThis,'crypto',{configurable:true,value:{subtle:correctionSubtle,getRandomValues:webcrypto.getRandomValues.bind(webcrypto)}});
+const correcting=vault.correct(json(record),json(corrected));
+let correctionTimeout;
+try {
+ await Promise.race([correctionReached,new Promise((_,reject)=>{correctionTimeout=setTimeout(()=>reject(new Error('correction encrypt not reached')),10000);})]);
+ vault.lock(); correctionRelease(); await rejects(correcting,'VAULT_LOCKED');
+ assert.equal(storage.get(key),beforeInterruptedCorrection);
+} finally {
+ clearTimeout(correctionTimeout); correctionRelease(); Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
+}
+await vault.unlock(password);assert.deepEqual(records(vault),[record]);assert.equal(vault.correctable(json(record)),false);
+console.log('PASS M7 lock during correction retains the original ciphertext and invalidates authority');

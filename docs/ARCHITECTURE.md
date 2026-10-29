@@ -34,4 +34,5 @@ protocol specification. Public testnet configuration, measurements and independe
 review are required before considering deployment with material funds.
 
 See [security and operating basis](SECURITY_AND_OPERATING_BASIS.md) for the
-current trust assumptions, disclosure risks and outcome-seed expiry failure.
+current trust assumptions, disclosure risks, original-hash recovery and fallback
+settlement, including expiry risks in older immutable deployments.

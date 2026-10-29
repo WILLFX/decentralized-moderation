@@ -36,5 +36,20 @@ Public website collections are websites/dist/{moderator,publisher,search}. Each 
 seven allowlisted assets with hashes. Native checkpoint processing is separate;
 its binary must not enter a website collection.
 
+The moderator browser fixture is documented in
+`websites/test/browser/README.md`. It serves the built Rust interface with a
+synthetic local provider and prepared read states. It never forwards RPC or
+signs transactions. Its codec and expired-checkpoint checks run in `check.sh`;
+the browser task sequence is separate from these tests. This fixture does not
+establish real extension-wallet behavior, continuous chain history or human
+comprehension.
+
+The same browser-test directory documents a publisher fixture for held wallet
+requests and saved-request reconciliation. It serves only the built publisher,
+synthetic RPC facts and local observer controls. Production Rust checks the journal
+and receipts. The fixture cannot validate a real MetaMask panel or actual chain
+replacement behavior; those remain separate integration evidence.
+
 See STATUS.md for the current validation limits. The organized checkout passed this
-combined Ubuntu gate on 25 October 2026; browser acceptance remains separate.
+combined Ubuntu gate on 25 October 2026 and again for the moderator UI changes on
+26 October 2026; browser acceptance remains separate.

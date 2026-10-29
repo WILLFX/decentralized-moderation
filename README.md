@@ -14,7 +14,9 @@ with it, the specification governs.
 **Status: under development.** The contracts implement the adopted committee
 scheduling and N-4 eligibility rules. Moderator, publisher and search are three
 separate Rust/Wasm websites. Node tools support packaging, tests and local uploads.
-This is not a public deployment or completed security review.
+Development deployments have been exercised on Chiado and the public Swarm
+testnet. Human acceptance and security review remain incomplete; see the status
+for the scope of the evidence.
 
 Start with [architecture](docs/ARCHITECTURE.md),
 [build and test](docs/BUILD_AND_TEST.md), and [status](docs/STATUS.md).
@@ -45,8 +47,8 @@ A moderator stakes a fixed amount. Every stake is the same size; influence is ac
 by running additional identities, each paying its own stake, and never by staking more
 against one identity.
 
-Concurrency is unlimited. Nothing is reserved per case and nothing is locked, so a
-moderator may vote in as many cases at once as they choose.
+No stake is reserved per case, so a moderator may vote in multiple cases.
+Unsettled votes prevent stake withdrawal until each vote is settled.
 
 The only penalty is a freeze. A vote incoherent with the outcome adds a fixed duration
 to the moderator's total frozen time. Durations are additive to a running total, so a
@@ -81,7 +83,7 @@ party can determine their own eligible identities once `R` exists.
 submit
   │  R_A = a future block, fixed at submission
   ├── committee A commits          closes 15 min after the 3rd commit
-  │  R_B armed only when A closes
+  │  R_B has a fallback future target; the third A commit may revise it once
   ├── committee B commits          closes 15 min after the 3rd commit
   ├── A and B reveal together      30 min
   │      each committee must finish with at least MIN_REVEALS revealed votes
@@ -93,9 +95,9 @@ submit
 
 Three properties carry the design.
 
-*Committee B is not knowable while A commits.* Its seed is a block height armed only
-when A's commit phase closes, so a moderator deciding whether to commit in A cannot
-see who else will review the case.
+*Committee B is not knowable while A commits.* Its future target is scheduled at pair opening and may be revised once by the
+third A commitment. Under the specified timing assumptions, its hash is unavailable
+until A's last admissible commitment. See the exact rules in the specification.
 
 *Neither committee sees the other's votes.* Both reveal in one phase, so B commits
 without a tally to follow. Payment is for coherence with the outcome, so a visible
@@ -162,7 +164,8 @@ require a protocol change.
 A removal targets a listed entry and runs through the same engine: the same
 committees, the same staging, the same tickets. On a removal case, Approve means
 remove. The fee is paid whichever way the case resolves, so a speculative removal
-costs its submitter in every instance.
+costs its submitter when an outcome is completed. Initial unresolved cases,
+including unrecoverable initial draw expiry, refund the submission fee.
 
 ## 7. Open parameters
 

@@ -1,0 +1,138 @@
+{
+  "name": "Decentralized Moderation testnet MVP",
+  "publishedDate": "2026-10-29",
+  "sourceRevision": "888e82a6d7e8478f2e8e0b61a483ae988559bdfc",
+  "sourceRepository": "https://github.com/WILLFX/decentralized-moderation",
+  "moderationChainId": 10200,
+  "swarmNetworkId": 10,
+  "swarmStorageChainId": 11155111,
+  "deploymentFile": "deployment.json",
+  "sites": [
+    {
+      "role": "moderator",
+      "swarmReference": "196ef15a1f7917870333ea558422135a3d6efd9e2c69766866a259cc8e831900",
+      "archiveSha256": "cc264ec8b02a8c09da828aee6705dbd5b4de66cd9f15336e6529412e0ceace63",
+      "assets": [
+        {
+          "name": "index.html",
+          "sha256": "ec55c2815022ac224aae773f1355467604b0831080da8e3340bc2372422daacb",
+          "bytes": 718
+        },
+        {
+          "name": "loader.js",
+          "sha256": "9d4fe4c92595262b42c5301af53f0f3f30e06d80746e6d691c68cccea238fe1e",
+          "bytes": 312
+        },
+        {
+          "name": "style.css",
+          "sha256": "c1fca11a47e2df7f95e94cf34b57af5e606530e1d4f4655a94851e9c126f66b0",
+          "bytes": 8163
+        },
+        {
+          "name": "MODERATION_GUIDELINES.md",
+          "sha256": "5c91983e50fd7cb0e3d18285089e80da60fff9af27d0b689964f56a44df07acf",
+          "bytes": 13462
+        },
+        {
+          "name": "pkg/swarm_moderator.js",
+          "sha256": "d4324a225da02309fdfa8ac9d8d7d49678c925432b55e040ee6bc2cd1ff14f29",
+          "bytes": 43062
+        },
+        {
+          "name": "pkg/swarm_moderator_bg.wasm",
+          "sha256": "080e06ab23c3edd7add60dcfbde037820fe0029ae619576bd1e4c8f857ad15c4",
+          "bytes": 1348237
+        },
+        {
+          "name": "asset-hashes.json",
+          "sha256": "2be5223e4d593c779edd4730f96b203bc82874b473b5d784b098e88ce91cc03a",
+          "bytes": 548
+        }
+      ]
+    },
+    {
+      "role": "publisher",
+      "swarmReference": "68f29f8180eb2d6aa796654d66c64c36297a27424ca601eb6dce4931b46c13b1",
+      "archiveSha256": "18f027dc8a5cf85870a86f9731f69016330824bb21f38e4b2e0adb578c7ec594",
+      "assets": [
+        {
+          "name": "index.html",
+          "sha256": "1bd77b21e07d06b4c7eb7fdcc89179b33fb6a3fe5f49a5f25c95bf9bdb76afbd",
+          "bytes": 720
+        },
+        {
+          "name": "loader.js",
+          "sha256": "e3585888a03e64fa629394b5aefc8ac77ee7db348dfd94da18fe7f12d55e156a",
+          "bytes": 241
+        },
+        {
+          "name": "style.css",
+          "sha256": "36fa6543784aa1e28ea564165ed8b5dd8fb6191333eb676a0e087daf53467542",
+          "bytes": 5807
+        },
+        {
+          "name": "MODERATION_GUIDELINES.md",
+          "sha256": "5c91983e50fd7cb0e3d18285089e80da60fff9af27d0b689964f56a44df07acf",
+          "bytes": 13462
+        },
+        {
+          "name": "pkg/swarm_publisher.js",
+          "sha256": "cd33d1e95dee656d75b56176be3450d7cb334456a4f4d22db93f66f142f3c81f",
+          "bytes": 47299
+        },
+        {
+          "name": "pkg/swarm_publisher_bg.wasm",
+          "sha256": "8ed3067fc5d75fe263028a7a8bf6a4cba3016929516b614ee6d339574c9b130b",
+          "bytes": 1390223
+        },
+        {
+          "name": "asset-hashes.json",
+          "sha256": "17d32d1d39db673b269af812e1acc9fc257a9bf9cdae127fc4f695fbbb9522f1",
+          "bytes": 548
+        }
+      ]
+    },
+    {
+      "role": "search",
+      "swarmReference": "092239e7d6f0f8ac713c6aa97ca22d0359272c4040f30970fd1c79192aa2f099",
+      "archiveSha256": "139f4b5bea522a900b24f259fcb0640cb41ce5ee7db0104bfc69f6679eaf9064",
+      "assets": [
+        {
+          "name": "index.html",
+          "sha256": "78fc9f0889de0a7c67154d95462fb56cf82ab034bfc29584c184c60f1865eb09",
+          "bytes": 5751
+        },
+        {
+          "name": "loader.js",
+          "sha256": "756bbf739a490c3a1917f8ac8ebeda45e2fb74012c9ce4ee436d29e8ee2c3158",
+          "bytes": 265
+        },
+        {
+          "name": "style.css",
+          "sha256": "c3e78c080a792fdaa0b128806a2eb957ece85e850dca4010fc16935ef1c71afc",
+          "bytes": 4751
+        },
+        {
+          "name": "MODERATION_GUIDELINES.md",
+          "sha256": "5c91983e50fd7cb0e3d18285089e80da60fff9af27d0b689964f56a44df07acf",
+          "bytes": 13462
+        },
+        {
+          "name": "pkg/swarm_search.js",
+          "sha256": "bedaaa0a1351127929bd9b368ff4c20c57ced7bcdaa862f75cf79a1f99b4a061",
+          "bytes": 30097
+        },
+        {
+          "name": "pkg/swarm_search_bg.wasm",
+          "sha256": "5f35d3c8f77975a2038787b545cf844e4c3fb94224562906b5269a45fe06480d",
+          "bytes": 981948
+        },
+        {
+          "name": "asset-hashes.json",
+          "sha256": "03b2c9ed5032be9c794f6240abf9283e2f2ef73579cd1e5bc2f59eb37e496c29",
+          "bytes": 542
+        }
+      ]
+    }
+  ]
+}

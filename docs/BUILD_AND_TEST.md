@@ -1,55 +1,75 @@
 # Build and test
 
-Use Linux or Ubuntu WSL with Foundry/Anvil 1.7.1, Solidity 0.8.28, Python 3,
-Node 18 or later, and Rust 1.96.0. Solidity is configured for offline compilation;
-provision 0.8.28 first. Node is used for packaging, Wasm crypto tests and local Bee
-tooling. Browser application logic is Rust/Wasm.
+These commands are for contributors and operators building a website package.
+Participants can use the [published release](releases/TESTNET_MVP.md) without a
+compiler or repository checkout.
+
+## Tools
+
+Use Linux or Ubuntu WSL with Git, Foundry/Anvil 1.7.1, Solidity 0.8.28, Python 3,
+Node.js 18 or later, and Rust installed through rustup. The website toolchain is
+Rust 1.96.0 with wasm-bindgen 0.2.118. Dependencies are pinned in the repository's
+lockfile and Git submodules.
+
+Provision Solidity 0.8.28 locally before building: `contracts/foundry.toml` selects
+that compiler and offline operation. The Rust bootstrap installs its specified
+toolchain and bindings CLI. Node scripts use built-in modules; there is no npm
+install step for this repository's packaging tools.
+
+## First build
 
 From the repository root:
 
-```bash
+```sh
 git submodule update --init --recursive
 (cd websites && bash scripts/bootstrap.sh)
 bash scripts/check.sh
 ```
 
-Bootstrap is only needed when the pinned Rust/Wasm tools are absent. WASM_BINDGEN
-can select an existing wasm-bindgen 0.2.118 executable. CARGO_HOME and an absolute
-CARGO_TARGET_DIR can reuse an existing cache. No Windows drive is required.
-The Node tools use built-in modules; this build has no npm install step.
+Run bootstrap only when those tools are absent. The repository check compiles
+contracts and Rust, runs the configured checks and builds the three websites.
+It does not sign transactions, start a public deployment or upload collections.
 
-The check script runs normal Solidity tests, named audit regressions, Python
-eligibility and outcome-draw comparisons, native Rust tests/build, the Rust
-workspace and release Wasm builds, encrypted-recovery format checks, and packaging/local-tool tests. Generated
-outputs are ignored. It does not start a live chain, sign a wallet request or
-publish a website.
+For a focused website build:
 
-The encrypted-recovery check exercises the Rust WebCrypto implementation against
-synthetic format-v1 data, round trips, fresh encryption randomness and rejection
-of wrong passwords, modified ciphertext and weakened KDF parameters. The same
-harness drives the production Rust vault with synthetic local storage:
-persistence, exact backup coverage, import conflicts, write failure, cross-tab
-changes and locking during encryption. Test exports are built separately and
-cannot enter a public website collection.
+```sh
+bash websites/scripts/build.sh publisher
+bash websites/scripts/build.sh moderator
+bash websites/scripts/build.sh search
+```
 
-Public website collections are websites/dist/{moderator,publisher,search}. Each has
-seven allowlisted assets with hashes. Native checkpoint processing is separate;
-its binary must not enter a website collection.
+Omit the role to build all three. Public outputs are under `websites/dist/`.
+`WASM_BINDGEN` can select an existing matching bindings CLI. `CARGO_HOME` and an
+absolute `CARGO_TARGET_DIR` can reuse a local cache. Neither variable requires a
+particular computer or drive.
 
-The moderator browser fixture is documented in
-`websites/test/browser/README.md`. It serves the built Rust interface with a
-synthetic local provider and prepared read states. It never forwards RPC or
-signs transactions. Its codec and expired-checkpoint checks run in `check.sh`;
-the browser task sequence is separate from these tests. This fixture does not
-establish real extension-wallet behavior, continuous chain history or human
-comprehension.
+## Work on individual components
 
-The same browser-test directory documents a publisher fixture for held wallet
-requests and saved-request reconciliation. It serves only the built publisher,
-synthetic RPC facts and local observer controls. Production Rust checks the journal
-and receipts. The fixture cannot validate a real MetaMask panel or actual chain
-replacement behavior; those remain separate integration evidence.
+```sh
+(cd contracts && forge test --use 0.8.28)
+(cd websites && cargo +1.96.0 test --workspace --features swarm-browser/browser-check --locked)
+python3 -m unittest discover -s tools -p test_publisher_setup.py -v
+node --test websites/test/browser/provider.test.mjs
+```
 
-See STATUS.md for the current validation limits. The organized checkout passed this
-combined Ubuntu gate on 25 October 2026 and again for the moderator UI changes on
-26 October 2026; browser acceptance remains separate.
+Use [browser fixtures](../websites/test/browser/README.md) for prepared interface
+states. They serve built applications with isolated synthetic providers. Use test
+accounts and synthetic recovery files in development; do not add personal files
+to fixtures.
+
+The native checkpoint processor is built separately:
+
+```sh
+bash websites/scripts/build-checkpoint.sh
+```
+
+It is installed under ignored `tools/local-session/.tools/` and never belongs in a
+public website collection. [Checkpoint documentation](../websites/apps/checkpoint/README.md)
+explains its file-processing role.
+
+## Package and publish
+
+The build creates a separate allowlisted collection for each website. Generated
+JavaScript loads Wasm; test-only exports and configuration are excluded from these
+public packages. Publishing is a separate operator action, described in the
+[operator guide](OPERATORS.md#publish-website-collections-and-maintain-storage).

@@ -1,28 +1,27 @@
-# Native checkpoint processing
+# Native checkpoint processor
 
-swarm-checkpoint validates and processes local-chain checkpoint files. It is a
-native Rust executable, separate from browser Wasm. It never enters a public site.
+`swarm-checkpoint` is a native Rust tool for local-chain checkpoint files. It is
+not a participant website and must not enter a public website collection.
 
-Commands select and verify checkpoints, prepare an Anvil startup file, inspect a
-streamed RPC dump, and atomically package a checkpoint. Callers supply the declared
-run/deployment/fingerprint context. File consistency checks are not independent
-blockchain consensus verification.
+The commands select and check saved checkpoints, prepare an Anvil startup file,
+inspect a streamed RPC dump and atomically package a checkpoint. Callers supply
+the run, deployment and fingerprint context. These are local file operations,
+not a way to alter public-network time or prove blockchain consensus.
 
-Validation covers compressed-state SHA-256, gzip CRC, truncation, required history
-sections, and agreement between the exported header and its declared fingerprint.
-Conflicting highest heads or corrupt newest saves fail explicitly. Writes use
-private temporary files, file sync, readback verification and atomic replacement;
-a failed verification cannot replace the prior checkpoint.
+Processing checks compressed-state SHA-256, gzip CRC, truncation, required history
+sections and agreement between a header and its declared fingerprint. Conflicting
+highest heads or a corrupt newest save are reported. Private temporary files,
+readback and atomic replacement preserve an earlier save on write failure.
 
-Compressed hex is bounded at 512 MiB, checkpoint JSON at 513 MiB and expanded JSON
-at 1 GiB. History is streamed rather than retained as decoded object graphs.
-These are bounded-memory limits, not a claim of constant memory for all input.
+Compressed hex is bounded to 512 MiB, checkpoint JSON to 513 MiB and expanded JSON
+to 1 GiB. History is streamed rather than retained as a complete decoded graph.
 
-From the repository root:
+Build from the repository root:
 
-```bash
+```sh
 bash websites/scripts/build-checkpoint.sh
 ```
 
-The binary is installed under tools/local-session/.tools. Building/testing does
-not require a personal configuration, start a chain or change a saved session.
+The binary is installed under ignored `tools/local-session/.tools/`. Building it
+does not require or replace an existing saved session. Keep actual checkpoint
+files, runtime configuration and recovery material outside public release assets.

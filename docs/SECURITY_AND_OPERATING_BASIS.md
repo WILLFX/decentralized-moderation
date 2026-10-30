@@ -1,82 +1,86 @@
-# Security and operating basis
+# Transaction and trust model
 
-This document states current source assumptions and unresolved failure modes.
-It is not a security audit or a claim that a public network meets these assumptions.
-The protocol specification remains normative.
+This reference explains the operating assumptions behind the contracts and clients.
+Participant actions are in the [participant guide](PARTICIPANTS.md); infrastructure
+configuration is in the [operator guide](OPERATORS.md).
 
-## Timing, entropy and availability
+## Deployment identity and chain reads
 
-Scheduling assumes the approved minimum five-second timestamp step. B needs exact
-historical block hashes from the EIP-2935 service at the selected target. Missing
-blocks, unavailable history and delayed calls can prevent progress. A positive
-seed lag gives lookahead; it does not establish finality. Validate timestamp,
-history and RPC behavior on the intended network before public deployment.
+A public profile identifies the chain, four contracts, their runtime code hashes
+and the immutable guidelines identity. During deployment verification, clients
+compare runtime code, contract links and the contract's guidelines version/hash
+with the profile pins. This does not fetch or authenticate the guidelines document.
+Moderator checks document bytes when loading review material; Publisher checks
+them when loading guidelines. Reader checks the contract pins without loading
+the document. A profile must come from a source the participant chooses to trust;
+its fingerprint identifies bytes, not the person who distributed them.
 
-A retains the 250-block eligibility horizon. An armed outcome target cannot be
-replaced. Outcome recovery uses its round-scoped cache, BLOCKHASH through age 256,
-or the original target's EIP-2935 hash through age 8,191 inclusive. A cached original
-remains drawable after that window. The boundary is based on chain height, not a
-failed RPC/history read. The source follows the [EIP-2935 history window](https://eips.ethereum.org/EIPS/eip-2935).
+Contract reads and receipts are pinned to canonical block hashes and rechecked
+when an operation completes. The selected RPC supplies that chain evidence.
+Canonical/finalized labels are observations from that provider, not an independent
+consensus implementation inside the browser. A wallet must use the same intended
+account and network as the reviewed operation.
 
-Beyond target + 8,191, an uncached armed draw can terminate: initial expiry is
-unresolved/refundable; either challenge expiry finalizes the last completed outcome
-with ordinary pooled settlement. Non-reveal penalties remain. Outcome-based freezes
-against a preserved fallback do not prove wrongdoing or responsibility for draw
-failure. Permissionless recovery still needs a caller, gas and inclusion; the new
-terminal exit releases fee/refund and vote settlement paths, not automatic payments.
-Cached state survives only on the canonical chain. Older immutable deployments
-still have their original stranded-case risk; client updates cannot repair them.
+## Private choices and disclosure
 
-## Eligibility and participation
+A commitment hides a choice using a random salt. The encrypted vault and recovery
+file preserve both. Public request history is not a replacement for that private
+backup. After reveal, the vote and salt are public on chain. A transaction removed
+by reorganization cannot make already disclosed information private again.
 
-The pinned staked-address count determines N-4 eligibility difficulty. Membership
-is checked when committing; there is no case-opening admission cutoff. Once a seed
-is known, an actor can search for passing addresses and then fund and stake them.
-The pinned denominator does not prevent that attack. Raw block hashes also retain
-block-producer influence. These mechanisms do not establish secure Sybil-resistant
-sampling by themselves.
+Before disclosure the client requires finalized and latest case/schedule evidence,
+wallet context, a fresh head and enough real time for inclusion. It repeats the
+final disclosure check after wallet reads. Clock allowance and inclusion budget
+are profile parameters, not extensions to contract deadlines. An inaccurate local
+clock, stale head or delayed finality can block a reveal. Deadline inclusion still
+requires timely submission and network processing.
 
-Floor three is a development parameter, not measured turnout assurance. Case-wide
-address exclusion reduces the population available to later committees. At least
-six distinct participants are necessary for an initial successful round; thirteen
-and twenty are necessary for one and two successful challenges respectively.
-These counts are not sufficient population recommendations. Older N-5 simulation
-rates do not apply to the adopted N-4 rule. Turnout, capture cost, stake, fees and
-freeze periods need current calibration.
+## Interrupted signing
 
-## Reorganisation and secret disclosure
+The clients retain the original account, deployment and operation when a wallet
+request begins. A missing response is not proof that no transaction was sent.
+Receipt reconciliation checks the actual sender, destination, nonce, input and
+mined block. An imported history file supplies hints, not trusted confirmations.
 
-An entropy cache and vote lock persist only on the surviving chain branch. A
-reorganisation can remove both. A reveal exposes information even if its
-transaction is later removed. Successful transaction inclusion alone does not
-make disclosure safe against a replacement branch that still accepts commitments.
+Private choices may be changed only under the implemented proof-of-no-send rules.
+Retained secrets remain available for matching a mined commitment. A replacement
+or cancellation must satisfy the original request's reconciliation rules; a page
+reload or unavailable receipt cannot authorize an unsafe retry.
 
-The Rust reveal guard requires finalized and latest state, with the finalized
-execution timestamp at or after the effective pair close. Reads must identify the
-same intended deployment, case, round, vote and schedule, using canonical hash
-pinning. The guard also checks real wall time, request duration, head freshness
-and remaining inclusion budget before disclosure, including a second check after
-wallet reads. Missing evidence fails closed. These checks depend on a trustworthy
-finality source and correct local time; an RPC finalized label or two endpoints
-owned by one provider do not independently authenticate consensus.
+## Timing and original hashes
 
-Delayed finality, RPC outages or a stale local clock can prevent an otherwise valid
-reveal. The guard cannot guarantee inclusion before the reveal deadline. Do not
-weaken it or extend deadlines to make an acceptance test pass.
+Group scheduling assumes a minimum five-second timestamp step. The first group
+uses the native block-hash window; the second uses the exact EIP-2935 target and
+caches it with its first valid vote. Outcome draws use their originally armed hash,
+with native history, extended history or a round-specific cache. A cached original
+has no draw-age limit. Missing history does not permit a replacement sample.
 
-## Advancement and incentives
+An uncached outcome can expire only beyond the precise on-chain history boundary.
+Initial expiry refunds the fee; challenge expiry uses the last completed outcome
+and ordinary settlement. See the [protocol](../specs/protocol.md#431-original-hash-recovery-and-expiry)
+for exact conditions. These rules need callers and gas; elapsed time alone performs
+no recovery, settlement or payment.
 
-Third-A commitment scheduling and first-B activation place extra work and gas on
-those voters without separate payment. Other phase advancement remains permissionless
-and unpaid. Permissionless availability does not guarantee a timely caller. No
-keeper funding policy is implemented. An initial full publisher refund and an
-unconditional bounty from the same fee would double-allocate that fee.
+## Participation and incentives
 
-## Verification and deployment limits
+Selection uses the staked-address count fixed at case opening. It is not a fixed
+admission roster: new identities can stake after a selection seed becomes known.
+One stake per address and frozen time impose costs; they do not identify a unique
+person. Block-derived randomness can also be influenced by block production.
 
-Successful source checks do not establish these economic or network assumptions.
-The full human Rust guarded reveal, outcome draw, finalization and reward settlement
-acceptance flow still needs completion. Unresolved-case settlement and refund do
-not pass it. Fresh target-network validation, operational recovery policy and
-independent security review remain required before public use with material funds.
-See [implementation status](STATUS.md) for other outstanding acceptance work.
+Rewards follow agreement with the final outcome. They are not a contract assessment
+of a participant's honesty or correctness. Frozen-time penalties tie up stake
+rather than confiscating it. Phase advancement has no separate funded keeper
+reward, so someone must choose to pay its gas. Each group still needs the configured
+minimum number of reveals to produce a new outcome.
+
+## Content and storage
+
+Metadata and guideline hash checks identify exact documents. Moderators apply the
+content rules; an authenticated description is not automatically a truthful one.
+Submitted content opens on another origin so it does not share the application's
+browser storage. A different URL path on the same origin is insufficient.
+
+Swarm storage depends on postage and service availability. An approved listing
+neither renews storage nor removes dangerous bytes from the network. Readers check
+current index membership before opening content; that is a time-specific observation.

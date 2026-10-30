@@ -1,54 +1,63 @@
 # Rust/Wasm websites
 
-The moderator, publisher and search applications are Rust/Wasm and are packaged
-as three separate static Swarm collections. Shared protocol and metadata code is
-in crates/swarm-core; browser, wallet, encrypted-vault and site workflows are in
-crates/swarm-browser.
+Three separate static applications implement publishing, moderation and discovery:
 
-```bash
-(cd websites && bash scripts/bootstrap.sh)  # only when the tools are absent
-(cd websites && bash scripts/build.sh)
-bash websites/scripts/build-checkpoint.sh
+| Application | Entry source | Participant guide |
+| --- | --- | --- |
+| Swarm Publish | `apps/publisher` | [Publish](../docs/PARTICIPANTS.md#publish-content) |
+| Swarm Review | `apps/moderator` | [Moderate](../docs/PARTICIPANTS.md#moderate-content) |
+| Swarm Search | `apps/search` | [Discover](../docs/PARTICIPANTS.md#discover-content) |
+
+The [release entry](../docs/releases/TESTNET_MVP.md) has published references and
+public profiles. An application reads its selected deployment/services from a
+profile; no participant account, deployment or personal Bee is built into it.
+
+## Development layout
+
+`crates/swarm-core` contains profile/metadata parsing, ABI helpers and protocol
+calculations. `crates/swarm-browser` contains browser I/O, views, wallet sessions,
+request history and private-vote storage. Generated JavaScript loads the Rust Wasm
+bindings. Node scripts package artifacts and support explicit development tools.
+
+```sh
+(cd websites && bash scripts/bootstrap.sh)
+bash websites/scripts/build.sh
 ```
 
-See ../docs/BUILD_AND_TEST.md for the complete checks. Rust 1.96.0, wasm-bindgen
-0.2.118 and Cargo.lock are retained. WASM_BINDGEN can select an existing pinned CLI.
-The recovery tests use synthetic format-v1 data and Rust encryption/decryption.
-No test exports, configuration, keys or recovery files enter a public package.
+Bootstrap requires rustup and installs Rust 1.96.0 and wasm-bindgen 0.2.118. It is
+unnecessary when the pinned tools are already present. Use `build.sh publisher`,
+`moderator` or `search` for one role. See [build and test](../docs/BUILD_AND_TEST.md).
 
-For trusted profile links, per-user Bee settings and the content-to-metadata
-workflow, see [publisher setup](../docs/PUBLISHER_SETUP.md). The setup-link helper
-prints a URL for a reviewed public profile; it does not publish the file or choose
-an operator on the user's behalf.
+The three `dist/` collections have seven public assets each. Packaging refuses
+extra files; profiles, private state, test providers and recovery exports are not
+website assets. `apps/checkpoint` is a separate native executable.
 
-Local upload is an explicit separate operation:
+## Browser connections
 
-```bash
+Publisher and Moderator discover compatible browser wallets through EIP-6963,
+the Ethereum convention for announcing installed providers. Requests use the
+selected provider's EIP-1193 interface. When no wallet announces, a single injected
+`window.ethereum` provider can serve as a fallback. The selected provider stays
+bound to the page's current session; a later announcement cannot silently replace
+it. Reload requires wallet selection/connection again. Reader has no signing path.
+
+Profile and Bee configuration are described in the [operator guide](../docs/OPERATORS.md).
+Existing public setup links and per-user publisher settings are described in
+[publisher setup](../docs/PUBLISHER_SETUP.md).
+
+## Owned local-environment upload tool
+
+```sh
 node websites/scripts/publish-local.mjs moderator
 node websites/scripts/publish-local.mjs publisher
 node websites/scripts/publish-local.mjs search
 ```
 
-The uploader requires the current configuration of an already running owned Bee
-environment and verifies Docker ownership, bytes, references and browser media
-types. LOCAL_BEE_SESSION_ROOT can select its local record directory; the default
-is tools/local-session. No operator configuration is included in Git.
+This tool expects current records for an already running owned local Bee-factory
+environment. It checks environment ownership and the collection it uploads.
+`LOCAL_BEE_SESSION_ROOT` selects its local record directory; the default is
+`tools/local-session`. Do not copy another installation's state into it.
 
-apps/checkpoint is a native file-processing executable, not browser code. It is
-built separately and never uploaded with a website. See ../docs/STATUS.md for
-remaining validation and deployment work.
-
-
-### Browser wallet connection
-
-Publisher and moderator use EIP-6963 discovery to offer the browser's announced
-wallets. Choose a wallet, then connect the intended account on the profile's
-chain. Discovery requests no account access or signatures. When no wallets announce, a single injected window.ethereum provider remains
-available as a legacy browser-wallet fallback.
-
-Each page binds requests and event monitoring to the selected provider object.
-New announcements or a changed browser default do not switch an active session.
-An explicit switch clears old readiness and must clean up the previous event
-subscriptions before connecting again. Wallet choice is not persisted across
-reloads. Names and identifiers are supplied by wallets, not authenticated by the
-application. WalletConnect/QR pairing is not implemented.
+For a separately operated public-testnet Bee, use that node's normal collection
+uploader or API. The local tool does not install a public Bee, deploy contracts or
+create service configuration.

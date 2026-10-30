@@ -1,16 +1,19 @@
-# Local tool files
+# Owned local-environment tooling
 
-This directory holds the ignored local cache, native executable and current
-owned-environment inputs used by local tools. No operator state is included in Git.
+This directory is the default location for ignored inputs and generated files used
+by the repository's local Bee-factory tools. It contains no shared operator state.
+Use a current record from an environment you own, not another installation's save.
 
-`node tools/local-session/preflight.mjs` checks Docker and retrieves the fixed Bee
-factory artifact. Metadata and bytes must match the shared version, URL and hash.
-The command does not start containers, deploy contracts or publish websites.
+`node tools/local-session/preflight.mjs` checks Docker and obtains the pinned
+Bee-factory artifact. It checks its expected version and bytes before use. This
+command does not start containers, deploy contracts or upload websites.
 
-`bash websites/scripts/build-checkpoint.sh` builds and tests native checkpoint
-processing and installs it under ignored .tools/. It needs no saved checkpoint.
+`bash websites/scripts/build-checkpoint.sh` builds the native checkpoint processor
+under `.tools/`. It does not need a saved checkpoint. The
+[local uploader](../../websites/README.md#owned-local-environment-upload-tool) expects
+an already running owned environment and its current records. Environment startup
+and service configuration are separate operator responsibilities.
 
-The local uploader requires an existing owned environment and its current records.
-Environment startup and profile generation are separate operator work, not supplied
-by a saved example run. Actual current/, run data, credentials and downloaded
-artifacts stay local.
+Keep generated executables, runtime records, credentials, node data and saves local.
+Use the [operator guide](../../docs/OPERATORS.md) for an independently operated
+public-testnet Bee or shared service.

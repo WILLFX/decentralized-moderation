@@ -1,286 +1,60 @@
 # Moderation contracts
 
-Solidity implementation of [`specs/protocol.md`](../specs/protocol.md), which is
-normative.
+These Solidity contracts implement the [protocol reference](../specs/protocol.md).
+The [testnet release entry](../docs/releases/TESTNET_MVP.md) identifies the deployed
+stack; [operator guidance](../docs/OPERATORS.md) explains another deployment.
 
-| File | Role |
-|---|---|
-| `src/Moderation.sol` | adopted case state machine — §3 through §8 |
-| `src/StakeRegistry.sol` | stake custody and frozen time — §2 |
-| `src/IndexRegistry.sol` | approved topic index |
+| Contract | Responsibility |
+| --- | --- |
+| `src/Moderation.sol` | Submission, paired-group voting, outcome draws, challenges, fee custody and settlement |
+| `src/StakeRegistry.sol` | Fixed stakes, outstanding votes and additive frozen time |
+| `src/IndexRegistry.sol` | Entry facts and paged topic membership |
+| `src/testnet/ChiadoTestToken.sol` | Chiado-only TEST token with a public faucet |
 
-The recorded 17 October via-IR production measurement was 13,696 bytes for
-Moderation, below EIP-170's 24,576-byte limit. This is dated component evidence;
-rebuild this checkout before claiming a new runtime measurement. Older size,
-mutation and performance results below describe their original campaigns.
+## Build and commands
 
-## Compiler pipelines
+The Foundry configuration selects Solidity 0.8.28, Cancun, optimizer runs 200 and
+via-IR compilation. Provision the compiler locally before using offline mode.
+Compiler settings affect deployed runtime hashes; keep them aligned with the
+artifacts used for deployment and profiles.
 
-The recorded current runtime fits EIP-170 under the configured via-IR profile.
-Keep the compiler settings used for tests and deployment aligned. Historical legacy
-pipeline measurements do not replace a current build.
+From this directory:
 
-The legacy pipeline must nonetheless keep working, because `tools/mutate.py` compiles
-through it for speed: 4.6 s per mutant against 30 s. A contract that only `via_ir` can
-compile would cause every mutant to be classified INVALID, and INVALID is never
-scored, so a campaign would report a clean sweep of nothing. `forge build` under
-`FOUNDRY_VIA_IR=false` is the check for that condition.
-
-`Moderation`'s constructor takes a `Config` struct for this reason among others.
-Thirteen positional arguments overflow the stack during ABI decoding on the legacy
-pipeline ("Variable dataEnd is 1 slot too deep"); a `memory` struct occupies one slot.
-
-## Deployment
-
-`script/Deploy.s.sol` deploys and links all three contracts. `verify()` is the
-significant entry point rather than `run()`: both registries hold a one-shot
-`moderation` address and `Moderation` holds theirs as immutables, so an unlinked stack
-deploys successfully, accepts submissions, and fails at the first commit. Every link
-is asserted in both directions, and a test confirms that `verify()` detects an
-unlinked stack.
-
-The guidelines are pinned rather than governed. `Moderation` carries
-`guidelinesVersion` and `guidelinesHash` as immutables, so every case in a deployment
-is judged under one text by construction, and `Deploy` rejects a stack whose hash is
-not the keccak-256 of `MODERATION_GUIDELINES.md`. The script is the only place that
-check can be made, since the contract has no filesystem access. An immutable binding
-prevents any party from altering the meaning of an open case; the cost is that a
-guidelines revision requires a new deployment.
-
----
-
-## Bound challenge interface
-
-New deployments expose `challenge(caseId, expectedRound, expectedPreliminary)`.
-Both values describe the published outcome BEFORE the round increments. Invalid
-or stale intent reverts before vote, tally, stake-counter or phase changes. The
-legacy `challenge(caseId)` entry point always reverts `ChallengeIntentRequired`,
-including calls with extra trailing words. There is no legacy fallback.
-
-`challengeIntentVersion()` returns 1 for this interface. Clients must verify their
-runtime/code-hash and deployment pins before treating that marker as support.
-Earlier immutable deployments do not acquire this fix.
-
-## Original outcome recovery and expiry
-
-An outcome target is single-shot. `cacheOutcome(caseId)` saves only that target's
-on-chain original hash, and `draw` uses it regardless of cache age. Without a cache,
-recovery uses BLOCKHASH through age 256 and EIP-2935 history through age 8,191
-inclusive. A failed history read does not authorize terminal expiry.
-
-Only `block.number > target + 8191` with no cached original permits
-`expireOutcome(caseId, expectedRound, expectedTarget)`. Initial expiry is unresolved
-and refundable; revealers receive no outcome-based reward or freeze. Challenge
-expiry finalizes the last completed outcome with ordinary pooled settlement,
-including the challenger. Non-reveal liability remains. A fallback loss is not
-proof of wrongdoing or responsibility for draw failure. Both terminal paths
-release an open removal slot. See protocol section 4.3.1 for exact semantics.
-
-`OutcomeDrawArmed`, `OutcomeHashCached` and `OutcomeDrawExpired` distinguish arming,
-recovery and terminal fallback. `PhaseChanged` reports actual stored transitions.
-The normal audit gate includes `test_regression*` from ChallengeIntentProbe,
-CompletionReviewProbes and OutcomeRecoveryTest, covering LIST/REMOVE, every round,
-cache boundaries, settlement and truthful events. Old expiry/event witnesses have
-been converted to regressions. These changes require a new linked deployment and
-matching runtime-pinned profiles; existing immutable stacks are unchanged.
-
-## Tests
-
-Run the suites using [BUILD_AND_TEST.md](../docs/BUILD_AND_TEST.md).
-
-| suite | scope |
-|---|---|
-| `Lifecycle.t.sol` | one case end to end, and the staging properties |
-| `ChallengeRound.t.sol` | the second round, end to end |
-| `Removal.t.sol` | §8 — Approve means remove |
-| `Guards.t.sol` | the guards, and the state a reader is shown |
-| `Stakes.t.sol` | §2 — additive freezes, and the stake never taken |
-| `Index.t.sol` | §7 — the two recorded facts, and the swap-remove |
-| `Draw.t.sol` | §5 — the ticket rule, and vector emission |
-| `Integration.t.sol` | the three real contracts, no mocks |
-| `Invariant.t.sol` | nine properties under fuzzed orderings |
-| `ThreeVote.t.sol` | the cost of capture before and after §4.4's threshold |
-| `RevealFloor.t.sol` | §4.4 — the threshold and its two failure paths |
-| `Settlement.t.sol` | settlement safety, actor guards, and stated boundaries |
-| `Eligibility.t.sol` | §3 — the threshold, the seed window, and the vector emitters |
-| `InputAndClaimRegression.t.sol` | zero topics/commitments and accurate unresolved freeze events |
-| `ProductionScheduling.t.sol` | fallback/revision/history caching and phase boundaries with real registries |
-| `N4Eligibility.t.sol` | adopted threshold boundaries and pinned eligibility with real registries |
-
-Four of these require explanation.
-
-`Integration.t.sol`, `ProductionScheduling.t.sol` and `N4Eligibility.t.sol`
-exercise real registry wiring. Smaller mock-based tests isolate individual rules;
-those tests alone cannot establish interface agreement. Integration uses 64 staked
-moderators to exercise nonzero eligibility bits rather than only all-selected
-small fixtures.
-
-`Invariant.t.sol` guards against vacuity. A handler whose calls all revert satisfies
-every invariant by doing nothing. The coverage check cannot be an `invariant_*`
-function, since Foundry evaluates those once before fuzzing begins, nor
-`afterInvariant`, which Foundry calls with handler state reset so that every counter
-reads zero — and a `view` implementation of it aborts the run silently. It is
-therefore an ordinary test that drives the handler directly and confirms each state of
-interest is reachable.
-
-`ThreeVote.t.sol` contains two tests that assert opposing outcomes, which is
-deliberate. The first confirms that the original three-identity capture no longer
-succeeds: it required committee B to hold nobody, and any non-zero threshold prevents
-it. The second confirms that a clique fielding `MIN_REVEALS` revealing identities in
-each committee still takes a unanimous case with certainty, because the estimator
-remains the raw share. The threshold changed the cost of capture, not its
-possibility.
-
-`Settlement.t.sol` covers classes of defect that the rest of the suite left open, each
-identified by mutation testing and listed under [Mutation testing](#mutation-testing)
-below.
-
-## Differentials
-
-Both differentials exist because a check on an aggregate is blind to which inputs
-produced it.
-
-**The draw.** `Draw.t.sol` constrains the rate — that outcomes track `3a² − 2a³`. It
-says nothing about the ticket derivation. A domain-separation error keeps `u` uniform,
-keeps the rate correct, passes every statistical test, and makes two distinct draws
-identical. `simulation/check_draw_vectors.py` re-derives every `u[i]` in Python; 48
-vectors agree.
-
-**Eligibility.** `Integration.t.sol` establishes that eligibility narrows to roughly
-half at 64 staked, which constrains the count alone. Inverting the predicate —
-`h >> (256 - eligBits) == 0` to `!= 0` — produces a different set of the same size, so
-it passes every count-based assertion; every test commits whichever identities are
-eligible rather than a set fixed in advance.
-`simulation/check_eligibility_vectors.py` therefore re-derives the predicate identity
-by identity: 128 vectors from both committees of a real case, and 512 from a planted
-sweep across bit widths 1–4, since a real registry pins `eligBits` at 1 for every size
-from 64 to 127 and the shift would otherwise be compared at a single width. It also
-re-derives the threshold from the registry size, and requires the two committees to be
-distinct draws.
-
-Each Python implementation loads a keccak that refuses to run unless it reproduces
-published KATs, and each deliberately breaks its own derivation — the draw omits the
-round from the preimage, eligibility omits the committee — failing if the comparison
-does not detect the change. Agreement is evidence only if disagreement were possible.
-Each also rejects vacuous input: the eligibility checker refuses vectors emitted at
-`eligBits == 0`, where the contract short-circuits, and refuses any width whose
-eligible set is uniform, since an all-false set cannot distinguish the predicate from
-a constant.
-
-```
-cd contracts && forge test --match-test "test_emit.*Vectors"
-python3 simulation/check_draw_vectors.py
-python3 simulation/check_eligibility_vectors.py
+```sh
+forge build --use 0.8.28
+forge test --use 0.8.28
 ```
 
-Both are Python scripts, so neither `forge test` nor a mutation campaign runs them. A
-mutant that changes the draw or the eligibility hash also regenerates the vectors, so
-the Python side agrees with the mutant and the campaign records a survivor. The
-differentials are evidence about the contracts but contribute nothing to the mutation
-score, and any property that must appear in that score requires an assertion in
-Solidity. `test_thePhaseDerivedCommitteeMatchesTheExplicitOne` serves that purpose for
-the committee number.
+The repository-wide command is `bash scripts/check.sh` from its root. The
+`test/` and `audit/` directories contain Solidity test sources. `test/vectors/`
+holds the data consumed by Python/Rust comparison tools. `tools/mutate.py` is an
+optional mutation tool and uses a separate legacy compiler configuration.
 
-## Mutation testing
+## Deploy and link
 
-```
-python3 tools/mutate.py --all
-```
+`script/Deploy.s.sol` takes a `Params` structure, creates both registries and
+`Moderation`, then sets their one-time links. Its `verify` method checks links in
+both directions and agreement on the token. `script/DeployChiado.s.sol` adds the
+TEST faucet token, enforces chain ID 10200 and takes a public deploying address.
+A dry script run simulates; broadcasting/signing is a separate operator action.
 
-Three outcomes, of which two are scored:
+The root `MODERATION_GUIDELINES.md` supplies the immutable guideline hash. Do not
+rewrite its bytes while reusing a deployment identity. New guidelines or contract
+logic require new contract addresses and profiles; a website update cannot upgrade
+an existing immutable stack.
 
-| | |
-|---|---|
-| `KILLED` | compiles, a test fails — the suite detected it |
-| `SURVIVED` | compiles, all tests pass — a gap in coverage |
-| `INVALID` | does not compile — no information either way, never scored |
+## Interfaces to retain when changing code
 
-Counting INVALID as killed inflates the rate with mutants no test could detect. The
-rate is `killed / (killed + survived)`, and INVALID is reported alongside it.
+- `challenge(caseId, expectedRound, expectedPreliminary)` binds the reviewed
+  decision at execution. The one-argument overload always refuses.
+- `outcomeRecoveryOf`, `cacheOutcome` and `expireOutcome` describe the original
+  target and precise recovery boundary. A cached original remains drawable.
+- `pairScheduleOf` supplies effective deadlines even when stored phase lags the
+  first admissible second-group commitment.
+- `claim(caseId, moderator)` settles once and pays that moderator. Refunds pay the
+  original submitter. Phase advancement and per-vote settlement are permissionless.
+- The index records listing origins and current membership separately. A removal
+  targets the listing's case and cannot choose a different set of topics.
 
-Campaigns mutate a scratch copy of the project rather than the working tree, so that a
-concurrent commit cannot capture a live mutant. They compile through the legacy
-pipeline, because a campaign measures the test suite rather than the deployed
-bytecode; the shipped profile and ordinary `forge test` retain `via_ir`.
-
-Latest full sweep — 243 mutants, no sampling:
-
-| | killed | survived | INVALID | rate |
-|---|---:|---:|---:|---:|
-| `Moderation` | 180 | 4 | 6 | 97.8% |
-| `IndexRegistry` | 34 | 2 | 1 | 94.4% |
-| `StakeRegistry` | 15 | 1 | 0 | 93.8% |
-| **combined** | **229** | **7** | **7** | **97.0%** |
-
-### The seven survivors
-
-Each is annotated at its location in the source. None is outstanding work.
-
-Two are unreachable by construction and retained as defence in depth:
-
-- `challenge`'s `c.challenges >= MAX_CHALLENGES`. `draw` finalizes at the cap, so no
-  state reaches `Phase.CHALLENGE` carrying two challenges.
-- `_eligible`'s `sb == 0`. Both callers ask only about the current phase, whose seed is
-  armed before that phase can be reached.
-
-Five are equivalent mutants, which change no observable behaviour:
-
-- `bits > 5` against `>=` in `_eligBits` — both yield 0 at `bits == 5`.
-- the draw's `u * den < num << 128` — the two forms differ only on an equality of
-  probability 2⁻¹²⁸.
-- `StakeRegistry`'s freeze-base ternary at the boundary.
-- `IndexRegistry`'s two pagination bounds, which return the same empty page either way.
-
-### What `Settlement.t.sol` covers, and why
-
-The suite contains 21 tests, each written against a specific surviving mutant and each
-verified to fail on that mutant and pass on unmodified code. Five of those mutants
-represented defects with material consequences:
-
-| mutant | consequence |
-|---|---|
-| `vt.settled = true` → `false` | a coherent voter re-enters `claim` and is paid on each call, draining the pot |
-| `claim`'s `\|\|` → `&&` | `claim(caseId, m)` is permissionless in `m`, so a non-voter passes the guard and reaches `settle(m, true, …)`; any address can be frozen by any caller |
-| `challenge`'s stake guard `\|\|` → `&&` | an address holding no stake can purchase two further committees for a case |
-| `challenge`'s seed `+` → `-` | the challenge round's committee A seed becomes a past block, so the challenger can compute that committee when they challenge, defeating the staging property |
-| `draw`'s cap `>=` → `>` | the challenge cap becomes three rather than two |
-
-Three further tests address mutants that a first pass had misclassified as
-equivalent. The most significant concerns `submitRemoval`, which has its own
-`nextCaseId++`: existing tests submitted listings and removals in separate groups, so
-none confirmed that a removal leaves the counter where the next listing can use it.
-Under the mutant a removal assigns the next submission an identifier already in use
-and overwrites a live case. The other two are guard shapes covered on one function and
-not on another: `reveal` at exactly its deadline, and `draw`'s own blockhash horizon.
-
-A note on method, since it determines whether a hand check means anything: a probe
-must apply exactly the mutation the campaign applies. Replacing both occurrences of
-`nextCaseId++` reverts on the second submission and fails loudly, whereas the
-single-line mutation in `submitRemoval` is silent. A probe that mutates more than the
-campaign does measures a different program.
-
-The code introduced for §4.4 required none of these additions. All eleven mutants on
-the reveal threshold, the first-round and challenge-round branches, the non-reveal
-freeze and the constructor guard were killed by `RevealFloor.t.sol` and
-`ThreeVote.t.sol` on the first campaign.
-
-## Open items
-
-[`specs/protocol.md`](../specs/protocol.md) §11 is the authoritative list. Two items
-bear directly on this code.
-
-`minRevealsPerCommittee = 3` is conditional rather than settled, and is a constructor
-argument so that a testnet can change it. `simulation/FINDINGS-floor-price.md` prices
-the earlier N-5 lottery at 0.9% of cases unresolvable given 20% turnout and a 75% reveal rate, and at 28%
-given 10% turnout. Those figures do not calibrate the adopted N-4 lottery. The earlier study's low-turnout conclusions apply to its historical lottery/model,
-not a calibrated operating boundary for current N-4. Turnout remains unmeasured.
-
-Identity rotation is untouched by anything here. A frozen moderator can leave the
-frozen stake idle and stake a fresh address, so escaping a freeze costs one stake tied
-up for the freeze duration — the same cost as serving it. `StakeRegistry`'s closing
-comment records this where a reader of the contract will encounter it.
-
-The adopted eligibility denominator is the total staked count pinned at case
-opening, as stated in protocol §3. Frozen callers are rejected separately. A
-moderator may vote once per case, not once per committee. Historical discussions
-of a non-frozen denominator do not override those current rules.
+Read the protocol before changing settlement, seed recovery or phase events.
+Arithmetic, exact-call binding and client ABI behavior must agree across components.

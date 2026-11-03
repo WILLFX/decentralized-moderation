@@ -110,6 +110,12 @@ is a content identifier, not an endorsement of the operator. The existing
 [publisher setup helper](PUBLISHER_SETUP.md) builds such links. Local-file selection
 is also available. Do not publish personal drafts or private recovery as profiles.
 
+For a source retained for existing work, matching clients accept
+`"purpose": "existingWork"` outside the deployment pins. This blocks new
+publication payments and fresh staking while keeping completion, receipt recovery,
+refunds and eligible withdrawals. It does not disable on-chain calls or older
+websites. See the [Chiado existing-work profiles](../deployments/chiado/existing-work/README.md).
+
 ### Match content access
 
 Swarm's `/bytes` route retrieves raw stored bytes. `/bzz` opens a file or collection

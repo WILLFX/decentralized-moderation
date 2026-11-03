@@ -100,3 +100,6 @@ footer { border-top: 1px solid #c8d5ce; margin-top: 2.5rem; padding-top: 1rem; }
 #change-editor .check span { min-width: 0; overflow-wrap: anywhere; }
 
 #change-editor button { padding: .4rem .3rem; }
+
+.version-settings { min-width: 0; max-width: 100%; flex-basis: 100%; overflow-wrap: anywhere; }
+.version-settings select { min-width: 0; width: 100%; max-width: 100%; }

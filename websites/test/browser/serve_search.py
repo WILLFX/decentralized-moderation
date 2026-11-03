@@ -94,8 +94,8 @@ class SearchModel:
         if not x or self.mode=="unavailable":return None
         return x["metadata"]+b" " if self.mode=="tamper" else x["metadata"]
 
-def serve(args):
-    model=SearchModel(args.assets)
+def serve(args, model_type=SearchModel):
+    model=model_type(args.assets)
     manifest=json.loads((args.assets/"asset-hashes.json").read_text())
     app_origin=content_origin=""
     class Handler(BaseHTTPRequestHandler):

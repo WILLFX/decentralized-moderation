@@ -63,7 +63,7 @@ impl Reader {
             source,
         };
         let d = &self.profile.deployment;
-        for p in [&d.moderation, &d.stakes, &d.index, &d.token] {
+        for p in swarm_core::versioning::runtime_pins(d) {
             let code = self.rpc("eth_getCode", json!([p.address, c.pin])).await?;
             let code = as_str(&code)?;
             if code.len() > 131074 {
@@ -90,7 +90,49 @@ impl Reader {
                 .await?,
         )
         .map_err(|e| e.0)?;
+        for check in swarm_core::versioning::word_checks(d).map_err(|e| e.0)? {
+            let raw = self
+                .call(&c, &check.contract, check.signature, &check.args)
+                .await?;
+            swarm_core::versioning::verify_word(&check, &raw).map_err(|e| e.0)?;
+        }
         Ok(c)
+    }
+    pub async fn version_at(&self, c: &Context, address: &str) -> Result<ModeratorProfile> {
+        let p = swarm_core::versioning::select(&self.profile, address).map_err(|e| e.0)?;
+        let d = &p.deployment;
+        let code = self
+            .rpc("eth_getCode", json!([d.moderation.address, c.pin]))
+            .await?;
+        verify_runtime(&d.moderation, as_str(&code)?).map_err(|e| e.0)?;
+        for link in link_checks(d)
+            .into_iter()
+            .filter(|l| l.contract_address.eq_ignore_ascii_case(address))
+        {
+            verify_link(
+                &link,
+                &self
+                    .call(c, &link.contract_address, link.signature, "")
+                    .await?,
+            )
+            .map_err(|e| e.0)?;
+        }
+        for check in swarm_core::versioning::word_checks(d).map_err(|e| e.0)? {
+            swarm_core::versioning::verify_word(
+                &check,
+                &self
+                    .call(c, &check.contract, check.signature, &check.args)
+                    .await?,
+            )
+            .map_err(|e| e.0)?;
+        }
+        verify_guidelines(
+            d,
+            &self.call(c, address, "guidelinesVersion()", "").await?,
+            &self.call(c, address, "guidelinesHash()", "").await?,
+        )
+        .map_err(|e| e.0)?;
+        Ok(p)
     }
     pub async fn finish(&self, c: &Context) -> Result<()> {
         let b = parse_block(

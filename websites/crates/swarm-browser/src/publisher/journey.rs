@@ -197,7 +197,8 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
         "active-pins",
         &s.profile
             .as_ref()
-            .and_then(|p| serde_json::to_string_pretty(&p.deployment).ok())
+            .and_then(|p| swarm_core::versioning::identity(&p.deployment).ok())
+            .and_then(|identity| serde_json::to_string_pretty(&identity).ok())
             .unwrap_or_default(),
     );
 
@@ -345,7 +346,24 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
                 "Fee, balance and allowance have not been read for this context.".into()
             }),
     );
-    hidden("review-setup", p.is_some() && s.account.is_some());
+    let closed = s
+        .funding
+        .as_ref()
+        .and_then(|f| f.active_version.as_ref())
+        .zip(p)
+        .is_some_and(|(active, p)| !active.eq_ignore_ascii_case(&p.deployment.moderation.address));
+    hidden(
+        "review-setup",
+        p.is_some() && s.account.is_some() && !closed,
+    );
+    text(
+        "review-setup",
+        if closed {
+            "Choose active version"
+        } else {
+            "Choose source or connect wallet"
+        },
+    );
     hidden("review-inspect", content::ready(a));
     hidden("loadguidelines", s.draft.is_none() || s.guidelines);
     hidden("metadata-ack", s.draft.is_none() || !s.guidelines);
@@ -359,7 +377,10 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
     hidden("submit", !r.submit);
     hidden("approvalreceipt", !r.approval_open);
     hidden("submissionreceipt", !r.submission_open);
-    hidden("resubmit-label", !r.submitted);
+    hidden(
+        "resubmit-label",
+        !r.submitted || s.profile.as_ref().is_some_and(|p| !p.purpose.is_standard()),
+    );
     hidden("approval-note", !(r.approve || r.approval_open || r.submit));
     hidden(
         "submission-note",

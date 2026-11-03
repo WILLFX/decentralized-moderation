@@ -240,6 +240,22 @@ pub(crate) fn ensure_clear(p: &ModeratorProfile, voter: &str) -> Result<()> {
     if load(p, voter)?.iter().any(|r| !r.settled) {
         return Err("REQUEST_UNRESOLVED");
     }
+    if let Some(family) = &p.deployment.persistent {
+        for version in &family.versions {
+            if version
+                .moderation
+                .address
+                .eq_ignore_ascii_case(&p.deployment.moderation.address)
+            {
+                continue;
+            }
+            let origin =
+                swarm_core::versioning::select(p, &version.moderation.address).map_err(|e| e.0)?;
+            if load(&origin, voter)?.iter().any(|r| !r.settled) {
+                return Err("OTHER_VERSION_REQUEST_UNRESOLVED");
+            }
+        }
+    }
     Ok(())
 }
 pub(crate) async fn boundary(p: &ModeratorProfile, voter: &str) -> Result<(u64, u64)> {

@@ -431,6 +431,10 @@ impl Session {
         .await
     }
     pub async fn stake_action(&self, action: &str) -> Result<Broadcast> {
+        self.profile
+            .purpose
+            .check_staking(action)
+            .map_err(|e| e.0)?;
         self.current()?;
         let e = evidence::read_moderator(&self.profile, &self.voter).await?;
         self.current()?;

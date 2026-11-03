@@ -91,8 +91,11 @@
   </label>
   <p id="profile-error" class="field-error"></p>
   <button id="loadprofilefile">Review selected profile file</button>
+<p id="profile-purpose" class="status" hidden></p>
+<div id="version-settings" class="version-settings" hidden><label>Case contract <select id="profile-version"></select></label><p id="version-status" class="hint"></p></div>
 <div id="profile-candidate-controls">
-  <p id="source-candidate" class="context" tabindex="-1"></p><details><summary>Full candidate identity</summary><pre id="profile-review"></pre></details>
+
+<p id="source-candidate" class="context" tabindex="-1"></p><details><summary>Full candidate identity</summary><pre id="profile-review"></pre></details>
   <label class="check"><input id="trustprofile" type="checkbox">This candidate matches the deployment source I trust.</label>
   <button id="useprofile">Use reviewed profile</button>
 </div>

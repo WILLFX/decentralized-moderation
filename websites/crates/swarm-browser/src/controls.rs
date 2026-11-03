@@ -581,6 +581,26 @@ pub(super) fn render(app: &App) {
     crate::wallet::render_picker("wallet-picker", wallet_selection_locked(app));
     journey::render(app);
     disabled("resume-case", app.busy);
+    let purpose = app
+        .profile
+        .as_ref()
+        .or(app.candidate.as_ref())
+        .map(|p| p.purpose);
+    crate::versions::purpose(purpose);
+    let existing_only = app
+        .profile
+        .as_ref()
+        .is_some_and(|p| !p.purpose.is_standard());
+    journey::hidden("stake-purpose", !existing_only);
+    text(
+        "stake-purpose",
+        if existing_only {
+            "Existing work: new staking is disabled. Withdrawals still require settled votes and no freeze."
+        } else {
+            ""
+        },
+    );
+    crate::versions::locked(app.busy || wallet_selection_locked(app));
     disabled("use-profile", app.busy || app.candidate.is_none());
     disabled("connect", app.busy || app.profile.is_none());
     disabled("refresh", app.busy || !app.wallet.connected);
@@ -694,8 +714,15 @@ pub(super) fn render(app: &App) {
             e.funds.balance,
             e.funds.allowance,
         );
-        disabled("approve-stake", pending.is_some() || !a.approve_stake);
-        disabled("stake", pending.is_some() || !a.stake);
+        let existing_only = app
+            .profile
+            .as_ref()
+            .is_some_and(|p| !p.purpose.is_standard());
+        disabled(
+            "approve-stake",
+            existing_only || pending.is_some() || !a.approve_stake,
+        );
+        disabled("stake", existing_only || pending.is_some() || !a.stake);
         disabled("withdraw-stake", pending.is_some() || !a.withdraw);
     }
     let Ok(e) = selected(app) else {
@@ -1261,8 +1288,13 @@ fn case_summary(e: &CaseEvidence) -> String {
     let s = &e.snapshot;
     let c = &s.case;
     let time = case_time(e);
-    format!("Case {} · {}\n{}\nContent: {}\nMetadata: {}\nSource: block {}, {}\n{}\n{} verdict: {}\nReveals A / B: {} / {} · round {}\nYour vote settled: {}\nRefresh this case for current time and action availability.",
-        s.case_id,case_actions(s,e.eligibility).state,view::question(c),c.content_hash,c.meta_hash,s.source.number,moment(s.source.timestamp),time,
+    let target = e
+        .target_moderation
+        .as_ref()
+        .map(|m| format!("\nTarget case contract: {m}"))
+        .unwrap_or_default();
+    format!("Case {} · {}\n{}{}\nContent: {}\nMetadata: {}\nSource: block {}, {}\n{}\n{} verdict: {}\nReveals A / B: {} / {} · round {}\nYour vote settled: {}\nRefresh this case for current time and action availability.",
+        s.case_id,case_actions(s,e.eligibility).state,view::question(c),target,c.content_hash,c.meta_hash,s.source.number,moment(s.source.timestamp),time,
         if c.phase == 5 {"Final"} else {"Preliminary"}, if c.preliminary == 0 {"Not drawn"} else {view::choice(c.action_type,c.preliminary)},c.reveals_a,c.reveals_b,c.challenges,if s.vote.settled {"Yes"} else {"No"})
 }
 async fn backup_text() -> Result<String> {
@@ -1595,6 +1627,9 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
         _ => {}
     }
     let mut s = session(app)?;
+    if let Command::Stake(action) = command {
+        s.profile.purpose.check_staking(action).map_err(|e| e.0)?;
+    }
     if matches!(
         command,
         Command::Commit | Command::Reveal | Command::Action(_) | Command::Stake(_)

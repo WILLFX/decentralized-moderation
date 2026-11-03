@@ -24,6 +24,8 @@ pub fn parse_profile(text: &str) -> Result<SearchProfile> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Raw {
+        #[serde(default)]
+        purpose: crate::ProfilePurpose,
         deployment: crate::Deployment,
         rpc_url: String,
         gateway_url: String,
@@ -41,7 +43,7 @@ pub fn parse_profile(text: &str) -> Result<SearchProfile> {
             .unwrap_or(&raw.gateway_url),
     )?;
     crate::review::resource_url(&content_gateway, "bytes", &format!("0x{}", "01".repeat(32)))?;
-    let value = serde_json::json!({"deployment":raw.deployment,"rpcUrl":raw.rpc_url,"gatewayUrl":raw.gateway_url,"metadataPath":raw.metadata_path.unwrap_or("bytes".into()),"contentPath":raw.content_path.unwrap_or("bzz".into()),"guidelinesUrl":raw.guidelines_url.unwrap_or("./MODERATION_GUIDELINES.md".into()),"timing":{"clockErrorSeconds":0,"maxEvidenceAgeSeconds":30,"maxHeadLagSeconds":30,"inclusionBudgetSeconds":120}});
+    let value = serde_json::json!({"purpose":raw.purpose,"deployment":raw.deployment,"rpcUrl":raw.rpc_url,"gatewayUrl":raw.gateway_url,"metadataPath":raw.metadata_path.unwrap_or("bytes".into()),"contentPath":raw.content_path.unwrap_or("bzz".into()),"guidelinesUrl":raw.guidelines_url.unwrap_or("./MODERATION_GUIDELINES.md".into()),"timing":{"clockErrorSeconds":0,"maxEvidenceAgeSeconds":30,"maxHeadLagSeconds":30,"inclusionBudgetSeconds":120}});
     let access = crate::parse_profile(&value.to_string())?;
     crate::review::resource_url(
         &access.gateway_url,
@@ -101,6 +103,7 @@ pub fn increment(mut id: Uint256) -> Result<Uint256> {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
+    pub origin: Option<crate::versioning::Origin>,
     pub case_id: Uint256,
     pub claim: String,
     pub content: String,
@@ -141,6 +144,7 @@ pub fn candidate(id: Uint256, c: &CaseInfo, topics: Vec<String>) -> Result<Optio
         return Ok(None);
     }
     Ok(Some(Binding {
+        origin: None,
         case_id: id,
         claim: c.claim_key.clone(),
         content: c.content_hash.clone(),
@@ -431,6 +435,7 @@ mod provenance_tests {
         let content = hash(1);
         let metadata = hash(2);
         Binding {
+            origin: None,
             case_id: Uint256::from_u64(1),
             claim: pair_hash(&content, &metadata).unwrap(),
             content,
@@ -534,6 +539,7 @@ mod cap_tests {
     fn capped_scan_retains_progress_without_becoming_resolved() {
         let hash = |n| format!("0x{}", format!("{n:02x}").repeat(32));
         let b = Binding {
+            origin: None,
             case_id: Uint256::from_u64(1),
             claim: pair_hash(&hash(1), &hash(2)).unwrap(),
             content: hash(1),

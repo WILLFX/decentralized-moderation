@@ -66,3 +66,6 @@ footer { border-top: 1px solid #c8d5ce; margin-top: 2.5rem; padding-top: 1rem; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 
 #wallet-picker { display: block; width: 100%; max-width: 32rem; min-width: 0; min-height: 2.75rem; box-sizing: border-box; font: inherit; line-height: 1.4; margin: .4rem 0; padding: .6rem; border: 1px solid #788c87; border-radius: .3rem; background: white; color: #20333c; }
+
+.version-settings { min-width: 0; max-width: 100%; flex-basis: 100%; overflow-wrap: anywhere; }
+.version-settings select { min-width: 0; width: 100%; max-width: 100%; }

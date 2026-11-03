@@ -55,11 +55,31 @@ pub(super) async fn load(app: Shared, remote: bool) -> Result<()> {
         ]
         .iter()
         .any(|u| u.contains('?'))
+        || remote
+            && profile
+                .access
+                .deployment
+                .persistent
+                .as_ref()
+                .is_some_and(|f| f.versions.iter().any(|v| v.guidelines_url.contains('?')))
     {
         return Err("PUBLIC_PROFILE_CONTAINS_ACCESS_SETTINGS");
     }
+    let family = profile
+        .access
+        .deployment
+        .persistent
+        .as_ref()
+        .map(|p| {
+            format!(
+                "\nShared authority {}\n{} reviewed case contracts",
+                p.authority.address,
+                p.versions.len()
+            )
+        })
+        .unwrap_or_default();
     let candidate = Candidate {
-        summary: summary(&profile, &fingerprint),
+        summary: format!("{}{family}", summary(&profile, &fingerprint)),
         profile,
     };
     let p = &candidate.profile;

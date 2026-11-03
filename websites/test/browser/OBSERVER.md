@@ -184,3 +184,55 @@ before accepting the correct one. After results are loaded, select another sourc
 through the interface and confirm that old results no longer appear as evidence
 from the new source. These are different operations from the `replaced` mode,
 which changes the chain evidence behind an already selected source.
+
+
+## Persistent-version checkpoints
+
+`serve_persistent_versions.py --role reader|publisher|moderator --output <directory>`
+reuses the existing isolated servers and built role assets. The generated profile
+contains a shared authority and two reviewed case contracts. This prepares reads;
+it does not execute a replacement or forward requests to a blockchain.
+
+Reader starts with the new contract selected, but index origins name the earlier
+contract. Numeric case 1 has different content in the two contracts. The selected
+contract advertises guidelines v2, while the original listing retains v1. Search,
+check membership and open content through the normal controls. Reader accepts
+`{"mode":"unknown-origin"}`, `{"mode":"wrong-guidelines"}` and
+`{"mode":"unknown-case"}` for refusal states; `normal` clears these faults.
+The existing `removed`, `replaced` and transient-failure modes also remain available.
+
+Publisher starts before replacement. `{"command":"activate-version"}` approves
+and activates the next prepared version. A new fee approval or submission through
+the earlier version must stop before the wallet send. Use the Case contract
+selector, review the candidate and reconnect to use the new version. To exercise
+recovery, hold an approval, release it as `unknown`, activate the next version,
+change versions and return to the original. Its saved request must remain, and
+its matching receipt must still reconcile without another send. The existing
+Publisher `release` and `mine` payloads apply here.
+
+Moderator starts on an earlier approved version after replacement. Read its cases
+and review material normally. Changing Case contract must clear earlier evidence
+and require explicit profile acceptance and wallet reconnection. Private recovery
+and public request records remain scoped to their original contract. Case 18's
+removal registration identifies its target contract as well as target case 16.
+
+## Existing-work profiles
+
+`serve_existing_work.py --role reader|publisher|moderator --output <directory>`
+adds `purpose: "existingWork"` without changing the source identity. No upload
+credentials are supplied. New publication payments and fresh staking must be
+unavailable, including after reconnecting. Normal receipt recovery remains usable.
+
+Publisher starts with an unresolved case 1 and a refund owed. Use the existing
+case lookup and refund controls; held-request `release` and `mine` commands still
+apply. Reader retains the original source's listings and membership checks.
+
+Moderator starts unstaked. `{"command":"stake-state","staked":true}` prepares
+an existing stake; an optional `frozenUntil` sets its freeze deadline.
+`{"command":"prepare-completion"}` prepares a revealed, unsettled vote in
+finalized case 1. Settle it through the interface, then refresh stake and withdraw.
+Withdrawal must remain blocked while obligations or a freeze remain.
+`{"command":"advance-finality"}` advances the synthetic receipt checkpoint.
+The existing commit/reveal phase controls can also be used with a saved choice
+and a verified encrypted backup. This fixture prepares facts; it does not execute
+contracts or operate a real wallet.

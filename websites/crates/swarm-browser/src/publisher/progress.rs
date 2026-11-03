@@ -8,11 +8,14 @@ pub(super) struct FundingRead {
     pub balance: Uint256,
     pub allowance: Uint256,
     pub source: Value,
+    pub active_version: Option<String>,
 }
 #[derive(Default)]
 struct Ready {
     profile: bool,
     candidate: bool,
+    version_closed: bool,
+    existing_work: bool,
     content: bool,
     connected: bool,
     draft: bool,
@@ -46,8 +49,12 @@ fn plan(r: &Ready) -> Plan {
         "Check the saved fee approval receipt. A sufficient allowance does not clear an unresolved wallet request. Use transaction recovery if its hash is missing or replaced."
     } else if r.submission_open {
         "Check the saved submission receipt. Do not submit again while the earlier request is unresolved."
+    } else if r.existing_work {
+        "Use My publications or Saved requests to continue existing work. New publication payments are disabled in this profile."
     } else if r.submitted && !r.resubmit {
         "The matching submission is confirmed. Open it in My publications to check moderation and current listing status. To submit the same publication again, explicitly choose deliberate resubmission below; this pays another fee."
+    } else if r.version_closed {
+        "This version is closed to new publications. Choose the active version in Source & wallet; existing publications and refunds remain available."
     } else if !r.content {
         "Upload or identify the intended content, inspect it through a checked copy or separate viewer, then acknowledge this exact reference before metadata upload or payment."
     } else if !r.draft {
@@ -73,7 +80,9 @@ fn plan(r: &Ready) -> Plan {
     } else {
         "Allowance covers the selected fee. Submit explicitly to pay that fee and enter moderation. The wallet estimates network gas separately."
     };
-    let common = r.profile
+    let common = !r.existing_work
+        && !r.version_closed
+        && r.profile
         && r.connected
         && r.content
         && r.draft
@@ -133,11 +142,16 @@ pub(super) async fn refresh_funds(a: &Rc<RefCell<App>>) -> Result<()> {
     let (p, who, epoch) = context(a)?;
     wallet::check(p.deployment.chain_id, &who).await?;
     let c = io::begin(&p).await?;
+    let active_version = crate::versioning::active_address(&p, &c.pin).await?;
     let (minimum, balance, allowance) = io::funds(&p, &c, &who).await?;
     io::finish(&p, &c).await?;
     wallet::check(p.deployment.chain_id, &who).await?;
     active(a, epoch)?;
+    if let Some(address) = &active_version {
+        crate::versions::active(address);
+    }
     a.borrow_mut().funding = Some(FundingRead {
+        active_version,
         minimum,
         balance,
         allowance,
@@ -205,6 +219,10 @@ pub(super) fn explain(a: &Rc<RefCell<App>>, code: &str, fallback: &str) -> Strin
         return "Choose the wallet you want to connect.".into();
     }
     let help=match code {
+        "OTHER_VERSION_REQUEST_UNRESOLVED"=>"An earlier request in another case contract is unresolved. Select its original contract in Source & wallet and check the saved receipt before trying again.",
+        "EXISTING_WORK_ONLY"=>"This profile is for existing work. Use My publications or Saved requests; new publication payments are disabled.",
+        "VERSION_CLOSED_TO_SUBMISSIONS"=>"This contract is closed to new publications. Choose the active case contract in Source & wallet, or refresh the profile. Existing receipts and refunds are still available.",
+        "UNKNOWN_CASE_VERSION"|"DEPLOYMENT_VERSION_MISMATCH"|"SELECTED_VERSION_MISMATCH"|"CASE_VERSION_MISMATCH"=>"The profile and verified case version do not match. Refresh the intended deployment profile; keep existing recovery files and saved requests.",
         "INVALID_FEE_AMOUNT"=>"Enter the publication fee as a plain nonnegative decimal within the profile's precision. Do not use commas or exponents. The exact base-unit amount appears below the field.",
         "FEE_OVERFLOW"=>"The selected fee exceeds the contract's amount limit. Choose a smaller fee; the application never rounds or truncates it.",
         "FEE_TOO_LOW"=>"The chosen fee is below the current minimum. Refresh fee and balances, then choose the minimum or enter a higher fee.",
@@ -237,6 +255,15 @@ pub(super) fn explain(a: &Rc<RefCell<App>>, code: &str, fallback: &str) -> Strin
     format!("{help}\nDetails: {code}")
 }
 pub(super) fn render(a: &Rc<RefCell<App>>) {
+    let purpose = {
+        let s = a.borrow();
+        s.profile
+            .as_ref()
+            .map(|p| p.purpose)
+            .or_else(|| s.setup_candidate.as_ref().map(|c| c.profile.purpose))
+    };
+    crate::versions::purpose(purpose);
+    crate::versions::locked(a.borrow().busy);
     wallet::render_picker("wallet-picker", a.borrow().busy);
     let (p, connected, draft, guidelines, uploaded, funding, busy) = {
         let s = a.borrow();
@@ -258,6 +285,14 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
     let ready = Ready {
         profile: p.is_some(),
         candidate: a.borrow().setup_candidate.is_some(),
+        existing_work: p.as_ref().is_some_and(|p| !p.purpose.is_standard()),
+        version_closed: funding
+            .as_ref()
+            .and_then(|f| f.active_version.as_ref())
+            .zip(p.as_ref())
+            .is_some_and(|(active, p)| {
+                !active.eq_ignore_ascii_case(&p.deployment.moderation.address)
+            }),
         content: content::ready(a),
         connected,
         draft: draft.is_some(),
@@ -465,6 +500,32 @@ mod tests {
             journal: true,
             ..Ready::default()
         }
+    }
+    #[test]
+    fn closed_version_never_offers_a_new_payment_even_with_allowance() {
+        let mut r = reviewed();
+        r.version_closed = true;
+        assert!(!plan(&r).approve);
+        assert!(!plan(&r).submit);
+        assert!(plan(&r).next.contains("active version"));
+        r.allowance = true;
+        assert!(!plan(&r).submit);
+        r.approval_open = true;
+        assert!(plan(&r).next.contains("receipt"));
+    }
+    #[test]
+    fn existing_work_never_offers_payment_or_deliberate_republication() {
+        let mut r = reviewed();
+        r.existing_work = true;
+        assert!(!plan(&r).approve);
+        assert!(!plan(&r).submit);
+        assert!(plan(&r).next.contains("existing work"));
+        r.allowance = true;
+        r.submitted = true;
+        r.resubmit = true;
+        assert!(!plan(&r).submit);
+        r.approval_open = true;
+        assert!(plan(&r).next.contains("receipt"));
     }
     #[test]
     fn existing_allowance_skips_approval_but_uncertain_approval_still_blocks() {

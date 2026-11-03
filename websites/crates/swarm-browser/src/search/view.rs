@@ -40,6 +40,8 @@ pub(super) fn collecting(s: &Session) -> bool {
 }
 pub(super) fn message(code: &str) -> String {
     let meaning=match code {
+        "UNKNOWN_CASE_VERSION"=>"The original case contract is missing from this profile. Obtain an updated source profile before opening this result.",
+        "ENTRY_VERSION_MISMATCH"|"CASE_VERSION_MISMATCH"|"DEPLOYMENT_VERSION_MISMATCH"=>"The case version or its original guidelines could not be authenticated. Refresh the source profile; no content link was enabled.",
         "INVALID_TOPIC"=>"Enter a complete topic of 1–64 characters.",
         "LOAD_SEARCH_PROFILE"=>"Choose and review a search source first.",
         "SELECT_FILE"=>"Choose a JSON file first.",
@@ -477,8 +479,18 @@ pub(super) fn update_row(app: &Shared, i: usize) {
     }
     let binding = match &r.resolution {
         Resolution::Resolved(b) => format!(
-            "Finalized LIST case {}\nClaim {}\nContent {}\nMetadata {}",
-            b.case_id, b.claim, b.content, b.metadata
+            "Finalized LIST case {}{}\nClaim {}\nContent {}\nMetadata {}",
+            b.case_id,
+            b.origin
+                .as_ref()
+                .map(|o| format!(
+                    "\nCase contract {}\nGuidelines v{} · {}",
+                    o.moderation, o.guidelines.version, o.guidelines.hash
+                ))
+                .unwrap_or_default(),
+            b.claim,
+            b.content,
+            b.metadata
         ),
         _ => "No usable unique LIST binding".into(),
     };

@@ -66,6 +66,7 @@ struct App {
     refund_ready: bool,
     funding: Option<progress::FundingRead>,
     setup_candidate: Option<setup::Candidate>,
+    setup_accepted: Option<setup::Candidate>,
     content: content::ContentState,
     validation_shown: bool,
     wallet_chain: Option<u64>,
@@ -442,6 +443,7 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             };
         }
         "usemimetype" => validation::apply_format(a)?,
+        "version" => setup::choose_version(a)?,
         "approvalreceipt" => progress::check_latest(a, "approve").await?,
         "submissionreceipt" => progress::check_latest(a, "submit").await?,
         "exporthistory" | "importhistory" | "savehistory" => transfers::transfer(a, action).await?,
@@ -567,6 +569,13 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             text("notice","Uploaded metadata bytes verified. This does not establish persistence or replication.");
         }
         "approve" | "submit" | "refund" => {
+            a.borrow()
+                .profile
+                .as_ref()
+                .ok_or("PROFILE_REQUIRED")?
+                .purpose
+                .check_publication(action)
+                .map_err(|e| e.0)?;
             if action != "refund" {
                 content::require(a)?;
             }
@@ -578,6 +587,9 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             let (p, who, epoch) = context(a)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             let c = io::begin(&p).await?;
+            if action != "refund" {
+                crate::versioning::require_active(&p, &c.pin).await?;
+            }
             let (to, data) = if action == "refund" {
                 let id = positive(&value("caseid"))?;
                 let (case, owed, _) = io::case(&p, &c, id).await?;
@@ -660,7 +672,7 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             } else {
                 String::new()
             };
-            history::guard(&records, action, &intent, &caseid)?;
+            history::guard_family(a, &p, &who, &records, action, &intent, &caseid)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             active(a, epoch)?;
             let mut reservation = history::record(&p, &who, action, &to, &data, intent, caseid);
@@ -822,6 +834,7 @@ pub fn start_publisher() -> std::result::Result<(), JsValue> {
         ("publicationprev", "publicationprev", "click"),
         ("publicationnext", "publicationnext", "click"),
         ("profile", "profile", "change"),
+        ("profile-version", "version", "change"),
         ("loadprofilefile", "profile", "click"),
         ("fetchprofile", "fetchprofile", "click"),
         ("useprofile", "useprofile", "click"),

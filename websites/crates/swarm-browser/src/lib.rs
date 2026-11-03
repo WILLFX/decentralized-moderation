@@ -63,3 +63,9 @@ pub use vault::VoteVault;
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
 #[path = "moderator/requests.rs"]
 mod moderator_requests;
+
+#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
+mod versioning;
+
+#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
+mod versions;

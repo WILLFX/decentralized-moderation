@@ -540,6 +540,48 @@ fn guard_state(records: &[Value], action: &str, intent: &Value, caseid: &str) ->
     }
     Ok(repeated)
 }
+fn related_submissions(records: &[Value], action: &str) -> Vec<Value> {
+    if action != "submit" {
+        return vec![];
+    }
+    records
+        .iter()
+        .filter(|r| r["action"] == "submit")
+        .cloned()
+        .collect()
+}
+pub(super) fn guard_family(
+    a: &Rc<RefCell<App>>,
+    p: &ModeratorProfile,
+    who: &str,
+    records: &[Value],
+    action: &str,
+    intent: &Value,
+    caseid: &str,
+) -> Result<()> {
+    if action != "submit" {
+        return guard(records, action, intent, caseid);
+    }
+    let mut all = records.to_vec();
+    if let Some(family) = &p.deployment.persistent {
+        for version in &family.versions {
+            if version
+                .moderation
+                .address
+                .eq_ignore_ascii_case(&p.deployment.moderation.address)
+            {
+                continue;
+            }
+            let origin =
+                swarm_core::versioning::select(p, &version.moderation.address).map_err(|e| e.0)?;
+            let related = related_submissions(&load_current(a, &origin, who)?, action);
+            guard_state(&related, action, intent, caseid)
+                .map_err(|_| "OTHER_VERSION_REQUEST_UNRESOLVED")?;
+            all.extend(related);
+        }
+    }
+    guard(&all, action, intent, caseid)
+}
 pub(super) fn guard(records: &[Value], action: &str, intent: &Value, caseid: &str) -> Result<()> {
     if guard_state(records,action,intent,caseid)? && !web_sys::window().unwrap().confirm_with_message("This exact publication already has a confirmed submission. Submit it again deliberately?").map_err(|_|"CONFIRMATION_FAILED")? {return Err("RESUBMISSION_CANCELLED");}
     Ok(())
@@ -1014,4 +1056,68 @@ pub(super) async fn coordinated(a: &Rc<RefCell<App>>, action: &'static str) -> R
         .take()
         .ok_or("HISTORY_COORDINATION_FAILED")?;
     r
+}
+
+#[cfg(test)]
+mod version_guard_tests {
+    use super::*;
+    #[test]
+    fn refunds_and_distinct_spender_approvals_never_read_other_version_storage() {
+        let mut p = fixture_profile();
+        let mut other = p.deployment.moderation.clone();
+        other.address = format!("0x{}", "77".repeat(20));
+        p.deployment.persistent = Some(swarm_core::versioning::PersistentDeployment {
+            authority: swarm_core::ContractPin {
+                address: format!("0x{}", "90".repeat(20)),
+                code_hash: p.deployment.index.code_hash.clone(),
+            },
+            versions: vec![p.deployment.moderation.clone(), other]
+                .into_iter()
+                .map(|moderation| swarm_core::versioning::VersionPin {
+                    moderation,
+                    guidelines: p.deployment.guidelines.clone(),
+                    rules_hash: format!("0x{}", "99".repeat(32)),
+                    guidelines_url: p.guidelines_url.clone(),
+                })
+                .collect(),
+        });
+        let p = swarm_core::parse_profile(&serde_json::to_string(&p).unwrap()).unwrap();
+        let a = Rc::new(RefCell::new(App::default()));
+        // Native tests have no browser storage: touching the other journal would panic.
+        guard_family(
+            &a,
+            &p,
+            &format!("0x{}", "50".repeat(20)),
+            &[],
+            "refund",
+            &Value::Null,
+            "12",
+        )
+        .unwrap();
+        guard_family(
+            &a,
+            &p,
+            &format!("0x{}", "50".repeat(20)),
+            &[],
+            "approve",
+            &Value::Null,
+            "",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn old_unknown_submission_blocks_matching_republication_but_not_equal_id_refunds() {
+        let intent = json!({"contentHash":"c","metaHash":"m","topics":["t"]});
+        let old = vec![
+            json!({"action":"submit","intent":intent,"state":"unknown","contract":"old","caseId":"12"}),
+            json!({"action":"approve","state":"unknown"}),
+        ];
+        let related = related_submissions(&old, "submit");
+        assert_eq!(related.len(), 1);
+        assert!(guard_state(&related, "submit", &intent, "").is_err());
+        assert!(related_submissions(&old, "refund").is_empty());
+        assert!(related_submissions(&old, "approve").is_empty());
+        let other = json!({"contentHash":"different","metaHash":"m","topics":["t"]});
+        assert!(!guard_state(&related, "submit", &other, "").unwrap());
+    }
 }

@@ -42,7 +42,7 @@ pub(crate) async fn verification(profile: &ModeratorProfile, _voter: &str) -> Re
     }
     let pin = json!({ "blockHash": hash, "requireCanonical": true });
     let d = &profile.deployment;
-    for contract in [&d.moderation, &d.stakes, &d.index, &d.token] {
+    for contract in swarm_core::versioning::runtime_pins(d) {
         let code = rpc(profile, "eth_getCode", json!([contract.address, pin])).await?;
         verify_runtime(contract, as_str(&code)?).map_err(|_| "DEPLOYMENT_RUNTIME_MISMATCH")?;
     }
@@ -61,6 +61,7 @@ pub(crate) async fn verification(profile: &ModeratorProfile, _voter: &str) -> Re
     let guideline_hash = view(profile, &d.moderation.address, "guidelinesHash()", "", &pin).await?;
     verify_guidelines(d, &version, &guideline_hash)
         .map_err(|_| "DEPLOYMENT_GUIDELINES_MISMATCH")?;
+    crate::versioning::verify(profile, &pin).await?;
     // Re-read the source height and chain before publishing any evidence.
     let canonical = rpc(
         profile,
@@ -77,5 +78,10 @@ pub(crate) async fn verification(profile: &ModeratorProfile, _voter: &str) -> Re
     if quantity(as_str(&rpc(profile, "eth_chainId", json!([])).await?)?)? != d.chain_id {
         return Err("SOURCE_CHAIN_CHANGED");
     }
-    Ok(format!("Deployment verified at block {height}.\nFour runtime hashes and six contract links match.\nPinned guidelines version {} and hash match the contract.\nNext: open My work or select a case from the review queue. Load its review documents to read the pinned guidelines.", d.guidelines.version))
+    let checks = if d.persistent.is_some() {
+        "Runtime, shared authority and selected version pins match."
+    } else {
+        "Four runtime hashes and six contract links match."
+    };
+    Ok(format!("Deployment verified at block {height}.\n{checks}\nPinned guidelines version {} and hash match the contract.\nNext: open My work or select a case from the review queue. Load its review documents to read the pinned guidelines.", d.guidelines.version))
 }

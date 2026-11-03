@@ -32,6 +32,7 @@ and private recovery files out of this environment.
 | `serve_publisher.py` | Authoring, fee approval, submission and public history |
 | `serve_publisher_expiry.py` | Publication follow-up at recovery/expiry states |
 | `serve_search.py` | Topic/category queries, metadata and membership |
+| `serve_persistent_versions.py` | Shared authority, originating versions and replacement gates |
 | `serve_wallet_selection.py` | Announced wallet providers and provider changes |
 
 Use each helper's argument parser for its available startup options. They select

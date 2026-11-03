@@ -31,5 +31,37 @@ class PublisherSetup(unittest.TestCase):
         with self.assertRaises(ValueError):
             setup_link(json.dumps(self.profile()).encode(), "http://remote.example/profile.json", "https://example.org/")
 
+class VersionedPublisherSetup(unittest.TestCase):
+    def profile(self):
+        def pin(n):return {"address":"0x"+format(n,"040x"),"codeHash":"0x"+format(n,"064x")}
+        def version(n):return {"moderation":pin(n),"guidelines":{"version":n,"hash":"0x"+format(n+10,"064x")},"rulesHash":"0x"+format(n+20,"064x"),"guidelinesUrl":f"https://guidelines.example/{n}.md"}
+        return {"deployment":{"chainId":10200,"moderation":pin(1),"stakes":pin(3),"index":pin(4),"token":pin(5),"guidelines":version(1)["guidelines"],"persistent":{"authority":pin(6),"versions":[version(1),version(2)]}},"rpcUrl":"https://rpc.example/","guidelinesUrl":"https://guidelines.example/1.md"}
+    def test_version_profile_is_public_and_exactly_bound(self):
+        p=self.profile();validate_public(json.dumps(p).encode())
+        link=setup_link(json.dumps(p).encode(),"https://profiles.example/p.json","https://app.example/")
+        self.assertIn("profileHash=",link)
+        self.assertNotIn("rulesHash",link)
+    def test_invalid_version_url_types_are_validation_errors(self):
+        for value in [None, True, 42, [], {}]:
+            p=self.profile();p["deployment"]["persistent"]["versions"][1]["guidelinesUrl"]=value
+            with self.assertRaises(ValueError):validate_public(json.dumps(p).encode())
+    def test_duplicate_selected_mismatch_and_private_version_urls_are_refused(self):
+        for change in range(4):
+            p=self.profile()
+            if change==0:p["deployment"]["persistent"]["versions"][1]=p["deployment"]["persistent"]["versions"][0]
+            elif change==1:p["deployment"]["guidelines"]["version"]=2
+            elif change==2:p["deployment"]["persistent"]["versions"][1]["guidelinesUrl"]="https://example.org/?secret=private"
+            else:p["deployment"]["persistent"]["versions"]*=9
+            with self.assertRaises(ValueError):validate_public(json.dumps(p).encode())
+
+class ExistingWorkSetup(unittest.TestCase):
+    def test_existing_work_policy_is_preserved_in_exact_profile_bytes(self):
+        profile=PublisherSetup().profile();profile["purpose"]="existingWork"
+        raw=json.dumps(profile).encode();self.assertEqual(validate_public(raw)["purpose"],"existingWork")
+        normal=PublisherSetup().profile();self.assertNotIn("purpose",validate_public(json.dumps(normal).encode()))
+        for purpose in [None,True,"existing-work",{}]:
+            profile["purpose"]=purpose
+            with self.assertRaises(ValueError):validate_public(json.dumps(profile).encode())
+
 if __name__ == "__main__":
     unittest.main()

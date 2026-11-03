@@ -5,6 +5,8 @@ pub(super) const LIMIT: usize = 64 * 1024;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Shape {
+    #[serde(default)]
+    purpose: swarm_core::ProfilePurpose,
     deployment: swarm_core::Deployment,
     rpc_url: String,
     #[serde(default)]
@@ -26,6 +28,7 @@ struct Upload {
     #[serde(default)]
     authorization: Option<String>,
 }
+#[derive(Clone)]
 pub(super) struct Candidate {
     pub profile: ModeratorProfile,
     pub upload: Option<Value>,
@@ -72,6 +75,7 @@ pub(super) fn parse(raw: &[u8]) -> Result<Candidate> {
         })
         .transpose()?;
     let p = ModeratorProfile {
+        purpose: shape.purpose,
         deployment: shape.deployment,
         rpc_url: shape.rpc_url,
         gateway_url: gateway
@@ -133,12 +137,14 @@ pub(super) async fn file_bytes(file: &web_sys::File, limit: usize) -> Result<Vec
     Ok(bytes)
 }
 pub(super) fn clear(a: &Rc<RefCell<App>>) {
+    crate::versions::clear();
     invalidate(a);
     let mut s = a.borrow_mut();
     s.profile = None;
     s.upload = None;
     s.account = None;
     s.setup_candidate = None;
+    s.setup_accepted = None;
     input("fee").set_value("");
     input("trustprofile").set_checked(false);
     for id in ["beeendpoint", "beebatch", "beeauth", "contentgateway"] {
@@ -182,7 +188,14 @@ pub(super) async fn load(a: &Rc<RefCell<App>>, remote: bool) -> Result<()> {
             .upload
             .as_ref()
             .is_some_and(|u| u.get("authorization").is_some())
-            || candidate.profile.rpc_url.contains('?'))
+            || candidate.profile.rpc_url.contains('?')
+            || candidate.profile.guidelines_url.contains('?')
+            || candidate
+                .profile
+                .deployment
+                .persistent
+                .as_ref()
+                .is_some_and(|f| f.versions.iter().any(|v| v.guidelines_url.contains('?'))))
     {
         return Err("PUBLIC_PROFILE_CONTAINS_ACCESS_SETTINGS");
     }
@@ -190,13 +203,50 @@ pub(super) async fn load(a: &Rc<RefCell<App>>, remote: bool) -> Result<()> {
     for id in ["profile", "profileurl", "profilepin"] {
         validation::field(id, None);
     }
+    show_candidate(&candidate)?;
+    a.borrow_mut().setup_candidate = Some(candidate);
+    text("notice","Profile candidate loaded. Compare its chain, addresses and fingerprint with your trusted source, then accept it.");
+    Ok(())
+}
+fn show_candidate(candidate: &Candidate) -> Result<()> {
+    crate::versions::populate(&candidate.profile.deployment);
     let d = &candidate.profile.deployment;
     let origin = web_sys::Url::new(&candidate.profile.rpc_url)
         .map_err(|_| "INVALID_ACCESS_URL")?
         .origin();
     text("profile-review",&format!("Candidate only — not active\n{}\nModeration: {}\nToken: {}\nStakes: {}\nIndex: {}\nPinned guidelines: version {}, {}\nRPC origin: {origin}\nExact profile fingerprint (Keccak-256): {}\nCompare these with the deployment announcement you trust. A matching file does not identify its operator. No wallet request has been made.",progress::network(d.chain_id),d.moderation.address,d.token.address,d.stakes.address,d.index.address,d.guidelines.version,d.guidelines.hash,candidate.fingerprint));
-    a.borrow_mut().setup_candidate = Some(candidate);
-    text("notice","Profile candidate loaded. Compare its chain, addresses and fingerprint with your trusted source, then accept it.");
+    Ok(())
+}
+pub(super) fn choose_version(a: &Rc<RefCell<App>>) -> Result<()> {
+    let mut c = {
+        let s = a.borrow();
+        s.setup_candidate
+            .clone()
+            .or_else(|| s.setup_accepted.clone())
+    }
+    .ok_or("PROFILE_CANDIDATE_REQUIRED")?;
+    let mut selected =
+        swarm_core::versioning::select(&c.profile, &crate::versions::choice()).map_err(|e| e.0)?;
+    if a.borrow().profile.is_some() {
+        selected.content_path = if input("contentcollection").checked() {
+            "bzz"
+        } else {
+            "bytes"
+        }
+        .into();
+        c.upload = a.borrow().upload.clone();
+        let gateway = value("contentgateway");
+        c.gateway = if gateway.is_empty() {
+            None
+        } else {
+            Some(gateway)
+        };
+    }
+    clear(a);
+    c.profile = selected;
+    show_candidate(&c)?;
+    a.borrow_mut().setup_candidate = Some(c);
+    text("notice","Review and accept the selected case contract, then reconnect. Saved requests and private work stay with their original contract.");
     Ok(())
 }
 pub(super) fn accept(a: &Rc<RefCell<App>>) -> Result<()> {
@@ -208,6 +258,7 @@ pub(super) fn accept(a: &Rc<RefCell<App>>) -> Result<()> {
         .setup_candidate
         .take()
         .ok_or("PROFILE_CANDIDATE_REQUIRED")?;
+    a.borrow_mut().setup_accepted = Some(candidate.clone());
     input("contentgateway").set_value(candidate.gateway.as_deref().unwrap_or(""));
     input("contentcollection").set_checked(candidate.profile.content_path == "bzz");
     let upload = candidate.upload;

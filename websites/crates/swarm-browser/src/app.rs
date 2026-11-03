@@ -93,7 +93,13 @@ fn update_wallet(app: &App) {
 
 fn busy(app: &Rc<RefCell<App>>, value: bool) {
     app.borrow_mut().busy = value;
-    for id in ["connect", "refresh", "profile", "use-profile"] {
+    for id in [
+        "connect",
+        "refresh",
+        "profile",
+        "use-profile",
+        "profile-version",
+    ] {
         if value {
             element(id).set_attribute("disabled", "").unwrap();
         } else {
@@ -115,6 +121,7 @@ fn bind_profile(app: Rc<RefCell<App>>) {
             return;
         };
         clear_wallet_guidance();
+        crate::versions::clear();
         // Clear old evidence before reading or validating a replacement file.
         {
             let mut s = app.borrow_mut();
@@ -146,6 +153,7 @@ fn bind_profile(app: Rc<RefCell<App>>) {
             };
             match result {
                 Ok(profile) => {
+                    crate::versions::populate(&profile.deployment);
                     text(
                         "profile-review",
                         &format!(
@@ -172,6 +180,56 @@ fn bind_profile(app: Rc<RefCell<App>>) {
         .add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())
         .unwrap();
     handler.forget();
+    let changed = accepted.clone();
+    let version_handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let base = {
+            let s = changed.borrow();
+            s.candidate.clone().or_else(|| s.profile.clone())
+        };
+        let Some(base) = base else { return };
+        if changed.borrow().busy || controls::wallet_selection_locked(&changed.borrow()) {
+            crate::versions::populate(&base.deployment);
+            return;
+        }
+        let selected = match swarm_core::versioning::select(&base, &crate::versions::choice()) {
+            Ok(p) => p,
+            Err(e) => {
+                notice(e.0);
+                return;
+            }
+        };
+        {
+            let mut s = changed.borrow_mut();
+            s.profile = None;
+            s.wallet.invalidate();
+            s.vault.lock();
+            s.controls.clear_context();
+            s.controls.journey_cancelled();
+            s.candidate = Some(selected.clone());
+        }
+        controls::clear_dom();
+        crate::versions::populate(&selected.deployment);
+        text(
+            "profile-review",
+            &format!(
+                "Chain {}\nCase contract {}\nGuidelines v{} · {}\nShared index {}",
+                selected.deployment.chain_id,
+                selected.deployment.moderation.address,
+                selected.deployment.guidelines.version,
+                selected.deployment.guidelines.hash,
+                selected.deployment.index.address
+            ),
+        );
+        text(
+            "configuration",
+            "Review the selected case contract, then use the profile and reconnect.",
+        );
+        update_wallet(&changed.borrow());
+    });
+    element("profile-version")
+        .add_event_listener_with_callback("change", version_handler.as_ref().unchecked_ref())
+        .unwrap();
+    version_handler.forget();
     let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
         if accepted.borrow().busy {
             return;

@@ -30,6 +30,7 @@ pub(crate) struct CaseEvidence {
     pub eligibility: Eligibility,
     pub funds: ModeratorFunds,
     pub challenge_bound: bool,
+    pub target_moderation: Option<String>,
 }
 pub(crate) struct CasePage {
     pub source: SourceBlock,
@@ -100,7 +101,7 @@ async fn begin(profile: &ModeratorProfile, tag: &str) -> Result<Context> {
         tag: tag.into(),
     };
     let d = &profile.deployment;
-    for p in [&d.moderation, &d.stakes, &d.index, &d.token] {
+    for p in swarm_core::versioning::runtime_pins(d) {
         let code = rpc(profile, "eth_getCode", json!([p.address, ctx.pin])).await?;
         verify_runtime(p, as_str(&code)?).map_err(|e| e.0)?;
     }
@@ -121,6 +122,7 @@ async fn begin(profile: &ModeratorProfile, tag: &str) -> Result<Context> {
     .await?;
     let hash = view(profile, &ctx, &d.moderation.address, "guidelinesHash()", "").await?;
     verify_guidelines(d, &version, &hash).map_err(|e| e.0)?;
+    crate::versioning::verify(profile, &ctx.pin).await?;
     Ok(ctx)
 }
 async fn finish(profile: &ModeratorProfile, ctx: &Context) -> Result<()> {
@@ -204,6 +206,7 @@ async fn case_at(
     let args = id.abi();
     let case = decode_case(&view(profile, ctx, target, "caseInfo(uint256)", &args).await?)
         .map_err(|e| e.0)?;
+    let target_moderation = crate::versioning::case(profile, &ctx.pin, id, &case).await?;
     let vote = decode_vote(
         &view(
             profile,
@@ -277,6 +280,7 @@ async fn case_at(
         false
     };
     Ok(CaseEvidence {
+        target_moderation,
         challenge_bound,
         snapshot,
         topics,

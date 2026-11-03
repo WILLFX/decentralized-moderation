@@ -356,17 +356,21 @@ async fn begin(app: Shared, query: Query) -> Result<()> {
         expected,
     };
     let ctx = reader.begin(None).await?;
-    let next_case = Uint256::hex(
-        &reader
-            .call(
-                &ctx,
-                &p.access.deployment.moderation.address,
-                "nextCaseId()",
-                "",
-            )
-            .await?,
-    )
-    .map_err(|e| e.0)?;
+    let next_case = if p.access.deployment.persistent.is_some() {
+        Uint256::from_u64(1)
+    } else {
+        Uint256::hex(
+            &reader
+                .call(
+                    &ctx,
+                    &p.access.deployment.moderation.address,
+                    "nextCaseId()",
+                    "",
+                )
+                .await?,
+        )
+        .map_err(|e| e.0)?
+    };
     if next_case == Uint256::ZERO {
         return Err("INVALID_CONTRACT_STATE");
     }
@@ -526,13 +530,17 @@ async fn read_rows(
     }
     let mut rows = Vec::new();
     for key in keys {
-        let resolution = resolve(
-            &s.bindings,
-            &key,
-            topic,
-            s.next_scan == s.next_case && !s.binding_limit,
-        )
-        .map_err(|e| e.0)?;
+        let resolution = if s.profile.access.deployment.persistent.is_some() {
+            Resolution::Resolved(persistent_binding(s, c, &key, topic).await?)
+        } else {
+            resolve(
+                &s.bindings,
+                &key,
+                topic,
+                s.next_scan == s.next_case && !s.binding_limit,
+            )
+            .map_err(|e| e.0)?
+        };
         if let Resolution::Resolved(b) = &resolution {
             membership(s, c, b, topic).await?;
         }
@@ -547,6 +555,58 @@ async fn read_rows(
         });
     }
     Ok(rows)
+}
+async fn persistent_binding(s: &Session, c: &Context, key: &str, topic: &str) -> Result<Binding> {
+    let d = &s.profile.access.deployment;
+    let raw = s
+        .reader
+        .call(c, &d.index.address, "originOf(bytes32)", &key[2..])
+        .await?;
+    let origin = swarm_core::versioning::decode_origin(d, &raw).map_err(|e| e.0)?;
+    let p = s.reader.version_at(c, &origin.moderation).await?;
+    let case = decode_case(
+        &s.reader
+            .call(
+                c,
+                &origin.moderation,
+                "caseInfo(uint256)",
+                &origin.case_id.abi(),
+            )
+            .await?,
+    )
+    .map_err(|e| e.0)?;
+    let topics = decode_topics(
+        &s.reader
+            .call(
+                c,
+                &origin.moderation,
+                "topicsOf(uint256)",
+                &origin.case_id.abi(),
+            )
+            .await?,
+    )
+    .map_err(|e| e.0)?;
+    let family = d.persistent.as_ref().ok_or("INVALID_VERSION_PROFILE")?;
+    let args = swarm_core::versioning::registration_args(&origin.moderation, origin.case_id)
+        .map_err(|e| e.0)?;
+    let raw = s
+        .reader
+        .call(
+            c,
+            &family.authority.address,
+            "registration(address,uint256)",
+            &args,
+        )
+        .await?;
+    swarm_core::versioning::verify_registration(&p.deployment, &case, &raw).map_err(|e| e.0)?;
+    let mut b = candidate(origin.case_id, &case, topics)
+        .map_err(|e| e.0)?
+        .ok_or("UNRESOLVED_ENTRY")?;
+    if !b.topics.iter().any(|t| t == topic) || pair_hash(&b.claim, topic).map_err(|e| e.0)? != key {
+        return Err("ENTRY_VERSION_MISMATCH");
+    }
+    b.origin = Some(origin);
+    Ok(b)
 }
 async fn membership(s: &Session, c: &Context, b: &Binding, topic: &str) -> Result<()> {
     let args = format!("{}{}", &b.claim[2..], &topic[2..]);
@@ -746,30 +806,36 @@ async fn open(app: Shared, index: usize) -> Result<()> {
         _ => return Err("UNRESOLVED_ENTRY"),
     };
     let ctx = s.reader.begin(None).await?;
-    let c = decode_case(
-        &s.reader
-            .call(
-                &ctx,
-                &s.profile.access.deployment.moderation.address,
-                "caseInfo(uint256)",
-                &b.case_id.abi(),
-            )
-            .await?,
-    )
-    .map_err(|e| e.0)?;
-    let topics = decode_topics(
-        &s.reader
-            .call(
-                &ctx,
-                &s.profile.access.deployment.moderation.address,
-                "topicsOf(uint256)",
-                &b.case_id.abi(),
-            )
-            .await?,
-    )
-    .map_err(|e| e.0)?;
-    if candidate(b.case_id, &c, topics).map_err(|e| e.0)?.as_ref() != Some(&b) {
-        return Err("ENTRY_CONTEXT_CHANGED");
+    if b.origin.is_some() {
+        if persistent_binding(&s, &ctx, &row.entry, &row.topic).await? != b {
+            return Err("ENTRY_CONTEXT_CHANGED");
+        }
+    } else {
+        let c = decode_case(
+            &s.reader
+                .call(
+                    &ctx,
+                    &s.profile.access.deployment.moderation.address,
+                    "caseInfo(uint256)",
+                    &b.case_id.abi(),
+                )
+                .await?,
+        )
+        .map_err(|e| e.0)?;
+        let topics = decode_topics(
+            &s.reader
+                .call(
+                    &ctx,
+                    &s.profile.access.deployment.moderation.address,
+                    "topicsOf(uint256)",
+                    &b.case_id.abi(),
+                )
+                .await?,
+        )
+        .map_err(|e| e.0)?;
+        if candidate(b.case_id, &c, topics).map_err(|e| e.0)?.as_ref() != Some(&b) {
+            return Err("ENTRY_CONTEXT_CHANGED");
+        }
     }
     membership(&s, &ctx, &b, &row.topic).await?;
     // A category AND result must still match every current membership requirement.
@@ -800,6 +866,15 @@ async fn open(app: Shared, index: usize) -> Result<()> {
                         .await?,
                 )
                 .map_err(|e| e.0)?;
+                if s.profile.access.deployment.persistent.is_some() {
+                    let key = pair_hash(&b.claim, topic).map_err(|e| e.0)?;
+                    let current_binding = persistent_binding(&s, &ctx, &key, topic).await?;
+                    if current_binding.content != b.content
+                        || current_binding.metadata != b.metadata
+                    {
+                        return Err("ENTRY_CONTEXT_CHANGED");
+                    }
+                }
                 current.push(topic.clone());
             }
         }

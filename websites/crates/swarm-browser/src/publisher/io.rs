@@ -50,7 +50,7 @@ async fn begin_at(p: &ModeratorProfile, tag: &str) -> Result<Context> {
         source,
     };
     let d = &p.deployment;
-    for pin in [&d.moderation, &d.stakes, &d.index, &d.token] {
+    for pin in swarm_core::versioning::runtime_pins(d) {
         verify_runtime(
             pin,
             as_str(&rpc(p, "eth_getCode", json!([pin.address, c.pin])).await?)?,
@@ -70,6 +70,7 @@ async fn begin_at(p: &ModeratorProfile, tag: &str) -> Result<Context> {
         &view(p, &c, &d.moderation.address, "guidelinesHash()", "").await?,
     )
     .map_err(|e| e.0)?;
+    crate::versioning::verify(p, &c.pin).await?;
     Ok(c)
 }
 pub(super) async fn finish(p: &ModeratorProfile, c: &Context) -> Result<()> {
@@ -119,8 +120,11 @@ pub(super) async fn case(
     id: Uint256,
 ) -> Result<(CaseInfo, Uint256, Vec<String>)> {
     let d = &p.deployment.moderation.address;
+    let case =
+        decode_case(&view(p, c, d, "caseInfo(uint256)", &id.abi()).await?).map_err(|e| e.0)?;
+    crate::versioning::case(p, &c.pin, id, &case).await?;
     Ok((
-        decode_case(&view(p, c, d, "caseInfo(uint256)", &id.abi()).await?).map_err(|e| e.0)?,
+        case,
         amount(&view(p, c, d, "refundOwed(uint256)", &id.abi()).await?)?,
         decode_topics(&view(p, c, d, "topicsOf(uint256)", &id.abi()).await?).map_err(|e| e.0)?,
     ))

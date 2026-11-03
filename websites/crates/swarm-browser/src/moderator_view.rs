@@ -467,6 +467,9 @@ pub(crate) fn wallet_guidance(code: &str) -> Option<&'static str> {
 
 pub(crate) fn error(code: &str) -> String {
     let explanation = match code {
+        "OTHER_VERSION_REQUEST_UNRESOLVED" => "An unfinished request belongs to another case contract. Select its original contract in Source & wallet, then open Transactions before sending again.",
+        "UNKNOWN_CASE_VERSION" | "CASE_VERSION_MISMATCH" | "DEPLOYMENT_VERSION_MISMATCH" => "The case contract or authority does not match this profile. Refresh the intended profile; keep private recovery and saved requests.",
+        "EXISTING_WORK_ONLY" => "This profile is for existing work. New staking is disabled; case completion, receipt checks and eligible withdrawals remain available.",
         "REQUEST_UNRESOLVED" => "A previous request is unfinished. Open Transactions and check its hash from your wallet activity before sending again. Keep your private recovery and site data.",
         "REQUEST_TRANSACTION_MISMATCH" => "This transaction does not match the unfinished request. Keep the request and check the original wallet activity.",
         "FINALITY_NOT_AVAILABLE" => "The source cannot confirm finality yet. Keep the saved request and check its receipt later.",

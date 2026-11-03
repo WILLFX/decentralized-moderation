@@ -1,0 +1,41 @@
+{
+  "purpose": "existingWork",
+  "deployment": {
+    "chainId": 10200,
+    "moderation": {
+      "address": "0x7969b0941d2f41181b85211d95150c3b2501be50",
+      "codeHash": "0xdfcd6bce50196ad9b1a792117a7e1c71fad604a7b84e123653845d2b73a772e5"
+    },
+    "stakes": {
+      "address": "0x48e73d412c7c8a0266ee5a68a1f5b5a1ab4170c4",
+      "codeHash": "0x7c459035c09688c94a0a9af9d0ee71af2d8037020f8c1e9b50bd6cd64bc7086c"
+    },
+    "index": {
+      "address": "0xbe3b2734e31db803ba80ddaa19635f253f6ddf7f",
+      "codeHash": "0x1ddfc5712b2fab8925399d526c9e29e0c9ea21a22d914e2f9c97009b7df8f94f"
+    },
+    "token": {
+      "address": "0x8475c3b6f391b0415d702be32407099ef6e06061",
+      "codeHash": "0x8c812ca1aac00fffc01a3a409f80eb401dec6808551810fd323c3cb76510db34"
+    },
+    "guidelines": {
+      "version": 1,
+      "hash": "0x780247619462ac3dcc846780bffd6e527329ff20673bafe0e33ffc6ecd23b00f"
+    }
+  },
+  "rpcUrl": "https://rpc.chiadochain.net",
+  "guidelinesUrl": "./MODERATION_GUIDELINES.md",
+  "gatewayUrl": "http://localhost:1633",
+  "metadataPath": "bytes",
+  "contentPath": "bytes",
+  "timing": {
+    "clockErrorSeconds": 5,
+    "maxEvidenceAgeSeconds": 30,
+    "maxHeadLagSeconds": 30,
+    "inclusionBudgetSeconds": 120
+  },
+  "display": {
+    "decimals": 16,
+    "symbol": "TEST"
+  }
+}

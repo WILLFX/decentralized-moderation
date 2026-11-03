@@ -1,6 +1,9 @@
 //! Pure profile validation and deployment identity checks shared by the websites.
 //! Network and wallet access deliberately live outside this crate.
+pub mod purpose;
 pub mod review;
+pub use purpose::ProfilePurpose;
+pub mod versioning;
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -27,6 +30,8 @@ type Result<T> = std::result::Result<T, CoreError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModeratorProfile {
+    #[serde(default, skip_serializing_if = "ProfilePurpose::is_standard")]
+    pub purpose: ProfilePurpose,
     pub deployment: Deployment,
     pub rpc_url: String,
     pub gateway_url: String,
@@ -77,6 +82,8 @@ pub struct Deployment {
     pub index: ContractPin,
     pub token: ContractPin,
     pub guidelines: Guidelines,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent: Option<versioning::PersistentDeployment>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,7 +91,7 @@ pub struct ContractPin {
     pub address: String,
     pub code_hash: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guidelines {
     pub hash: String,
     #[serde(deserialize_with = "decimal_u64")]
@@ -149,6 +156,16 @@ pub fn parse_profile(text: &str) -> Result<ModeratorProfile> {
     }
     let mut profile: ModeratorProfile =
         serde_json::from_str(text).map_err(|_| CoreError("INVALID_CONFIG_JSON"))?;
+    if profile.guidelines_url != guidelines_url() {
+        profile.guidelines_url = access_url(&profile.guidelines_url)?;
+    }
+    if let Some(family) = &mut profile.deployment.persistent {
+        for version in &mut family.versions {
+            if version.guidelines_url != guidelines_url() {
+                version.guidelines_url = access_url(&version.guidelines_url)?;
+            }
+        }
+    }
     let d = &profile.deployment;
     if ![100, 10200].contains(&d.chain_id)
         || [&d.moderation, &d.stakes, &d.index, &d.token]
@@ -158,6 +175,12 @@ pub fn parse_profile(text: &str) -> Result<ModeratorProfile> {
         || d.guidelines.version == 0
     {
         return Err(CoreError("INVALID_DEPLOYMENT"));
+    }
+    versioning::validate(d)?;
+    if d.persistent.is_some()
+        && versioning::version(d, &d.moderation.address)?.guidelines_url != profile.guidelines_url
+    {
+        return Err(CoreError("SELECTED_VERSION_MISMATCH"));
     }
     profile.rpc_url = access_url(&profile.rpc_url)?;
     profile.gateway_url = access_url(&profile.gateway_url)?;
@@ -248,6 +271,9 @@ pub struct LinkCheck {
 }
 /// The six reciprocal links used by the existing moderator adapter.
 pub fn link_checks(d: &Deployment) -> Vec<LinkCheck> {
+    if d.persistent.is_some() {
+        return versioning::links(d);
+    }
     [
         (&d.moderation, "stakes()", &d.stakes),
         (&d.moderation, "token()", &d.token),

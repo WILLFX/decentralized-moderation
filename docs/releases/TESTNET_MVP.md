@@ -1,9 +1,9 @@
 # Testnet MVP
 
-Released 29 October 2026. The release includes Swarm Publish, Swarm Review and
+Released 4 November 2026. The release includes Swarm Publish, Swarm Review and
 Swarm Search, with moderation contracts on Chiado and websites on Swarm testnet.
 
-Source revision: [`888e82a6d7e8478f2e8e0b61a483ae988559bdfc`](https://github.com/WILLFX/decentralized-moderation/tree/888e82a6d7e8478f2e8e0b61a483ae988559bdfc).
+Source revision: [`529fd6f9c6700eb0ec4d6e375bd5666262d89a69`](https://github.com/WILLFX/decentralized-moderation/tree/529fd6f9c6700eb0ec4d6e375bd5666262d89a69).
 The [release manifest](../../deployments/chiado/manifest.json) contains the website
 references and public asset checksums. Documentation and connection profiles can
 be updated independently of these published application bytes.
@@ -17,9 +17,9 @@ its standard local address. If you use an operator's gateway, open
 
 | Website | Open through a local Bee | Swarm reference |
 | --- | --- | --- |
-| Swarm Publish | [Open Publisher](http://127.0.0.1:1633/bzz/68f29f8180eb2d6aa796654d66c64c36297a27424ca601eb6dce4931b46c13b1/) | `68f29f8180eb2d6aa796654d66c64c36297a27424ca601eb6dce4931b46c13b1` |
-| Swarm Review | [Open Moderator](http://127.0.0.1:1633/bzz/196ef15a1f7917870333ea558422135a3d6efd9e2c69766866a259cc8e831900/) | `196ef15a1f7917870333ea558422135a3d6efd9e2c69766866a259cc8e831900` |
-| Swarm Search | [Open Reader](http://127.0.0.1:1633/bzz/092239e7d6f0f8ac713c6aa97ca22d0359272c4040f30970fd1c79192aa2f099/) | `092239e7d6f0f8ac713c6aa97ca22d0359272c4040f30970fd1c79192aa2f099` |
+| Swarm Publish | [Open Publisher](http://127.0.0.1:1633/bzz/5d3d61a72ddd6a41563070da25f63599d27770f1da3db3924b3fabd5b645c1be/) | `5d3d61a72ddd6a41563070da25f63599d27770f1da3db3924b3fabd5b645c1be` |
+| Swarm Review | [Open Moderator](http://127.0.0.1:1633/bzz/61dbb17294ea2ce7338df372f7d0b6d1d169ee3fe55c46fbcfc284e3734560ef/) | `61dbb17294ea2ce7338df372f7d0b6d1d169ee3fe55c46fbcfc284e3734560ef` |
+| Swarm Search | [Open Reader](http://127.0.0.1:1633/bzz/fdb29d9f2d5a5dd5527d01278cba7b0a84bf47da52d9f949d7bf341891b1fe9c/) | `fdb29d9f2d5a5dd5527d01278cba7b0a84bf47da52d9f949d7bf341891b1fe9c` |
 
 The contracts and Swarm content references are public. The local links are not a
 shared hosting service. You may use your own Bee, an operator's service or a
@@ -53,13 +53,15 @@ and staking token, with 16 decimal places.
 
 | Contract | Address |
 | --- | --- |
-| Moderation | [`0x006392a3f365c3ed4b2ab39897c6de9e2346cdc8`](https://gnosis-chiado.blockscout.com/address/0x006392a3f365c3ed4b2ab39897c6de9e2346cdc8) |
-| Stake registry | [`0x82b6eb1e424bd845af0118f574cf0fbe022a72ca`](https://gnosis-chiado.blockscout.com/address/0x82b6eb1e424bd845af0118f574cf0fbe022a72ca) |
-| Topic index | [`0x6f047578ba94b6a523f1f6302de440ea740c2586`](https://gnosis-chiado.blockscout.com/address/0x6f047578ba94b6a523f1f6302de440ea740c2586) |
+| Moderation | [`0x1fc3c373bb6575e92118095746ee4dde9f653d40`](https://gnosis-chiado.blockscout.com/address/0x1fc3c373bb6575e92118095746ee4dde9f653d40) |
+| Stake registry | [`0xddf50f669327b3e4e3981cf12ee77778f00ad1d3`](https://gnosis-chiado.blockscout.com/address/0xddf50f669327b3e4e3981cf12ee77778f00ad1d3) |
+| Topic index | [`0x09418cd42e11b45ce349d3ae7417cbd1d09fa0d3`](https://gnosis-chiado.blockscout.com/address/0x09418cd42e11b45ce349d3ae7417cbd1d09fa0d3) |
 | TEST token | [`0xf6edbdb55c58f3fb2a4346bea561af3526119dca`](https://gnosis-chiado.blockscout.com/address/0xf6edbdb55c58f3fb2a4346bea561af3526119dca) |
+| Replacement authority | [`0x98d7272dcd2523b0c51af5022a7766f655802669`](https://gnosis-chiado.blockscout.com/address/0x98d7272dcd2523b0c51af5022a7766f655802669) |
 
 The [deployment configuration](../../deployments/chiado/deployment.json) includes
-all four code hashes and the guidelines identity used by the public profiles.
+the contract code hashes, guidelines identity and known moderation versions used
+by the public profiles.
 
 | Setting | Released value |
 | --- | --- |
@@ -73,6 +75,19 @@ all four code hashes and the guidelines identity used by the public profiles.
 | Required reveals | At least 3 from each group in the round |
 | Freeze added per contrary vote or missing reveal | 8 days |
 | Guidelines | Version 1, hash `0x780247619462ac3dcc846780bffd6e527329ff20673bafe0e33ffc6ecd23b00f` |
+
+The stake registry and topic index persist when an authorized moderation version
+is replaced. The [authorization Safe](https://gnosis-chiado.blockscout.com/address/0x32d21b0ccc5e7d64ab47cc17359cfb05fe977c30)
+currently has three founder-controlled owner accounts and requires two signatures.
+It authorizes exact moderation code and settings with a fixed **10-minute notice**.
+Earlier registered versions retain the ability to finish their existing cases.
+See the [persistent-registry interface](../../specs/persistent-registries.md).
+
+For a stake, case or listing at an earlier standalone deployment, select its
+[existing-work profile](../../deployments/chiado/existing-work/README.md).
+Those profiles preserve the original source for completion, refunds, eligible
+withdrawals and discovery while blocking new payments and fresh staking in the
+matching clients. Earlier approvals are not copied into the new index.
 
 Use the case's actual deadlines. Scheduling, block availability and the calls that
 advance a phase affect when actions become available. Full rules are in the

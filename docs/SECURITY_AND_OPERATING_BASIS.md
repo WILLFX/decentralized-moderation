@@ -6,9 +6,10 @@ configuration is in the [operator guide](OPERATORS.md).
 
 ## Deployment identity and chain reads
 
-A public profile identifies the chain, four contracts, their runtime code hashes
-and the immutable guidelines identity. During deployment verification, clients
-compare runtime code, contract links and the contract's guidelines version/hash
+A public profile identifies the chain, moderation contract, registries, token,
+runtime code hashes and immutable guidelines identity. Persistent-family profiles
+also pin the shared authority and known moderation versions. During deployment
+verification, clients compare runtime code, contract links and the contract's guidelines version/hash
 with the profile pins. This does not fetch or authenticate the guidelines document.
 Moderator checks document bytes when loading review material; Publisher checks
 them when loading guidelines. Reader checks the contract pins without loading

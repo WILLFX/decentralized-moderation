@@ -64,5 +64,6 @@ Arithmetic, exact-call binding and client ABI behavior must agree across compone
 `src/persistent/` adds delayed replacement authorization and case-scoped completion
 rights while retaining the existing moderation state machine. See the
 [persistent-registry interface](../specs/persistent-registries.md) for permissions,
-configuration and the client boundary. These contracts are separate from the
-released Chiado deployment and its existing website profiles.
+configuration and the client boundary. The current Chiado release uses this family.
+Earlier fixed-link deployments remain separate sources, with their own case and
+custody records.

@@ -2,16 +2,16 @@
   "deployment": {
     "chainId": 10200,
     "moderation": {
-      "address": "0x006392a3f365c3ed4b2ab39897c6de9e2346cdc8",
-      "codeHash": "0x0ad954b0110a531341194753f11c0d8fb0cd10c3d2c50b11a548bff87e14e7f8"
+      "address": "0x1fc3c373bb6575e92118095746ee4dde9f653d40",
+      "codeHash": "0x00f92d5f74280b34e8b430d6ff370537b7022e6491454d71f977e860c471f5cf"
     },
     "stakes": {
-      "address": "0x82b6eb1e424bd845af0118f574cf0fbe022a72ca",
-      "codeHash": "0xf569a50e48cdac13db0c5292f00969ef64fd017832efdf38ee2103ebe1b91b29"
+      "address": "0xddf50f669327b3e4e3981cf12ee77778f00ad1d3",
+      "codeHash": "0x79f05f518eed6a2acab542de85fd6eeb31485cbc8258778136512d59a6cb2501"
     },
     "index": {
-      "address": "0x6f047578ba94b6a523f1f6302de440ea740c2586",
-      "codeHash": "0x1ddfc5712b2fab8925399d526c9e29e0c9ea21a22d914e2f9c97009b7df8f94f"
+      "address": "0x09418cd42e11b45ce349d3ae7417cbd1d09fa0d3",
+      "codeHash": "0x35f2cb08c7f97bac2d646c1cebf906e9bff8fb47e2831557749970ce90900e60"
     },
     "token": {
       "address": "0xf6edbdb55c58f3fb2a4346bea561af3526119dca",
@@ -20,6 +20,26 @@
     "guidelines": {
       "version": 1,
       "hash": "0x780247619462ac3dcc846780bffd6e527329ff20673bafe0e33ffc6ecd23b00f"
+    },
+    "persistent": {
+      "authority": {
+        "address": "0x98d7272dcd2523b0c51af5022a7766f655802669",
+        "codeHash": "0xe310994680b028d0fb3cbab80e6a9901401b25673ca23a6f9ba9fffcffb932a6"
+      },
+      "versions": [
+        {
+          "moderation": {
+            "address": "0x1fc3c373bb6575e92118095746ee4dde9f653d40",
+            "codeHash": "0x00f92d5f74280b34e8b430d6ff370537b7022e6491454d71f977e860c471f5cf"
+          },
+          "guidelines": {
+            "version": 1,
+            "hash": "0x780247619462ac3dcc846780bffd6e527329ff20673bafe0e33ffc6ecd23b00f"
+          },
+          "rulesHash": "0x131d4cf41f5ef0b49fb555c85eb63dd3e30c6374a9a0d8668df1f488dfa88600",
+          "guidelinesUrl": "./MODERATION_GUIDELINES.md"
+        }
+      ]
     }
   },
   "rpcUrl": "https://rpc.chiadochain.net",

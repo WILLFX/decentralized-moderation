@@ -36,8 +36,21 @@ provide another gateway or upload service.
 The current websites support moderation deployments on Gnosis (100) and Chiado
 (10200). Configure timing and chain access for the selected network.
 
-For your own deployment, install the [build tools](BUILD_AND_TEST.md), provision
-funds for the deploying account and choose the token, stake, fees, deadlines,
+The current release uses a persistent registry family: one authority, a stake
+registry, a topic index and an initial moderation version. Supply an existing
+token, stake amount, authorization account and notice period to
+`contracts/script/DeployPersistent.s.sol`. Its four creations remain inactive.
+The authorizer then binds the registries and proposes the exact version's runtime
+and configuration hashes. Anyone can activate that proposal after its notice.
+The authorization account can be a Safe; its owners approve the authorizer calls.
+The notice period is fixed at authority creation. See the
+[persistent-registry interface](../specs/persistent-registries.md) for parameters
+and the rights retained by earlier versions. The current Chiado values are in the
+[release entry](releases/TESTNET_MVP.md).
+
+Standalone deployments are also supported. For your own deployment, install the
+[build tools](BUILD_AND_TEST.md), provision funds for the deploying account and
+choose the token, stake, fees, deadlines,
 reveal minimum, freeze duration and guidelines. `contracts/script/Deploy.s.sol`
 creates the stake registry, index and moderation contract and links them.
 `DeployChiado.s.sol` additionally creates the public TEST faucet token and requires
@@ -54,8 +67,8 @@ forge script script/DeployChiado.s.sol:DeployChiado \
 Without a broadcast flag this prepares a simulation, not a live deployment. Review
 the chosen parameters and transactions, then use your normal wallet or Foundry
 signer workflow to deploy. Keep keys and signer configuration out of the repository
-and public profiles. The deployer must complete both registry links; a created but
-unlinked stack cannot perform its intended work.
+and public profiles. For the standalone scripts, complete both registry links;
+a created but unlinked stack cannot perform its intended work.
 
 Record the actual addresses and the Keccak-256 hash of each deployed runtime. This
 **code hash** identifies the code at the address. Build profiles from those values,
@@ -86,7 +99,7 @@ retain the contract/code/guidelines pins when using the same deployment.
 
 | Configuration | Public use |
 | --- | --- |
-| `deployment` | Chain, four contract addresses/code hashes and guidelines identity |
+| `deployment` | Chain, contract/runtime pins and guidelines; authority and version pins for a persistent family |
 | `rpcUrl` | A chain endpoint that accepts browser requests |
 | `gatewayUrl` | Metadata/content reads for Moderator, metadata reads for Reader |
 | `contentGatewayUrl` | Separate content viewing in Publisher and Reader |

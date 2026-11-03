@@ -1,8 +1,9 @@
 # Persistent registries and moderation versions
 
 This contract interface adds replacement authorization to the existing
-[moderation rules](protocol.md). It is separate from the deployed testnet MVP.
-It does not upgrade that deployment or move its balances, cases or listings.
+[moderation rules](protocol.md). The current Chiado release uses this registry family.
+Earlier fixed-link deployments retain their own balances, cases and listings.
+Their state is not moved into the new family.
 
 ## Authority and activation
 

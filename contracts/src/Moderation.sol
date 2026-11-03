@@ -353,6 +353,7 @@ contract Moderation is ReentrancyGuard {
     ///      topic and leave it under another.
     function submitRemoval(uint256 targetCaseId, uint256 fee)
         external
+        virtual
         nonReentrant
         returns (uint256 caseId)
     {
@@ -384,7 +385,7 @@ contract Moderation is ReentrancyGuard {
         emit RemovalSubmitted(caseId, targetCaseId, msg.sender);
     }
 
-    function _open(uint256 caseId, uint256 fee) internal {
+    function _open(uint256 caseId, uint256 fee) internal virtual {
         Case storage c = cases[caseId];
 
         // `pot` is a uint128 and `fee` is not, so an unchecked cast would credit a
@@ -458,7 +459,7 @@ contract Moderation is ReentrancyGuard {
         votes[caseId][msg.sender] =
             Vote({commitment: h, committee: committee, round: c.challenges, revealed: 0, settled: false});
 
-        stakes.noteCommit(msg.sender);
+        _noteCommit(caseId, msg.sender);
 
         uint32 n;
         if (committee == 1) {
@@ -723,7 +724,7 @@ contract Moderation is ReentrancyGuard {
         if (against == uint8(Outcome.APPROVE)) ++c.pooledApprove;
         else ++c.pooledReject;
 
-        stakes.noteCommit(msg.sender);
+        _noteCommit(caseId, msg.sender);
         c.everChallenged = true;
         ++c.challenges;
 
@@ -757,6 +758,22 @@ contract Moderation is ReentrancyGuard {
         emit PhaseChanged(caseId, previousPhase, c.phase);
         c.finalizedAt = uint40(block.timestamp);
 
+        _applyOutcome(caseId);
+        _completeCase(caseId);
+        emit Finalized(caseId, c.preliminary);
+    }
+
+    // Registry adapters preserve the state machine and disclosure/settlement rules.
+    function _noteCommit(uint256, address voter) internal virtual {
+        stakes.noteCommit(voter);
+    }
+
+    function _settleVote(uint256, address voter, bool frozen) internal virtual {
+        stakes.settle(voter, frozen, freezePerLoss);
+    }
+
+    function _applyOutcome(uint256 caseId) internal virtual {
+        Case storage c = cases[caseId];
         bytes32[MAX_TOPICS] storage t = caseTopics[caseId];
 
         if (c.actionType == ACTION_REMOVE) {
@@ -784,8 +801,9 @@ contract Moderation is ReentrancyGuard {
                 );
             }
         }
-        emit Finalized(caseId, c.preliminary);
     }
+
+    function _completeCase(uint256) internal virtual {}
 
     function _toUnresolved(uint256 caseId) internal {
         Case storage c = cases[caseId];
@@ -796,6 +814,7 @@ contract Moderation is ReentrancyGuard {
         c.finalizedAt = uint40(block.timestamp);
         refundOwed[caseId] += c.pot;
         c.pot = 0;
+        _completeCase(caseId);
         emit Unresolved(caseId);
     }
 
@@ -841,7 +860,7 @@ contract Moderation is ReentrancyGuard {
         // resolved case; the first clause is what carries the unresolved one.
         bool frozen = vt.revealed == uint8(Outcome.NONE)
             || (resolved && vt.revealed != c.preliminary);
-        stakes.settle(m, frozen, freezePerLoss);
+        _settleVote(caseId, m, frozen);
 
         if (!resolved) {
             emit Claimed(caseId, m, 0, frozen);

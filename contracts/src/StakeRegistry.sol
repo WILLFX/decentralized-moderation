@@ -63,7 +63,7 @@ contract StakeRegistry {
 
     /// @dev `Moderation` needs this registry's address at construction, so the
     ///      link can only be closed afterwards. Once.
-    function setModeration(address m) external {
+    function setModeration(address m) external virtual {
         if (msg.sender != deployer) revert NotDeployer();
         if (moderation != address(0)) revert AlreadySet();
         moderation = m;
@@ -107,7 +107,7 @@ contract StakeRegistry {
 
     // ---------------------------------------------------------- from cases
 
-    function noteCommit(address m) external onlyModeration {
+    function noteCommit(address m) external virtual onlyModeration {
         ++mods[m].openVotes;
     }
 
@@ -119,7 +119,11 @@ contract StakeRegistry {
     ///      charges them the same duration on purpose so that withholding is not
     ///      cheaper than being wrong. This contract does not distinguish them and
     ///      should not: it holds the penalty, not the reason for it.
-    function settle(address m, bool incoherent, uint256 duration) external onlyModeration {
+    function settle(address m, bool incoherent, uint256 duration) external virtual onlyModeration {
+        _settle(m, incoherent, duration);
+    }
+
+    function _settle(address m, bool incoherent, uint256 duration) internal {
         Moderator storage s = mods[m];
         if (s.openVotes != 0) --s.openVotes;
         if (!incoherent) return;

@@ -67,7 +67,7 @@ contract IndexRegistry {
         deployer = msg.sender;
     }
 
-    function setModeration(address m) external {
+    function setModeration(address m) external virtual {
         if (msg.sender != deployer) revert NotDeployer();
         if (moderation != address(0)) revert AlreadySet();
         moderation = m;
@@ -94,7 +94,12 @@ contract IndexRegistry {
         bool everChallenged,
         uint32 approve,
         uint32 reject
-    ) external onlyModeration {
+    ) external virtual onlyModeration {
+        _writeEntry(claimKey, topicKey, status, allTicketsApprove, everChallenged, approve, reject);
+    }
+
+    function _writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status,
+        bool allTicketsApprove, bool everChallenged, uint32 approve, uint32 reject) internal {
         if (topicKey == bytes32(0)) revert ZeroTopicKey();
         if (status != 1 && status != 2) revert BadStatus();
 
@@ -121,7 +126,11 @@ contract IndexRegistry {
     /// @dev §8 — a successful removal case takes the entry out. Approve on a
     ///      removal means remove, so `Moderation` calls this rather than
     ///      `writeEntry` when a removal finalizes as Approve.
-    function removeListing(bytes32 claimKey, bytes32 topicKey) external onlyModeration {
+    function removeListing(bytes32 claimKey, bytes32 topicKey) external virtual onlyModeration {
+        _removeListing(claimKey, topicKey);
+    }
+
+    function _removeListing(bytes32 claimKey, bytes32 topicKey) internal {
         bytes32 k = entryKeyOf(claimKey, topicKey);
         if (!entries[k].written) revert NoSuchEntry();
 

@@ -95,7 +95,7 @@ class RecoveryModel(RequestsModel):
 if __name__ == '__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True);p.add_argument('--port',type=int,default=0)
-    args=p.parse_args();args.assets=base.ROOT/'dist/moderator'
+    args=p.parse_args();args.assets=base.ROOT/'apps/moderator/static'
     bootstrap=Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').replace('__MODE__','single').replace('__AUTH_EVENT__','false')
     base.WALLET=bootstrap.encode('utf8')
     base.serve(args,RecoveryModel)

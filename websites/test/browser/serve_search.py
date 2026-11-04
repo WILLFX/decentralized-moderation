@@ -159,4 +159,4 @@ def serve(args, model_type=SearchModel):
     except KeyboardInterrupt:pass
     finally:app.server_close();content.shutdown();content.server_close()
 if __name__=="__main__":
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument("--assets",type=Path,default=ROOT/"dist/search");p.add_argument("--output",type=Path,required=True);p.add_argument("--port",type=int,default=0);serve(p.parse_args())
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument("--assets",type=Path,default=ROOT/'apps/search/static');p.add_argument("--output",type=Path,required=True);p.add_argument("--port",type=int,default=0);serve(p.parse_args())

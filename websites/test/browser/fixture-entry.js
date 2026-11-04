@@ -6,5 +6,5 @@ if (window.__syntheticModeratorReady !== true) {
   banner.textContent = 'LOCAL UI TEST: synthetic wallet and chain; no real transactions.';
   banner.setAttribute('role', 'note');
   document.body.prepend(banner);
-  await import('./loader.js');
+  await import('./fixture-bootstrap.js');
 }

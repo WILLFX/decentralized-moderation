@@ -19,7 +19,7 @@ const collection = { entries: [
   {name:'index.html', bytes:Buffer.from('html')},
   {name:'loader.js', bytes:Buffer.from('js')},
   {name:'style.css', bytes:Buffer.from('css')},
-  {name:'pkg/app.wasm', bytes:Buffer.from([0,97,115,109,1,0,0,0])},
+  {name:'app.wasm', bytes:Buffer.from([0,97,115,109,1,0,0,0])},
 ] };
 function fakeBee({badBytes=false, wasmType='application/wasm'} = {}) {
   return {request: async path => {

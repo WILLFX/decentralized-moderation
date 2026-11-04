@@ -14,6 +14,9 @@ python3 websites/test/browser/serve_moderator.py --output websites/receipts/mode
 The helper prints its current URL and saves a synthetic profile and session under
 the output directory. Select that profile through the application's normal Source
 controls. Use the URL from the current session, not a copied port from another run.
+Automated actors must wait for `document.documentElement.dataset.bootState` to
+equal `ready` before choosing a profile. The page shell is visible before Rust
+attaches its handlers; the main controls remain inert during startup.
 
 Use a fresh browser context without a real injected wallet. The provider bootstrap
 refuses an existing wallet rather than forwarding a request to it. Helpers bind

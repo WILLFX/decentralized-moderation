@@ -35,5 +35,6 @@ contracts/cache-*/
 /tools/local-session/runs/
 /tools/local-session/resume-check-*/
 /websites/dist/
+/websites/apps/*/static/
 /websites/receipts/
 /tools/local-session/preflight/

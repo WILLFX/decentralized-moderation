@@ -85,6 +85,14 @@ class FixtureCodecs(unittest.TestCase):
         self.assertNotIn(b'<script>', event_wrapped)
         with self.assertRaisesRegex(ValueError, "unguarded"):
             fixture_html(b'<script type="module" src="different-loader.js"></script>')
+    def test_built_inline_entry_is_guarded_before_any_application_code(self):
+        from serve_moderator import fixture_bootstrap
+        page=b'<main inert></main><script id="app-bootstrap" type="module">await start();</script>'
+        wrapped=fixture_html(page)
+        self.assertNotIn(b'await start()',wrapped)
+        self.assertIn(b'src="./fixture-wallet.js"',wrapped)
+        self.assertIn(b'src="./fixture-entry.js"',wrapped)
+        self.assertEqual(fixture_bootstrap(page),b'await start();')
     def test_commitment_includes_domain_and_matches_existing_abi_vector(self):
         self.assertEqual(
             commitment(10200, "0x" + "22" * 20, 2, 0, "0x" + "11" * 20, 1, 0),

@@ -1,3 +1,29 @@
-// Only loads the Rust application. All search behavior lives in Rust.
-import init from './pkg/swarm_search.js';
-init().catch(() => { document.getElementById('boot').textContent = 'The Rust search application could not load. Check the Wasm collection assets.'; });
+// Bootstrap only. The existing Rust application owns all participant workflows.
+const page = document.documentElement;
+page.dataset.bootState = 'loading';
+performance.mark('swarm-bootstrap-start');
+const retry = document.getElementById('boot-retry');
+retry?.addEventListener('click', () => location.reload());
+try {
+  // Start both transfers together; the wrapper must not delay the Wasm request.
+  const [bindings, response] = await Promise.all([
+    import('./swarm_search.js'),
+    fetch(new URL('./swarm_search_bg.wasm', document.baseURI)),
+  ]);
+  if (!response.ok) throw new Error('APPLICATION_ASSET_UNAVAILABLE');
+  performance.mark('swarm-assets-received');
+  await bindings.default({ module_or_path: response });
+  const main = document.querySelector('main');
+  main.removeAttribute('inert');
+  main.removeAttribute('aria-busy');
+  document.getElementById('boot')?.remove();
+  retry?.remove();
+  page.dataset.bootState = 'ready';
+  performance.mark('swarm-ready');
+} catch (error) {
+  page.dataset.bootState = 'error';
+  const boot = document.getElementById('boot');
+  if (boot) boot.textContent = 'Swarm Search could not start. Reload to try again.';
+  if (retry) retry.hidden = false;
+  console.error('Application startup failed', error);
+}

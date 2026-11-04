@@ -7,7 +7,7 @@ import serve_moderator as base
 
 class RequestFixtureTests(unittest.TestCase):
     def model(self):
-        model = RequestsModel(base.ROOT / 'dist' / 'moderator')
+        model = RequestsModel(base.assets_dir('moderator'))
         tx = {'from': model.accounts['alpha'], 'to': model.addresses['token'],
               'chainId': '0x27d8', 'value': '0x0', 'nonce': '0x9',
               'data': base.digest(b'approve(address,uint256)')[:10] + model.addresses['stakes'][2:].zfill(64) + f'{10:064x}'}
@@ -70,7 +70,7 @@ class RequestFixtureTests(unittest.TestCase):
 
     def test_timing_hook_changes_finalized_evidence_after_the_first_guard_read(self):
         cls = type('RequestsTimingFixture', (RequestsModel, TimingModel), {})
-        model = cls(base.ROOT / 'dist' / 'moderator')
+        model = cls(base.assets_dir('moderator'))
         model.control({'mode': 'reveal'})
         model.control({'command': 'wallet-boundary', 'mode': 'finality-lag'})
         model.rpc('eth_getBlockByNumber', ['finalized', False])

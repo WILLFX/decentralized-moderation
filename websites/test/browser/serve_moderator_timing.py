@@ -116,7 +116,7 @@ class TimingModel(Model):
 
 if __name__=="__main__":
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--assets",type=Path,default=ROOT/"dist/moderator")
+    parser.add_argument("--assets",type=Path,default=ROOT/'apps/moderator/static')
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--port",type=int,default=0)
     serve(parser.parse_args(),TimingModel)

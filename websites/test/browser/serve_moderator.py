@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 import sys
@@ -17,6 +18,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[2]
+def assets_dir(role):
+    if role not in ['moderator','publisher','search']:raise ValueError('Unknown website role')
+    return ROOT/'apps'/role/'static'
 sys.path.insert(0, str(ROOT.parent / "simulation"))
 from keccak import keccak256  # noqa: E402; existing independently checked codec
 
@@ -58,10 +62,18 @@ ENTRY = (FIXTURE_DIR / "fixture-entry.js").read_bytes()
 
 def fixture_html(data, event_polling=False):
     loader = b'<script type="module" src="./loader.js">'
-    if data.count(loader) != 1:
-        raise ValueError("Unexpected production entry; refusing an unguarded fixture")
     events = b'<script src="./fixture-events.js"></script>' if event_polling else b''
-    return data.replace(loader, events + b'<script src="./fixture-wallet.js"></script><script type="module" src="./fixture-entry.js">')
+    replacement=events+b'<script src="./fixture-wallet.js"></script><script type="module" src="./fixture-entry.js">'
+    inline=rb'<script id="app-bootstrap" type="module">[\s\S]*?</script>'
+    if len(re.findall(inline,data))==1:
+        return re.sub(inline,lambda _:replacement+b'</script>',data)
+    if data.count(loader)==1:return data.replace(loader,replacement)
+    raise ValueError("Unexpected production entry; refusing an unguarded fixture")
+
+def fixture_bootstrap(data):
+    matches=re.findall(rb'<script id="app-bootstrap" type="module">([\s\S]*?)</script>',data)
+    if len(matches)!=1:raise ValueError('Rebuild the static website before starting this fixture')
+    return matches[0]
 
 
 def viewport_html(path):
@@ -281,6 +293,7 @@ def serve(args, model_type=Model):
             if path == "/fixture-wallet.js": return self.reply(200, WALLET, "text/javascript")
             if path == "/fixture-events.js" and model.event_polling: return self.reply(200, b'window.__syntheticFixtureEvents = true;', "text/javascript")
             if path == "/fixture-entry.js": return self.reply(200, ENTRY, "text/javascript")
+            if path == "/fixture-bootstrap.js": return self.reply(200, fixture_bootstrap((model.assets/'index.html').read_bytes()), "text/javascript")
             name = "index.html" if path == "/" else path[1:]
             if name not in manifest: return self.reply(404, {})
             data = (model.assets / name).read_bytes()
@@ -350,7 +363,7 @@ def serve(args, model_type=Model):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--assets", type=Path, default=ROOT / "dist" / "moderator")
+    parser.add_argument("--assets", type=Path, default=assets_dir('moderator'))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=0, help="Loopback port; 0 allocates a fresh port")
     serve(parser.parse_args())

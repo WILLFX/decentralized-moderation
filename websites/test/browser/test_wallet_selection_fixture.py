@@ -17,7 +17,7 @@ class PublisherSelection(SelectionModelMixin, PublisherModel):
 
 class WalletSelectionFixtureTests(unittest.TestCase):
     def setUp(self):
-        self.model = ModeratorSelection(ROOT / "dist/moderator")
+        self.model = ModeratorSelection(ROOT/'apps/moderator/static')
 
     def approval(self, model, provider="alpha"):
         spender = model.addresses["stakes" if model.role == "moderator" else "moderation"]
@@ -40,7 +40,7 @@ class WalletSelectionFixtureTests(unittest.TestCase):
     def test_same_account_does_not_erase_provider_identity(self):
         class SameAccountSelection(ModeratorSelection):
             same_account = True
-        model = SameAccountSelection(ROOT / "dist/moderator")
+        model = SameAccountSelection(ROOT/'apps/moderator/static')
         self.assertEqual(model.handle_wallet("eth_accounts", ["alpha"]), model.handle_wallet("eth_accounts", ["beta"]))
         self.assertEqual([call["provider"] for call in model.selection_calls], ["alpha", "beta"])
 
@@ -84,7 +84,7 @@ class WalletSelectionFixtureTests(unittest.TestCase):
         self.assertEqual([s["provider"] for s in self.model.sends], ["alpha"])
 
     def test_publisher_approval_checks_its_own_spender_and_retains_nonce(self):
-        model = PublisherSelection(ROOT / "dist/publisher")
+        model = PublisherSelection(ROOT/'apps/publisher/static')
         value = model.handle_wallet("eth_sendTransaction", ["beta", self.approval(model, "beta")])
         self.assertEqual(model.transactions[value]["from"], model.accounts["beta"])
         self.assertEqual(model.transactions[value]["nonce"], "0x9")

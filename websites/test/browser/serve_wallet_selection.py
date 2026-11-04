@@ -103,7 +103,7 @@ if __name__ == '__main__':
     p.add_argument('--same-account', action='store_true')
     p.add_argument('--authorization-event', action='store_true')
     args = p.parse_args()
-    args.assets = base.ROOT / 'dist' / args.role
+    args.assets = base.assets_dir(args.role)
     base.WALLET = Path(__file__).with_name('fixture-wallet-selection.js').read_bytes().replace(b'__MODE__', args.mode.encode()).replace(b'__AUTH_EVENT__', b'true' if args.authorization_event else b'false')
     Parent = PublisherModel if args.role == 'publisher' else base.Model
     Model = type('SelectionModel', (SelectionModelMixin, Parent), {'role': args.role, 'same_account': args.same_account})

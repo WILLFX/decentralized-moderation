@@ -38,7 +38,17 @@ bash websites/scripts/build.sh moderator
 bash websites/scripts/build.sh search
 ```
 
-Omit the role to build all three. Public outputs are under `websites/dist/`.
+Omit the role to build all three. Each public output is a standalone folder at
+`websites/apps/<role>/static/`, containing the page, generated JavaScript wrapper
+and Wasm file. CSS and bootstrap source are inlined during packaging; compiled
+files are ignored by Git. For example, after building Publisher:
+
+```sh
+python3 -m http.server 8080 --directory websites/apps/publisher/static
+```
+
+Open `http://localhost:8080/`. The generated file layout is described in the
+[website guide](../websites/README.md).
 `WASM_BINDGEN` can select an existing matching bindings CLI. `CARGO_HOME` and an
 absolute `CARGO_TARGET_DIR` can reuse a local cache. Neither variable requires a
 particular computer or drive.

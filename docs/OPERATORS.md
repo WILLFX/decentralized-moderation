@@ -172,8 +172,9 @@ wallet access, cryptography and local storage also depend on the browser context
 ## Publish website collections and maintain storage
 
 Build the three applications with `websites/scripts/build.sh`. Their outputs are
-separate collections in `websites/dist/{publisher,moderator,search}`. Each contains
-its public entry page, styles, loader, guidelines and Wasm bindings. Upload the
+separate collections in `websites/apps/{publisher,moderator,search}/static`. Each
+contains its entry page with inline styles and bootstrap, guidelines, a JavaScript
+wrapper, Wasm and an asset-hash manifest. Upload the
 collection with `index.html` as its default document using your chosen Bee tooling.
 Keep configuration, private keys, drafts and recovery files out of the collection.
 

@@ -106,7 +106,7 @@ if __name__ == '__main__':
     parser.add_argument('--timing', action='store_true')
     parser.add_argument('--capture-recovery', action='store_true', help='Observe encrypted export blobs in keyless loopback tests only')
     args = parser.parse_args()
-    args.assets = base.ROOT / 'dist' / 'moderator'
+    args.assets = base.assets_dir('moderator')
     bootstrap = Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').replace('__MODE__', 'single').replace('__AUTH_EVENT__', 'false')
     bootstrap = bootstrap.replace('  const listeners = new Map();', """  let failRequestWrites = false;
   const originalSet = Storage.prototype.setItem;

@@ -36,5 +36,5 @@ class PublisherExpiryModel(PublisherModel):
         return super().control(body)
     def status(self):return {**super().status(),'recoveryReads':self.recovery_reads}
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--assets',type=Path,default=ROOT/'dist/publisher');p.add_argument('--output',type=Path,required=True);p.add_argument('--port',type=int,default=0)
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--assets',type=Path,default=ROOT/'apps/publisher/static');p.add_argument('--output',type=Path,required=True);p.add_argument('--port',type=int,default=0)
     serve(p.parse_args(),PublisherExpiryModel)

@@ -107,7 +107,7 @@ if __name__ == '__main__':
     p.add_argument('--port', type=int, default=0)
     p.add_argument('--capability', choices=['bound', 'legacy', 'unknown', 'malformed'], default='bound')
     args = p.parse_args()
-    args.assets = base.ROOT / 'dist' / 'moderator'
+    args.assets = base.assets_dir('moderator')
     bootstrap = Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').replace('__MODE__', 'single').replace('__AUTH_EVENT__', 'false')
     bootstrap = bootstrap.replace('defaultId,listeners:counts', "defaultId,listeners:counts,requests:Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('moderator-requests-v1:')))")
     base.WALLET = bootstrap.encode('utf8')

@@ -98,6 +98,6 @@ if __name__=='__main__':
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--port',type=int,default=0)
     args=p.parse_args()
-    args.assets=base.ROOT/'dist'/('search' if args.role=='reader' else args.role)
+    args.assets=base.assets_dir('search' if args.role=='reader' else args.role)
     if args.role=='reader':search.serve(args,ReaderModel)
     else:base.serve(args,PublisherModel if args.role=='publisher' else ModeratorModel)

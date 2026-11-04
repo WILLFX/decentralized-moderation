@@ -28,7 +28,24 @@ Bootstrap requires rustup and installs Rust 1.96.0 and wasm-bindgen 0.2.118. It 
 unnecessary when the pinned tools are already present. Use `build.sh publisher`,
 `moderator` or `search` for one role. See [build and test](../docs/BUILD_AND_TEST.md).
 
-The three `dist/` collections have seven public assets each. Packaging refuses
+Each interface builds into its own ignored `static/` directory:
+
+```text
+websites/apps/publisher/static/
+websites/apps/moderator/static/
+websites/apps/search/static/
+```
+
+Each directory contains `index.html`, `swarm_<role>.js`,
+`swarm_<role>_bg.wasm`, `MODERATION_GUIDELINES.md` and `asset-hashes.json`.
+These generated files are build output, not committed source. The page inlines
+its CSS and small startup script under content-security-policy hashes; the
+generated JavaScript wrapper and Wasm file sit beside the HTML. The wrapper
+and Wasm download in parallel. Edit the role's `style.css`, `loader.js` and HTML
+source, then rebuild; serve or upload the resulting `static/` directory.
+
+The published [release manifest](../deployments/chiado/manifest.json) lists the
+exact asset paths and hashes in the released collections. Packaging refuses
 extra files; profiles, private state, test providers and recovery exports are not
 website assets. `apps/checkpoint` is a separate native executable.
 

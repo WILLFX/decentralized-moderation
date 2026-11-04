@@ -96,7 +96,7 @@ async function main() {
   const session = await jsonFile(sessionFile);
   const paths = sessionPaths(session, delivery);
   const environment = await jsonFile(paths.environment);
-  const collection = await collect(join(root, 'dist', role), role);
+  const collection = await collect(undefined, role);
   console.log('Checking ownership of the existing local Bee environment.');
   stage = 'Proving ownership of the running local Bee and storage chain';
   const endpoint = await proveEnvironment(environment);

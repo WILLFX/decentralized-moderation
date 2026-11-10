@@ -1,7 +1,7 @@
 {
   "name": "Decentralized Moderation testnet MVP",
-  "publishedDate": "2026-11-04",
-  "sourceRevision": "d496c3c3f9835cb45c5d5b10af1cc0370092bc3d",
+  "publishedDate": "2026-11-10",
+  "sourceRevision": "7f2438fb09017744af724b54996e4552414076a6",
   "sourceRepository": "https://github.com/WILLFX/decentralized-moderation",
   "moderationChainId": 10200,
   "swarmNetworkId": 10,
@@ -10,13 +10,13 @@
   "sites": [
     {
       "role": "moderator",
-      "swarmReference": "680026c1f46b0a809431e44c1de7ac48b5ad77c325d9580b901ccc501ce28ed4",
-      "archiveSha256": "2854402805b64d76396534a720284999883cc3696a7521dd60358ae17e279747",
+      "swarmReference": "6b4978dcef078eab26a00c42926e22dee398ccd08783bc61a8db044c6e9d951d",
+      "archiveSha256": "aa14c2e3c692510241fa909d63e2883c8a72a597061b7839878d2eb6bc8094f5",
       "assets": [
         {
           "name": "index.html",
-          "sha256": "63f0beb0de1307465c673d6f23df31a3cace92b9faf8a36eda315f121a463e4f",
-          "bytes": 28852
+          "sha256": "b466dbe08e0f2d3c1b09314117cafc82f80759c2b89ba809c026faa79d25d21f",
+          "bytes": 29020
         },
         {
           "name": "MODERATION_GUIDELINES.md",
@@ -29,26 +29,26 @@
           "bytes": 43238
         },
         {
-          "name": "swarm_moderator_bg.wasm",
-          "sha256": "73ba2e4923b894eed37e2ae101aa959dcee59b7d06ba96138bd1946693f5c706",
-          "bytes": 1198325
+          "name": "swarm_moderator_bg.wasm.gz",
+          "sha256": "0f8274537b70f318ab99542367659f0eafefe234bfe37d88f534b277c81bcc07",
+          "bytes": 442425
         },
         {
           "name": "asset-hashes.json",
-          "sha256": "0c30a0ff84d51167ef724f4227471c581f4175abcc7d8bab337d83429eec98cf",
-          "bytes": 374
+          "sha256": "f2d620337721fe98260c2e528bb6492132ed8179f956396eef83c88a430d9984",
+          "bytes": 377
         }
       ]
     },
     {
       "role": "publisher",
-      "swarmReference": "ebd27ed9be21b7dd6668a045b321b3959fd0e4a05e177d3833f8649e6ddd0e14",
-      "archiveSha256": "7c4f170c164c94e5dd75b34305323ec4176281203423cf5128ec116a102028e4",
+      "swarmReference": "7a655e42c811ef90248cf9505bf4bec7362499266df8be68f6f34c97aca509a3",
+      "archiveSha256": "69cf2d9e2d4302345cd70a3dafc44233b35ee6e747809d2aaaf25a9e0459451d",
       "assets": [
         {
           "name": "index.html",
-          "sha256": "b8e4cc78f91c873847f7d2ae617b6ff9af635ea371b39811500a4c6fd22dfac3",
-          "bytes": 29977
+          "sha256": "ce5a759dd6acc16fcb8d2112251d5258705721bfc87992e22088d8db132095a7",
+          "bytes": 30145
         },
         {
           "name": "MODERATION_GUIDELINES.md",
@@ -61,26 +61,26 @@
           "bytes": 47480
         },
         {
-          "name": "swarm_publisher_bg.wasm",
-          "sha256": "68723cb77649b9586bc31a8deafa51e4e21c83afbac0f701faaf39cdab7fc5b2",
-          "bytes": 1277718
+          "name": "swarm_publisher_bg.wasm.gz",
+          "sha256": "f741b92be3626ad536b586df83954a6c240c83f87083785379c28d77a327ea7d",
+          "bytes": 461535
         },
         {
           "name": "asset-hashes.json",
-          "sha256": "1e095d12df28c1b36e4b125a9e898383de3c7d3e26d8e1a0d020b3ba7712b2b0",
-          "bytes": 374
+          "sha256": "24ccc81db185e766e85000d185471802308569f8d8b832da89208599c7efd720",
+          "bytes": 377
         }
       ]
     },
     {
       "role": "search",
-      "swarmReference": "df06720008b73511a785c08c4395953e68422f33b6a47b3e6e5ce2fbbdf86fef",
-      "archiveSha256": "0da308da14ec4daaea3271149a7597c36acaeb3a6f4458f88966d771f128e391",
+      "swarmReference": "3c2d994f2d76913fa3d4cb448b65ff8ff7834bbbc0be36f14246b05919ff53ec",
+      "archiveSha256": "030603f1022909e4d678a1c47a6086efbaf066c127f62795d67ca1b5ca174c0b",
       "assets": [
         {
           "name": "index.html",
-          "sha256": "b0365fa58a2c12cfd3448184f34597a461d1483da1dd4e35bb4c8564911c5f0b",
-          "bytes": 12738
+          "sha256": "e5a0a8f3347ab6e7f9c3ab26ef39417473b4feabb6ee7ac9de68d9c743a0748b",
+          "bytes": 12906
         },
         {
           "name": "MODERATION_GUIDELINES.md",
@@ -93,14 +93,14 @@
           "bytes": 30094
         },
         {
-          "name": "swarm_search_bg.wasm",
-          "sha256": "cc4a81e9af27d4357d69d3ea2dea1c4e2df08ee63dd2a29cf6e9df8265c7b847",
-          "bytes": 947057
+          "name": "swarm_search_bg.wasm.gz",
+          "sha256": "2dde4d518eb17afa5feec47247ad0f874b1327e56daef2326f2ea858438c46f9",
+          "bytes": 345816
         },
         {
           "name": "asset-hashes.json",
-          "sha256": "43e935b59605c551465cdd5f6d95db0bde0363c471c5a8a8bd2714e12f19c566",
-          "bytes": 368
+          "sha256": "6c59f1277e4fab4fd514c3ff2837b09e31bef62fb44a9a2386de93ba70443376",
+          "bytes": 371
         }
       ]
     }

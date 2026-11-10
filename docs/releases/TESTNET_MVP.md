@@ -2,8 +2,9 @@
 
 Released 4 November 2026. The release includes Swarm Publish, Swarm Review and
 Swarm Search, with moderation contracts on Chiado and websites on Swarm testnet.
+The website bundles were updated on 10 November 2026.
 
-Source revision: [`d496c3c3f9835cb45c5d5b10af1cc0370092bc3d`](https://github.com/WILLFX/decentralized-moderation/tree/d496c3c3f9835cb45c5d5b10af1cc0370092bc3d).
+Source revision: [`7f2438fb09017744af724b54996e4552414076a6`](https://github.com/WILLFX/decentralized-moderation/tree/7f2438fb09017744af724b54996e4552414076a6).
 The [release manifest](../../deployments/chiado/manifest.json) contains the website
 references and public asset checksums. Documentation and connection profiles can
 be updated independently of these published application bytes.
@@ -17,15 +18,15 @@ its standard local address. If you use an operator's gateway, open
 
 | Website | Open through a local Bee | Swarm reference |
 | --- | --- | --- |
-| Swarm Publish | [Open Publisher](http://127.0.0.1:1633/bzz/ebd27ed9be21b7dd6668a045b321b3959fd0e4a05e177d3833f8649e6ddd0e14/) | `ebd27ed9be21b7dd6668a045b321b3959fd0e4a05e177d3833f8649e6ddd0e14` |
-| Swarm Review | [Open Moderator](http://127.0.0.1:1633/bzz/680026c1f46b0a809431e44c1de7ac48b5ad77c325d9580b901ccc501ce28ed4/) | `680026c1f46b0a809431e44c1de7ac48b5ad77c325d9580b901ccc501ce28ed4` |
-| Swarm Search | [Open Reader](http://127.0.0.1:1633/bzz/df06720008b73511a785c08c4395953e68422f33b6a47b3e6e5ce2fbbdf86fef/) | `df06720008b73511a785c08c4395953e68422f33b6a47b3e6e5ce2fbbdf86fef` |
+| Swarm Publish | [Open Publisher](http://127.0.0.1:1633/bzz/7a655e42c811ef90248cf9505bf4bec7362499266df8be68f6f34c97aca509a3/) | `7a655e42c811ef90248cf9505bf4bec7362499266df8be68f6f34c97aca509a3` |
+| Swarm Review | [Open Moderator](http://127.0.0.1:1633/bzz/6b4978dcef078eab26a00c42926e22dee398ccd08783bc61a8db044c6e9d951d/) | `6b4978dcef078eab26a00c42926e22dee398ccd08783bc61a8db044c6e9d951d` |
+| Swarm Search | [Open Reader](http://127.0.0.1:1633/bzz/3c2d994f2d76913fa3d4cb448b65ff8ff7834bbbc0be36f14246b05919ff53ec/) | `3c2d994f2d76913fa3d4cb448b65ff8ff7834bbbc0be36f14246b05919ff53ec` |
 
 The same released references can also be opened through weeb-3's browser client:
 
 | Access route | Publisher | Moderator | Reader |
 | --- | --- | --- | --- |
-| weeb-3 · Swarm testnet | [Open Publisher](https://lat-murmeldjur.github.io/weeb-3/testnet/bzz/ebd27ed9be21b7dd6668a045b321b3959fd0e4a05e177d3833f8649e6ddd0e14/) | [Open Moderator](https://lat-murmeldjur.github.io/weeb-3/testnet/bzz/680026c1f46b0a809431e44c1de7ac48b5ad77c325d9580b901ccc501ce28ed4/) | [Open Reader](https://lat-murmeldjur.github.io/weeb-3/testnet/bzz/df06720008b73511a785c08c4395953e68422f33b6a47b3e6e5ce2fbbdf86fef/) |
+| weeb-3 · Swarm testnet | [Open Publisher](https://lat-murmeldjur.github.io/weeb-3/testnet/bzz/7a655e42c811ef90248cf9505bf4bec7362499266df8be68f6f34c97aca509a3/) | [Open Moderator](https://lat-murmeldjur.github.io/weeb-3/testnet/bzz/6b4978dcef078eab26a00c42926e22dee398ccd08783bc61a8db044c6e9d951d/) | [Open Reader](https://lat-murmeldjur.github.io/weeb-3/testnet/bzz/3c2d994f2d76913fa3d4cb448b65ff8ff7834bbbc0be36f14246b05919ff53ec/) |
 
 The `/testnet/` path selects Swarm network 10. Publishing and moderation wallet
 transactions still use Chiado, as described below.

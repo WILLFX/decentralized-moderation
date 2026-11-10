@@ -37,12 +37,11 @@ websites/apps/search/static/
 ```
 
 Each directory contains `index.html`, `swarm_<role>.js`,
-`swarm_<role>_bg.wasm`, `MODERATION_GUIDELINES.md` and `asset-hashes.json`.
-These generated files are build output, not committed source. The page inlines
-its CSS and small startup script under content-security-policy hashes; the
-generated JavaScript wrapper and Wasm file sit beside the HTML. The wrapper
-and Wasm download in parallel. Edit the role's `style.css`, `loader.js` and HTML
-source, then rebuild; serve or upload the resulting `static/` directory.
+`swarm_<role>_bg.wasm.gz`, `MODERATION_GUIDELINES.md` and `asset-hashes.json`.
+The page inlines its CSS and startup script under content-security-policy hashes.
+It downloads the JavaScript wrapper and gzip Wasm in parallel, then decompresses
+the Wasm as the browser compiles it. Edit the role's source files, rebuild, and
+serve or upload the resulting `static/` directory.
 
 The published [release manifest](../deployments/chiado/manifest.json) lists the
 exact asset paths and hashes in the released collections. Packaging refuses

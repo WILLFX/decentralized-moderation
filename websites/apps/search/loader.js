@@ -8,11 +8,13 @@ try {
   // Start both transfers together; the wrapper must not delay the Wasm request.
   const [bindings, response] = await Promise.all([
     import('./swarm_search.js'),
-    fetch(new URL('./swarm_search_bg.wasm', document.baseURI)),
+    fetch(new URL('./swarm_search_bg.wasm.gz', document.baseURI)),
   ]);
   if (!response.ok) throw new Error('APPLICATION_ASSET_UNAVAILABLE');
   performance.mark('swarm-assets-received');
-  await bindings.default({ module_or_path: response });
+  const decoded = response.body.pipeThrough(new DecompressionStream('gzip'));
+  const wasm = new Response(decoded, { headers: { 'Content-Type': 'application/wasm' } });
+  await bindings.default({ module_or_path: wasm });
   const main = document.querySelector('main');
   main.removeAttribute('inert');
   main.removeAttribute('aria-busy');

@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { assets, assetsFor, collect, bindingsDirectory, staticDirectory, renderPage, root as workspace } from '../scripts/package.mjs';
 import { resolve } from 'node:path';
 
@@ -17,7 +18,7 @@ async function fixture(t, role = 'moderator') {
   t.after(() => rm(root, { recursive: true, force: true }));
   const manifest = {};
   for (const name of assetsFor(role)) {
-    const bytes = name.endsWith('.wasm') ? Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]) : Buffer.from('public fixture');
+    const bytes = name.endsWith('.wasm.gz') ? gzipSync(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])) : Buffer.from('public fixture');
     await mkdir(dirname(join(root, name)), { recursive: true });
     await writeFile(join(root, name), bytes);
     manifest[name] = createHash('sha256').update(bytes).digest('hex');
@@ -49,11 +50,22 @@ test('changed assets fail closed', async t => {
 
 test('hash-consistent invalid Wasm still fails', async t => {
   const { root, manifest } = await fixture(t);
-  const name = 'swarm_moderator_bg.wasm', bytes = Buffer.from('bad wasm');
+  const name = 'swarm_moderator_bg.wasm.gz', bytes = gzipSync(Buffer.from('bad wasm'));
   await writeFile(join(root, name), bytes);
   manifest[name] = createHash('sha256').update(bytes).digest('hex');
   await writeFile(join(root, 'asset-hashes.json'), JSON.stringify(manifest));
   await assert.rejects(collect(root), /INVALID_WASM/);
+});
+
+test('compressed Wasm must decompress within the public asset limit', async t => {
+  const { root, manifest } = await fixture(t);
+  const name = 'swarm_moderator_bg.wasm.gz';
+  for (const bytes of [Buffer.from('invalid gzip'), gzipSync(Buffer.alloc(8 * 1024 * 1024 + 1))]) {
+    await writeFile(join(root, name), bytes);
+    manifest[name] = createHash('sha256').update(bytes).digest('hex');
+    await writeFile(join(root, 'asset-hashes.json'), JSON.stringify(manifest));
+    await assert.rejects(collect(root), /INVALID_WASM_GZIP/);
+  }
 });
 
 for (const forbidden of ['encrypt_test', 'decrypt_test', 'encrypt_recovery_for_test',
@@ -64,9 +76,10 @@ for (const forbidden of ['encrypt_test', 'decrypt_test', 'encrypt_recovery_for_t
     const bytes=Buffer.from([0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,
       7,exportName.length+4,1,exportName.length,...exportName,0,0,10,4,1,2,0,11]);
     assert.equal(WebAssembly.validate(bytes),true);
-    const name='swarm_moderator_bg.wasm';
-    await writeFile(join(root,name),bytes);
-    manifest[name]=createHash('sha256').update(bytes).digest('hex');
+    const name='swarm_moderator_bg.wasm.gz';
+    const compressed=gzipSync(bytes);
+    await writeFile(join(root,name),compressed);
+    manifest[name]=createHash('sha256').update(compressed).digest('hex');
     await writeFile(join(root,'asset-hashes.json'),JSON.stringify(manifest));
     await assert.rejects(collect(root),/TEST_HARNESS_IN_PUBLIC_COLLECTION/);
   });
@@ -79,8 +92,8 @@ test('publisher and search collections remain separate fixed public packages', a
   const found = await collect(search.root, 'search');
   assert.equal(pub.role, 'publisher-rust-preview');
   assert.equal(found.role, 'search-rust-preview');
-  assert.ok(pub.entries.some(entry => entry.name === 'swarm_publisher_bg.wasm'));
-  assert.ok(found.entries.some(entry => entry.name === 'swarm_search_bg.wasm'));
+  assert.ok(pub.entries.some(entry => entry.name === 'swarm_publisher_bg.wasm.gz'));
+  assert.ok(found.entries.some(entry => entry.name === 'swarm_search_bg.wasm.gz'));
   assert.notDeepEqual(pub.tar, found.tar);
   await assert.rejects(collect(publisher.root, 'search'), /PUBLIC_ASSET_ALLOWLIST_MISMATCH/u);
   await assert.rejects(collect(search.root, '../publisher'), /INVALID_SITE_ROLE/u);

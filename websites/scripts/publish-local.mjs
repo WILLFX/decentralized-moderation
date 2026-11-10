@@ -74,7 +74,8 @@ export async function proveEnvironment(state) {
 
 export async function verifyPublicRoundTrip(bee, collection, reference) {
   assert.match(reference, /^[0-9a-f]{64}$/u);
-  const types = name => name.endsWith('.wasm') ? /^application\/wasm(?:;|$)/iu
+  const types = name => name.endsWith('.wasm.gz') ? /^application\/(?:x-)?gzip(?:;|$)/iu
+    : name.endsWith('.wasm') ? /^application\/wasm(?:;|$)/iu
     : name.endsWith('.js') ? /^(?:text|application)\/javascript(?:;|$)/iu
     : name.endsWith('.css') ? /^text\/css(?:;|$)/iu
     : name.endsWith('.html') ? /^text\/html(?:;|$)/iu : null;

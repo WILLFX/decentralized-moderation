@@ -1,8 +1,9 @@
 import { readBoundedFileBytes, writeVerifiedCheckpointFile } from '../../tools/files.mjs';
-import { mkdir, readdir, lstat } from 'node:fs/promises';
+import { mkdir, readdir, lstat, unlink } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { createCollectionTar } from '../../tools/collections.mjs';
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -10,11 +11,12 @@ export const roles = Object.freeze(['moderator', 'publisher', 'search']);
 export function assetsFor(role = 'moderator') {
   if (!roles.includes(role)) throw new Error('INVALID_SITE_ROLE');
   return Object.freeze(['index.html', 'MODERATION_GUIDELINES.md',
-    `swarm_${role}.js`, `swarm_${role}_bg.wasm`]);
+    `swarm_${role}.js`, `swarm_${role}_bg.wasm.gz`]);
 }
 export const assets = assetsFor();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = code => { throw new Error(code); };
+const maxAssetBytes = 8 * 1024 * 1024;
 export function staticDirectory(role = 'moderator') {
   assetsFor(role);
   return join(root, 'apps', role, 'static');
@@ -32,9 +34,9 @@ async function safeRead(base, name) {
     if ((await lstat(path)).isSymbolicLink()) fail('UNSAFE_PUBLIC_ASSET');
   }
   const stat = await lstat(path);
-  if (!stat.isFile() || stat.size > 8 * 1024 * 1024) fail('PUBLIC_ASSET_SIZE_LIMIT');
-  const bytes = await readBoundedFileBytes(path, 8 * 1024 * 1024);
-  if (bytes.length > 8 * 1024 * 1024) fail('PUBLIC_ASSET_SIZE_LIMIT');
+  if (!stat.isFile() || stat.size > maxAssetBytes) fail('PUBLIC_ASSET_SIZE_LIMIT');
+  const bytes = await readBoundedFileBytes(path, maxAssetBytes);
+  if (bytes.length > maxAssetBytes) fail('PUBLIC_ASSET_SIZE_LIMIT');
   return bytes;
 }
 
@@ -68,9 +70,12 @@ export async function collect(base, role = 'moderator') {
     if (hash(bytes) !== manifest[name]) fail('ASSET_HASH_MISMATCH');
     total += bytes.length;
     if (total > 16 * 1024 * 1024) fail('PUBLIC_COLLECTION_SIZE_LIMIT');
-    if (name.endsWith('.wasm')) {
-      if (!WebAssembly.validate(bytes)) fail('INVALID_WASM');
-      if (WebAssembly.Module.exports(new WebAssembly.Module(bytes)).some(item =>
+    if (name.endsWith('.wasm.gz')) {
+      let wasm;
+      try { wasm = gunzipSync(bytes, { maxOutputLength: maxAssetBytes }); }
+      catch { fail('INVALID_WASM_GZIP'); }
+      if (!WebAssembly.validate(wasm)) fail('INVALID_WASM');
+      if (WebAssembly.Module.exports(new WebAssembly.Module(wasm)).some(item =>
         /^(?:(?:encrypt_test|decrypt_test|encrypt_recovery_for_test|decrypt_recovery_for_test)$|(?:__wbg_)?lifecyclevault(?:_|$))/u.test(item.name))) {
         fail('TEST_HARNESS_IN_PUBLIC_COLLECTION');
       }
@@ -125,14 +130,25 @@ export async function packagePreview(role = 'moderator') {
     view: role === 'search' ? undefined : (await safeRead(join(root, 'crates', 'swarm-browser', 'src', role), 'view.html')).toString('utf8'),
   });
   const manifest = {};
+  const bindings = bindingsDirectory(process.env.CARGO_TARGET_DIR, role);
   for (const name of assets) {
-    const bytes = name === 'index.html' ? html : await safeRead(
-      name.endsWith('.js') || name.endsWith('.wasm') ? bindingsDirectory(process.env.CARGO_TARGET_DIR, role) : source,
-      name);
+    let bytes;
+    if (name === 'index.html') bytes = html;
+    else if (name.endsWith('.wasm.gz')) bytes = gzipSync(await safeRead(bindings, name.slice(0, -3)), { level: 9 });
+    else bytes = await safeRead(name.endsWith('.js') ? bindings : source, name);
     await writeVerifiedCheckpointFile(join(destination, name), bytes);
     manifest[name] = hash(bytes);
   }
   await writeVerifiedCheckpointFile(join(destination, 'asset-hashes.json'), JSON.stringify(manifest, null, 2) + '\n');
+  // Migrate an existing generated folder without removing unrelated files.
+  const legacyWasm = join(destination, `swarm_${role}_bg.wasm`);
+  const legacy = await lstat(legacyWasm).catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  if (legacy) {
+    if (!legacy.isFile()) fail('UNSAFE_PUBLIC_ASSET');
+    await unlink(legacyWasm);
+  }
   const collection = await collect(destination, role);
   console.log(`Packaged ${collection.entries.length} public assets; Wasm validates. No profile or recovery file is included.`);
 }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve, join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { sessionPaths, verifyPublicRoundTrip } from '../scripts/publish-local.mjs';
 
 test('publication only accepts a running session with recovery under its saved run', () => {
@@ -19,21 +20,21 @@ const collection = { entries: [
   {name:'index.html', bytes:Buffer.from('html')},
   {name:'loader.js', bytes:Buffer.from('js')},
   {name:'style.css', bytes:Buffer.from('css')},
-  {name:'app.wasm', bytes:Buffer.from([0,97,115,109,1,0,0,0])},
+  {name:'app.wasm.gz', bytes:gzipSync(Buffer.from([0,97,115,109,1,0,0,0]))},
 ] };
-function fakeBee({badBytes=false, wasmType='application/wasm'} = {}) {
+function fakeBee({badBytes=false, wasmType='application/gzip'} = {}) {
   return {request: async path => {
     const entry = collection.entries.find(e => path === `/bzz/${reference}/${e.name}`);
     assert.ok(entry);
-    const type = entry.name.endsWith('.wasm') ? wasmType : entry.name.endsWith('.js') ? 'text/javascript'
+    const type = entry.name.endsWith('.wasm.gz') ? wasmType : entry.name.endsWith('.js') ? 'text/javascript'
       : entry.name.endsWith('.css') ? 'text/css' : 'text/html; charset=utf-8';
     return {bytes: badBytes ? Buffer.from('changed') : entry.bytes, type};
   }};
 }
-test('public front-door round trip includes browser Wasm MIME verification', async () => {
+test('public front-door round trip includes gzip MIME verification', async () => {
   await verifyPublicRoundTrip(fakeBee(), collection, reference);
 });
-test('correct Wasm bytes with a nonexecutable MIME type are rejected', async () => {
+test('gzip Wasm served with the wrong MIME type is rejected', async () => {
   await assert.rejects(verifyPublicRoundTrip(fakeBee({wasmType:'application/octet-stream'}), collection, reference),
     /PUBLIC_ASSET_MEDIA_TYPE_MISMATCH/);
 });

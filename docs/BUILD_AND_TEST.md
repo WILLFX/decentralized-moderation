@@ -40,8 +40,8 @@ bash websites/scripts/build.sh search
 
 Omit the role to build all three. Each public output is a standalone folder at
 `websites/apps/<role>/static/`, containing the page, generated JavaScript wrapper
-and Wasm file. CSS and bootstrap source are inlined during packaging; compiled
-files are ignored by Git. For example, after building Publisher:
+and gzip Wasm file. Packaging inlines the CSS and bootstrap source. Git ignores
+the generated files. After building Publisher, serve its output with:
 
 ```sh
 python3 -m http.server 8080 --directory websites/apps/publisher/static

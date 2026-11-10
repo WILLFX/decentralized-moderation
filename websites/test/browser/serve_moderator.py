@@ -303,7 +303,9 @@ def serve(args, model_type=Model):
                 except ValueError: return self.reply(500, {"error": "Test entry bootstrap mismatch; application not served"})
                 if parse_qs(urlsplit(self.path).query).get("text")==["200"]:
                     data=data.replace(b"</head>",b'<link rel="stylesheet" href="/fixture-text.css"></head>')
-            return self.reply(200, data, "application/wasm" if name.endswith(".wasm") else "text/javascript" if name.endswith(".js") else mimetypes.guess_type(name)[0] or "text/plain")
+            types = {".gz": "application/gzip", ".js": "text/javascript", ".wasm": "application/wasm"}
+            content_type = types.get(Path(name).suffix) or mimetypes.guess_type(name)[0]
+            return self.reply(200, data, content_type or "text/plain")
 
         def do_POST(self):
             if self.server.is_content: return self.reply(405, {})

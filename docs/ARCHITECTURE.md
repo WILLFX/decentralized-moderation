@@ -21,11 +21,15 @@ A profile connects a website to a chosen deployment and its services.
 
 ## Components
 
+The current Chiado release uses `contracts/src/persistent/`. These implementations
+extend the base contracts below with replacement authority and case-origin tracking.
+
 | Location | Responsibility |
 | --- | --- |
 | `contracts/src/Moderation.sol` | Cases, voting, draws, challenges, fees and settlement |
 | `contracts/src/StakeRegistry.sol` | Fixed stakes, outstanding votes and frozen time |
 | `contracts/src/IndexRegistry.sol` | Approved entries and paged topic membership |
+| `contracts/src/persistent/` | Persistent registries, replacement authority and moderation adapter |
 | `contracts/src/testnet/ChiadoTestToken.sol` | The release's public TEST faucet |
 | `websites/apps/{publisher,moderator,search}` | Three separate website entry points |
 | `websites/crates/swarm-core` | Profiles, metadata, ABI encoding and protocol calculations |

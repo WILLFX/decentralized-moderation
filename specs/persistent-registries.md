@@ -89,8 +89,8 @@ code hash and expected configuration fingerprint, available as `rulesHash()` on
 the reviewed version. The script does not read a signing key or assume
 the deploying account is the authorizer. Broadcasting is a separate operator action.
 
-The published testnet MVP uses fixed reciprocal links. The current website source
-also accepts an explicit `deployment.persistent` object with this shape:
+Profiles for persistent deployments include an explicit `deployment.persistent`
+object with this shape:
 
 ```json
 {

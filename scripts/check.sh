@@ -5,7 +5,7 @@ cd -- "$root"
 if [[ -n "${CARGO_TARGET_DIR:-}" && "$CARGO_TARGET_DIR" != /* ]]; then
   export CARGO_TARGET_DIR="$root/$CARGO_TARGET_DIR"
 fi
-(cd contracts && forge test --use 0.8.28 && FOUNDRY_TEST=audit FOUNDRY_OUT=out-audit FOUNDRY_CACHE_PATH=cache-audit forge test --use 0.8.28 --match-contract 'TakeoverProbes|ChallengeIntentProbe|CompletionReviewProbes|OutcomeRecoveryTest' --match-test test_regression)
+(cd contracts && forge test --use 0.8.28)
 python3 -m unittest discover -s simulation -p test_eligibility.py -v
 python3 simulation/check_eligibility_vectors.py
 python3 simulation/check_draw_vectors.py

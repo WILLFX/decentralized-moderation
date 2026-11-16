@@ -1,56 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {HistoryFixture} from "./helpers/HistoryFixture.sol";
+import {RealModerationFixture} from "./helpers/RealModerationFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
-import {StakeRegistry} from "../src/StakeRegistry.sol";
-import {IndexRegistry} from "../src/IndexRegistry.sol";
-import {MockBZZ} from "./mocks/MockBZZ.sol";
 
-contract ProductionSchedulingTest is HistoryFixture {
-    Moderation mod;
-    StakeRegistry stakes;
-    IndexRegistry index;
-    MockBZZ token;
-    address[24] members;
-    address constant PUBLISHER = address(0x5011);
-    uint256 constant FEE = 1200;
-    bytes32 constant SALT = bytes32("schedule salt");
+contract ProductionSchedulingTest is RealModerationFixture {
     bytes32 constant ENTROPY = keccak256("selected B target");
-
-    function setUp() public {
-        _deploy(3600);
-    }
-
-    function _deploy(uint256 maximumWait) internal {
-        vm.roll(100);
-        vm.warp(1_000_000);
-        token = new MockBZZ();
-        stakes = new StakeRegistry(address(token), 1000);
-        index = new IndexRegistry();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
-            900, 1800, 3600, maximumWait, 8 days, 2, FEE, 3, 1, keccak256("guidelines")));
-        stakes.setModeration(address(mod));
-        index.setModeration(address(mod));
-        for (uint256 i; i < members.length; ++i) {
-            members[i] = address(uint160(0x1000 + i));
-            token.mint(members[i], 1000);
-            vm.startPrank(members[i]);
-            token.approve(address(stakes), 1000);
-            stakes.stake();
-            vm.stopPrank();
-        }
-        token.mint(PUBLISHER, 100 * FEE);
-        vm.prank(PUBLISHER);
-        token.approve(address(mod), type(uint256).max);
-    }
-
-    function _submit() internal returns (uint256 id) {
-        bytes32[] memory topics = new bytes32[](1);
-        topics[0] = keccak256("biology");
-        vm.prank(PUBLISHER);
-        return mod.submit(keccak256("content"), keccak256("metadata"), topics, FEE);
-    }
 
     function _commit(uint256 id, uint256 member) internal {
         bytes32 h = mod.commitHash(id, mod.caseInfo(id).challenges, members[member], 1, SALT);
@@ -75,11 +30,6 @@ contract ProductionSchedulingTest is HistoryFixture {
         vm.roll(target + age);
         vm.warp(mod.pairScheduleOf(id).deadlineA);
         _recordHistory(target, ENTROPY);
-    }
-
-    function _state(uint256 id, address voter) internal view returns (bytes32) {
-        return keccak256(abi.encode(mod.caseInfo(id), mod.pairScheduleOf(id),
-            mod.voteOf(id, voter), stakes.openVotes(voter), token.balanceOf(address(mod))));
     }
 
     function test_fallbackAndThirdCommitRevisionUseKnownTargets() public {

@@ -1,77 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
-import {HistoryFixture} from "./helpers/HistoryFixture.sol";
+import {MockedModerationFixture} from "./helpers/MockedModerationFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
-import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 
 /// @notice Guards and reported state, all found by the full mutation sweep.
 ///
 /// Moderation scored 73.2% with 49 survivors. Most were one of three kinds:
 /// state that no on-chain rule reads, guards that no test tried to violate, and
 /// equivalent mutants. These close the first two.
-contract GuardsTest is HistoryFixture {
-    Moderation mod;
-    MockBZZ token;
-    MockStakes stakes;
-    MockIndex index;
-
-    uint256 constant COMMIT_WINDOW = 15 minutes;
-    uint256 constant REVEAL_WINDOW = 30 minutes;
-    uint256 constant CHALLENGE_WINDOW = 1 hours;
-    uint256 constant MAX_WAIT = 1 hours;
-    uint256 constant FREEZE = 8 days;
-    uint256 constant SEED_LAG = 2;
-    uint256 constant FEE = 1000;
-    /// @dev The WEAKEST per-committee reveal floor. These suites exercise the
-    ///      lifecycle, not the floor, and at k = 1 every scenario below keeps the
-    ///      shape it had before the floor existed. The floor itself is tested at
-    ///      its deployed value in `RevealFloor.t.sol`.
-    uint256 constant FLOOR = 1;
-    /// @dev This suite is about the lifecycle, not the guidelines pin; any non-zero
-    ///      pair satisfies the constructor. `Integration.t.sol` is where the pin is
-    ///      checked against the real document.
-    uint32 constant GUIDELINES_VERSION = 1;
-    bytes32 constant GUIDELINES_HASH = keccak256("guidelines-v1-test");
-
-
-    uint8 constant APPROVE = 1;
-    uint8 constant REJECT = 2;
-
-    address submitter = address(0x5011);
-    address[12] mods;
-
-    uint256 blk = 100;
-    uint256 ts = 1_000_000;
-
+contract GuardsTest is MockedModerationFixture {
     function setUp() public {
-        token = new MockBZZ();
-        stakes = new MockStakes();
-        index = new MockIndex();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
-            GUIDELINES_VERSION, GUIDELINES_HASH));
-        for (uint256 i; i < mods.length; ++i) {
-            mods[i] = address(uint160(0x1000 + i));
-            stakes.add(mods[i]);
-        }
-        token.mint(submitter, 1_000_000);
-        vm.prank(submitter);
-        token.approve(address(mod), type(uint256).max);
-        vm.roll(blk);
-        vm.warp(ts);
-    }
-
-    function _advance(uint256 n) internal { blk += n; vm.roll(blk); }
-    function _wait(uint256 n) internal { ts += n; vm.warp(ts); }
-
-    function _submit() internal returns (uint256 id) {
-        bytes32[] memory t = new bytes32[](1);
-        t[0] = keccak256("biology");
-        vm.prank(submitter);
-        id = mod.submit(keccak256("content"), keccak256("meta"), t, FEE);
+        _setUpMockedModeration(12);
     }
 
     function _commit(uint256 id, address m, uint8 v) internal {
@@ -161,10 +101,7 @@ contract GuardsTest is HistoryFixture {
 
     // ------------------------------------------------------------ guards
 
-    /// @dev `_committeeOf` returns 0 outside a commit phase, and `commit` turns
-    ///      that into `BadPhase`. Nothing tried committing in the wrong phase, so
-    ///      a mutant returning 1 there — which would let a vote be cast during
-    ///      reveal — survived.
+    /// @dev Commit must reject votes during reveal and challenge with BadPhase.
     function test_cannotCommitOutsideACommitPhase() public {
         uint256 id = _submit();
         _advance(SEED_LAG + 1);

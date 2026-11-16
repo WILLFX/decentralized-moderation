@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
-import {HistoryFixture} from "./helpers/HistoryFixture.sol";
+import {MockedModerationFixture} from "./helpers/MockedModerationFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
-import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 
 /// @notice The second round, end to end.
 ///
@@ -14,66 +11,9 @@ import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
 /// through to a second draw, so a mutant that made the second draw impossible
 /// survived, as did one that decremented the tally when a Reject outcome was
 /// challenged.
-contract ChallengeRoundTest is HistoryFixture {
-    Moderation mod;
-    MockBZZ token;
-    MockStakes stakes;
-    MockIndex index;
-
-    uint256 constant COMMIT_WINDOW = 15 minutes;
-    uint256 constant REVEAL_WINDOW = 30 minutes;
-    uint256 constant CHALLENGE_WINDOW = 1 hours;
-    uint256 constant MAX_WAIT = 1 hours;
-    uint256 constant FREEZE = 8 days;
-    uint256 constant SEED_LAG = 2;
-    uint256 constant FEE = 1000;
-    /// @dev The WEAKEST per-committee reveal floor. These suites exercise the
-    ///      lifecycle, not the floor, and at k = 1 every scenario below keeps the
-    ///      shape it had before the floor existed. The floor itself is tested at
-    ///      its deployed value in `RevealFloor.t.sol`.
-    uint256 constant FLOOR = 1;
-    /// @dev This suite is about the lifecycle, not the guidelines pin; any non-zero
-    ///      pair satisfies the constructor. `Integration.t.sol` is where the pin is
-    ///      checked against the real document.
-    uint32 constant GUIDELINES_VERSION = 1;
-    bytes32 constant GUIDELINES_HASH = keccak256("guidelines-v1-test");
-
-
-    uint8 constant APPROVE = 1;
-    uint8 constant REJECT = 2;
-
-    address submitter = address(0x5011);
-    address[12] mods;
-
-    uint256 blk = 100;
-    uint256 ts = 1_000_000;
-
+contract ChallengeRoundTest is MockedModerationFixture {
     function setUp() public {
-        token = new MockBZZ();
-        stakes = new MockStakes();
-        index = new MockIndex();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
-            COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
-            GUIDELINES_VERSION, GUIDELINES_HASH));
-        for (uint256 i; i < mods.length; ++i) {
-            mods[i] = address(uint160(0x1000 + i));
-            stakes.add(mods[i]);
-        }
-        token.mint(submitter, 1_000_000);
-        vm.prank(submitter);
-        token.approve(address(mod), type(uint256).max);
-        vm.roll(blk);
-        vm.warp(ts);
-    }
-
-    function _advance(uint256 n) internal { blk += n; vm.roll(blk); }
-    function _wait(uint256 n) internal { ts += n; vm.warp(ts); }
-
-    function _submit() internal returns (uint256 id) {
-        bytes32[] memory t = new bytes32[](1);
-        t[0] = keccak256("biology");
-        vm.prank(submitter);
-        id = mod.submit(keccak256("content"), keccak256("meta"), t, FEE);
+        _setUpMockedModeration(12);
     }
 
     function _commit(uint256 id, address m, uint8 v, uint8 round) internal {
@@ -338,5 +278,51 @@ contract ChallengeRoundTest is HistoryFixture {
         vm.prank(submitter);
         vm.expectRevert(Moderation.BadTopics.selector);
         mod.submit(keccak256("a"), keccak256("b"), many, FEE);
+    }
+
+    function test_regressionLegacyDelayedChallengeCannotUseLaterOutcome() public {
+        uint256 id = _submit();
+        _round(id, 0, 0, 4, APPROVE);
+        assertEq(mod.caseInfo(id).preliminary, APPROVE);
+
+        // An unused sender reviews this request while the opposing vote is Reject.
+        bytes memory reviewedCall = abi.encodeWithSignature("challenge(uint256)", id);
+
+        assertEq(reviewedCall.length, 36, "only selector and case ID are encoded");
+        Moderation.Case memory challengeIntent1 = mod.caseInfo(id);
+
+        // Someone else advances the case before that reviewed request executes.
+        vm.prank(mods[10]);
+        mod.challenge(id, challengeIntent1.challenges, challengeIntent1.preliminary);
+        _armOutcome(id, 1, 4, 9, REJECT);
+        uint256 target = mod.caseInfo(id).outcomeSeedBlock;
+        _advance(SEED_LAG + 1);
+
+        // Choose a known-answer entropy fixture, without replacing any case state.
+        bytes32 entropy;
+        bool found;
+        for (uint256 i; i < 256; ++i) {
+            entropy = keccak256(abi.encode("delayed challenge fixture", i));
+            (uint8 outcome,) = mod.decideAt(id, entropy);
+            if (outcome == REJECT) {
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "a Reject fixture must be found");
+        vm.setBlockhash(target, entropy);
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).preliminary, REJECT);
+        assertEq(mod.caseInfo(id).challenges, 1);
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.CHALLENGE));
+
+        // Execute the original bytes from the original unused sender.
+        bytes32 beforeState = keccak256(abi.encode(mod.caseInfo(id), mod.voteOf(id, mods[11])));
+        vm.prank(mods[11]);
+        (bool accepted, bytes memory result) = address(mod).call(reviewedCall);
+        assertFalse(accepted);
+        assertEq(bytes4(result), Moderation.ChallengeIntentRequired.selector);
+        assertEq(keccak256(abi.encode(mod.caseInfo(id), mod.voteOf(id, mods[11]))), beforeState);
+        assertEq(stakes.openVotes(mods[11]), 0);
     }
 }

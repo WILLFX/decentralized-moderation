@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
+import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice Exposes `shareOf` over a planted tally, so the `winners == 0` branch
 ///         and the single-winner case can be checked without steering a real draw

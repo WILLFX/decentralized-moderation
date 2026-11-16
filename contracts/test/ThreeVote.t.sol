@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
+import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice **What the per-committee reveal floor buys, and what it does not.**
 ///

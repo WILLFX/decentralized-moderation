@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
+import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice §11's per-committee minimum, counted on REVEALS — the mechanism and
 ///         its two asymmetric failure paths.

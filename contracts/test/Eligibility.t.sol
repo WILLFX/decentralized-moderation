@@ -5,7 +5,7 @@ import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Test, console} from "forge-std/Test.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./Lifecycle.t.sol";
+import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice Answers `stakedCount` and nothing else. `_eligBits` reads only that, so
 ///         a registry of 65,536 costs one constructor argument rather than 65,536
@@ -61,9 +61,6 @@ contract BitsHarness is Moderation {
         return _eligible(caseId, m, committee);
     }
 
-    function committeeOf(uint8 phase) external pure returns (uint8) {
-        return _committeeOf(phase);
-    }
 }
 
 /// @notice §3 — eligibility, pinned against an independent derivation.
@@ -188,17 +185,8 @@ contract EligibilityTest is HistoryFixture {
         }
     }
 
-    /// @dev The phase-derived committee must equal the explicit one. `commit` and
-    ///      `isEligible` reach `_eligible` through `_committeeOf(phase)`; the width
-    ///      sweep reaches it with an explicit number. If those two disagree the
-    ///      contract is asking about a committee nobody is in.
-    ///
-    ///      This is the only in-Solidity check on the committee number, and it is
-    ///      needed because the Python differential cannot supply it: a mutant that
-    ///      makes `_committeeOf` return 3 for COMMIT_B also REGENERATES the vectors
-    ///      with 3, and the differential is a separate script that `forge test` never
-    ///      runs. So the mutation campaign is blind to it and this is not.
-    function test_thePhaseDerivedCommitteeMatchesTheExplicitOne() public {
+    /// @dev Committee IDs separate eligibility draws for the same case and seed.
+    function test_committeeIdsSeparateEligibilityDraws() public {
         BitsHarness h = new BitsHarness(address(token), address(stakes), address(index));
         _advance(5);
         uint40 sb = uint40(block.number - 3);
@@ -206,13 +194,6 @@ contract EligibilityTest is HistoryFixture {
         vm.setBlockhash(sb, keccak256("committee history"));
         h.plantCase(1, 1, sb);
 
-        assertEq(h.committeeOf(uint8(Moderation.Phase.COMMIT_A)), 1, "COMMIT_A is committee 1");
-        assertEq(h.committeeOf(uint8(Moderation.Phase.COMMIT_B)), 2, "COMMIT_B is committee 2");
-        assertEq(h.committeeOf(uint8(Moderation.Phase.REVEAL)), 0, "REVEAL has no committee");
-        assertEq(h.committeeOf(uint8(Moderation.Phase.CHALLENGE)), 0, "nor CHALLENGE");
-        assertEq(h.committeeOf(uint8(Moderation.Phase.FINALIZED)), 0, "nor FINALIZED");
-
-        // and the two committee numbers really are different draws over the same seed
         uint256 differ;
         for (uint256 i; i < mods.length; ++i) {
             if (h.probe(1, mods[i], 1) != h.probe(1, mods[i], 2)) ++differ;

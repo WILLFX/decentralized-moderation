@@ -25,10 +25,18 @@ forge build --use 0.8.28
 forge test --use 0.8.28
 ```
 
-The repository-wide command is `bash scripts/check.sh` from its root. The
-`test/` and `audit/` directories contain Solidity test sources. `test/vectors/`
-holds the data consumed by Python/Rust comparison tools. `tools/mutate.py` is an
-optional mutation tool and uses a separate legacy compiler configuration.
+The repository-wide command is `bash scripts/check.sh` from its root. Required
+regressions live in `test/` and use normal Forge discovery. Reusable fixtures in
+`test/helpers/` contain setup and helpers rather than public test cases.
+`test/vectors/` holds the data consumed by Python/Rust comparison tools.
+`tools/mutate.py` is an optional mutation tool with a separate legacy compiler configuration.
+
+The two cases in `audit/TakeoverProbes.t.sol` observe current behavior. They are
+opt-in diagnostics, outside the regression suite. From this directory, run them with:
+
+```sh
+FOUNDRY_TEST=audit FOUNDRY_OUT=out-audit FOUNDRY_CACHE_PATH=cache-audit forge test --use 0.8.28 --match-contract TakeoverProbes --match-test test_probe
+```
 
 ## Deploy and link
 

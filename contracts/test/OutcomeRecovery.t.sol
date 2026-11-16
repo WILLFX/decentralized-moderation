@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
-import {CompletionReviewProbes} from "./CompletionReviewProbes.t.sol";
+import {RealModerationFixture} from "./helpers/RealModerationFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 /// Known-answer chain fixtures, not caller-chosen entropy on a real chain.
-contract OutcomeRecoveryTest is CompletionReviewProbes {
+contract OutcomeRecoveryTest is RealModerationFixture {
     function _assertTransition(Vm.Log[] memory logs, uint8 expectedPhase) internal view {
         uint256 count;
         for (uint256 i; i < logs.length; ++i) {
@@ -58,7 +58,12 @@ contract OutcomeRecoveryTest is CompletionReviewProbes {
                 assertEq(mod.voteOf(id, members[22 + r]).round, r);
             }
         }
+        assertEq(mod.caseInfo(id).challenges, lastRound);
+        assertEq(mod.caseInfo(id).preliminary, lastRound == 0 ? 0 : fallbackOutcome);
         uint40 target = mod.caseInfo(id).outcomeSeedBlock;
+        _tickBlock(uint256(target) + 257);
+        vm.expectRevert(Moderation.SeedUnavailable.selector); mod.draw(id);
+        vm.expectRevert(Moderation.TooEarly.selector); mod.expireOutcome(id, lastRound, target);
         _tickBlock(uint256(target) + mod.BLOCK_HISTORY_WINDOW());
         vm.expectRevert(Moderation.TooEarly.selector); mod.expireOutcome(id, lastRound, target);
         _tickBlock(block.number + 1);
@@ -87,10 +92,14 @@ contract OutcomeRecoveryTest is CompletionReviewProbes {
         uint256 beforeBalance = token.balanceOf(address(mod));
         uint256 paid;
         for (uint256 i; i < (uint256(lastRound) + 1) * 6; ++i) paid += _settle(id, i, lastRound == 0);
-        for (uint256 i; i < lastRound; ++i) paid += _settle(id, 22 + i, false);
+        for (uint256 i; i < lastRound; ++i) {
+            assertEq(stakes.openVotes(members[22 + i]), 1, "challenger remains open until its own settlement");
+            paid += _settle(id, 22 + i, false);
+        }
         paid += _settle(id, 18, lastRound == 0);
         if (lastRound == 0) {
             assertEq(paid, 0); assertEq(mod.refundOwed(id), FEE);
+            assertEq(token.balanceOf(address(mod)), FEE);
             uint256 beforePublisher = token.balanceOf(PUBLISHER);
             mod.withdrawRefund(id);
             assertEq(token.balanceOf(PUBLISHER), beforePublisher + FEE);
@@ -105,6 +114,9 @@ contract OutcomeRecoveryTest is CompletionReviewProbes {
         }
         vm.expectRevert(Moderation.BadPhase.selector); mod.expireOutcome(id, lastRound, target);
         vm.expectRevert(Moderation.BadPhase.selector); mod.draw(id);
+        if (removal && lastRound == 0) {
+            vm.prank(PUBLISHER); mod.submitRemoval(listing, FEE);
+        }
     }
     function _settle(uint256 id, uint256 member, bool unresolved) internal returns (uint256 paid) {
         address who = members[member];
@@ -255,4 +267,23 @@ contract OutcomeRecoveryTest is CompletionReviewProbes {
     function test_regressionListOpeningAndBothChallengeEvents() public { _openingEvents(false); }
     function test_regressionRemoveOpeningAndBothChallengeEvents() public { _openingEvents(true); }
 
+    function test_regressionOutcomeSeedCannotBeReplacedAfterItIsKnown() public {
+        uint256 id = _submit();
+        _mixedArm(id, 0, false);
+        uint256 firstSeed = mod.caseInfo(id).outcomeSeedBlock;
+        _tickBlock(firstSeed + 1);
+        bytes32 firstEntropy = _outcomeHash(id, 2);
+        vm.setBlockhash(firstSeed, firstEntropy);
+        (uint8 firstOutcome,) = mod.decideAt(id, firstEntropy);
+        assertEq(firstOutcome, 2);
+
+        vm.prank(address(0xBAD)); // No stake, ownership or challenge is required to try.
+        vm.expectRevert(Moderation.BadPhase.selector);
+        mod.closeReveal(id);
+        assertEq(mod.caseInfo(id).outcomeSeedBlock, firstSeed);
+        assertEq(mod.caseInfo(id).challenges, 0);
+        mod.draw(id);
+        assertEq(mod.caseInfo(id).preliminary, 2, "draw uses the original known Reject hash");
+        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.CHALLENGE));
+    }
 }

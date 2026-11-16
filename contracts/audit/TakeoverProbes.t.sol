@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "../test/helpers/HistoryFixture.sol";
-import {Vm} from "forge-std/Vm.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {MockBZZ} from "../test/mocks/MockBZZ.sol";
 
-/// @notice Diagnostic witnesses for the takeover audit. Passing means the reported
-/// behavior exists, NOT that the behavior is correct. Run separately with
-/// FOUNDRY_TEST=audit. Convert each witness to a regression test when fixing it.
+/// @notice Opt-in observations of current behavior, separate from required regressions.
+/// Run with FOUNDRY_TEST=audit and --match-test test_probe.
 contract TakeoverProbes is HistoryFixture {
     Moderation mod;
     StakeRegistry stakes;
@@ -118,70 +115,6 @@ contract TakeoverProbes is HistoryFixture {
         _blocks(3);
         vm.setBlockhash(seed, _entropyFor(id, outcome));
         mod.draw(id);
-    }
-
-    function test_regressionOutcomeSeedCannotBeReplacedAfterItIsKnown() public {
-        uint256 id = _submit(TOPIC);
-        _round(id, 3, true);
-        uint256 firstSeed = mod.caseInfo(id).outcomeSeedBlock;
-        _blocks(3);
-        bytes32 firstEntropy = _entropyFor(id, REJECT);
-        vm.setBlockhash(firstSeed, firstEntropy);
-        (uint8 firstOutcome,) = mod.decideAt(id, firstEntropy);
-        assertEq(firstOutcome, REJECT);
-
-        vm.prank(address(0xBAD)); // no stake, ownership, or challenge required
-        vm.expectRevert(Moderation.BadPhase.selector);
-        mod.closeReveal(id);
-        assertEq(mod.caseInfo(id).outcomeSeedBlock, firstSeed);
-        assertEq(mod.caseInfo(id).challenges, 0);
-        mod.draw(id);
-        assertEq(mod.caseInfo(id).preliminary, REJECT, "draw uses the original known hash");
-        assertEq(mod.caseInfo(id).phase, uint8(Moderation.Phase.CHALLENGE));
-    }
-
-    function test_regressionZeroCommitmentsCannotInflateCountsOrLockStake() public {
-        uint256 id = _submit(TOPIC);
-        _blocks(3);
-        vm.startPrank(members[0]);
-        for (uint256 i; i < 3; ++i) {
-            vm.expectRevert(Moderation.NoCommitment.selector);
-            mod.commit(id, bytes32(0));
-        }
-        vm.stopPrank();
-        assertEq(mod.caseInfo(id).commitsA, 0);
-        assertEq(stakes.openVotes(members[0]), 0);
-        vm.prank(members[0]);
-        stakes.withdraw();
-        assertEq(token.balanceOf(members[0]), STAKE);
-    }
-
-    function test_regressionZeroTopicRejectedBeforeFeeCollection() public {
-        vm.expectRevert(Moderation.BadTopics.selector);
-        _submit(bytes32(0));
-        assertEq(mod.nextCaseId(), 1);
-        assertEq(token.balanceOf(PUBLISHER), 100 * FEE);
-        assertEq(token.balanceOf(address(mod)), 0);
-    }
-
-    function test_regressionUnresolvedClaimEventReportsAppliedFreeze() public {
-        uint256 id = _submit(TOPIC);
-        _round(id, 6, false);
-        vm.recordLogs();
-        mod.claim(id, members[0]);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        bool sawClaim;
-        for (uint256 i; i < logs.length; ++i) {
-            if (logs[i].emitter != address(mod)) continue;
-            if (logs[i].topics[0] != keccak256("Claimed(uint256,address,uint256,bool)")) continue;
-            (uint256 paid, bool reportedFrozen) = abi.decode(logs[i].data, (uint256, bool));
-            assertEq(paid, 0);
-            assertTrue(reportedFrozen);
-            sawClaim = true;
-        }
-        assertTrue(sawClaim);
-        assertTrue(stakes.isFrozen(members[0]));
-        assertEq(stakes.totalFrozen(members[0]), FREEZE);
     }
 
     function test_probeAnUnsettledLoserCanCommitToAnotherCase() public {

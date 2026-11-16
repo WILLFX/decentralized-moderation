@@ -71,6 +71,11 @@ contract InputAndClaimRegressionTest is HistoryFixture {
         assertEq(mod.caseInfo(caseId).commitsA, 0);
         assertEq(mod.caseInfo(caseId).phaseDeadline, deadline);
         assertEq(stakes.openVotes(VOTER), 0);
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(VOTER);
+        stakes.withdraw();
+        assertEq(token.balanceOf(VOTER), 1000);
+        assertTrue(vm.revertToStateAndDelete(snapshot));
         bytes32 commitment = mod.commitHash(caseId, 0, VOTER, 1, bytes32("salt"));
         vm.prank(VOTER);
         mod.commit(caseId, commitment);
@@ -132,6 +137,7 @@ contract InputAndClaimRegressionTest is HistoryFixture {
         emit Moderation.Claimed(caseId, VOTER, 0, !reveal);
         mod.claim(caseId, VOTER);
         assertEq(stakes.isFrozen(VOTER), !reveal);
+        assertEq(stakes.totalFrozen(VOTER), reveal ? 0 : 8 days);
         assertEq(stakes.openVotes(VOTER), 0);
         assertEq(token.balanceOf(VOTER), 0);
         assertEq(mod.refundOwed(caseId), FEE);

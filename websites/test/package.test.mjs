@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { assets, assetsFor, collect, bindingsDirectory, staticDirectory, renderPage, root as workspace } from '../scripts/package.mjs';
+import { assets, assetsFor, collect, bindingsDirectory, staticDirectory, renderPage, renderBootstrap, renderStyles, root as workspace } from '../scripts/package.mjs';
 import { resolve } from 'node:path';
 
 test('generated bindings follow the selected Cargo target directory', () => {
@@ -100,12 +100,35 @@ test('publisher and search collections remain separate fixed public packages', a
   assert.equal(bindingsDirectory('external-target', 'search'), resolve('external-target', 'web-bindings', 'search'));
 });
 
+const bootstrapHashes = {
+  publisher: '6bad86256333fdf7e223fe9b99794df3034fc57ab9ebab22418f25d3ce432915',
+  moderator: 'f6e55c4b46c0bb5687dad0669fc21d3537ec0484612a01e7d0e6ab56ff032856',
+  search: '4841791bd1a91d1e9e7fe841754259edf244d1e1cfa40fceb21e307280da81b4',
+};
+
+test('shared startup rejects unknown roles and invalid source', () => {
+  assert.throws(() => renderBootstrap('../publisher', ''), /INVALID_SITE_ROLE/);
+  assert.throws(() => renderBootstrap('publisher', null), /INVALID_PAGE_SOURCE/);
+});
+
+test('shared styles expand in place and reject unknown or duplicate sections', () => {
+  const common = '/* @shared first */\na { color: red; }\n/* @shared last */\na { color: blue; }\n';
+  const css = '/* @shared first */\na { color: black; }\n/* @shared last */\n';
+  assert.equal(renderStyles(css, common), 'a { color: red; }\na { color: black; }\na { color: blue; }\n');
+  assert.equal(renderStyles('/* @shared last */\n/* @shared first */', common),
+    'a { color: blue; }\na { color: red; }');
+  assert.throws(() => renderStyles('/* @shared missing */', common), /UNKNOWN_SHARED_STYLE/);
+  assert.throws(() => renderStyles(css, common + common), /DUPLICATE_SHARED_STYLE/);
+});
+
 for (const role of ['publisher','moderator','search']) {
   test(`${role} static page inlines its startup dependencies without weakening CSP`, async () => {
     const source=join(workspace,'apps',role);
     const html=await readFile(join(source,'index.html'),'utf8');
-    const css=await readFile(join(source,'style.css'),'utf8');
-    const bootstrap=await readFile(join(source,'loader.js'),'utf8');
+    const css=renderStyles(await readFile(join(source,'style.css'),'utf8'),
+      await readFile(join(workspace,'assets/common.css'),'utf8'));
+    const bootstrap=renderBootstrap(role, await readFile(join(workspace,'assets/loader.js'),'utf8'));
+    assert.equal(createHash('sha256').update(bootstrap.replace(/\r\n?/g,'\n')).digest('hex'), bootstrapHashes[role]);
     const view=role==='search'?undefined:await readFile(join(workspace,'crates/swarm-browser/src',role,'view.html'),'utf8');
     const page=renderPage(role,{html,css,bootstrap,view}).toString();
     const policy=page.match(/Content-Security-Policy" content="([^"]+)"/)[1];

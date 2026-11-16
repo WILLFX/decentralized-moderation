@@ -19,6 +19,18 @@ calculations. `crates/swarm-browser` contains browser I/O, views, wallet session
 request history and private-vote storage. Generated JavaScript loads the Rust Wasm
 bindings. Node scripts package artifacts and support explicit development tools.
 
+Within `swarm-browser/src`, `moderator/`, `publisher/` and `search/` own each
+application's workflow and views. Moderator also owns private vote recovery.
+Wallet discovery, transport, version verification and storage coordination remain
+shared at the crate root. Public application entry points are re-exported there.
+
+`assets/loader.js` supplies startup code for all three websites. Packaging fills
+in each role's asset names and title. The repository-root `MODERATION_GUIDELINES.md`
+is the single guideline source; packaging copies its exact bytes into each collection.
+`assets/common.css` holds shared style sections. Each role's `style.css` selects
+their positions with `/* @shared name */` markers, which packaging expands inline
+without changing rule order or adding stylesheet requests.
+
 ```sh
 (cd websites && bash scripts/bootstrap.sh)
 bash websites/scripts/build.sh

@@ -8,6 +8,7 @@ import { createCollectionTar } from '../../tools/collections.mjs';
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const roles = Object.freeze(['moderator', 'publisher', 'search']);
+const titles = Object.freeze({ search: 'Swarm Search', publisher: 'Swarm Publish', moderator: 'Swarm Review' });
 export function assetsFor(role = 'moderator') {
   if (!roles.includes(role)) throw new Error('INVALID_SITE_ROLE');
   return Object.freeze(['index.html', 'MODERATION_GUIDELINES.md',
@@ -86,7 +87,27 @@ export async function collect(base, role = 'moderator') {
   return { role: `${role}-rust-preview`, entries, tar: createCollectionTar(entries) };
 }
 
-// Keep editable source files separate; ship their exact contents inline under CSP hashes.
+export function renderBootstrap(role, source) {
+  assetsFor(role);
+  if (typeof source !== 'string') fail('INVALID_PAGE_SOURCE');
+  return source.replaceAll('__ROLE__', role).replaceAll('__TITLE__', titles[role]);
+}
+
+// Expand fixed shared sections in place; the role stylesheet owns rule order.
+export function renderStyles(css, common) {
+  if (typeof css !== 'string' || typeof common !== 'string') fail('INVALID_PAGE_SOURCE');
+  const parts = common.replace(/\r\n?/g, '\n').split(/^\/\* @shared ([a-z-]+) \*\/\n/m);
+  if (parts[0].trim() || parts.length < 3) fail('INVALID_SHARED_STYLES');
+  const blocks = new Map();
+  for (let i = 1; i < parts.length; i += 2) {
+    if (blocks.has(parts[i])) fail('DUPLICATE_SHARED_STYLE');
+    blocks.set(parts[i], parts[i + 1].replace(/\n$/, ''));
+  }
+  return css.replace(/\r\n?/g, '\n').replace(/\/\* @shared ([a-z-]+) \*\//g,
+    (_, name) => blocks.get(name) ?? fail('UNKNOWN_SHARED_STYLE'));
+}
+
+// Keep editable source files separate; ship the role's rendered contents inline under CSP hashes.
 export function renderPage(role, { html, css, bootstrap, view }) {
   assetsFor(role);
   for (const value of [html, css, bootstrap]) if (typeof value !== 'string') fail('INVALID_PAGE_SOURCE');
@@ -105,7 +126,7 @@ export function renderPage(role, { html, css, bootstrap, view }) {
   html = html.replace(/\s*<p id="boot"[^>]*>[\s\S]*?<\/p>/, '');
   // Rust decides whether saved-history attention is needed after it reads storage.
   if (role === 'publisher') html = html.replace('<p id="history-attention"', '<p hidden id="history-attention"');
-  const label = {search:'Swarm Search',publisher:'Swarm Publish',moderator:'Swarm Review'}[role];
+  const label = titles[role];
   html = html.replace(/<main([^>]*)>/, (_, attributes) =>
     `<p id="boot" role="status">Starting ${label}…</p><button id="boot-retry" type="button" hidden>Reload</button><main${attributes} inert aria-busy="true">`);
   html = html.replace(styleMarker, () => `<style id="app-style">${css}</style>`)
@@ -125,8 +146,9 @@ export async function packagePreview(role = 'moderator') {
   const source = join(root, 'apps', role);
   const html = await renderPage(role, {
     html: (await safeRead(source, 'index.html')).toString('utf8'),
-    css: (await safeRead(source, 'style.css')).toString('utf8'),
-    bootstrap: (await safeRead(source, 'loader.js')).toString('utf8'),
+    css: renderStyles((await safeRead(source, 'style.css')).toString('utf8'),
+      (await safeRead(join(root, 'assets'), 'common.css')).toString('utf8')),
+    bootstrap: renderBootstrap(role, (await safeRead(join(root, 'assets'), 'loader.js')).toString('utf8')),
     view: role === 'search' ? undefined : (await safeRead(join(root, 'crates', 'swarm-browser', 'src', role), 'view.html')).toString('utf8'),
   });
   const manifest = {};
@@ -134,6 +156,7 @@ export async function packagePreview(role = 'moderator') {
   for (const name of assets) {
     let bytes;
     if (name === 'index.html') bytes = html;
+    else if (name === 'MODERATION_GUIDELINES.md') bytes = await safeRead(dirname(root), name);
     else if (name.endsWith('.wasm.gz')) bytes = gzipSync(await safeRead(bindings, name.slice(0, -3)), { level: 9 });
     else bytes = await safeRead(name.endsWith('.js') ? bindings : source, name);
     await writeVerifiedCheckpointFile(join(destination, name), bytes);

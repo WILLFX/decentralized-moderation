@@ -7,8 +7,8 @@ retry?.addEventListener('click', () => location.reload());
 try {
   // Start both transfers together; the wrapper must not delay the Wasm request.
   const [bindings, response] = await Promise.all([
-    import('./swarm_search.js'),
-    fetch(new URL('./swarm_search_bg.wasm.gz', document.baseURI)),
+    import('./swarm___ROLE__.js'),
+    fetch(new URL('./swarm___ROLE___bg.wasm.gz', document.baseURI)),
   ]);
   if (!response.ok) throw new Error('APPLICATION_ASSET_UNAVAILABLE');
   performance.mark('swarm-assets-received');
@@ -25,7 +25,7 @@ try {
 } catch (error) {
   page.dataset.bootState = 'error';
   const boot = document.getElementById('boot');
-  if (boot) boot.textContent = 'Swarm Search could not start. Reload to try again.';
+  if (boot) boot.textContent = '__TITLE__ could not start. Reload to try again.';
   if (retry) retry.hidden = false;
   console.error('Application startup failed', error);
 }

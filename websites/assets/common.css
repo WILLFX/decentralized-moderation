@@ -1,0 +1,33 @@
+/* @shared foundation */
+:root {
+  --orange: #ff8a00; --orange-hover: #ff9d2e;
+  --purple: #a000ff; --purple-hover: #8700dc;
+  --ink: #18121f; --muted: #5e5168; --line: #d8cedf;
+  --link: #7500bf; --focus: #18121f; --field-line: #817087;
+  --disabled-bg: #e7deec; --disabled-ink: #5e5168; --disabled-line: #9c8ba8;
+}
+:root { font-family: system-ui, sans-serif; color: var(--ink); background: var(--page); line-height: 1.55; }
+* { box-sizing: border-box; }
+html { scroll-padding-block: 1rem; }
+/* @shared visibility */
+body { margin: 0; }
+[hidden] { display: none !important; }
+/* @shared signing-header */
+.skip { position: absolute; top: -8rem; left: 1rem; z-index: 2; padding: .75rem; background: white; }
+.skip:focus { top: .5rem; }
+.site-header { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1.5rem; border-bottom: 1px solid var(--line); padding: 1rem 0; }
+.site-header > a, .task-nav a { display: inline-flex; align-items: center; padding: .5rem .25rem; min-height: 2.75rem; }
+.brand { margin-right: auto; text-decoration: none; font-weight: 750; }
+.brand span { margin-left: .5rem; font-weight: 400; }
+/* @shared task-navigation */
+.task-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.2rem; margin: .65rem 0 1.5rem; }
+.task-nav a { text-decoration: none; border-bottom: 2px solid transparent; }
+.task-nav a[aria-current="page"] { border-bottom-color: var(--link); font-weight: 700; }
+/* @shared identity */
+.site-header { background: var(--header); color: var(--on-header); border: 0; box-shadow: inset 0 -4px 0 var(--header-mark); }
+.site-header a { color: inherit; }
+.brand { font-size: 1.15rem; letter-spacing: -.02em; flex-wrap: wrap; gap: 0 .3em; overflow-wrap: normal; }
+.brand span { font-weight: 700; margin-left: 0; color: var(--brand-ink, inherit); }
+#boot:not(:empty) { margin: 0; padding: .6rem 1.25rem; color: var(--muted); background: white; border-bottom: 1px solid var(--line); }
+.site-header :is(a,button,input,select):focus-visible { outline-color: var(--on-header); }
+button.secondary:hover:enabled, .route-choice button:hover:enabled { background: var(--purple-hover); color: #ffffff; border-color: var(--purple-hover); }

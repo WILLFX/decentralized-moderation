@@ -1,8 +1,20 @@
 """Two independent synthetic wallets for the actual built signing interfaces."""
-import argparse, threading
+import argparse, json, threading
 from pathlib import Path
 import serve_moderator as base
 from serve_publisher import PublisherModel
+
+def provider_source(*, mode='single', authorization_event=False, request_storage_faults=False,
+                    observe_requests=False, observe_vault=False, capture_recovery=False):
+    options = {'mode': mode, 'authorizationEvent': authorization_event,
+               'requestStorageFaults': request_storage_faults, 'observeRequests': observe_requests,
+               'observeVault': observe_vault, 'captureRecovery': capture_recovery}
+    if mode not in ['multi', 'single', 'announced-only', 'legacy', 'none']:
+        raise ValueError('Unknown synthetic wallet mode')
+    if any(type(value) is not bool for key, value in options.items() if key != 'mode'):
+        raise ValueError('Synthetic wallet options must be boolean')
+    source = Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').encode()
+    return source + b'(' + json.dumps(options, separators=(',', ':')).encode() + b');\n'
 
 class SelectionModelMixin:
 
@@ -104,7 +116,6 @@ if __name__ == '__main__':
     p.add_argument('--authorization-event', action='store_true')
     args = p.parse_args()
     args.assets = base.assets_dir(args.role)
-    base.WALLET = Path(__file__).with_name('fixture-wallet-selection.js').read_bytes().replace(b'__MODE__', args.mode.encode()).replace(b'__AUTH_EVENT__', b'true' if args.authorization_event else b'false')
     Parent = PublisherModel if args.role == 'publisher' else base.Model
     Model = type('SelectionModel', (SelectionModelMixin, Parent), {'role': args.role, 'same_account': args.same_account})
-    base.serve(args, Model)
+    base.serve(args, Model, wallet_source=provider_source(mode=args.mode, authorization_event=args.authorization_event))

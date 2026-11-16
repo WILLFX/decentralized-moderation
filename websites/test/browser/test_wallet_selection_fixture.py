@@ -1,8 +1,9 @@
 """Check the isolated wallet observer before using it for browser acceptance."""
 from concurrent.futures import ThreadPoolExecutor
 import unittest
+from fixture_unit_support import model_assets
 
-from serve_moderator import Model, ROOT, digest
+from serve_moderator import Model, digest
 from serve_publisher import PublisherModel
 from serve_wallet_selection import SelectionModelMixin
 
@@ -17,7 +18,7 @@ class PublisherSelection(SelectionModelMixin, PublisherModel):
 
 class WalletSelectionFixtureTests(unittest.TestCase):
     def setUp(self):
-        self.model = ModeratorSelection(ROOT/'apps/moderator/static')
+        self.model = ModeratorSelection(model_assets(self))
 
     def approval(self, model, provider="alpha"):
         spender = model.addresses["stakes" if model.role == "moderator" else "moderation"]
@@ -40,7 +41,7 @@ class WalletSelectionFixtureTests(unittest.TestCase):
     def test_same_account_does_not_erase_provider_identity(self):
         class SameAccountSelection(ModeratorSelection):
             same_account = True
-        model = SameAccountSelection(ROOT/'apps/moderator/static')
+        model = SameAccountSelection(model_assets(self))
         self.assertEqual(model.handle_wallet("eth_accounts", ["alpha"]), model.handle_wallet("eth_accounts", ["beta"]))
         self.assertEqual([call["provider"] for call in model.selection_calls], ["alpha", "beta"])
 
@@ -84,7 +85,7 @@ class WalletSelectionFixtureTests(unittest.TestCase):
         self.assertEqual([s["provider"] for s in self.model.sends], ["alpha"])
 
     def test_publisher_approval_checks_its_own_spender_and_retains_nonce(self):
-        model = PublisherSelection(ROOT/'apps/publisher/static')
+        model = PublisherSelection(model_assets(self))
         value = model.handle_wallet("eth_sendTransaction", ["beta", self.approval(model, "beta")])
         self.assertEqual(model.transactions[value]["from"], model.accounts["beta"])
         self.assertEqual(model.transactions[value]["nonce"], "0x9")
@@ -95,6 +96,55 @@ class WalletSelectionFixtureTests(unittest.TestCase):
         self.model.handle_wallet("fixture_ack", [{"seq": queued["queued"], "listeners": {}}])
         self.assertEqual(self.model.acks[0]["seq"], 1)
         self.assertEqual(self.model.selection_calls, [])
+
+
+class ProviderSourceTests(unittest.TestCase):
+    def test_configuration_rejects_unknown_modes_and_non_boolean_options(self):
+        from serve_wallet_selection import provider_source
+
+        with self.assertRaisesRegex(ValueError, "Unknown synthetic wallet mode"):
+            provider_source(mode="unknown")
+        for option in ["authorization_event", "request_storage_faults", "observe_requests",
+                       "observe_vault", "capture_recovery"]:
+            for value in [None, 0, 1, "false"]:
+                with self.subTest(option=option, value=value), self.assertRaisesRegex(ValueError, "boolean"):
+                    provider_source(**{option: value})
+
+    def test_server_instances_keep_distinct_provider_bytes_without_changing_default(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        import serve_moderator as base
+        from serve_wallet_selection import provider_source
+
+        servers = []
+
+        def server(address, handler):
+            self.assertEqual(address[0], "127.0.0.1")
+            instance = SimpleNamespace(server_port=7000 + len(servers), handler=handler,
+                                       serve_forever=Mock(), server_close=Mock(), shutdown=Mock())
+            servers.append(instance)
+            return instance
+
+        original = base.WALLET
+        sources = [provider_source(mode="single"), provider_source(mode="none")]
+        with patch.object(base, "ThreadingHTTPServer", side_effect=server), \
+             patch.object(base.threading, "Thread"), patch("builtins.print"):
+            for source in sources:
+                assets = model_assets(self)
+                (assets / "asset-hashes.json").write_text("{}", encoding="utf8")
+                args = SimpleNamespace(assets=assets, output=assets / "session", port=0)
+                base.serve(args, wallet_source=source)
+
+        self.assertEqual(base.WALLET, original)
+        self.assertEqual(len(servers), 4)
+        for instance, source in zip(servers[::2], sources):
+            handler = object.__new__(instance.handler)
+            handler.server = instance
+            handler.headers = {"Host": instance.expected_host}
+            handler.path = "/fixture-wallet.js"
+            handler.reply = Mock()
+            instance.handler.do_GET(handler)
+            handler.reply.assert_called_once_with(200, source, "text/javascript")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 import unittest
-from pathlib import Path
+from fixture_unit_support import model_assets
 from serve_outcome_recovery import RecoveryModel, READ, CALLS
-from serve_moderator import ROOT, abi
+from serve_moderator import abi
 
 class RecoveryObserverTests(unittest.TestCase):
-    def setUp(self): self.m=RecoveryModel(ROOT/'apps/moderator/static')
+    def setUp(self): self.m=RecoveryModel(model_assets(self))
     def checkpoint(self,name): self.m.control({'command':'recovery-checkpoint','checkpoint':name})
     def read(self): return self.m.rpc('eth_call',[{'to':self.m.addresses['moderation'],'data':READ+f'{1:064x}'},{'blockHash':self.m.latest['hash'],'requireCanonical':True}])
     def send(self,signature,extra=()):

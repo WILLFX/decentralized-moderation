@@ -244,11 +244,12 @@ class Model:
         return tx_hash
 
 
-def serve(args, model_type=Model):
+def serve(args, model_type=Model, *, wallet_source=None):
     model = model_type(args.assets.resolve())
     app_origin = ""
     content_origin = ""
     manifest = json.loads((model.assets / "asset-hashes.json").read_text())
+    wallet = WALLET if wallet_source is None else wallet_source
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
@@ -290,7 +291,7 @@ def serve(args, model_type=Model):
                 return self.reply(200, events)
             if path == "/fixture/status":
                 with model.lock: return self.reply(200, model.status())
-            if path == "/fixture-wallet.js": return self.reply(200, WALLET, "text/javascript")
+            if path == "/fixture-wallet.js": return self.reply(200, wallet, "text/javascript")
             if path == "/fixture-events.js" and model.event_polling: return self.reply(200, b'window.__syntheticFixtureEvents = true;', "text/javascript")
             if path == "/fixture-entry.js": return self.reply(200, ENTRY, "text/javascript")
             if path == "/fixture-bootstrap.js": return self.reply(200, fixture_bootstrap((model.assets/'index.html').read_bytes()), "text/javascript")

@@ -1,8 +1,26 @@
 // Synthetic EIP-6963 wallets. Never uses a key, extension, or remote RPC.
-(() => {
+((options) => {
   if (window.ethereum) return;
-  const mode = "__MODE__";
-  const authorizationEvent = __AUTH_EVENT__;
+  const {mode, authorizationEvent, requestStorageFaults, observeRequests, observeVault, captureRecovery} = options;
+  let failRequestWrites = false;
+  if (requestStorageFaults) {
+    const originalSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (failRequestWrites && key.startsWith('moderator-requests-v1:')) throw new Error('Synthetic storage failure');
+      return originalSet.call(this, key, value);
+    };
+  }
+  const recoveryExports = [];
+  if (captureRecovery) {
+    const createObjectURL = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = function(blob) {
+      if (blob.type === 'application/json') blob.text().then(text => {
+        const e = JSON.parse(text);
+        if (e.format === 'moderator-vote-vault' && e.cipher && !e.votes) recoveryExports.push(text);
+      });
+      return createObjectURL(blob);
+    };
+  }
   const listeners = new Map();
   const removalFailures = new Set();
   const registrationFailures = new Set();
@@ -54,6 +72,7 @@
         if (event.kind === 'emit') for (const fn of listeners.get(event.provider)?.get(event.name) || []) fn(event.value);
         if (event.kind === 'remove-failure') event.enabled ? removalFailures.add(event.provider) : removalFailures.delete(event.provider);
         if (event.kind === 'register-failure') event.enabled ? registrationFailures.add(event.provider) : registrationFailures.delete(event.provider);
+        if (requestStorageFaults && event.kind === 'request-storage-fault') failRequestWrites = event.enabled;
         if (event.kind === 'late-beta') announce('beta');
         if (event.kind === 'long-name') announce('gamma', {uuid:'33333333-3333-4333-8333-333333333333',name:'Long wallet name '.repeat(20),rdns:'test.gamma',icon:'https://invalid.test/no-fetch'});
         if (event.kind === 'duplicate') {
@@ -61,8 +80,12 @@
           announce('beta', {uuid:'11111111-1111-4111-8111-111111111111',name:'<script>Fake wallet</script>',rdns:'test.invalid',icon:'https://invalid.test/no-fetch'});
         }
         const counts = Object.fromEntries([...listeners].map(([id, events]) => [id,Object.fromEntries([...events].map(([name, fns])=>[name,fns.size]))]));
-        await fetch('/fixture/wallet', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:'fixture_ack',params:[{seq:event.seq,defaultId,listeners:counts}]})});
+        const observation = {seq:event.seq,defaultId,listeners:counts};
+        if (captureRecovery) observation.recoveryExports = recoveryExports;
+        if (observeVault) observation.vaultFingerprint = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(localStorage.getItem('moderator-vote-vault-v1')||'')))).map(b=>b.toString(16).padStart(2,'0')).join('');
+        if (observeRequests) observation.requests = Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('moderator-requests-v1:')));
+        await fetch('/fixture/wallet', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:'fixture_ack',params:[observation]})});
       }
     } catch { /* A stopped fixture cannot contact another provider. */ }
   }, 150);
-})();
+})

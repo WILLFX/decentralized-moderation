@@ -2,6 +2,7 @@
 import argparse
 from pathlib import Path
 from serve_moderator_requests import RequestsModel
+from serve_wallet_selection import provider_source
 import serve_moderator as base
 
 SIGNATURE = 'challenge(uint256,uint8,uint8)'
@@ -108,8 +109,5 @@ if __name__ == '__main__':
     p.add_argument('--capability', choices=['bound', 'legacy', 'unknown', 'malformed'], default='bound')
     args = p.parse_args()
     args.assets = base.assets_dir('moderator')
-    bootstrap = Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').replace('__MODE__', 'single').replace('__AUTH_EVENT__', 'false')
-    bootstrap = bootstrap.replace('defaultId,listeners:counts', "defaultId,listeners:counts,requests:Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('moderator-requests-v1:')))")
-    base.WALLET = bootstrap.encode('utf8')
     Model = type('SelectedChallengeModel', (ChallengeModel,), {'capability': args.capability})
-    base.serve(args, Model)
+    base.serve(args, Model, wallet_source=provider_source(observe_requests=True))

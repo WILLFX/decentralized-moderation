@@ -1,11 +1,12 @@
 """Checks the keyless observer, not the contract or the browser implementation."""
 import unittest
+from fixture_unit_support import model_assets
 from serve_challenge_intent import ChallengeModel, CAPABILITY, SELECTOR
 import serve_moderator as base
 
 class ChallengeObserverTests(unittest.TestCase):
     def model(self):
-        m=ChallengeModel(base.ROOT/'apps/moderator/static')
+        m=ChallengeModel(model_assets(self))
         tx={'from':m.accounts['alpha'],'to':m.addresses['moderation'],'value':'0x0','chainId':'0x27d8','nonce':'0x9','data':SELECTOR+base.abi(17,0,1)[2:]}
         return m,tx
     def test_exact_intent_succeeds_once(self):

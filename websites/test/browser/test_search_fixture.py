@@ -1,12 +1,12 @@
 """Checks the prepared search facts; production browser behavior is tested separately."""
 import unittest
-from pathlib import Path
+from fixture_unit_support import model_assets
 from serve_search import SearchModel, SELECTORS
 from serve_moderator import abi, digest, reference
 
 class SearchFixtureTests(unittest.TestCase):
     def setUp(self):
-        self.model=SearchModel(Path(__file__).resolve().parents[2]/"apps/search")
+        self.model=SearchModel(model_assets(self))
     def call(self,signature,*args):
         selector=next(k for k,v in SELECTORS.items()if v==signature)
         return self.model.rpc("eth_call",[{"to":self.model.addresses["index"],"data":selector+abi(*args)[2:]},{"blockHash":self.model.head["hash"],"requireCanonical":True}])

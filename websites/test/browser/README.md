@@ -65,6 +65,8 @@ URL options such as `?width=320&height=640` select reproducible dimensions;
 a user-selected device type. Exercise focus, scrolling and return paths using
 normal controls.
 
+Fixture model unit tests supply temporary synthetic guidelines and need no website
+build. Serving a browser fixture still requires the built assets described above.
 The fixture unit commands are included in `scripts/check.sh`. See the repository
 [build guide](../../../docs/BUILD_AND_TEST.md) for running it. Stop a helper with
 Ctrl+C when finished and keep generated sessions, screenshots and local reports

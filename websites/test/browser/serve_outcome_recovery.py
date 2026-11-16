@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 import serve_moderator as base
 from serve_moderator_requests import RequestsModel
+from serve_wallet_selection import provider_source
 
 READ = base.digest(b'outcomeRecoveryOf(uint256)')[:10]
 CALLS = {base.digest(s.encode())[:10]: s for s in [
@@ -96,6 +97,4 @@ if __name__ == '__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True);p.add_argument('--port',type=int,default=0)
     args=p.parse_args();args.assets=base.ROOT/'apps/moderator/static'
-    bootstrap=Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').replace('__MODE__','single').replace('__AUTH_EVENT__','false')
-    base.WALLET=bootstrap.encode('utf8')
-    base.serve(args,RecoveryModel)
+    base.serve(args,RecoveryModel,wallet_source=provider_source())

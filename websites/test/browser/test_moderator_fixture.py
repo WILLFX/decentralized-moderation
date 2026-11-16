@@ -1,7 +1,6 @@
 """Known-answer codec checks for the independent browser observer."""
 import unittest
-from pathlib import Path
-import tempfile
+from fixture_unit_support import model_assets
 from html.parser import HTMLParser
 from serve_moderator import ROOT, Model, abi, commitment, digest, fixture_html, reference, viewport_html
 from serve_publisher import PublisherModel
@@ -46,35 +45,29 @@ class FixtureCodecs(unittest.TestCase):
         self.assertEqual((frame['width'],frame['height']),('390','844'))
         self.assertNotIn('value="<script>"',page)
     def test_publisher_receipt_checkpoint_keeps_original_case_after_later_changes(self):
-        with tempfile.TemporaryDirectory() as folder:
-            assets = Path(folder)
-            (assets / "MODERATION_GUIDELINES.md").write_bytes(b"Synthetic guidelines")
-            model = PublisherModel(assets)
-            model.cases[19] = {"content":"0x"+"11"*32,"meta":"0x"+"22"*32,"claim":"0x"+"33"*32,"submitter":model.account,"topics":[digest(b"biology")],"fee":10,"phase":1,"verdict":0,"deadline_a":900,"deadline_b":4500,"reveal_deadline":6300,"finalized_at":0}
-            model.capture()
-            call = {"to":model.addresses["moderation"],"data":digest(b"caseInfo(uint256)")[:10]+abi(19)[2:]}
-            pin = {"blockHash":model.latest["hash"],"requireCanonical":True}
-            original = model.rpc("eth_call", [call, pin])
-            model.control({"command":"case-state","caseId":19,"state":"approved"})
-            self.assertEqual(model.rpc("eth_call", [call, pin]), original)
-            current = {"blockHash":model.latest["hash"],"requireCanonical":True}
-            self.assertNotEqual(model.rpc("eth_call", [call, current]), original)
+        model = PublisherModel(model_assets(self))
+        model.cases[19] = {"content":"0x"+"11"*32,"meta":"0x"+"22"*32,"claim":"0x"+"33"*32,"submitter":model.account,"topics":[digest(b"biology")],"fee":10,"phase":1,"verdict":0,"deadline_a":900,"deadline_b":4500,"reveal_deadline":6300,"finalized_at":0}
+        model.capture()
+        call = {"to":model.addresses["moderation"],"data":digest(b"caseInfo(uint256)")[:10]+abi(19)[2:]}
+        pin = {"blockHash":model.latest["hash"],"requireCanonical":True}
+        original = model.rpc("eth_call", [call, pin])
+        model.control({"command":"case-state","caseId":19,"state":"approved"})
+        self.assertEqual(model.rpc("eth_call", [call, pin]), original)
+        current = {"blockHash":model.latest["hash"],"requireCanonical":True}
+        self.assertNotEqual(model.rpc("eth_call", [call, current]), original)
 
     def test_publisher_prior_history_checkpoint_keeps_uncertainty(self):
-        with tempfile.TemporaryDirectory() as folder:
-            assets=Path(folder)
-            (assets/"MODERATION_GUIDELINES.md").write_bytes(b"Synthetic guidelines")
-            model=PublisherModel(assets)
-            model.control({"command":"seed-journal","count":100,"uncertain":1})
-            import json
-            event=model.events[-1]
-            rows=json.loads(event["value"]["raw"])
-            self.assertEqual(len(rows),100)
-            self.assertEqual(rows[0]["state"],"unknown")
-            self.assertIsNone(rows[0]["hash"])
-            self.assertTrue(event["value"]["key"].endswith('-history'))
-            model.control({"command":"history-storage","fail":True})
-            self.assertEqual(model.events[-1],{"name":"fixtureHistoryStorageFault","value":True})
+        model=PublisherModel(model_assets(self))
+        model.control({"command":"seed-journal","count":100,"uncertain":1})
+        import json
+        event=model.events[-1]
+        rows=json.loads(event["value"]["raw"])
+        self.assertEqual(len(rows),100)
+        self.assertEqual(rows[0]["state"],"unknown")
+        self.assertIsNone(rows[0]["hash"])
+        self.assertTrue(event["value"]["key"].endswith('-history'))
+        model.control({"command":"history-storage","fail":True})
+        self.assertEqual(model.events[-1],{"name":"fixtureHistoryStorageFault","value":True})
 
     def test_production_entry_is_guarded_or_refused(self):
         wrapped = fixture_html((ROOT / "apps/moderator/index.html").read_bytes())
@@ -106,16 +99,13 @@ class FixtureCodecs(unittest.TestCase):
         self.assertEqual(reference(data),"0x4e47ece0ea2d437c688fe407f8240bed436b15eb780ec3d85607ab8c22b9f3f8")
 
     def test_old_checkpoint_cannot_return_later_mutable_state(self):
-        with tempfile.TemporaryDirectory() as folder:
-            assets = Path(folder)
-            (assets / "MODERATION_GUIDELINES.md").write_bytes(b"Synthetic guidelines")
-            model = Model(assets)
-            call = {"to": model.addresses["moderation"], "data": digest(b"caseInfo(uint256)")[:10] + abi(17)[2:]}
-            pin = {"blockHash": model.latest["hash"], "requireCanonical": True}
+        model = Model(model_assets(self))
+        call = {"to": model.addresses["moderation"], "data": digest(b"caseInfo(uint256)")[:10] + abi(17)[2:]}
+        pin = {"blockHash": model.latest["hash"], "requireCanonical": True}
+        model.rpc("eth_call", [call, pin])
+        model.refresh()
+        with self.assertRaisesRegex(ValueError, "checkpoint"):
             model.rpc("eth_call", [call, pin])
-            model.refresh()
-            with self.assertRaisesRegex(ValueError, "checkpoint"):
-                model.rpc("eth_call", [call, pin])
 
 
 if __name__ == "__main__":

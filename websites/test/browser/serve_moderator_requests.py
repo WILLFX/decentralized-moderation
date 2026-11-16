@@ -2,7 +2,7 @@
 import argparse
 from pathlib import Path
 import serve_moderator as base
-from serve_wallet_selection import SelectionModelMixin
+from serve_wallet_selection import SelectionModelMixin, provider_source
 from serve_moderator_timing import TimingModel
 
 
@@ -107,30 +107,6 @@ if __name__ == '__main__':
     parser.add_argument('--capture-recovery', action='store_true', help='Observe encrypted export blobs in keyless loopback tests only')
     args = parser.parse_args()
     args.assets = base.assets_dir('moderator')
-    bootstrap = Path(__file__).with_name('fixture-wallet-selection.js').read_text(encoding='utf8').replace('__MODE__', 'single').replace('__AUTH_EVENT__', 'false')
-    bootstrap = bootstrap.replace('  const listeners = new Map();', """  let failRequestWrites = false;
-  const originalSet = Storage.prototype.setItem;
-  Storage.prototype.setItem = function(key, value) {
-    if (failRequestWrites && key.startsWith('moderator-requests-v1:')) throw new Error('Synthetic storage failure');
-    return originalSet.call(this, key, value);
-  };
-  const listeners = new Map();""")
-    bootstrap = bootstrap.replace("        if (event.kind === 'late-beta')", "        if (event.kind === 'request-storage-fault') failRequestWrites = event.enabled;\n        if (event.kind === 'late-beta')")
-    bootstrap = bootstrap.replace('defaultId,listeners:counts', "defaultId,listeners:counts,vaultFingerprint:Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(localStorage.getItem('moderator-vote-vault-v1')||'')))).map(b=>b.toString(16).padStart(2,'0')).join(''),requests:Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('moderator-requests-v1:')))")
-    if args.capture_recovery:
-        # Observe only the already encrypted export from the normal UI action.
-        # This option never exists in packaged website assets.
-        bootstrap = bootstrap.replace('  const listeners = new Map();', """  const recoveryExports = [];
-  const createObjectURL = URL.createObjectURL.bind(URL);
-  URL.createObjectURL = function(blob) {
-    if (blob.type === 'application/json') blob.text().then(text => {
-      const e = JSON.parse(text);
-      if (e.format === 'moderator-vote-vault' && e.cipher && !e.votes) recoveryExports.push(text);
-    });
-    return createObjectURL(blob);
-  };
-  const listeners = new Map();""")
-        bootstrap = bootstrap.replace('defaultId,listeners:counts,', 'defaultId,listeners:counts,recoveryExports,')
-    base.WALLET = bootstrap.encode('utf8')
     model = type('RequestsTimingModel', (RequestsModel, TimingModel), {}) if args.timing else RequestsModel
-    base.serve(args, model)
+    base.serve(args, model, wallet_source=provider_source(request_storage_faults=True,
+        observe_requests=True, observe_vault=True, capture_recovery=args.capture_recovery))

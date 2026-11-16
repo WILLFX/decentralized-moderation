@@ -1,7 +1,8 @@
 """Prepared provider facts, not an EVM or a wallet-extension test."""
 import unittest
+from fixture_unit_support import model_assets
 from serve_persistent_versions import ReaderModel, PublishModel, ModeratorModel, AUTHORITY, NEXT
-from serve_moderator import ROOT, abi, digest
+from serve_moderator import abi, digest
 
 
 def call(model, to, signature, *words):
@@ -12,7 +13,7 @@ def call(model, to, signature, *words):
 
 class PersistentVersionFixtureTests(unittest.TestCase):
     def test_reader_origin_is_not_the_selected_contracts_equal_numeric_id(self):
-        m = ReaderModel(ROOT/'apps/search/static')
+        m = ReaderModel(model_assets(self))
         profile = m.profile('http://127.0.0.1:7001', 'http://127.0.0.1:7002')
         self.assertEqual(profile['deployment']['moderation']['address'], NEXT)
         self.assertEqual(profile['deployment']['guidelines']['version'], 2)
@@ -25,7 +26,7 @@ class PersistentVersionFixtureTests(unittest.TestCase):
         self.assertTrue(all(r['pin']['requireCanonical'] for r in m.version_reads))
 
     def test_active_change_does_not_revoke_previous_approval_or_rewrite_profile(self):
-        m = PublishModel(ROOT/'apps/publisher/static')
+        m = PublishModel(model_assets(self))
         profile = m.profile('http://127.0.0.1:7001', 'http://localhost:7002')
         self.assertEqual(int(call(m, AUTHORITY, 'codeHashOf(address)', NEXT), 16), 0)
         m.control({'command': 'activate-version'})
@@ -35,19 +36,19 @@ class PersistentVersionFixtureTests(unittest.TestCase):
         self.assertEqual(profile['deployment']['moderation']['address'], m.previous)
 
     def test_removal_registration_identifies_target_and_unknown_cases_are_not_registered(self):
-        m = ModeratorModel(ROOT/'apps/moderator/static')
+        m = ModeratorModel(model_assets(self))
         raw = call(m, AUTHORITY, 'registration(address,uint256)', m.previous, 18)
         self.assertEqual(int(raw[130:194], 16), int(m.previous, 16))
         self.assertEqual(int(raw[194:258], 16), 16)
         self.assertEqual(int(call(m, AUTHORITY, 'registration(address,uint256)', m.previous, 999)[2:66], 16), 0)
 
     def test_authority_reads_refuse_an_unpinned_block(self):
-        m = ReaderModel(ROOT/'apps/search/static')
+        m = ReaderModel(model_assets(self))
         with self.assertRaises(ValueError):
             m.rpc('eth_call', [{'to': AUTHORITY, 'data': digest(b'active()')[:10]}, 'latest'])
 
     def test_reader_negative_controls_are_independent(self):
-        m = ReaderModel(ROOT/'apps/search/static')
+        m = ReaderModel(model_assets(self))
         m.control('unknown-origin'); self.assertTrue(m.bad_origin)
         m.control('wrong-guidelines'); self.assertFalse(m.bad_origin); self.assertTrue(m.bad_guidelines)
         m.control('unknown-case'); self.assertTrue(m.bad_registration)

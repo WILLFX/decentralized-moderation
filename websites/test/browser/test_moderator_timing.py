@@ -1,17 +1,14 @@
 """Known-answer timing states for the normal compiled moderator UI."""
-import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
+from fixture_unit_support import model_assets
 from serve_moderator import abi, commitment, digest
 from serve_moderator_timing import TimingModel
 
 class TimingCheckpoints(unittest.TestCase):
     def model(self):
-        folder=tempfile.TemporaryDirectory();self.addCleanup(folder.cleanup)
-        assets=Path(folder.name);(assets/"MODERATION_GUIDELINES.md").write_bytes(b"Synthetic timing guidelines")
-        return TimingModel(assets)
+        return TimingModel(model_assets(self, b"Synthetic timing guidelines"))
     def words(self,model):
         raw=model.info(17);return [int(raw[i:i+64],16) for i in range(2,len(raw),64)]
     def transaction(self,model,signature,*words):

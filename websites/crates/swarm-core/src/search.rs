@@ -6,7 +6,6 @@ use crate::{
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use unicode_normalization::UnicodeNormalization;
 type Result<T> = std::result::Result<T, CoreError>;
 pub const MAX_BINDINGS: usize = 10_000;
 pub const MAX_CATEGORY_ROWS: usize = 500;
@@ -43,8 +42,37 @@ pub fn parse_profile(text: &str) -> Result<SearchProfile> {
             .unwrap_or(&raw.gateway_url),
     )?;
     crate::review::resource_url(&content_gateway, "bytes", &format!("0x{}", "01".repeat(32)))?;
-    let value = serde_json::json!({"purpose":raw.purpose,"deployment":raw.deployment,"rpcUrl":raw.rpc_url,"gatewayUrl":raw.gateway_url,"metadataPath":raw.metadata_path.unwrap_or("bytes".into()),"contentPath":raw.content_path.unwrap_or("bzz".into()),"guidelinesUrl":raw.guidelines_url.unwrap_or("./MODERATION_GUIDELINES.md".into()),"timing":{"clockErrorSeconds":0,"maxEvidenceAgeSeconds":30,"maxHeadLagSeconds":30,"inclusionBudgetSeconds":120}});
-    let access = crate::parse_profile(&value.to_string())?;
+    let profile = ModeratorProfile {
+        purpose: raw.purpose,
+        deployment: raw.deployment,
+        rpc_url: raw.rpc_url,
+        gateway_url: raw.gateway_url,
+        metadata_path: raw.metadata_path.unwrap_or_else(|| "bytes".into()),
+        content_path: raw.content_path.unwrap_or_else(|| "bzz".into()),
+        guidelines_url: raw
+            .guidelines_url
+            .unwrap_or_else(|| "./MODERATION_GUIDELINES.md".into()),
+        timing: crate::Timing {
+            clock_error_seconds: 0,
+            max_evidence_age_seconds: 30,
+            max_head_lag_seconds: 30,
+            inclusion_budget_seconds: 120,
+        },
+        display: None,
+    };
+    // Preserve the expanded Reader limit before normalization: purpose is present,
+    // display is absent. This encoding is only measured, never decoded again.
+    let mut encoded =
+        serde_json::to_value(&profile).map_err(|_| CoreError("INVALID_CONFIG_JSON"))?;
+    encoded["purpose"] = serde_json::json!(profile.purpose);
+    encoded
+        .as_object_mut()
+        .expect("profile object")
+        .remove("display");
+    if encoded.to_string().len() > crate::MAX_CONFIG_BYTES {
+        return Err(CoreError("CONFIG_TOO_LARGE"));
+    }
+    let access = crate::validate_profile(profile)?;
     crate::review::resource_url(
         &access.gateway_url,
         "bytes",
@@ -62,24 +90,11 @@ pub fn parse_profile(text: &str) -> Result<SearchProfile> {
         scan_size,
     })
 }
-fn whitespace(c: char) -> bool {
-    c.is_whitespace() && c != '\u{0085}' || c == '\u{feff}'
-}
 pub fn normalize_topic(input: &str) -> Result<(String, String)> {
     if input.encode_utf16().count() > 4096 {
         return Err(CoreError("INVALID_TOPIC"));
     }
-    let lower = input
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
-        .nfc()
-        .collect::<String>();
-    let normalized = lower
-        .split(whitespace)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let normalized = crate::review::normalize_topic_text(input);
     if !(1..=64).contains(&normalized.chars().count()) {
         return Err(CoreError("INVALID_TOPIC"));
     }
@@ -379,9 +394,14 @@ mod tests {
     use super::*;
     #[test]
     fn normalization_matches_authoring() {
-        let (a, k) = normalize_topic("  BIOLOGY\tcell  ").unwrap();
-        assert_eq!(a, "biology cell");
-        assert_eq!(k, keccak256_hex(b"biology cell"));
+        for (input, expected) in [
+            ("  BIOLOGY\tcell  ", "biology cell"),
+            ("\u{feff}CAFE\u{301}\u{a0}A\u{0085}B", "café a\u{0085}b"),
+        ] {
+            let (text, key) = normalize_topic(input).unwrap();
+            assert_eq!(text, expected);
+            assert_eq!(key, keccak256_hex(expected.as_bytes()));
+        }
         assert!(normalize_topic("").is_err());
     }
     #[test]
@@ -559,5 +579,89 @@ mod cap_tests {
             resolve(&bindings, &entry, &hash(3), true).unwrap(),
             Resolution::Resolved(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod profile_boundary_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn sized_profile(purpose: &str, expanded_bytes: usize) -> Value {
+        let fixture = crate::parse_profile(include_str!(
+            "../tests/fixtures/local-moderator-profile.json"
+        ))
+        .unwrap();
+        let prefix = "https://rpc.example/";
+        let mut raw = json!({"purpose":purpose,"deployment":fixture.deployment,
+            "rpcUrl":prefix,"gatewayUrl":"https://gateway.example/"});
+        // This is the existing Reader's size-counted envelope, including purpose
+        // and excluding display. It describes test bytes, not validation rules.
+        let mut expanded = raw.clone();
+        expanded["metadataPath"] = json!("bytes");
+        expanded["contentPath"] = json!("bzz");
+        expanded["guidelinesUrl"] = json!("./MODERATION_GUIDELINES.md");
+        expanded["timing"] = json!({"clockErrorSeconds":0,"maxEvidenceAgeSeconds":30,
+            "maxHeadLagSeconds":30,"inclusionBudgetSeconds":120});
+        raw["rpcUrl"] = json!(format!(
+            "{prefix}{}",
+            "a".repeat(expanded_bytes - expanded.to_string().len())
+        ));
+        expanded["rpcUrl"] = raw["rpcUrl"].clone();
+        assert_eq!(expanded.to_string().len(), expanded_bytes);
+        assert!(raw.to_string().len() < 65_536);
+        raw
+    }
+
+    fn error(value: &Value) -> &'static str {
+        parse_profile(&value.to_string()).err().unwrap().0
+    }
+
+    #[test]
+    fn reader_keeps_its_exact_expanded_limit_for_both_profile_purposes() {
+        for purpose in ["standard", "existingWork"] {
+            let accepted = sized_profile(purpose, 65_536);
+            let parsed = parse_profile(&accepted.to_string()).unwrap();
+            assert_eq!(parsed.access.purpose.is_standard(), purpose == "standard");
+            assert_eq!(error(&sized_profile(purpose, 65_537)), "CONFIG_TOO_LARGE");
+        }
+    }
+
+    #[test]
+    fn reader_expanded_limit_precedes_semantics_and_page_limits() {
+        for purpose in ["standard", "existingWork"] {
+            for (bytes, expected) in [(65_536, "INVALID_DEPLOYMENT"), (65_537, "CONFIG_TOO_LARGE")]
+            {
+                let mut value = sized_profile(purpose, bytes);
+                value["deployment"]["moderation"]["codeHash"] =
+                    json!(format!("0x{}", "00".repeat(32)));
+                value["pageSize"] = json!(0);
+                assert_eq!(error(&value), expected);
+            }
+            let mut value = sized_profile(purpose, 65_536);
+            value["pageSize"] = json!(0);
+            assert_eq!(error(&value), "INVALID_SEARCH_LIMIT");
+        }
+        let mut value = sized_profile("standard", 65_537);
+        value["contentGatewayUrl"] = json!("http://remote.example/");
+        assert!(value.to_string().len() < 65_536);
+        assert_eq!(error(&value), "INVALID_ACCESS_URL");
+    }
+
+    #[test]
+    fn reader_shape_rejection_still_precedes_semantic_validation() {
+        let mut value = sized_profile("standard", 2_048);
+        value["deployment"]["moderation"]["codeHash"] = json!(format!("0x{}", "00".repeat(32)));
+        value["extension"] = json!(true);
+        assert_eq!(error(&value), "INVALID_SEARCH_PROFILE");
+        value.as_object_mut().unwrap().remove("extension");
+        let duplicate =
+            value
+                .to_string()
+                .replacen('{', "{\"rpcUrl\":\"https://other.example/\",", 1);
+        assert_eq!(
+            parse_profile(&duplicate).err().unwrap().0,
+            "INVALID_SEARCH_PROFILE"
+        );
     }
 }

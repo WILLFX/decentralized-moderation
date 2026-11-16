@@ -101,3 +101,34 @@ fn public_existing_work_sources_keep_their_original_registries() {
         assert!(m.deployment.persistent.is_none());
     }
 }
+
+#[test]
+fn current_public_profiles_keep_shared_identity_and_access_modes() {
+    for (moderator, reader, path) in [
+        (
+            include_str!("../../../../deployments/chiado/profiles/raw/moderator.json"),
+            include_str!("../../../../deployments/chiado/profiles/raw/reader.json"),
+            "bytes",
+        ),
+        (
+            include_str!("../../../../deployments/chiado/profiles/collections/moderator.json"),
+            include_str!("../../../../deployments/chiado/profiles/collections/reader.json"),
+            "bzz",
+        ),
+    ] {
+        let m = parse_profile(moderator).unwrap();
+        let r = swarm_core::search::parse_profile(reader).unwrap();
+        assert_eq!(m.purpose, ProfilePurpose::Standard);
+        assert_eq!(r.access.purpose, ProfilePurpose::Standard);
+        assert_eq!(
+            serde_json::to_value(&m.deployment).unwrap(),
+            serde_json::to_value(&r.access.deployment).unwrap()
+        );
+        assert!(m.deployment.persistent.is_some());
+        assert_eq!(m.rpc_url, r.access.rpc_url);
+        assert_eq!(m.metadata_path, "bytes");
+        assert_eq!(r.access.metadata_path, "bytes");
+        assert_eq!(m.content_path, path);
+        assert_eq!(r.access.content_path, path);
+    }
+}

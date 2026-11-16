@@ -18,25 +18,25 @@ pub(super) fn download(name: &str, raw: &str) -> Result<()> {
     web_sys::Url::revoke_object_url(&url).map_err(|_| "EXPORT_FAILED")?;
     Ok(())
 }
-pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
+pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: Action) -> Result<String> {
     let (p, who, epoch) = context(a)?;
     wallet::check(p.deployment.chain_id, &who).await?;
     active(a, epoch)?;
-    if action == "savehistory" {
-        let records = history::load_current(a, &p, &who)?;
-        history::save(a, &p, &who, &records)?;
-        text(
-            "notice",
-            "All public transaction records for this context saved.",
-        );
-        return Ok(());
+    if action == Action::SaveHistory {
+        let records = journal(a).load_current(&p, &who)?;
+        journal(a).save(&p, &who, &records)?;
+        let message = "All public transaction records for this context saved.";
+        return Ok(message.into());
     }
-    if action == "exporthistory" {
-        let records = history::load_current(a, &p, &who)?;
+    if action == Action::ExportHistory {
+        let records = journal(a).load_current(&p, &who)?;
         let (page, _) = archive::page(&records, a.borrow().history_page);
-        return download(
+        download(
             "swarm-publisher-history-page.json",
             &archive::file(&page, &p, &who, "swarm-publisher-history-page")?,
+        )?;
+        return Ok(
+            "History page download requested. Keep the downloaded file for recovery.".into(),
         );
     }
     let id = "historyfile";
@@ -56,11 +56,12 @@ pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
     wallet::check(p.deployment.chain_id, &who).await?;
     active(a, epoch)?;
     let imported = parse_history_file(&raw, &p, &who)?;
-    let records = merge_import(&history::load_current(a, &p, &who)?, imported)?;
-    history::import_room(a, &p, &who, &records)?;
-    history::save(a, &p, &who, &records)?;
-    text("transaction","Public transaction history merged. Imported receipts require fresh verification before another matching send.");
-    Ok(())
+    let records = merge_import(&journal(a).load_current(&p, &who)?, imported)?;
+    journal(a).import_room(&p, &who, &records)?;
+    journal(a).save(&p, &who, &records)?;
+    let message = "Public transaction history merged. Imported receipts require fresh verification before another matching send.";
+    text("transaction", message);
+    Ok(message.into())
 }
 /// Equal calldata is not request identity: a later uncertain approval must survive import.
 pub(super) fn merge_import(existing: &[Value], imported: Vec<Value>) -> Result<Vec<Value>> {

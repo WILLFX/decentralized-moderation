@@ -94,9 +94,11 @@ pub(super) fn parse(raw: &[u8]) -> Result<Candidate> {
         },
         display: shape.display,
     };
-    let profile =
-        swarm_core::parse_profile(&serde_json::to_string(&p).map_err(|_| "INVALID_CONFIG")?)
-            .map_err(|e| e.0)?;
+    // Keep the expanded-profile limit before semantic normalization.
+    if serde_json::to_vec(&p).map_err(|_| "INVALID_CONFIG")?.len() > LIMIT {
+        return Err("CONFIG_TOO_LARGE");
+    }
+    let profile = swarm_core::validate_profile(p).map_err(|e| e.0)?;
     Ok(Candidate {
         profile,
         upload,
@@ -158,7 +160,7 @@ pub(super) fn clear(a: &Rc<RefCell<App>>) {
     text("setup-link", "");
     text("wallet", "Not connected.");
 }
-pub(super) async fn load(a: &Rc<RefCell<App>>, remote: bool) -> Result<()> {
+pub(super) async fn load(a: &Rc<RefCell<App>>, remote: bool) -> Result<String> {
     clear(a);
     let epoch = a.borrow().epoch;
     if remote && swarm_core::publisher::normalize_reference(value("profilepin").trim()).is_err() {
@@ -205,8 +207,8 @@ pub(super) async fn load(a: &Rc<RefCell<App>>, remote: bool) -> Result<()> {
     }
     show_candidate(&candidate)?;
     a.borrow_mut().setup_candidate = Some(candidate);
-    text("notice","Profile candidate loaded. Compare its chain, addresses and fingerprint with your trusted source, then accept it.");
-    Ok(())
+    let message = "Profile candidate loaded. Compare its chain, addresses and fingerprint with your trusted source, then accept it.";
+    Ok(message.into())
 }
 fn show_candidate(candidate: &Candidate) -> Result<()> {
     crate::versions::populate(&candidate.profile.deployment);
@@ -217,7 +219,7 @@ fn show_candidate(candidate: &Candidate) -> Result<()> {
     text("profile-review",&format!("Candidate only — not active\n{}\nModeration: {}\nToken: {}\nStakes: {}\nIndex: {}\nPinned guidelines: version {}, {}\nRPC origin: {origin}\nExact profile fingerprint (Keccak-256): {}\nCompare these with the deployment announcement you trust. A matching file does not identify its operator. No wallet request has been made.",progress::network(d.chain_id),d.moderation.address,d.token.address,d.stakes.address,d.index.address,d.guidelines.version,d.guidelines.hash,candidate.fingerprint));
     Ok(())
 }
-pub(super) fn choose_version(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) fn choose_version(a: &Rc<RefCell<App>>) -> Result<String> {
     let mut c = {
         let s = a.borrow();
         s.setup_candidate
@@ -246,10 +248,10 @@ pub(super) fn choose_version(a: &Rc<RefCell<App>>) -> Result<()> {
     c.profile = selected;
     show_candidate(&c)?;
     a.borrow_mut().setup_candidate = Some(c);
-    text("notice","Review and accept the selected case contract, then reconnect. Saved requests and private work stay with their original contract.");
-    Ok(())
+    let message = "Review and accept the selected case contract, then reconnect. Saved requests and private work stay with their original contract.";
+    Ok(message.into())
 }
-pub(super) fn accept(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) fn accept(a: &Rc<RefCell<App>>) -> Result<String> {
     if !input("trustprofile").checked() {
         return Err("PROFILE_TRUST_ACK_REQUIRED");
     }
@@ -307,11 +309,8 @@ pub(super) fn accept(a: &Rc<RefCell<App>>) -> Result<()> {
     s.profile = Some(candidate.profile);
     s.upload = upload;
     text("profile-review","The reviewed profile is active. Runtime, linkage and wallet checks still run before payment; accepting this file did not connect or submit.");
-    text(
-        "notice",
-        "Profile accepted. Connect the intended wallet, then check your Bee settings and content. Reconnecting clears inspection and metadata readiness.",
-    );
-    Ok(())
+    let message = "Profile accepted. Connect the intended wallet, then check your Bee settings and content. Reconnecting clears inspection and metadata readiness.";
+    Ok(message.into())
 }
 pub(super) fn seed_link(a: &Rc<RefCell<App>>) {
     let hash = web_sys::window()
@@ -399,5 +398,138 @@ mod tests {
         let duplicate = raw.replacen("{", "{\"rpcUrl\":\"https://wrong.example/\",", 1);
         assert!(parse(duplicate.as_bytes()).is_err());
         assert!(parse(&[0xff, 0xfe]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod profile_compatibility_tests {
+    use super::*;
+
+    fn source() -> Value {
+        let p = history::fixture_profile();
+        json!({"deployment": p.deployment, "rpcUrl": p.rpc_url})
+    }
+
+    fn sized_source(encoded_size: usize) -> Value {
+        let mut value = source();
+        let candidate = parse(value.to_string().as_bytes()).unwrap();
+        let base_size = serde_json::to_vec(&candidate.profile).unwrap().len();
+        let url = format!(
+            "{}{}",
+            value["rpcUrl"].as_str().unwrap(),
+            "x".repeat(encoded_size - base_size)
+        );
+        value["rpcUrl"] = json!(url);
+        value
+    }
+
+    #[test]
+    fn raw_and_adapted_size_limits_keep_both_boundaries() {
+        let mut raw = source().to_string().into_bytes();
+        raw.resize(LIMIT, b' ');
+        assert!(parse(&raw).is_ok());
+        raw.push(b' ');
+        assert_eq!(parse(&raw).err(), Some("CONFIG_TOO_LARGE"));
+        assert_eq!(parse(&vec![b'x'; LIMIT]).err(), Some("INVALID_CONFIG"));
+        assert_eq!(
+            parse(&vec![b'x'; LIMIT + 1]).err(),
+            Some("CONFIG_TOO_LARGE")
+        );
+
+        let raw = sized_source(LIMIT).to_string().into_bytes();
+        assert!(raw.len() < LIMIT);
+        let candidate = parse(&raw).unwrap();
+        assert_eq!(serde_json::to_vec(&candidate.profile).unwrap().len(), LIMIT);
+        let raw = sized_source(LIMIT + 1).to_string().into_bytes();
+        assert!(raw.len() < LIMIT);
+        assert_eq!(parse(&raw).err(), Some("CONFIG_TOO_LARGE"));
+    }
+
+    #[test]
+    fn gateway_and_upload_errors_precede_adapted_size_and_deployment_checks() {
+        let mut value = sized_source(LIMIT + 1);
+        value["deployment"]["token"]["address"] = json!(format!("0x{}", "00".repeat(20)));
+        assert_eq!(
+            parse(value.to_string().as_bytes()).err(),
+            Some("CONFIG_TOO_LARGE")
+        );
+        value["upload"] = json!({"endpoint":"https://bee.example/", "postageBatchId":"00"});
+        value["contentGatewayUrl"] = json!("http://remote.example/content");
+        assert!(value.to_string().len() <= LIMIT);
+        assert_eq!(
+            parse(value.to_string().as_bytes()).err(),
+            Some("INVALID_ACCESS_URL")
+        );
+        value.as_object_mut().unwrap().remove("contentGatewayUrl");
+        assert_eq!(
+            parse(value.to_string().as_bytes()).err(),
+            Some("INVALID_BATCH")
+        );
+        value["upload"]["postageBatchId"] = json!("11".repeat(32));
+        value["upload"]["authorization"] = json!("not\na header");
+        assert!(value.to_string().len() <= LIMIT);
+        assert_eq!(
+            parse(value.to_string().as_bytes()).err(),
+            Some("INVALID_UPLOAD_AUTHORIZATION")
+        );
+    }
+
+    #[test]
+    fn equivalent_decoded_profiles_keep_distinct_raw_fingerprints() {
+        let value = source();
+        let compact = value.to_string().into_bytes();
+        let pretty = serde_json::to_vec_pretty(&value).unwrap();
+        let mut numeric_strings = value;
+        numeric_strings["deployment"]["chainId"] = json!("100");
+        numeric_strings["deployment"]["guidelines"]["version"] = json!("1");
+        let numeric_strings = numeric_strings.to_string().into_bytes();
+        let original = parse(&compact).unwrap();
+        let expected = serde_json::to_value(&original.profile).unwrap();
+        for raw in [&pretty, &numeric_strings] {
+            let candidate = parse(raw).unwrap();
+            assert_eq!(serde_json::to_value(&candidate.profile).unwrap(), expected);
+            assert_eq!(candidate.fingerprint, swarm_core::keccak256_hex(raw));
+            assert_ne!(candidate.fingerprint, original.fingerprint);
+            assert_eq!(
+                fingerprint_matches(raw, &original.fingerprint),
+                Err("PROFILE_FINGERPRINT_MISMATCH")
+            );
+        }
+        assert_eq!(original.fingerprint, swarm_core::keccak256_hex(&compact));
+    }
+
+    #[test]
+    fn decoding_keeps_bom_utf8_unknown_field_and_duplicate_field_errors() {
+        let raw = source().to_string();
+        let mut bom = vec![0xef, 0xbb, 0xbf];
+        bom.extend_from_slice(raw.as_bytes());
+        let duplicate = raw.replacen('{', "{\"rpcUrl\":\"https://other.example/\",", 1);
+        let mut unknown = source();
+        unknown["unknown"] = json!(true);
+        for bytes in [
+            bom,
+            vec![0xff, 0xfe],
+            duplicate.into_bytes(),
+            unknown.to_string().into_bytes(),
+        ] {
+            assert_eq!(parse(&bytes).err(), Some("INVALID_CONFIG"));
+        }
+    }
+
+    #[test]
+    fn released_publisher_profiles_keep_paths_purpose_and_fingerprints() {
+        let profiles: &[(&[u8], &str, bool)] = &[
+            (include_bytes!("../../../../../deployments/chiado/profiles/raw/publisher.json"), "bytes", false),
+            (include_bytes!("../../../../../deployments/chiado/profiles/collections/publisher.json"), "bzz", false),
+            (include_bytes!("../../../../../deployments/chiado/existing-work/earlier-workflow/publisher.json"), "bytes", true),
+            (include_bytes!("../../../../../deployments/chiado/existing-work/released-mvp/publisher.json"), "bytes", true),
+        ];
+        for (bytes, path, existing_work) in profiles {
+            let candidate = parse(bytes).unwrap();
+            assert_eq!(candidate.profile.deployment.chain_id, 10200);
+            assert_eq!(candidate.profile.content_path, *path);
+            assert_eq!(candidate.profile.purpose.is_standard(), !*existing_work);
+            assert_eq!(candidate.fingerprint, swarm_core::keccak256_hex(bytes));
+        }
     }
 }

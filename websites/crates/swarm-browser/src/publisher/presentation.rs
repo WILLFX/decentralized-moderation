@@ -1,52 +1,41 @@
 //! Publisher request display uses saved intent, never mutable authoring fields.
 use super::*;
-pub(super) fn feedback(action: &str) -> &'static str {
-    if ["preparearchive", "verifyarchive", "commitarchive"].contains(&action) {
-        "archive-feedback"
-    } else if action == "publication" {
-        "publication-feedback"
-    } else if ["profile", "connect", "fetchprofile", "useprofile"].contains(&action) {
-        "setup-feedback"
-    } else if [
-        "contentfile",
-        "applybee",
-        "uploadcontent",
-        "checkcontent",
-        "downloadcontent",
-    ]
-    .contains(&action)
-    {
-        "content-feedback"
-    } else if ["funds", "minimum"].contains(&action) {
-        "funds-feedback"
-    } else if ["draft", "guidelines", "upload", "usemimetype"].contains(&action) {
-        "draft-feedback"
-    } else if ["case", "owned", "refund"].contains(&action) {
-        "case-feedback"
-    } else if ["receipt", "history"].contains(&action) {
-        "recovery-feedback"
-    } else {
-        "transaction-feedback"
+pub(super) fn feedback(action: Action) -> &'static str {
+    match action {
+        a if a.is_archive() => "archive-feedback",
+        a if a.is_content() => "content-feedback",
+        Action::OpenPublication => "publication-feedback",
+        Action::LoadProfile | Action::Connect | Action::FetchProfile | Action::UseProfile => {
+            "setup-feedback"
+        }
+        Action::ReadFunds | Action::UseMinimum => "funds-feedback",
+        Action::PreviewDraft
+        | Action::LoadGuidelines
+        | Action::UploadMetadata
+        | Action::UseMimeType => "draft-feedback",
+        Action::ReadCase | Action::ReadOwned | Action::Refund => "case-feedback",
+        Action::CheckReceipt | Action::ReadHistory => "recovery-feedback",
+        _ => "transaction-feedback",
     }
 }
 // Capture the workspace before awaiting. A late result stays with its initiating task.
-pub(super) fn task_feedback(action: &str, view: journey::View) -> &'static str {
+pub(super) fn task_feedback(action: Action, view: journey::View) -> &'static str {
     match view {
-        journey::View::Source if action == "applybee" => "bee-feedback",
+        journey::View::Source if action == Action::ApplyBee => "bee-feedback",
         journey::View::Source => "setup-feedback",
         journey::View::Records
-            if ["history", "savehistory", "importhistory", "exporthistory"].contains(&action) =>
+            if matches!(
+                action,
+                Action::ReadHistory
+                    | Action::SaveHistory
+                    | Action::ImportHistory
+                    | Action::ExportHistory
+            ) =>
         {
             "history-feedback"
         }
-        journey::View::Records
-            if !["preparearchive", "verifyarchive", "commitarchive"].contains(&action) =>
-        {
-            "recovery-feedback"
-        }
-        journey::View::Editor if ["exportdraft", "importdraft"].contains(&action) => {
-            "authoring-note"
-        }
+        journey::View::Records if !action.is_archive() => "recovery-feedback",
+        journey::View::Editor if action.is_authoring_file() => "authoring-note",
         _ => feedback(action),
     }
 }
@@ -67,19 +56,13 @@ pub(super) fn bind_requests(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsV
         event.stop_propagation();
         let result = (|| -> Result<()> {
             let (p, who, _) = context(&state)?;
-            let records = history::load_current(&state, &p, &who)?;
+            let records = journal(&state).load_current(&p, &who)?;
             let record = records
                 .iter()
                 .find(|r| recovery::identity(r) == key)
                 .ok_or("SAVED_REQUEST_NOT_FOUND")?;
             state.borrow_mut().recovery_target = Some(key);
-            input("txhash").set_value(
-                record["resolution"]["hash"]
-                    .as_str()
-                    .or(record["candidateHash"].as_str())
-                    .or(record["hash"].as_str())
-                    .unwrap_or(""),
-            );
+            input("txhash").set_value(history::recovery_hash(record).unwrap_or(""));
             text("selected-request", &summary(record, p.display.as_ref()));
             text(
                 "selected-request-short",
@@ -102,11 +85,6 @@ pub(super) fn bind_requests(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsV
     Ok(())
 }
 
-pub(super) struct PendingIntent {
-    pub record: Value,
-    pub context_changed: bool,
-    pub display: Option<swarm_core::Display>,
-}
 pub(super) fn summary(r: &Value, display: Option<&swarm_core::Display>) -> String {
     let effect = match r["action"].as_str().unwrap_or("") {
         "approve" => {
@@ -142,7 +120,7 @@ pub(super) fn busy(a: &Rc<RefCell<App>>, value: bool) {
 pub(super) fn pending(a: &Rc<RefCell<App>>) {
     journey::render(a);
     let a = a.borrow();
-    if let Some(p) = &a.pending_wallet {
+    if let Some(p) = &a.journal.pending() {
         journey::hidden(
             "wallet-request",
             !["requesting", "unknown", "unchecked"]
@@ -168,7 +146,7 @@ pub(super) fn pending(a: &Rc<RefCell<App>>) {
 }
 pub(super) fn render_history(a: &Rc<RefCell<App>>) -> Result<()> {
     let (p, who, _) = context(a)?;
-    let records = history::load_current(a, &p, &who)?;
+    let records = journal(a).load_current(&p, &who)?;
     el("request-list").set_text_content(None);
     let (visible, pages) = archive::page(&records, a.borrow().history_page);
     let current = a.borrow().history_page.min(pages - 1);
@@ -184,7 +162,8 @@ pub(super) fn render_history(a: &Rc<RefCell<App>>) -> Result<()> {
             el(id).set_attribute("disabled", "").unwrap();
         }
     }
-    let archived = history::load_store(a, &p, &who)
+    let archived = journal(a)
+        .load_store(&p, &who)
         .map(|s| s.archived)
         .unwrap_or_default();
     for record in &visible {
@@ -299,29 +278,34 @@ mod task_feedback_tests {
     #[test]
     fn shared_actions_report_to_the_workspace_that_started_them() {
         assert_eq!(
-            task_feedback("funds", journey::View::Source),
+            task_feedback(Action::ReadFunds, journey::View::Source),
             "setup-feedback"
         );
         assert_eq!(
-            task_feedback("funds", journey::View::Review),
+            task_feedback(Action::ReadFunds, journey::View::Review),
             "funds-feedback"
         );
         assert_eq!(
-            task_feedback("applybee", journey::View::Source),
+            task_feedback(Action::ApplyBee, journey::View::Source),
             "bee-feedback"
         );
-        for action in ["savehistory", "importhistory", "exporthistory", "history"] {
+        for action in [
+            Action::SaveHistory,
+            Action::ImportHistory,
+            Action::ExportHistory,
+            Action::ReadHistory,
+        ] {
             assert_eq!(
                 task_feedback(action, journey::View::Records),
                 "history-feedback"
             );
         }
         assert_eq!(
-            task_feedback("verifyarchive", journey::View::Records),
+            task_feedback(Action::VerifyArchive, journey::View::Records),
             "archive-feedback"
         );
         assert_eq!(
-            task_feedback("submit", journey::View::Review),
+            task_feedback(Action::Submit, journey::View::Review),
             "transaction-feedback"
         );
     }

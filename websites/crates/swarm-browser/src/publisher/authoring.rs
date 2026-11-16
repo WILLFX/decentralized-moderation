@@ -159,8 +159,8 @@ pub(super) fn restore_tab(a: &Rc<RefCell<App>>) {
         Err(_) => {a.borrow_mut().authoring_storage_blocked=true; text("authoring-note","The saved tab draft is unavailable or unreadable. It has not been replaced. You can still type and save a draft file; no wallet is needed.");}
     }
 }
-pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
-    if action == "exportdraft" {
+pub(super) async fn transfer(a: &Rc<RefCell<App>>, action: Action) -> Result<()> {
+    if action == Action::ExportDraft {
         transfers::download("swarm-authoring-draft.json", &encode(&capture())?)?;
         text("authoring-note","Authoring draft file prepared. It contains text only, including incomplete fields. Loading it never restores wallet, upload or review readiness.");
         return Ok(());

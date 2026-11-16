@@ -1,14 +1,12 @@
 //! Canonical-block-pinned moderator evidence and authenticated review documents.
 use crate::{
-    transport::{as_str, fetch, quantity, rpc},
+    transport::{as_str, fetch, parse_block as source, quantity, rpc},
     BrowserResult as Result,
 };
 use serde_json::{json, Value};
 use swarm_core::moderator::*;
 use swarm_core::review::{parse_metadata, verify_guideline_bytes, Metadata, MAX_REVIEW_BYTES};
-use swarm_core::{
-    link_checks, selector, verify_guidelines, verify_link, verify_runtime, ModeratorProfile,
-};
+use swarm_core::{selector, ModeratorProfile};
 use web_sys::RequestInit;
 
 #[derive(Clone, Debug)]
@@ -45,25 +43,33 @@ pub(crate) struct VerifiedReview {
 }
 struct Context {
     source: SourceBlock,
+    raw_source: Value,
     tag: String,
     pin: Value,
+    purpose: ReadPurpose,
 }
 
-fn source(value: &Value) -> Result<SourceBlock> {
-    let hash = as_str(&value["hash"])?;
-    if hash.len() != 66
-        || !hash.starts_with("0x")
-        || !hash[2..].bytes().all(|b| b.is_ascii_hexdigit())
-        || hash[2..].bytes().all(|b| b == b'0')
-    {
-        return Err("INVALID_BLOCK_HASH");
-    }
-    Ok(SourceBlock {
-        number: quantity(as_str(&value["number"])?)?,
-        timestamp: quantity(as_str(&value["timestamp"])?)?,
-        hash: hash.to_ascii_lowercase(),
-    })
+#[derive(Clone, Copy, PartialEq)]
+enum ReadPurpose {
+    Evidence,
+    DeploymentVerification,
 }
+
+impl ReadPurpose {
+    fn error(self, evidence: &'static str, verification: &'static str) -> &'static str {
+        match self {
+            Self::Evidence => evidence,
+            Self::DeploymentVerification => verification,
+        }
+    }
+}
+
+pub(crate) async fn verify_deployment(profile: &ModeratorProfile) -> Result<SourceBlock> {
+    let ctx = begin_for(profile, "latest", ReadPurpose::DeploymentVerification).await?;
+    finish(profile, &ctx).await?;
+    Ok(ctx.source)
+}
+
 async fn chain(profile: &ModeratorProfile) -> Result<()> {
     if quantity(as_str(&rpc(profile, "eth_chainId", json!([])).await?)?)?
         != profile.deployment.chain_id
@@ -90,52 +96,64 @@ async fn view(
     .into())
 }
 async fn begin(profile: &ModeratorProfile, tag: &str) -> Result<Context> {
+    begin_for(profile, tag, ReadPurpose::Evidence).await
+}
+async fn begin_for(profile: &ModeratorProfile, tag: &str, purpose: ReadPurpose) -> Result<Context> {
     if !["latest", "finalized"].contains(&tag) {
         return Err("INVALID_BLOCK_TAG");
     }
-    chain(profile).await?;
-    let block = source(&rpc(profile, "eth_getBlockByNumber", json!([tag, false])).await?)?;
-    let ctx = Context {
-        pin: json!({"blockHash":block.hash,"requireCanonical":true}),
-        source: block,
-        tag: tag.into(),
+    chain(profile).await.map_err(|error| {
+        if error == "SOURCE_CHAIN_CHANGED" {
+            purpose.error(error, "DEPLOYMENT_CHAIN_MISMATCH")
+        } else {
+            error
+        }
+    })?;
+    let raw_source = rpc(profile, "eth_getBlockByNumber", json!([tag, false])).await?;
+    if purpose == ReadPurpose::DeploymentVerification {
+        // Preserve setup's validation order and original RPC spelling.
+        quantity(as_str(&raw_source["number"])?)?;
+        quantity(as_str(&raw_source["timestamp"])?)?;
+    }
+    let block = source(&raw_source)?;
+    let hash = match purpose {
+        ReadPurpose::Evidence => block.hash.as_str(),
+        ReadPurpose::DeploymentVerification => as_str(&raw_source["hash"])?,
     };
-    let d = &profile.deployment;
-    for p in swarm_core::versioning::runtime_pins(d) {
-        let code = rpc(profile, "eth_getCode", json!([p.address, ctx.pin])).await?;
-        verify_runtime(p, as_str(&code)?).map_err(|e| e.0)?;
-    }
-    for link in link_checks(d) {
-        verify_link(
-            &link,
-            &view(profile, &ctx, &link.contract_address, link.signature, "").await?,
-        )
-        .map_err(|e| e.0)?;
-    }
-    let version = view(
-        profile,
-        &ctx,
-        &d.moderation.address,
-        "guidelinesVersion()",
-        "",
+    let ctx = Context {
+        pin: json!({"blockHash":hash,"requireCanonical":true}),
+        source: block,
+        raw_source,
+        tag: tag.into(),
+        purpose,
+    };
+    crate::versioning::verify_deployment(
+        &profile.deployment,
+        &ctx.pin,
+        |method, args| rpc(profile, method, args),
+        None,
+        |error, setup_error| purpose.error(error, setup_error),
     )
     .await?;
-    let hash = view(profile, &ctx, &d.moderation.address, "guidelinesHash()", "").await?;
-    verify_guidelines(d, &version, &hash).map_err(|e| e.0)?;
-    crate::versioning::verify(profile, &ctx.pin).await?;
     Ok(ctx)
 }
 async fn finish(profile: &ModeratorProfile, ctx: &Context) -> Result<()> {
-    let canonical = source(
-        &rpc(
-            profile,
-            "eth_getBlockByNumber",
-            json!([format!("0x{:x}", ctx.source.number), false]),
-        )
-        .await?,
-    )?;
-    if canonical != ctx.source {
-        return Err("SOURCE_BLOCK_CHANGED");
+    let number = match ctx.purpose {
+        ReadPurpose::Evidence => json!(format!("0x{:x}", ctx.source.number)),
+        ReadPurpose::DeploymentVerification => ctx.raw_source["number"].clone(),
+    };
+    let canonical = rpc(profile, "eth_getBlockByNumber", json!([number, false])).await?;
+    let changed = match ctx.purpose {
+        ReadPurpose::Evidence => source(&canonical)? != ctx.source,
+        ReadPurpose::DeploymentVerification => ["number", "hash", "timestamp"]
+            .iter()
+            .any(|field| canonical[field] != ctx.raw_source[field]),
+    };
+    if changed {
+        return Err(ctx.purpose.error(
+            "SOURCE_BLOCK_CHANGED",
+            "SOURCE_BLOCK_CHANGED: refresh the evidence.",
+        ));
     }
     if ctx.tag == "finalized"
         && source(&rpc(profile, "eth_getBlockByNumber", json!(["finalized", false])).await?)?

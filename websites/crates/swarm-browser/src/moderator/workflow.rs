@@ -1,11 +1,10 @@
 //! Transaction coordination. Every entry is an explicit UI operation. Public
 //! transaction history omits calldata, vote choices, salts and recovery data.
-use crate::{
+use super::{
     evidence::{self, CaseEvidence},
-    transport::rpc,
     vault::{random_bytes, VoteVault},
-    wallet, BrowserResult as Result,
 };
+use crate::{transport::rpc, wallet, BrowserResult as Result};
 use js_sys::Date;
 use serde_json::{json, Value};
 use std::rc::Rc;
@@ -103,7 +102,7 @@ impl Session {
         vote: u8,
         original: Option<&VoteRecord>,
     ) -> Result<VoteRecord> {
-        crate::moderator_requests::ensure_clear(&self.profile, &self.voter)?;
+        crate::moderator::requests::ensure_clear(&self.profile, &self.voter)?;
         if !self.vault.is_unlocked() {
             return Err("VAULT_LOCKED");
         }
@@ -165,7 +164,7 @@ impl Session {
             salt,
         };
         self.current()?;
-        crate::moderator_requests::ensure_clear(&self.profile, &self.voter)?;
+        crate::moderator::requests::ensure_clear(&self.profile, &self.voter)?;
         let saved = if let Some(original) = original {
             self.vault.correct_vote(original, v).await?
         } else {
@@ -185,7 +184,7 @@ impl Session {
             round: s.case.challenges,
             committee: s.vote.committee,
         };
-        let record = crate::saved_vote::matching_record(
+        let record = crate::moderator::saved_vote::matching_record(
             &context,
             &s.vote.commitment,
             &self.vault.list_votes()?,
@@ -368,7 +367,7 @@ impl Session {
             .await
             .and_then(|()| self.stored(&v, false))
         {
-            crate::moderator_requests::not_sent(&self.profile, &self.voter, request)?;
+            crate::moderator::requests::not_sent(&self.profile, &self.voter, request)?;
             return Err(error);
         }
         self.broadcast_reserved(
@@ -396,7 +395,7 @@ impl Session {
             return Err("CHALLENGE_INTENT_UNSUPPORTED");
         }
         if [Action::Draw, Action::CacheOutcome].contains(&action) {
-            if let Some(reason) = crate::moderator_view::draw_request_hold(&e.snapshot) {
+            if let Some(reason) = crate::moderator::view::draw_request_hold(&e.snapshot) {
                 return Err(reason);
             }
         }
@@ -468,7 +467,7 @@ impl Session {
     }
     fn reserve(&self, to: &str, data: &str, action: &str, id: Option<Uint256>) -> Result<usize> {
         self.current()?;
-        crate::moderator_requests::begin(
+        crate::moderator::requests::begin(
             &self.profile,
             &self.voter,
             to,
@@ -497,7 +496,7 @@ impl Session {
         request: usize,
     ) -> Result<Broadcast> {
         if let Err(error) = self.current() {
-            crate::moderator_requests::not_sent(&self.profile, &self.voter, request)?;
+            crate::moderator::requests::not_sent(&self.profile, &self.voter, request)?;
             return Err(error);
         }
         // Success path: no journal IO, RPC read or timer before wallet disclosure.
@@ -513,13 +512,13 @@ impl Session {
         {
             Ok(hash) => hash,
             Err("WALLET_REJECTED") => {
-                crate::moderator_requests::rejected(&self.profile, &self.voter, request)?;
+                crate::moderator::requests::rejected(&self.profile, &self.voter, request)?;
                 return Err("WALLET_REJECTED");
             }
             Err(_) => return Err("REQUEST_UNRESOLVED"),
         };
         let journal_saved =
-            crate::moderator_requests::sent(&self.profile, &self.voter, request, &hash);
+            crate::moderator::requests::sent(&self.profile, &self.voter, request, &hash);
         // A wallet prompt can outlive a context change. Always preserve a valid
         // returned broadcast hash; a reset cannot cancel an already sent tx.
         let item = json!({"hash":hash,"action":action,"caseId":id.map(|v|v.to_decimal()),
@@ -624,7 +623,7 @@ pub(crate) fn public_case_ids(profile: &ModeratorProfile, voter: &str) -> Result
         })
         .collect();
     ids.extend(
-        crate::moderator_requests::load(profile, voter)?
+        crate::moderator::requests::load(profile, voter)?
             .iter()
             .filter_map(|r| {
                 r.case_id
@@ -636,7 +635,7 @@ pub(crate) fn public_case_ids(profile: &ModeratorProfile, voter: &str) -> Result
     Ok(ids)
 }
 
-pub(crate) async fn receipt(profile: &ModeratorProfile, hash: &str) -> Result<&'static str> {
+pub(crate) async fn receipt(profile: &ModeratorProfile, hash: &str) -> Result<ReceiptResult> {
     if hash.len() != 66
         || !hash.starts_with("0x")
         || !hash[2..].bytes().all(|b| b.is_ascii_hexdigit())
@@ -655,7 +654,10 @@ pub(crate) async fn receipt(profile: &ModeratorProfile, hash: &str) -> Result<&'
             profile.deployment.chain_id,
             &rpc(profile, "eth_chainId", json!([])).await?,
         )?;
-        return Ok("Receipt not yet available. Refresh before any retry.");
+        return Ok(ReceiptResult {
+            status: ReceiptStatus::Unavailable,
+            journal_message: None,
+        });
     }
     let (number, _) = receipt_anchor(&raw, hash)?;
     let canonical = rpc(
@@ -667,9 +669,23 @@ pub(crate) async fn receipt(profile: &ModeratorProfile, hash: &str) -> Result<&'
     let chain = rpc(profile, "eth_chainId", json!([])).await?;
     let status =
         canonical_receipt_status(&raw, hash, &canonical, profile.deployment.chain_id, &chain)?;
-    Ok(crate::moderator_requests::reconcile(profile, hash, &raw)
-        .await?
-        .unwrap_or(status))
+    let journal_message = crate::moderator::requests::reconcile(profile, hash, &raw).await?;
+    Ok(ReceiptResult {
+        status,
+        journal_message,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiptStatus {
+    Unavailable,
+    Confirmed,
+    Reverted,
+}
+
+pub(crate) struct ReceiptResult {
+    pub status: ReceiptStatus,
+    pub journal_message: Option<&'static str>,
 }
 
 fn check_receipt_chain(expected: u64, observed: &Value) -> Result<()> {
@@ -706,7 +722,7 @@ pub(crate) fn canonical_receipt_status(
     canonical: &Value,
     expected_chain: u64,
     observed_chain: &Value,
-) -> Result<&'static str> {
+) -> Result<ReceiptStatus> {
     let (number, block_hash) = receipt_anchor(raw, hash)?;
     check_receipt_chain(expected_chain, observed_chain)?;
     if canonical["hash"]
@@ -720,8 +736,8 @@ pub(crate) fn canonical_receipt_status(
         return Err("RECEIPT_BLOCK_CHANGED");
     }
     match raw["status"].as_str() {
-        Some("0x1") => Ok("Transaction confirmed. Refresh the case to read updated state."),
-        Some("0x0") => Ok("Transaction reverted. Refresh evidence before trying again."),
+        Some("0x1") => Ok(ReceiptStatus::Confirmed),
+        Some("0x0") => Ok(ReceiptStatus::Reverted),
         _ => Err("INVALID_RECEIPT"),
     }
 }
@@ -741,16 +757,14 @@ mod receipt_tests {
     #[test]
     fn canonical_success_and_revert_keep_distinct_status() {
         let (hash, mut receipt, block) = fixture();
-        assert!(
-            canonical_receipt_status(&receipt, &hash, &block, 10200, &json!("0x27d8"))
-                .unwrap()
-                .starts_with("Transaction confirmed.")
+        assert_eq!(
+            canonical_receipt_status(&receipt, &hash, &block, 10200, &json!("0x27d8")).unwrap(),
+            ReceiptStatus::Confirmed
         );
         receipt["status"] = json!("0x0");
-        assert!(
-            canonical_receipt_status(&receipt, &hash, &block, 10200, &json!("0x27d8"))
-                .unwrap()
-                .starts_with("Transaction reverted.")
+        assert_eq!(
+            canonical_receipt_status(&receipt, &hash, &block, 10200, &json!("0x27d8")).unwrap(),
+            ReceiptStatus::Reverted
         );
     }
 

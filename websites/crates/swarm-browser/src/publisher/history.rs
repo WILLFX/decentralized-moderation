@@ -1,4 +1,159 @@
 use super::*;
+use std::{cell::Cell, collections::BTreeMap};
+
+#[derive(Default)]
+pub(super) struct Journal {
+    entries: RefCell<BTreeMap<String, Entry>>,
+    write_lock: Cell<bool>,
+    pending: RefCell<Option<PendingIntent>>,
+}
+
+#[derive(Default)]
+struct Entry {
+    base: Vec<Value>,
+    cached: Option<Vec<Value>>,
+    fault: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct PendingIntent {
+    pub record: Value,
+    pub context_changed: bool,
+    pub display: Option<swarm_core::Display>,
+}
+
+pub(super) struct WalletRequest {
+    journal: Rc<Journal>,
+    profile: ModeratorProfile,
+    account: String,
+    records: Vec<Value>,
+}
+
+impl WalletRequest {
+    pub fn record(&self) -> &Value {
+        self.records.last().unwrap()
+    }
+
+    fn save(&self) -> bool {
+        let saved = self
+            .journal
+            .save(&self.profile, &self.account, &self.records)
+            .is_ok();
+        // Retain the wallet result even when its durable save fails.
+        if let Some(pending) = self.journal.pending.borrow_mut().as_mut() {
+            pending.record = self.record().clone();
+        }
+        saved
+    }
+
+    pub fn failed(&mut self, error: &str) {
+        self.records.last_mut().unwrap()["state"] = json!(if error == "WALLET_REJECTED" {
+            "rejected"
+        } else {
+            "unknown"
+        });
+        self.save();
+    }
+
+    pub fn broadcast(&mut self, hash: &str) -> bool {
+        let record = self.records.last_mut().unwrap();
+        record["state"] = json!("unchecked");
+        record["hash"] = json!(hash);
+        self.save()
+    }
+
+    pub fn observed_nonce(&mut self, nonce: String) -> bool {
+        self.records.last_mut().unwrap()["nonce"] = json!(nonce);
+        self.save()
+    }
+}
+
+pub(super) fn resolved(record: &Value) -> bool {
+    ["confirmed", "failed", "cancelled", "rejected"]
+        .contains(&record["state"].as_str().unwrap_or(""))
+}
+
+pub(super) fn uncertain_without_hash(record: &Value) -> bool {
+    record["hash"].is_null()
+        && ["requesting", "unknown"].contains(&record["state"].as_str().unwrap_or(""))
+}
+
+pub(super) fn recovery_hash(record: &Value) -> Option<&str> {
+    record["resolution"]["hash"]
+        .as_str()
+        .or(record["candidateHash"].as_str())
+        .or(record["hash"].as_str())
+}
+
+impl Journal {
+    fn entry(&self, key: &str) -> std::cell::RefMut<'_, Entry> {
+        std::cell::RefMut::map(self.entries.borrow_mut(), |entries| {
+            entries.entry(key.into()).or_default()
+        })
+    }
+
+    pub fn has_faults(&self) -> bool {
+        self.entries.borrow().values().any(|entry| entry.fault)
+    }
+
+    pub fn has_fault(&self, p: &ModeratorProfile, who: &str) -> bool {
+        self.entries
+            .borrow()
+            .get(&key(p, who))
+            .is_some_and(|entry| entry.fault)
+    }
+
+    pub fn pending(&self) -> Option<PendingIntent> {
+        self.pending.borrow().clone()
+    }
+
+    pub fn context_changed(&self) {
+        if let Some(pending) = self.pending.borrow_mut().as_mut() {
+            if pending.record["state"] == "requesting" {
+                pending.context_changed = true;
+            }
+        }
+    }
+
+    pub fn begin_wallet(&self, record: &Value, display: Option<swarm_core::Display>) {
+        *self.pending.borrow_mut() = Some(PendingIntent {
+            record: record.clone(),
+            context_changed: false,
+            display,
+        });
+    }
+
+    pub fn update_pending(&self, record: &Value) {
+        if let Some(pending) = self.pending.borrow_mut().as_mut() {
+            if recovery::identity(&pending.record) == recovery::identity(record) {
+                pending.record = record.clone();
+            }
+        }
+    }
+
+    pub fn reserve(
+        self: &Rc<Self>,
+        p: &ModeratorProfile,
+        who: &str,
+        mut records: Vec<Value>,
+        reservation: Value,
+    ) -> Result<WalletRequest> {
+        self.ensure_room(p, who, &reservation)?;
+        records.push(reservation);
+        if let Err(error) = self.save(p, who, &records) {
+            let reserved = records.pop().ok_or("INVALID_HISTORY")?;
+            self.cancel_unsent(p, who, &reserved);
+            return Err(error);
+        }
+        Ok(WalletRequest {
+            journal: self.clone(),
+            profile: p.clone(),
+            account: who.into(),
+            records,
+        })
+    }
+}
+
 pub(super) fn key(p: &ModeratorProfile, who: &str) -> String {
     format!(
         "swarm-publisher-last-{}-{}-{}-history",
@@ -276,50 +431,41 @@ fn disk(p: &ModeratorProfile, who: &str) -> Result<ledger::Ledger> {
         .unwrap_or_else(|| "[]".into());
     ledger::Ledger::parse(&raw, p, who)
 }
-pub(super) fn has_fault(a: &Rc<RefCell<App>>, p: &ModeratorProfile, who: &str) -> bool {
-    a.borrow().history_faults.contains(&key(p, who))
-}
-pub(super) fn load_store(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-) -> Result<ledger::Ledger> {
-    let mut store = disk(p, who)?;
-    // Clean tab caches are snapshots, never instructions to overwrite newer disk state.
-    let k = key(p, who);
-    if has_fault(a, p, who) {
-        let cached = a.borrow().history_cache.get(&k).cloned();
-        if let Some(cached) = cached {
-            let base = a
-                .borrow()
-                .history_bases
-                .get(&k)
-                .cloned()
-                .unwrap_or_default();
-            store.records = merge_cache(&store.records, &base, &cached)?;
-            store.reconcile();
-        }
-    }
-    Ok(store)
-}
-pub(super) fn load_current(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-) -> Result<Vec<Value>> {
-    match load_store(a, p, who) {
-        Ok(store) => {
-            if !has_fault(a, p, who) {
-                a.borrow_mut()
-                    .history_bases
-                    .insert(key(p, who), store.records.clone());
+impl Journal {
+    pub fn load_store(&self, p: &ModeratorProfile, who: &str) -> Result<ledger::Ledger> {
+        let mut store = disk(p, who)?;
+        // Clean tab caches are snapshots, never instructions to overwrite newer disk state.
+        let k = key(p, who);
+        let entries = self.entries.borrow();
+        if let Some(entry) = entries.get(&k).filter(|entry| entry.fault) {
+            if let Some(cached) = &entry.cached {
+                store.records = merge_cache(&store.records, &entry.base, cached)?;
+                store.reconcile();
             }
-            Ok(store.records)
         }
-        Err(error) => {
-            let k = key(p, who);
-            a.borrow_mut().history_faults.insert(k.clone());
-            a.borrow().history_cache.get(&k).cloned().ok_or(error)
+        Ok(store)
+    }
+    pub fn load_current(&self, p: &ModeratorProfile, who: &str) -> Result<Vec<Value>> {
+        self.current_from(p, who, &self.load_store(p, who))
+    }
+    fn current_from(
+        &self,
+        p: &ModeratorProfile,
+        who: &str,
+        result: &Result<ledger::Ledger>,
+    ) -> Result<Vec<Value>> {
+        let mut entry = self.entry(&key(p, who));
+        match result {
+            Ok(store) => {
+                if !entry.fault {
+                    entry.base = store.records.clone();
+                }
+                Ok(store.records.clone())
+            }
+            Err(error) => {
+                entry.fault = true;
+                entry.cached.clone().ok_or(*error)
+            }
         }
     }
 }
@@ -334,16 +480,13 @@ fn merge_cache(disk: &[Value], base: &[Value], cached: &[Value]) -> Result<Vec<V
         }
         if let Some(current) = disk.iter().find(|old| recovery::identity(old) == id) {
             if original != Some(current) && current != r {
-                if ledger::resolved(current)
-                    && !ledger::resolved(r)
+                if resolved(current)
+                    && !resolved(r)
                     && same_hex_bytes(&current["hash"], &r["hash"], Some(32))
                 {
                     continue;
                 }
-                if ledger::resolved(current)
-                    && ledger::resolved(r)
-                    && current["state"] != r["state"]
-                {
+                if resolved(current) && resolved(r) && current["state"] != r["state"] {
                     return Err("HISTORY_CONCURRENT_CHANGE");
                 }
                 if !current["resolution"].is_null()
@@ -364,77 +507,61 @@ fn merge_cache(disk: &[Value], base: &[Value], cached: &[Value]) -> Result<Vec<V
     }
     merge_retaining(disk, &updates)
 }
-fn stage(a: &Rc<RefCell<App>>, k: &str, records: Vec<Value>) {
-    let mut state = a.borrow_mut();
-    state.history_cache.insert(k.into(), records);
-    state.history_faults.insert(k.into());
-}
-fn persist_with(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    mut store: ledger::Ledger,
-    write: impl FnOnce(&str) -> Result<()>,
-) -> Result<()> {
-    let k = key(p, who);
-    stage(a, &k, store.records.clone());
-    store.reconcile();
-    store.revision = store
-        .revision
-        .checked_add(1)
-        .ok_or("HISTORY_REVISION_LIMIT")?;
-    let raw = store.encode(p, who)?;
-    write(&raw)?;
-    a.borrow_mut()
-        .history_bases
-        .insert(k.clone(), store.records.clone());
-    a.borrow_mut().history_faults.remove(&k);
-    Ok(())
-}
-pub(super) fn persist(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    store: ledger::Ledger,
-) -> Result<()> {
-    if !a.borrow().history_write_lock {
-        return Err("HISTORY_COORDINATION_UNAVAILABLE");
+impl Journal {
+    fn stage(&self, k: &str, records: Vec<Value>) {
+        let mut entry = self.entry(k);
+        entry.cached = Some(records);
+        entry.fault = true;
     }
-    let k = key(p, who);
-    persist_with(a, p, who, store, |raw| {
-        storage()?
-            .set_item(&k, raw)
-            .map_err(|_| "HISTORY_SAVE_FAILED")
-    })
-}
-pub(super) fn save(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    records: &[Value],
-) -> Result<()> {
-    let k = key(p, who);
-    let cached = if has_fault(a, p, who) {
-        a.borrow()
-            .history_cache
+    fn persist_with(
+        &self,
+        p: &ModeratorProfile,
+        who: &str,
+        mut store: ledger::Ledger,
+        write: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<()> {
+        let k = key(p, who);
+        self.stage(&k, store.records.clone());
+        store.reconcile();
+        store.revision = store
+            .revision
+            .checked_add(1)
+            .ok_or("HISTORY_REVISION_LIMIT")?;
+        let raw = store.encode(p, who)?;
+        write(&raw)?;
+        let mut entry = self.entry(&k);
+        entry.base = store.records;
+        entry.fault = false;
+        Ok(())
+    }
+    pub fn persist(&self, p: &ModeratorProfile, who: &str, store: ledger::Ledger) -> Result<()> {
+        if !self.write_lock.get() {
+            return Err("HISTORY_COORDINATION_UNAVAILABLE");
+        }
+        let k = key(p, who);
+        self.persist_with(p, who, store, |raw| {
+            storage()?
+                .set_item(&k, raw)
+                .map_err(|_| "HISTORY_SAVE_FAILED")
+        })
+    }
+    pub fn save(&self, p: &ModeratorProfile, who: &str, records: &[Value]) -> Result<()> {
+        let k = key(p, who);
+        let cached = self
+            .entries
+            .borrow()
             .get(&k)
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
-    let incoming = merge_retaining(&cached, records)?;
-    // Stage before bounds, parsing, quota or disk failures. Export sees all known hashes.
-    stage(a, &k, incoming.clone());
-    let mut store = disk(p, who)?;
-    let base = a
-        .borrow()
-        .history_bases
-        .get(&k)
-        .cloned()
-        .unwrap_or_default();
-    store.records = merge_cache(&store.records, &base, &incoming)?;
-    persist(a, p, who, store)
+            .filter(|entry| entry.fault)
+            .and_then(|entry| entry.cached.clone())
+            .unwrap_or_default();
+        let incoming = merge_retaining(&cached, records)?;
+        // Stage before bounds, parsing, quota or disk failures. Export sees all known hashes.
+        self.stage(&k, incoming.clone());
+        let mut store = disk(p, who)?;
+        let base = self.entry(&k).base.clone();
+        store.records = merge_cache(&store.records, &base, &incoming)?;
+        self.persist(p, who, store)
+    }
 }
 fn rebase_checked(base: &mut Vec<Value>, disk: &[Value], id: &str) {
     base.retain(|r| recovery::identity(r) != id);
@@ -444,74 +571,56 @@ fn rebase_checked(base: &mut Vec<Value>, disk: &[Value], id: &str) {
 }
 // Only the canonical receipt checker calls this after its final context checks.
 // Rebase that one checked identity; unrelated dirty rows still undergo conflict checks.
-pub(super) fn save_checked(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    records: &[Value],
-    checked: &Value,
-) -> Result<()> {
-    if !a.borrow().history_write_lock {
-        return Err("HISTORY_COORDINATION_UNAVAILABLE");
+impl Journal {
+    pub fn save_checked(
+        &self,
+        p: &ModeratorProfile,
+        who: &str,
+        records: &[Value],
+        checked: &Value,
+    ) -> Result<()> {
+        if !self.write_lock.get() {
+            return Err("HISTORY_COORDINATION_UNAVAILABLE");
+        }
+        let k = key(p, who);
+        let cached = self.entry(&k).cached.clone().unwrap_or_default();
+        self.stage(&k, merge_retaining(&cached, records)?);
+        let current = disk(p, who)?;
+        rebase_checked(
+            &mut self.entry(&k).base,
+            &current.records,
+            &recovery::identity(checked),
+        );
+        self.save(p, who, records)
     }
-    let k = key(p, who);
-    let cached = a
-        .borrow()
-        .history_cache
-        .get(&k)
-        .cloned()
-        .unwrap_or_default();
-    stage(a, &k, merge_retaining(&cached, records)?);
-    let current = disk(p, who)?;
-    rebase_checked(
-        a.borrow_mut().history_bases.entry(k).or_default(),
-        &current.records,
-        &recovery::identity(checked),
-    );
-    save(a, p, who, records)
-}
-pub(super) fn ensure_room(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    reservation: &Value,
-) -> Result<()> {
-    load_store(a, p, who)?.room(reservation)
-}
-pub(super) fn import_room(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    records: &[Value],
-) -> Result<()> {
-    let mut store = load_store(a, p, who)?;
-    let previous = store.active();
-    let before_count = previous.len();
-    let before_bytes = serde_json::to_vec(&previous)
-        .map_err(|_| "INVALID_HISTORY")?
-        .len();
-    store.records = records.to_vec();
-    store.reconcile();
-    let active = store.active();
-    let after_bytes = serde_json::to_vec(&active)
-        .map_err(|_| "INVALID_HISTORY")?
-        .len();
-    if (active.len() > ledger::ACTIVE_COUNT && active.len() > before_count)
-        || (after_bytes > ledger::ACTIVE_BYTES && after_bytes > before_bytes)
-    {
-        return Err("HISTORY_IMPORT_CAPACITY");
+    pub fn ensure_room(&self, p: &ModeratorProfile, who: &str, reservation: &Value) -> Result<()> {
+        self.load_store(p, who)?.room(reservation)
     }
-    Ok(())
-}
-/// Called only when persistence failed before opening a wallet prompt.
-pub(super) fn cancel_unsent(
-    a: &Rc<RefCell<App>>,
-    p: &ModeratorProfile,
-    who: &str,
-    reservation: &Value,
-) {
-    if let Some(records) = a.borrow_mut().history_cache.get_mut(&key(p, who)) {
-        records.retain(|r| r["requestId"] != reservation["requestId"] || !r["hash"].is_null());
+    pub fn import_room(&self, p: &ModeratorProfile, who: &str, records: &[Value]) -> Result<()> {
+        let mut store = self.load_store(p, who)?;
+        let previous = store.active();
+        let before_count = previous.len();
+        let before_bytes = serde_json::to_vec(&previous)
+            .map_err(|_| "INVALID_HISTORY")?
+            .len();
+        store.records = records.to_vec();
+        store.reconcile();
+        let active = store.active();
+        let after_bytes = serde_json::to_vec(&active)
+            .map_err(|_| "INVALID_HISTORY")?
+            .len();
+        if (active.len() > ledger::ACTIVE_COUNT && active.len() > before_count)
+            || (after_bytes > ledger::ACTIVE_BYTES && after_bytes > before_bytes)
+        {
+            return Err("HISTORY_IMPORT_CAPACITY");
+        }
+        Ok(())
+    }
+    /// Called only when persistence failed before opening a wallet prompt.
+    pub fn cancel_unsent(&self, p: &ModeratorProfile, who: &str, reservation: &Value) {
+        if let Some(records) = self.entry(&key(p, who)).cached.as_mut() {
+            records.retain(|r| r["requestId"] != reservation["requestId"] || !r["hash"].is_null());
+        }
     }
 }
 fn guard_state(records: &[Value], action: &str, intent: &Value, caseid: &str) -> Result<bool> {
@@ -529,10 +638,7 @@ fn guard_state(records: &[Value], action: &str, intent: &Value, caseid: &str) ->
             "refund" => r["action"] == "refund" && r["caseId"] == caseid,
             _ => false,
         };
-        if matching
-            && !["confirmed", "failed", "rejected", "cancelled"]
-                .contains(&r["state"].as_str().unwrap_or(""))
-        {
+        if matching && !resolved(r) {
             return Err("CHECK_PRIOR_TRANSACTION_BEFORE_RESENDING");
         }
         repeated |=
@@ -574,7 +680,7 @@ pub(super) fn guard_family(
             }
             let origin =
                 swarm_core::versioning::select(p, &version.moderation.address).map_err(|e| e.0)?;
-            let related = related_submissions(&load_current(a, &origin, who)?, action);
+            let related = related_submissions(&journal(a).load_current(&origin, who)?, action);
             guard_state(&related, action, intent, caseid)
                 .map_err(|_| "OTHER_VERSION_REQUEST_UNRESOLVED")?;
             all.extend(related);
@@ -597,6 +703,100 @@ pub(super) fn record(
 ) -> Value {
     json!({"chainId":p.deployment.chain_id,"contract":p.deployment.moderation.address,"publisher":who,"action":action,"to":to,"data":data,"intent":intent,"caseId":caseid,"state":"requesting","hash":null,"requestId":format!("{}-{}",js_sys::Date::now(),js_sys::Math::random())})
 }
+
+/// Ethereum hex is an encoding of bytes: letter case is not part of identity.
+/// Require well-formed, equally sized fields before accepting a case variant.
+pub(super) fn same_hex_bytes(left: &Value, right: &Value, size: Option<usize>) -> bool {
+    let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
+        return false;
+    };
+    let (Some(a), Some(b)) = (left.strip_prefix("0x"), right.strip_prefix("0x")) else {
+        return false;
+    };
+    if a.len() != b.len() || a.len() % 2 != 0 || left.len() > 4096 {
+        return false;
+    }
+    if match size {
+        Some(bytes) => a.len() != bytes * 2,
+        None => a.len() < 8,
+    } {
+        return false;
+    }
+    a.bytes().all(|v| v.is_ascii_hexdigit())
+        && b.bytes().all(|v| v.is_ascii_hexdigit())
+        && a.eq_ignore_ascii_case(b)
+}
+/// Resolve only one journal request. An already known hash never clears a different unknown request.
+pub(super) fn receipt_record_index(
+    records: &[Value],
+    hash: &str,
+    to: &Value,
+    data: &Value,
+) -> Result<Option<usize>> {
+    let hash_value = json!(hash);
+    let known = records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| same_hex_bytes(&r["hash"], &hash_value, Some(32)))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    let candidates = if known.is_empty() {
+        records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                uncertain_without_hash(r)
+                    && same_hex_bytes(&r["to"], to, Some(20))
+                    && same_hex_bytes(&r["data"], data, None)
+            })
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+    } else {
+        known
+    };
+    if candidates.len() > 1 {
+        return Err("HISTORY_AMBIGUOUS_TRANSACTION");
+    }
+    if let Some(&i) = candidates.first() {
+        if !same_hex_bytes(&records[i]["to"], to, Some(20))
+            || !same_hex_bytes(&records[i]["data"], data, None)
+        {
+            return Err("HISTORY_TRANSACTION_MISMATCH");
+        }
+        Ok(Some(i))
+    } else {
+        Ok(None)
+    }
+}
+
+// Serialize all journal writers across tabs. A busy lock refuses instead of queuing a send.
+pub(super) async fn coordinated(a: &Rc<RefCell<App>>, action: Action) -> ActionResult {
+    if !action.writes_history() {
+        return run(a, action).await;
+    }
+    let epoch = a.borrow().epoch;
+    let state = a.clone();
+    crate::coordination::run_if_available(
+        "swarm-publisher-history-v2",
+        crate::coordination::Errors {
+            unavailable: "HISTORY_COORDINATION_UNAVAILABLE",
+            busy: "HISTORY_BUSY_IN_ANOTHER_TAB",
+            failed: "HISTORY_COORDINATION_FAILED",
+        },
+        move || {
+            let state = state.clone();
+            async move {
+                active(&state, epoch)?;
+                journal(&state).write_lock.set(true);
+                let result = run(&state, action).await;
+                journal(&state).write_lock.set(false);
+                result
+            }
+        },
+    )
+    .await?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,10 +834,12 @@ mod tests {
         assert!(guard(&records, "refund", &Value::Null, "4").is_ok());
     }
 }
+
 #[cfg(test)]
 pub(super) fn fixture_profile() -> ModeratorProfile {
     serde_json::from_value(json!({"deployment":{"chainId":100,"moderation":{"address":format!("0x{}","11".repeat(20)),"codeHash":format!("0x{}","a1".repeat(32))},"stakes":{"address":format!("0x{}","22".repeat(20)),"codeHash":format!("0x{}","a2".repeat(32))},"index":{"address":format!("0x{}","33".repeat(20)),"codeHash":format!("0x{}","a3".repeat(32))},"token":{"address":format!("0x{}","44".repeat(20)),"codeHash":format!("0x{}","a4".repeat(32))},"guidelines":{"version":1,"hash":format!("0x{}","b1".repeat(32))}},"rpcUrl":"https://example.org/rpc","gatewayUrl":"https://example.org/","timing":{"clockErrorSeconds":5,"maxEvidenceAgeSeconds":30,"maxHeadLagSeconds":30,"inclusionBudgetSeconds":120},"display":null})).unwrap()
 }
+
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
@@ -670,15 +872,19 @@ mod recovery_tests {
         let a = Rc::new(RefCell::new(App::default()));
         let sent = record("r1", json!(format!("0x{}", "66".repeat(32))), "unchecked");
         let reservation = record("r2", Value::Null, "requesting");
-        a.borrow_mut()
-            .history_cache
-            .insert(key(&p, &who), vec![sent.clone()]);
-        a.borrow_mut()
-            .history_cache
-            .insert(key(&p, &other), vec![reservation.clone()]);
-        cancel_unsent(&a, &p, &other, &reservation);
-        assert_eq!(a.borrow().history_cache[&key(&p, &who)], vec![sent]);
-        assert!(a.borrow().history_cache[&key(&p, &other)].is_empty());
+        journal(&a).entry(&key(&p, &who)).cached = Some(vec![sent.clone()]);
+        journal(&a).entry(&key(&p, &other)).cached = Some(vec![reservation.clone()]);
+        journal(&a).cancel_unsent(&p, &other, &reservation);
+        assert_eq!(
+            journal(&a).entry(&key(&p, &who)).cached.as_ref().unwrap(),
+            &vec![sent]
+        );
+        assert!(journal(&a)
+            .entry(&key(&p, &other))
+            .cached
+            .as_ref()
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn imported_action_cannot_disguise_submit_calldata_as_approval() {
@@ -779,12 +985,14 @@ mod recovery_tests {
             ..ledger::Ledger::default()
         };
         assert_eq!(
-            persist_with(&a, &p, who, store, |_| Err("HISTORY_SAVE_FAILED")).unwrap_err(),
+            journal(&a)
+                .persist_with(&p, who, store, |_| Err("HISTORY_SAVE_FAILED"))
+                .unwrap_err(),
             "HISTORY_SAVE_FAILED"
         );
-        assert!(has_fault(&a, &p, who));
+        assert!(journal(&a).has_fault(&p, who));
         assert_eq!(
-            a.borrow().history_cache[&key(&p, who)][0]["hash"],
+            journal(&a).entry(&key(&p, who)).cached.as_ref().unwrap()[0]["hash"],
             sent["hash"]
         );
     }
@@ -809,71 +1017,7 @@ mod recovery_tests {
         assert_eq!(retained[0]["hash"], broadcast["hash"]);
     }
 }
-/// Ethereum hex is an encoding of bytes: letter case is not part of identity.
-/// Require well-formed, equally sized fields before accepting a case variant.
-pub(super) fn same_hex_bytes(left: &Value, right: &Value, size: Option<usize>) -> bool {
-    let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
-        return false;
-    };
-    let (Some(a), Some(b)) = (left.strip_prefix("0x"), right.strip_prefix("0x")) else {
-        return false;
-    };
-    if a.len() != b.len() || a.len() % 2 != 0 || left.len() > 4096 {
-        return false;
-    }
-    if match size {
-        Some(bytes) => a.len() != bytes * 2,
-        None => a.len() < 8,
-    } {
-        return false;
-    }
-    a.bytes().all(|v| v.is_ascii_hexdigit())
-        && b.bytes().all(|v| v.is_ascii_hexdigit())
-        && a.eq_ignore_ascii_case(b)
-}
-/// Resolve only one journal request. An already known hash never clears a different unknown request.
-pub(super) fn receipt_record_index(
-    records: &[Value],
-    hash: &str,
-    to: &Value,
-    data: &Value,
-) -> Result<Option<usize>> {
-    let hash_value = json!(hash);
-    let known = records
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| same_hex_bytes(&r["hash"], &hash_value, Some(32)))
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    let candidates = if known.is_empty() {
-        records
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                r["hash"].is_null()
-                    && same_hex_bytes(&r["to"], to, Some(20))
-                    && same_hex_bytes(&r["data"], data, None)
-                    && ["requesting", "unknown"].contains(&r["state"].as_str().unwrap_or(""))
-            })
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>()
-    } else {
-        known
-    };
-    if candidates.len() > 1 {
-        return Err("HISTORY_AMBIGUOUS_TRANSACTION");
-    }
-    if let Some(&i) = candidates.first() {
-        if !same_hex_bytes(&records[i]["to"], to, Some(20))
-            || !same_hex_bytes(&records[i]["data"], data, None)
-        {
-            return Err("HISTORY_TRANSACTION_MISMATCH");
-        }
-        Ok(Some(i))
-    } else {
-        Ok(None)
-    }
-}
+
 #[cfg(test)]
 mod receipt_resolution_tests {
     use super::*;
@@ -987,77 +1131,6 @@ mod receipt_resolution_tests {
     }
 }
 
-// Serialize all journal writers across tabs. A busy lock refuses instead of queuing a send.
-pub(super) async fn coordinated(a: &Rc<RefCell<App>>, action: &'static str) -> Result<()> {
-    if ![
-        "approve",
-        "submit",
-        "refund",
-        "receipt",
-        "approvalreceipt",
-        "submissionreceipt",
-        "publication",
-        "importhistory",
-        "savehistory",
-        "commitarchive",
-    ]
-    .contains(&action)
-    {
-        return run(a, action).await;
-    }
-    let epoch = a.borrow().epoch;
-    let navigator = js_sys::Reflect::get(web_sys::window().unwrap().as_ref(), &"navigator".into())
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
-    let locks = js_sys::Reflect::get(&navigator, &"locks".into())
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
-    let request = js_sys::Reflect::get(&locks, &"request".into())
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?
-        .dyn_into::<js_sys::Function>()
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
-    let result = Rc::new(RefCell::new(None));
-    let output = result.clone();
-    let state = a.clone();
-    let callback = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(move |lock: JsValue| {
-        let output = output.clone();
-        let state = state.clone();
-        wasm_bindgen_futures::future_to_promise(async move {
-            let r = if lock.is_null() {
-                Err("HISTORY_BUSY_IN_ANOTHER_TAB")
-            } else if let Err(e) = active(&state, epoch) {
-                Err(e)
-            } else {
-                state.borrow_mut().history_write_lock = true;
-                let result = run(&state, action).await;
-                state.borrow_mut().history_write_lock = false;
-                result
-            };
-            *output.borrow_mut() = Some(r);
-            Ok(JsValue::UNDEFINED)
-        })
-    });
-    let options = js_sys::Object::new();
-    js_sys::Reflect::set(&options, &"ifAvailable".into(), &JsValue::TRUE)
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
-    let promise = request
-        .call3(
-            &locks,
-            &"swarm-publisher-history-v2".into(),
-            &options,
-            callback.as_ref(),
-        )
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?
-        .dyn_into::<js_sys::Promise>()
-        .map_err(|_| "HISTORY_COORDINATION_UNAVAILABLE")?;
-    JsFuture::from(promise)
-        .await
-        .map_err(|_| "HISTORY_COORDINATION_FAILED")?;
-    let r = result
-        .borrow_mut()
-        .take()
-        .ok_or("HISTORY_COORDINATION_FAILED")?;
-    r
-}
-
 #[cfg(test)]
 mod version_guard_tests {
     use super::*;
@@ -1119,5 +1192,223 @@ mod version_guard_tests {
         assert!(related_submissions(&old, "approve").is_empty());
         let other = json!({"contentHash":"different","metaHash":"m","topics":["t"]});
         assert!(!guard_state(&related, "submit", &other, "").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod journal_owner_tests {
+    use super::*;
+
+    const WHO: &str = "0x5555555555555555555555555555555555555555";
+    // Existing compact Value encoding, with an independently calculated Keccak hash.
+    const LEGACY_RECORD: &str = r#"{"action":"approve","caseId":"","chainId":100,"contract":"0x1111111111111111111111111111111111111111","data":"0x095ea7b3000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000004b0","hash":"0x6666666666666666666666666666666666666666666666666666666666666666","intent":null,"publisher":"0x5555555555555555555555555555555555555555","state":"confirmed","to":"0x4444444444444444444444444444444444444444"}"#;
+    const RECORD_HASH: &str = "0xa0ad9775a8f19e8a3f05bbea09bed37b6e9432e4ab377fbb8b6e94cb336eae45";
+
+    fn saved(id: &str, state: &str) -> Value {
+        let mut row: Value = serde_json::from_str(LEGACY_RECORD).unwrap();
+        row["requestId"] = json!(id);
+        row["state"] = json!(state);
+        if ["requesting", "unknown"].contains(&state) {
+            row["hash"] = Value::Null;
+        }
+        row
+    }
+
+    #[test]
+    fn clean_read_records_base_without_inventing_a_cache_fallback() {
+        let journal = Journal::default();
+        let p = fixture_profile();
+        let rows = vec![saved("read", "confirmed")];
+        let disk = Ok(ledger::Ledger {
+            records: rows.clone(),
+            ..Default::default()
+        });
+        assert_eq!(journal.current_from(&p, WHO, &disk).unwrap(), rows);
+        assert!(!journal.has_fault(&p, WHO));
+        assert_eq!(journal.entry(&key(&p, WHO)).base, rows);
+        assert!(journal.entry(&key(&p, WHO)).cached.is_none());
+        assert_eq!(
+            journal
+                .current_from(&p, WHO, &Err("HISTORY_UNAVAILABLE"))
+                .unwrap_err(),
+            "HISTORY_UNAVAILABLE"
+        );
+        assert!(journal.has_fault(&p, WHO));
+        assert_eq!(journal.entry(&key(&p, WHO)).base, rows);
+    }
+
+    #[test]
+    fn absent_empty_and_populated_cache_have_distinct_failure_results() {
+        let p = fixture_profile();
+        for cached in [
+            None,
+            Some(vec![]),
+            Some(vec![saved("returned", "unchecked")]),
+        ] {
+            let journal = Journal::default();
+            journal.entry(&key(&p, WHO)).cached = cached.clone();
+            let store = Err("HISTORY_CONCURRENT_CHANGE");
+            let records = journal.current_from(&p, WHO, &store);
+            assert_eq!(records, cached.ok_or("HISTORY_CONCURRENT_CHANGE"));
+            assert!(journal.has_fault(&p, WHO));
+            // Visible fallback rows do not provide a ledger for archive or capacity.
+            assert!(store.is_err());
+        }
+    }
+
+    #[test]
+    fn successful_dirty_read_keeps_reconciliation_base_and_send_fault() {
+        let journal = Journal::default();
+        let p = fixture_profile();
+        let original = saved("returned", "requesting");
+        let sent = saved("returned", "unchecked");
+        journal.entry(&key(&p, WHO)).base = vec![original.clone()];
+        journal.stage(&key(&p, WHO), vec![sent.clone()]);
+        let mut store = ledger::Ledger {
+            records: vec![saved("returned", "confirmed")],
+            ..Default::default()
+        };
+        store.archive(&store.records.clone()).unwrap();
+        let disk = Ok(store);
+        let rows = journal.current_from(&p, WHO, &disk).unwrap();
+        assert_eq!(rows[0]["state"], "confirmed");
+        assert_eq!(journal.entry(&key(&p, WHO)).base, vec![original]);
+        assert_eq!(journal.entry(&key(&p, WHO)).cached, Some(vec![sent]));
+        assert!(journal.has_fault(&p, WHO));
+        // A valid ledger may have room even though the separate send guard is held.
+        assert!(disk
+            .as_ref()
+            .unwrap()
+            .room(&json!("x".repeat(4096)))
+            .is_ok());
+    }
+
+    #[test]
+    fn successful_persist_retains_export_cache_and_replaces_base_after_write() {
+        let journal = Journal::default();
+        let p = fixture_profile();
+        let rows = vec![saved("returned", "unchecked")];
+        journal.stage(&key(&p, WHO), vec![saved("returned", "requesting")]);
+        let mut written = String::new();
+        journal
+            .persist_with(
+                &p,
+                WHO,
+                ledger::Ledger {
+                    revision: 7,
+                    records: rows.clone(),
+                    ..Default::default()
+                },
+                |raw| {
+                    written = raw.into();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            ledger::Ledger::parse(&written, &p, WHO).unwrap().revision,
+            8
+        );
+        assert!(!journal.has_fault(&p, WHO));
+        assert_eq!(journal.entry(&key(&p, WHO)).base, rows);
+        assert_eq!(
+            journal
+                .current_from(&p, WHO, &Err("HISTORY_UNAVAILABLE"))
+                .unwrap(),
+            rows
+        );
+        assert!(journal.has_fault(&p, WHO));
+    }
+
+    #[test]
+    fn receipt_save_without_coordination_cannot_stage_or_rebase() {
+        let journal = Journal::default();
+        let p = fixture_profile();
+        let pending = saved("pending", "requesting");
+        journal.begin_wallet(&pending, None);
+        let checked = saved("pending", "confirmed");
+        assert_eq!(
+            journal
+                .save_checked(&p, WHO, &[checked.clone()], &checked)
+                .unwrap_err(),
+            "HISTORY_COORDINATION_UNAVAILABLE"
+        );
+        assert!(journal.entries.borrow().is_empty());
+        assert_eq!(journal.pending().unwrap().record, pending);
+        assert!(!journal.write_lock.get());
+    }
+
+    #[test]
+    fn pending_capture_survives_context_change_and_only_matching_recovery_updates_it() {
+        let journal = Journal::default();
+        let mut original = saved("open-wallet", "requesting");
+        let captured = original.clone();
+        journal.begin_wallet(
+            &original,
+            Some(swarm_core::Display {
+                decimals: 16,
+                symbol: "TEST".into(),
+            }),
+        );
+        original["data"] = json!("changed editor data");
+        journal.context_changed();
+        journal.update_pending(&saved("different-request", "confirmed"));
+        assert_eq!(journal.pending().unwrap().record, captured);
+        let checked = saved("open-wallet", "confirmed");
+        journal.update_pending(&checked);
+        let pending = journal.pending().unwrap();
+        assert_eq!(pending.record, checked);
+        assert!(pending.context_changed);
+        assert_eq!(pending.display.unwrap().symbol, "TEST");
+        for state in [
+            "unknown",
+            "unchecked",
+            "confirmed",
+            "failed",
+            "cancelled",
+            "rejected",
+        ] {
+            journal.begin_wallet(&saved("later", state), None);
+            journal.context_changed();
+            assert!(
+                !journal.pending().unwrap().context_changed,
+                "state: {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_encoding_archive_bytes_and_optional_null_fingerprints_stay_exact() {
+        let p = fixture_profile();
+        let store = ledger::Ledger::parse(&format!(" \n[ {LEGACY_RECORD} ]"), &p, WHO).unwrap();
+        assert_eq!(
+            serde_json::to_string(&store.records[0]).unwrap(),
+            LEGACY_RECORD
+        );
+        assert_eq!(ledger::fingerprint(&store.records[0]), RECORD_HASH);
+        assert_eq!(
+            store.encode(&p, WHO).unwrap(),
+            format!(r#"{{"version":2,"revision":0,"records":[{LEGACY_RECORD}],"archived":{{}}}}"#)
+        );
+        let archive = archive::file(&store.records, &p, WHO, "swarm-publisher-archive").unwrap();
+        assert_eq!(
+            archive,
+            format!(
+                r#"{{"chainId":100,"contract":"0x1111111111111111111111111111111111111111","format":"swarm-publisher-archive","publisher":"{WHO}","records":[{LEGACY_RECORD}],"version":1}}"#
+            )
+        );
+        let mut explicit_null = store.records[0].clone();
+        explicit_null["nonce"] = Value::Null;
+        let parsed = validate(&json!([explicit_null.clone()]).to_string(), &p, WHO).unwrap();
+        assert_eq!(parsed, vec![explicit_null.clone()]);
+        assert_eq!(
+            ledger::fingerprint(&explicit_null),
+            "0x595534de6e1ccf3995cafd01d048a1db5a8079cfce32134829540b8ec5a19188"
+        );
+        explicit_null["requestId"] = Value::Null;
+        assert_eq!(
+            validate(&json!([explicit_null]).to_string(), &p, WHO).unwrap_err(),
+            "INVALID_HISTORY"
+        );
     }
 }

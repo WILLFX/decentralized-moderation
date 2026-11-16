@@ -1,14 +1,15 @@
 //! Moderator UI bindings. Remote documents are always text, never HTML.
 use super::{busy, document, element, text, App};
-fn notice(value: &str) {
+fn notice(value: &str) -> String {
     text("notice", value);
+    value.to_owned()
 }
-use crate::{
+use crate::moderator::{
     evidence::{self, CaseEvidence, ModeratorEvidence},
-    moderator_view as view,
+    view,
     workflow::{self, Broadcast, Session},
-    BrowserResult as Result,
 };
+use crate::BrowserResult as Result;
 use js_sys::Array;
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 use swarm_core::{
@@ -19,7 +20,7 @@ use swarm_core::{
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{HtmlAnchorElement, HtmlInputElement};
-#[path = "moderator/journey.rs"]
+#[path = "journey.rs"]
 mod journey;
 pub(super) fn install_journey(app: Rc<RefCell<App>>) {
     journey::install(app);
@@ -548,7 +549,7 @@ fn local_record(app: &App, e: &CaseEvidence) -> Result<VoteRecord> {
         committee,
     };
     if committed {
-        return crate::saved_vote::matching_record(
+        return crate::moderator::saved_vote::matching_record(
             &context,
             &e.snapshot.vote.commitment,
             &app.vault.list_votes()?,
@@ -647,7 +648,7 @@ pub(super) fn render(app: &App) {
     );
     disabled("receipt", app.profile.is_none());
     let pending = match (&app.profile, &app.wallet.account) {
-        (Some(p), Some(v)) => crate::moderator_requests::summary(p, v).unwrap_or_else(|_| {
+        (Some(p), Some(v)) => crate::moderator::requests::summary(p, v).unwrap_or_else(|_| {
             Some(
                 "Saved requests could not be read. Sending is blocked; keep this site's data."
                     .into(),
@@ -1184,20 +1185,24 @@ fn perform(app: Rc<RefCell<App>>, command: Command) {
     busy(&app, true);
     spawn_local(async move {
         let result = coordinated(&app, command).await;
-        if let Err(code) = result {
-            notice(&view::error(code));
-            if matches!(command, Command::Reveal) {
-                text(
-                    "reveal-result",
-                    if code == "REQUEST_UNRESOLVED" {
-                        "Transaction outcome unknown. Check this transaction before another send."
-                    } else {
-                        "Reveal not completed. Read the result above before another attempt."
-                    },
-                );
+        let succeeded = result.is_ok();
+        let message = match result {
+            Ok(message) => message,
+            Err(code) => {
+                let message = notice(&view::error(code));
+                if matches!(command, Command::Reveal) {
+                    text(
+                        "reveal-result",
+                        if code == "REQUEST_UNRESOLVED" {
+                            "Transaction outcome unknown. Check this transaction before another send."
+                        } else {
+                            "Reveal not completed. Read the result above before another attempt."
+                        },
+                    );
+                }
+                message
             }
-        }
-        let message = element("notice").text_content().unwrap_or_default();
+        };
         text(feedback_id(command), &message);
         let feedback_owner = element(feedback_id(command))
             .closest("[data-view]")
@@ -1225,13 +1230,13 @@ fn perform(app: Rc<RefCell<App>>, command: Command) {
         busy(&app, false);
         let unchanged = app.borrow().controls.journey.revision == revision;
         if unchanged {
-            if result.is_ok() && matches!(command, Command::Open(_) | Command::Read) {
+            if succeeded && matches!(command, Command::Open(_) | Command::Read) {
                 journey::show(&app, journey::View::Case, false);
-            } else if result.is_ok() && matches!(command, Command::Draft(_) | Command::Change(_)) {
+            } else if succeeded && matches!(command, Command::Draft(_) | Command::Change(_)) {
                 journey::focus("choice-heading");
-            } else if result.is_ok() && is_send {
+            } else if succeeded && is_send {
                 journey::show(&app, journey::View::Records, false);
-            } else if matches!(command, Command::CheckReveal) && result.is_ok() {
+            } else if matches!(command, Command::CheckReveal) && succeeded {
                 focus_note("reveal-result");
             } else if feedback_owner.as_deref() == Some(owner.name())
                 && element(feedback_id(command))
@@ -1427,7 +1432,7 @@ async fn show_case(app: &Rc<RefCell<App>>, s: &Session, id: Uint256) -> Result<(
     render(&app.borrow());
     Ok(())
 }
-fn broadcast_result(app: &Rc<RefCell<App>>, s: &Session, result: Broadcast, stake: bool) {
+fn broadcast_result(app: &Rc<RefCell<App>>, s: &Session, result: Broadcast, stake: bool) -> String {
     // A broadcast is not a receipt. Remove action availability from the old
     // snapshot, forcing an explicit fresh read before another transaction.
     let follow = app.borrow().controls.journey.operation_case;
@@ -1481,25 +1486,50 @@ fn broadcast_result(app: &Rc<RefCell<App>>, s: &Session, result: Broadcast, stak
         "Transaction hash saved. Check its receipt, then refresh Stake before any retry."
     } else {
         "Transaction hash saved. Refresh its receipt and case before any retry."
-    });
+    })
 }
-async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
+fn receipt_message(
+    result: workflow::ReceiptResult,
+    stake: bool,
+    has_context: bool,
+) -> &'static str {
+    if let Some(message) = result.journal_message {
+        return message;
+    }
+    match result.status {
+        workflow::ReceiptStatus::Unavailable => {
+            "Receipt not yet available. Refresh before any retry."
+        }
+        workflow::ReceiptStatus::Confirmed if stake => {
+            "Transaction confirmed. Return to Stake and refresh its balance and allowance."
+        }
+        workflow::ReceiptStatus::Confirmed if !has_context => {
+            "Transaction confirmed. Refresh current evidence before another action."
+        }
+        workflow::ReceiptStatus::Confirmed => {
+            "Transaction confirmed. Refresh the case to read updated state."
+        }
+        workflow::ReceiptStatus::Reverted => {
+            "Transaction reverted. Refresh evidence before trying again."
+        }
+    }
+}
+
+async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<String> {
     // Vault operations do not require wallet access and never call a provider.
     let vault = app.borrow().vault.clone();
     match command {
         Command::Unlock => {
             let p = take_password("vault-password");
             let n = vault.unlock(&p).await?;
-            notice(&format!("Private storage unlocked: {n} saved votes. Connect the intended account, then Refresh my work to find this deployment's cases."));
-            return Ok(());
+            return Ok(notice(&format!("Private storage unlocked: {n} saved votes. Connect the intended account, then Refresh my work to find this deployment's cases.")));
         }
         Command::Export => {
             let raw = vault.export_backup().await?;
             download(&raw)?;
-            notice(
+            return Ok(notice(
                 "Recovery export prepared. Select the saved file and verify it before committing.",
-            );
-            return Ok(());
+            ));
         }
         Command::Import | Command::Verify => {
             let epoch = app.borrow().wallet.epoch;
@@ -1523,15 +1553,14 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                     .and_then(|e| local_record(&a, e).ok())
                     .map(|v| vault.is_backed_up(&v.context()).unwrap_or(false))
             };
-            notice(&match current_covered {
+            return Ok(notice(&match current_covered {
                 Some(true) => "Recovery for your current saved choice is verified.".into(),
                 Some(false) => {
                     "This file does not cover your current choice. Export and verify new recovery."
                         .into()
                 }
                 None => format!("Recovery checked: {n} exact choice records covered."),
-            });
-            return Ok(());
+            }));
         }
         Command::ResumeRequest => {
             let (profile, voter) = {
@@ -1541,13 +1570,13 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                     a.wallet.account.clone().ok_or("WALLET_NOT_CONNECTED")?,
                 )
             };
-            let row = crate::moderator_requests::load(&profile, &voter)?
+            let row = crate::moderator::requests::load(&profile, &voter)?
                 .into_iter()
                 .find(|r| !r.settled)
                 .ok_or("REQUEST_NOT_FOUND")?;
             let context = format!(
                 "{} · {}\nAccount: {}\nChain: {} · Moderation: {}\nDestination: {}",
-                crate::moderator_requests::label(&row.action),
+                crate::moderator::requests::label(&row.action),
                 row.case_id
                     .as_ref()
                     .map(|id| format!("Case {id}"))
@@ -1572,9 +1601,9 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                     .and_then(|id| Uint256::decimal(id).ok()),
             });
             journey::show(app, journey::View::Records, false);
-            notice("Check this saved request. If its hash is missing, copy it from your wallet activity. Nothing will be resent.");
+            let message = notice("Check this saved request. If its hash is missing, copy it from your wallet activity. Nothing will be resent.");
             journey::focus("receipt-hash");
-            return Ok(());
+            return Ok(message);
         }
         Command::Receipt => {
             let hash = input("receipt-hash").value();
@@ -1587,7 +1616,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
             };
             let status = workflow::receipt(&profile, &hash).await?;
             if let Some(tx) = app.borrow_mut().controls.last_transaction.as_mut() {
-                if crate::moderator_requests::load(&tx.profile, &tx.voter)?
+                if crate::moderator::requests::load(&tx.profile, &tx.voter)?
                     .iter()
                     .any(|r| {
                         r.settled
@@ -1609,20 +1638,9 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                 .filter(|tx| tx.hash.eq_ignore_ascii_case(&hash))
                 .map(|tx| (tx.context.clone(), tx.stake))
                 .unwrap_or_default();
-            let status = if stake
-                && status == "Transaction confirmed. Refresh the case to read updated state."
-            {
-                "Transaction confirmed. Return to Stake and refresh its balance and allowance."
-            } else if context.is_empty()
-                && status == "Transaction confirmed. Refresh the case to read updated state."
-            {
-                "Transaction confirmed. Refresh current evidence before another action."
-            } else {
-                status
-            };
+            let status = receipt_message(status, stake, !context.is_empty());
             text("transaction", &format!("{hash}\n{context}\n{status}"));
-            notice(status);
-            return Ok(());
+            return Ok(notice(status));
         }
         _ => {}
     }
@@ -1634,15 +1652,16 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
         command,
         Command::Commit | Command::Reveal | Command::Action(_) | Command::Stake(_)
     ) {
-        s.request_boundary = Some(crate::moderator_requests::boundary(&s.profile, &s.voter).await?);
+        s.request_boundary =
+            Some(crate::moderator::requests::boundary(&s.profile, &s.voter).await?);
         s.current()?;
     }
-    match command {
+    let message = match command {
         Command::ReadStake => {
             let evidence = evidence::read_moderator(&s.profile, &s.voter).await?;
             s.current()?;
             app.borrow_mut().controls.moderator = Some(evidence);
-            notice("Stake and balance refreshed at a verified source block.");
+            notice("Stake and balance refreshed at a verified source block.")
         }
         Command::Work(next) => {
             let vault_generation = vault.generation();
@@ -1705,7 +1724,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                         "Unlock private storage and refresh again to include encrypted saved votes."
                     }
                 )
-            });
+            })
         }
         Command::Page(next) => {
             let cursor = if next {
@@ -1733,7 +1752,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
             );
             journey::browse_rows(&page.cases);
             app.borrow_mut().controls.next = page.next_cursor;
-            notice("Case page verified at one canonical source block.");
+            notice("Case page verified at one canonical source block.")
         }
         Command::Read | Command::RefreshSelected | Command::Open(_) => {
             let id = match command {
@@ -1751,7 +1770,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
             };
             input("case-id").set_value(&id.to_decimal());
             show_case(app, &s, id).await?;
-            notice("Selected case refreshed from verified evidence.");
+            notice("Selected case refreshed from verified evidence.")
         }
         Command::Review => {
             let e = selected(&app.borrow())?.clone();
@@ -1799,7 +1818,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                 "Review documents loaded. Read the guidelines and content before preparing a vote."
             } else {
                 "Guidelines could not be authenticated. Vote preparation is blocked."
-            });
+            })
         }
         Command::Draft(vote) => {
             let e = selected(&app.borrow())?.clone();
@@ -1807,7 +1826,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                 return Err("REVIEW_REQUIRED");
             }
             s.draft(e.snapshot.case_id, vote).await?;
-            notice("Vote saved in encrypted local storage. Export and verify the recovery file before commit.");
+            notice("Vote saved in encrypted local storage. Export and verify the recovery file before commit.")
         }
         Command::Change(vote) => {
             let e = selected(&app.borrow())?.clone();
@@ -1824,7 +1843,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
             }
             s.change_choice(&original, vote).await?;
             app.borrow_mut().controls.changing = None;
-            notice("Choice changed. Save and verify new recovery before committing.");
+            notice("Choice changed. Save and verify new recovery before committing.")
         }
         Command::Commit => {
             let e = selected(&app.borrow())?.clone();
@@ -1833,12 +1852,12 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                 return Err("REVIEW_REQUIRED");
             }
             let result = s.commit(&v).await?;
-            broadcast_result(app, &s, result, false);
+            broadcast_result(app, &s, result, false)
         }
         Command::Reveal => {
             let id = selected(&app.borrow())?.snapshot.case_id;
             let result = s.reveal(id).await?;
-            broadcast_result(app, &s, result, false);
+            broadcast_result(app, &s, result, false)
         }
         Command::CheckReveal => {
             let id = selected(&app.borrow())?.snapshot.case_id;
@@ -1863,7 +1882,7 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
                     moment(report.checked_wall_ms / 1000)
                 ),
             );
-            notice("");
+            notice("")
         }
         Command::Action(action) => {
             let e = selected(&app.borrow())?.clone();
@@ -1871,19 +1890,19 @@ async fn execute(app: &Rc<RefCell<App>>, command: Command) -> Result<()> {
             let result = s
                 .action(e.snapshot.case_id, action, c.challenges, c.preliminary)
                 .await?;
-            broadcast_result(app, &s, result, false);
+            broadcast_result(app, &s, result, false)
         }
         Command::Stake(action) => {
             let result = s.stake_action(action).await?;
-            broadcast_result(app, &s, result, true);
+            broadcast_result(app, &s, result, true)
         }
         _ => return Err("INVALID_ACTION"),
-    }
-    Ok(())
+    };
+    Ok(message)
 }
 
 // Refuse simultaneous sends across tabs instead of queuing a stale action.
-async fn coordinated(a: &Rc<RefCell<App>>, command: Command) -> Result<()> {
+async fn coordinated(a: &Rc<RefCell<App>>, command: Command) -> Result<String> {
     if !matches!(
         command,
         Command::Draft(_)
@@ -1897,57 +1916,107 @@ async fn coordinated(a: &Rc<RefCell<App>>, command: Command) -> Result<()> {
         return execute(a, command).await;
     }
     let epoch = a.borrow().wallet.epoch;
-    let navigator = js_sys::Reflect::get(web_sys::window().unwrap().as_ref(), &"navigator".into())
-        .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?;
-    let locks = js_sys::Reflect::get(&navigator, &"locks".into())
-        .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?;
-    let request = js_sys::Reflect::get(&locks, &"request".into())
-        .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?
-        .dyn_into::<js_sys::Function>()
-        .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?;
-    let result = Rc::new(RefCell::new(None));
-    let output = result.clone();
     let state = a.clone();
-    let callback = Closure::<dyn FnMut(wasm_bindgen::JsValue) -> js_sys::Promise>::new(
-        move |lock: wasm_bindgen::JsValue| {
-            let output = output.clone();
+    crate::coordination::run_if_available(
+        "swarm-moderator-requests-v1",
+        crate::coordination::Errors {
+            unavailable: "REQUEST_COORDINATION_UNAVAILABLE",
+            busy: "REQUEST_BUSY_IN_ANOTHER_TAB",
+            failed: "REQUEST_COORDINATION_FAILED",
+        },
+        move || {
             let state = state.clone();
-            wasm_bindgen_futures::future_to_promise(async move {
-                let r = if lock.is_null() {
-                    Err("REQUEST_BUSY_IN_ANOTHER_TAB")
-                } else if state.borrow().wallet.epoch != epoch {
+            async move {
+                if state.borrow().wallet.epoch != epoch {
                     Err("CONTEXT_CHANGED")
                 } else {
                     execute(&state, command).await
-                };
-                *output.borrow_mut() = Some(r);
-                Ok(wasm_bindgen::JsValue::UNDEFINED)
-            })
+                }
+            }
         },
-    );
-    let options = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &options,
-        &"ifAvailable".into(),
-        &wasm_bindgen::JsValue::TRUE,
     )
-    .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?;
-    let promise = request
-        .call3(
-            &locks,
-            &"swarm-moderator-requests-v1".into(),
-            &options,
-            callback.as_ref(),
-        )
-        .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?
-        .dyn_into::<js_sys::Promise>()
-        .map_err(|_| "REQUEST_COORDINATION_UNAVAILABLE")?;
-    JsFuture::from(promise)
-        .await
-        .map_err(|_| "REQUEST_COORDINATION_FAILED")?;
-    let r = result
-        .borrow_mut()
-        .take()
-        .ok_or("REQUEST_COORDINATION_FAILED")?;
-    r
+    .await?
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    use workflow::{ReceiptResult, ReceiptStatus};
+
+    #[test]
+    fn receipt_wording_preserves_the_original_return_context() {
+        for (status, stake, context, expected) in [
+            (
+                ReceiptStatus::Unavailable,
+                true,
+                true,
+                "Receipt not yet available. Refresh before any retry.",
+            ),
+            (
+                ReceiptStatus::Reverted,
+                true,
+                false,
+                "Transaction reverted. Refresh evidence before trying again.",
+            ),
+            (
+                ReceiptStatus::Confirmed,
+                false,
+                true,
+                "Transaction confirmed. Refresh the case to read updated state.",
+            ),
+            (
+                ReceiptStatus::Confirmed,
+                false,
+                false,
+                "Transaction confirmed. Refresh current evidence before another action.",
+            ),
+            (
+                ReceiptStatus::Confirmed,
+                true,
+                false,
+                "Transaction confirmed. Return to Stake and refresh its balance and allowance.",
+            ),
+            (
+                ReceiptStatus::Confirmed,
+                true,
+                true,
+                "Transaction confirmed. Return to Stake and refresh its balance and allowance.",
+            ),
+        ] {
+            assert_eq!(
+                receipt_message(
+                    ReceiptResult {
+                        status,
+                        journal_message: None
+                    },
+                    stake,
+                    context
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn journal_resolution_is_never_reworded_as_ordinary_stake_success() {
+        let message =
+            "Same-nonce cancellation verified. Refresh current evidence before another action.";
+        for status in [ReceiptStatus::Confirmed, ReceiptStatus::Reverted] {
+            for stake in [false, true] {
+                for context in [false, true] {
+                    assert_eq!(
+                        receipt_message(
+                            ReceiptResult {
+                                status,
+                                journal_message: Some(message),
+                            },
+                            stake,
+                            context
+                        ),
+                        message
+                    );
+                }
+            }
+        }
+    }
 }

@@ -172,7 +172,8 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
                     .is_empty()),
     );
     let waiting_wallet = s
-        .pending_wallet
+        .journal
+        .pending()
         .as_ref()
         .is_some_and(|p| p.record["state"] == "requesting");
     text(
@@ -189,7 +190,7 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
             ""
         },
     );
-    hidden("history-attention", s.history_faults.is_empty());
+    hidden("history-attention", !s.journal.has_faults());
     hidden("source-funding-details", s.funding.is_none());
     hidden("publication-connect", s.account.is_some());
     hidden("profile-candidate-controls", s.setup_candidate.is_none());
@@ -331,21 +332,7 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
         })
         .unwrap_or_else(|| "Choose a source and the account that will pay.".into()),
     );
-    text(
-        "review-cost",
-        &p.zip(s.funding.as_ref())
-            .map(|(p, f)| {
-                format!(
-                    "Minimum {} · Balance {} · Allowance {}",
-                    short_amount(f.minimum, p.display.as_ref()),
-                    short_amount(f.balance, p.display.as_ref()),
-                    short_amount(f.allowance, p.display.as_ref())
-                )
-            })
-            .unwrap_or_else(|| {
-                "Fee, balance and allowance have not been read for this context.".into()
-            }),
-    );
+    text("review-cost", &review_cost(&s));
     let closed = s
         .funding
         .as_ref()
@@ -396,7 +383,7 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
         text("publication-current-source", &v.source);
         hidden("refund", !v.refund || !s.refund_ready);
     }
-    if let Some(pending) = &s.pending_wallet {
+    if let Some(pending) = &s.journal.pending() {
         text(
             "recover-pending",
             if s.busy {
@@ -452,32 +439,49 @@ pub(super) fn request_summary(r: &Value, display: Option<&swarm_core::Display>) 
         r["state"].as_str().unwrap_or("")
     )
 }
-pub(super) fn after_action(a: &Rc<RefCell<App>>, action: &str, ok: bool, revision: u64) {
+pub(super) fn review_cost(s: &App) -> String {
+    s.profile
+        .as_ref()
+        .zip(s.funding.as_ref())
+        .map(|(p, f)| {
+            format!(
+                "Minimum {} · Balance {} · Allowance {}",
+                short_amount(f.minimum, p.display.as_ref()),
+                short_amount(f.balance, p.display.as_ref()),
+                short_amount(f.allowance, p.display.as_ref())
+            )
+        })
+        .unwrap_or_else(|| "Fee, balance and allowance have not been read for this context.".into())
+}
+
+pub(super) fn after_action(a: &Rc<RefCell<App>>, action: Action, ok: bool, revision: u64) {
     render(a);
     if a.borrow().journey.revision != revision {
         return;
     }
     if ok {
         match action {
-            "profile" | "fetchprofile" if a.borrow().journey.view == View::Source => {
+            Action::LoadProfile | Action::FetchProfile
+                if a.borrow().journey.view == View::Source =>
+            {
                 focus("source-candidate")
             }
-            "useprofile" if a.borrow().journey.view == View::Source => focus("connect"),
-            "connect" if a.borrow().journey.view == View::Source => focus("source-return"),
-            "draft" => show(a, View::Review, false),
-            "importdraft" => show(a, View::Editor, false),
-            "uploadcontent" | "checkcontent" => {
+            Action::UseProfile if a.borrow().journey.view == View::Source => focus("connect"),
+            Action::Connect if a.borrow().journey.view == View::Source => focus("source-return"),
+            Action::PreviewDraft => show(a, View::Review, false),
+            Action::ImportDraft => show(a, View::Editor, false),
+            Action::UploadContent | Action::CheckContent => {
                 let _ = el("inspection-tools").set_attribute("open", "");
             }
-            "publication" | "case" => {
+            Action::OpenPublication | Action::ReadCase => {
                 show(a, View::Publications, false);
                 if a.borrow().journey.publication.is_some() {
                     focus("publication-current-heading");
                 }
             }
-            "submissionreceipt" | "receipt" => {
+            Action::CheckSubmissionReceipt | Action::CheckReceipt => {
                 if let Ok((p, who, _)) = context(a) {
-                    if let Ok(records) = history::load_current(a, &p, &who) {
+                    if let Ok(records) = journal(a).load_current(&p, &who) {
                         if records.iter().any(|r| {
                             r["action"] == "submit"
                                 && r["state"] == "confirmed"
@@ -491,12 +495,17 @@ pub(super) fn after_action(a: &Rc<RefCell<App>>, action: &str, ok: bool, revisio
             }
             _ => {}
         }
-    } else if action == "draft" {
+    } else if action == Action::PreviewDraft {
         show(a, View::Editor, false);
         validation::focus_first();
     }
-    if ["approve", "submit", "approvalreceipt", "submissionreceipt"].contains(&action)
-        && a.borrow().journey.view == View::Review
+    if matches!(
+        action,
+        Action::Approve
+            | Action::Submit
+            | Action::CheckApprovalReceipt
+            | Action::CheckSubmissionReceipt
+    ) && a.borrow().journey.view == View::Review
     {
         focus("transaction-feedback");
     }
@@ -513,10 +522,10 @@ pub(super) fn bind(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsValue> {
         if let Some((id, key)) = selected {
             if let Some(key) = key {
                 state.borrow_mut().publication_target = Some(key);
-                dispatch(state.clone(), "publication");
+                dispatch(state.clone(), Action::OpenPublication);
             } else {
                 input("caseid").set_value(&id);
-                dispatch(state.clone(), "case");
+                dispatch(state.clone(), Action::ReadCase);
             }
         }
     });

@@ -1,9 +1,8 @@
 //! Exact metadata authoring and unsigned LIST publication for unchanged contracts.
 use crate::moderator::Uint256;
-use crate::review::{parse_metadata, swarm_reference};
+use crate::review::{normalize_topic_text, parse_metadata, swarm_reference};
 use crate::{keccak256_hex, selector, CoreError};
 use serde_json::Value;
-use unicode_normalization::UnicodeNormalization;
 type Result<T> = std::result::Result<T, CoreError>;
 #[derive(Clone, Debug)]
 pub struct Draft {
@@ -25,21 +24,6 @@ pub fn normalize_reference(value: &str) -> Result<String> {
 }
 fn hash(value: &str) -> Result<String> {
     normalize_reference(value)
-}
-fn whitespace(c: char) -> bool {
-    matches!(c,'\u{0009}'..='\u{000d}'|'\u{0020}'|'\u{00a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}')
-}
-fn normalize_topic(value: &str) -> String {
-    value
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
-        .nfc()
-        .collect::<String>()
-        .split(whitespace)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 pub fn create_draft(content: &str, metadata: &Value) -> Result<Draft> {
     let content_hash = hash(content)?;
@@ -68,7 +52,7 @@ pub fn create_draft(content: &str, metadata: &Value) -> Result<Draft> {
     let mut topics = vec![];
     for item in input {
         let original = item.as_str().ok_or(CoreError("INVALID_TOPICS"))?;
-        let normalized = normalize_topic(original);
+        let normalized = normalize_topic_text(original);
         if topics.contains(&normalized) {
             return Err(CoreError("DUPLICATE_TOPICS"));
         }
@@ -234,7 +218,7 @@ impl AuthorFields {
         let topics = self
             .topics
             .iter()
-            .map(|s| normalize_topic(s))
+            .map(|s| normalize_topic_text(s))
             .collect::<Vec<_>>();
         let optional = |s: &String| if s.is_empty() { None } else { Some(s.clone()) };
         let m = crate::review::Metadata {

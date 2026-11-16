@@ -1,9 +1,6 @@
 //! Read-only reader journey. No wallet, transaction or private storage API.
-#[path = "search/reader.rs"]
 mod reader;
-#[path = "search/setup.rs"]
 mod setup;
-#[path = "search/view.rs"]
 mod view;
 use crate::{transport::fetch, BrowserResult as Result};
 use reader::{Context, Reader};

@@ -101,6 +101,19 @@ fn schema_version<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<u8, D:
 fn js_whitespace(c: char) -> bool {
     matches!(c,'\u{0009}'..='\u{000d}'|'\u{0020}'|'\u{00a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}')
 }
+/// Author/query normalization only; received metadata must already be canonical.
+pub(crate) fn normalize_topic_text(value: &str) -> String {
+    value
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .nfc()
+        .collect::<String>()
+        .split(js_whitespace)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 fn bounded(s: &str, low: usize, high: usize) -> bool {
     (low..=high).contains(&s.chars().count())
 }

@@ -115,9 +115,6 @@ fn enabled(id: &str, yes: bool) {
         el(id).set_attribute("disabled", "").unwrap();
     }
 }
-fn unresolved(r: &Value) -> bool {
-    !["confirmed", "failed", "cancelled", "rejected"].contains(&r["state"].as_str().unwrap_or(""))
-}
 fn matches(r: &Value, d: &Draft) -> bool {
     r["action"] == "submit"
         && r["intent"]["contentHash"] == d.content_hash
@@ -128,14 +125,8 @@ fn latest<'a>(records: &'a [Value], action: &str) -> Option<&'a Value> {
     records
         .iter()
         .rev()
-        .find(|r| r["action"] == action && unresolved(r))
+        .find(|r| r["action"] == action && !history::resolved(r))
         .or_else(|| records.iter().rev().find(|r| r["action"] == action))
-}
-fn hash(record: &Value) -> Option<&str> {
-    record["resolution"]["hash"]
-        .as_str()
-        .or(record["candidateHash"].as_str())
-        .or(record["hash"].as_str())
 }
 pub(super) async fn refresh_funds(a: &Rc<RefCell<App>>) -> Result<()> {
     a.borrow_mut().funding = None;
@@ -157,29 +148,29 @@ pub(super) async fn refresh_funds(a: &Rc<RefCell<App>>) -> Result<()> {
         allowance,
         source: c.source,
     });
-    text("funds-feedback", success("funds"));
+    text("funds-feedback", Action::ReadFunds.success_message());
     Ok(())
 }
-pub(super) async fn check_latest(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
+pub(super) async fn check_latest(a: &Rc<RefCell<App>>, kind: &str) -> Result<String> {
     let (p, who, _) = context(a)?;
-    let records = history::load_current(a, &p, &who)?;
-    let r = latest(&records, action).ok_or("SAVED_REQUEST_NOT_FOUND")?;
-    let h = hash(r).ok_or("REQUEST_HASH_REQUIRED")?;
+    let records = journal(a).load_current(&p, &who)?;
+    let r = latest(&records, kind).ok_or("SAVED_REQUEST_NOT_FOUND")?;
+    let h = history::recovery_hash(r).ok_or("REQUEST_HASH_REQUIRED")?;
     input("txhash").set_value(h);
     a.borrow_mut().recovery_target = Some(recovery::identity(r));
-    let _ = recovery::check(a).await?;
+    let outcome = recovery::check(a).await?;
     after_receipt(a).await;
-    Ok(())
+    Ok(outcome.message)
 }
 pub(super) async fn after_receipt(a: &Rc<RefCell<App>>) {
     let Ok((p, who, _)) = context(a) else { return };
-    let Ok(records) = history::load_current(a, &p, &who) else {
+    let Ok(records) = journal(a).load_current(&p, &who) else {
         return;
     };
     if records.iter().any(|r| {
         r["action"] == "approve"
             && r["state"] == "confirmed"
-            && hash(r) == Some(value("txhash").as_str())
+            && history::recovery_hash(r) == Some(value("txhash").as_str())
     }) {
         if let Err(code) = refresh_funds(a).await {
             text("funds-feedback",&format!("The approval receipt was checked, but the current allowance could not be refreshed. Refresh fee and balances before submitting. Details: {code}"));
@@ -203,15 +194,6 @@ pub(super) fn network(chain: u64) -> String {
         100 => format!("Gnosis (chain {chain})"),
         11155111 => format!("Sepolia (chain {chain})"),
         _ => format!("Chain {chain}"),
-    }
-}
-pub(super) fn success(action: &str) -> &'static str {
-    match action {
-        "funds"=>"Current minimum fee, token balance and allowance refreshed below. Your chosen fee was kept.",
-        "minimum"=>"The chosen fee now equals the current minimum. Review its readable amount and exact base units below.",
-        "guidelines"=>"Pinned guidelines verified. Open the guidelines text and review it with the exact metadata before acknowledging.",
-        "connect"=>"Wallet account connected on the selected chain. Continue with the publisher prerequisites.",
-        _=>"Action finished. Read its result and the next step below.",
     }
 }
 pub(super) fn explain(a: &Rc<RefCell<App>>, code: &str, fallback: &str) -> String {
@@ -277,7 +259,7 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
             s.busy,
         )
     };
-    let result = context(a).and_then(|(p, who, _)| history::load_current(a, &p, &who));
+    let result = context(a).and_then(|(p, who, _)| journal(a).load_current(&p, &who));
     let records = result.as_deref().unwrap_or(&[]);
     let approval = latest(records, "approve");
     let submission = latest(records, "submit");
@@ -314,13 +296,15 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
             .zip(selected)
             .is_some_and(|(f, n)| f.allowance >= n),
         journal: result.is_ok()
-            && context(a).is_ok_and(|(p, who, _)| !history::has_fault(a, &p, &who))
+            && context(a).is_ok_and(|(p, who, _)| !journal(a).has_fault(&p, &who))
             && archive::room(a),
         approval_open: records
             .iter()
-            .any(|r| r["action"] == "approve" && unresolved(r)),
+            .any(|r| r["action"] == "approve" && !history::resolved(r)),
         submission_open: records.iter().any(|r| {
-            r["action"] == "submit" && draft.as_ref().is_none_or(|d| matches(r, d)) && unresolved(r)
+            r["action"] == "submit"
+                && draft.as_ref().is_none_or(|d| matches(r, d))
+                && !history::resolved(r)
         }),
         submitted: records
             .iter()
@@ -421,11 +405,11 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
         ),
         (
             "approvalreceipt",
-            approval.is_some_and(|r| hash(r).is_some()),
+            approval.is_some_and(|r| history::recovery_hash(r).is_some()),
         ),
         (
             "submissionreceipt",
-            submission.is_some_and(|r| hash(r).is_some()),
+            submission.is_some_and(|r| history::recovery_hash(r).is_some()),
         ),
         ("receipt", connected),
         ("history", connected),

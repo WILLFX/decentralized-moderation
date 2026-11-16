@@ -1,5 +1,7 @@
 //! Explicit public content upload/readback and separate-origin inspection.
 use super::*;
+const INSPECTION_UNCHECKED: &str =
+    "Content inspection has not been checked for this reference and access context.";
 #[derive(Default)]
 pub(super) struct ContentState {
     pub checked: Option<(String, Vec<u8>)>,
@@ -21,10 +23,7 @@ impl ContentState {
 pub(super) fn clear(a: &Rc<RefCell<App>>) {
     a.borrow_mut().content = ContentState::default();
     input("contentack").set_checked(false);
-    text(
-        "content-feedback",
-        "Content inspection has not been checked for this reference and access context.",
-    );
+    text("content-feedback", INSPECTION_UNCHECKED);
 }
 fn reference() -> Result<String> {
     swarm_core::publisher::normalize_reference(&value("reference")).map_err(|e| e.0)
@@ -64,14 +63,15 @@ pub(super) fn require(a: &Rc<RefCell<App>>) -> Result<()> {
         Err("CONTENT_INSPECTION_REQUIRED")
     }
 }
-pub(super) fn selected(a: &Rc<RefCell<App>>) {
+pub(super) fn selected(a: &Rc<RefCell<App>>) -> String {
     clear(a);
     invalidate_review(a);
     let info=input("contentfile").files().and_then(|f|f.get(0)).map(|f|format!("Selected file: {} ({} bytes). Declared type: {}. Selecting it does not upload it or change the current reference. Upload uses your applied Bee settings and publishes these bytes without encryption.",f.name(),f.size(),f.type_())).unwrap_or_else(||"No local content file selected.".into());
     text("content-file-note", &info);
     validation::field("contentfile", None);
+    INSPECTION_UNCHECKED.into()
 }
-pub(super) fn apply_bee(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) fn apply_bee(a: &Rc<RefCell<App>>) -> Result<String> {
     if a.borrow().profile.is_none() {
         return Err("PROFILE_REQUIRED");
     }
@@ -87,12 +87,13 @@ pub(super) fn apply_bee(a: &Rc<RefCell<App>>) -> Result<()> {
     for id in ["beeendpoint", "beebatch", "beeauth"] {
         validation::field(id, None);
     }
-    text("content-feedback","Local Bee upload settings applied. They do not change the deployment pins. Check or upload your content again; access credentials remain in memory and are excluded from draft files.");
-    Ok(())
+    let message = "Local Bee upload settings applied. They do not change the deployment pins. Check or upload your content again; access credentials remain in memory and are excluded from draft files.";
+    text("content-feedback", message);
+    Ok(message.into())
 }
-pub(super) async fn upload(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) async fn upload(a: &Rc<RefCell<App>>) -> ActionResult<String> {
     if a.borrow().profile.is_none() {
-        return Err("PROFILE_REQUIRED");
+        return Err("PROFILE_REQUIRED".into());
     }
     let epoch = a.borrow().epoch;
     let config = a.borrow().upload.clone().ok_or("UPLOAD_CONFIG_REQUIRED")?;
@@ -122,8 +123,12 @@ pub(super) async fn upload(a: &Rc<RefCell<App>>) -> Result<()> {
         } else {
             ""
         };
-        text("content-feedback",&format!("The upload/readback did not verify. The current reference has been kept. Expected file reference: {expected}. The server may already have stored data; inspect it before retrying.{inspection} Details: {code}"));
-        return Err("CONTENT_UPLOAD_UNVERIFIED");
+        let message = format!("The upload/readback did not verify. The current reference has been kept. Expected file reference: {expected}. The server may already have stored data; inspect it before retrying.{inspection} Details: {code}");
+        text("content-feedback", &message);
+        return Err(ActionFailure {
+            code: "CONTENT_UPLOAD_UNVERIFIED",
+            message: Some(message),
+        });
     }
     active(a, epoch)?;
     invalidate_review(a);
@@ -133,10 +138,11 @@ pub(super) async fn upload(a: &Rc<RefCell<App>>) -> Result<()> {
     a.borrow_mut().content.checked = Some((expected.clone(), bytes));
     authoring::save_tab(a);
     validation::refresh(a);
-    text("content-feedback",&format!("Content uploaded and exact readback verified: {expected}. The reference now points to that raw file. Inspect your original file or download the checked copy, then acknowledge it. Metadata has not been uploaded and no moderation case was submitted."));
-    Ok(())
+    let message = format!("Content uploaded and exact readback verified: {expected}. The reference now points to that raw file. Inspect your original file or download the checked copy, then acknowledge it. Metadata has not been uploaded and no moderation case was submitted.");
+    text("content-feedback", &message);
+    Ok(message)
 }
-pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<String> {
     if input("contentcollection").checked() {
         return Err("COLLECTION_VIEWER_REQUIRED");
     }
@@ -164,10 +170,11 @@ pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<()> {
     }
     a.borrow_mut().content.mismatch = false;
     a.borrow_mut().content.checked = Some((r, bytes));
-    text("content-feedback","Raw content bytes match this reference. That authenticates bytes, not their safety or your metadata's honesty. Inspect a downloaded copy or the separate viewer before acknowledging.");
-    Ok(())
+    let message = "Raw content bytes match this reference. That authenticates bytes, not their safety or your metadata's honesty. Inspect a downloaded copy or the separate viewer before acknowledging.";
+    text("content-feedback", message);
+    Ok(message.into())
 }
-pub(super) fn download(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) fn download(a: &Rc<RefCell<App>>) -> Result<String> {
     let s = a.borrow();
     let (r, bytes) = s.content.checked.as_ref().ok_or("CONTENT_BYTES_REQUIRED")?;
     if *r != reference()? {
@@ -189,8 +196,9 @@ pub(super) fn download(a: &Rc<RefCell<App>>) -> Result<()> {
     link.set_download(&format!("swarm-content-{}.bin", &r[2..10]));
     link.click();
     web_sys::Url::revoke_object_url(&url).map_err(|_| "EXPORT_FAILED")?;
-    text("content-feedback","Checked content prepared as an octet-stream download. It has not been rendered inside this publisher. Inspect it with an appropriate viewer and acknowledge the exact content.");
-    Ok(())
+    let message = "Checked content prepared as an octet-stream download. It has not been rendered inside this publisher. Inspect it with an appropriate viewer and acknowledge the exact content.";
+    text("content-feedback", message);
+    Ok(message.into())
 }
 pub(super) fn bind(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsValue> {
     let state = a.clone();
@@ -210,7 +218,8 @@ pub(super) fn bind(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsValue> {
             Err(code) => {
                 e.prevent_default();
                 text("content-feedback", &help(code));
-                validation::action_error("opencontent", code);
+                // Opening and checking content share the same gateway validation.
+                validation::action_error(Action::CheckContent, code);
             }
         }
     });

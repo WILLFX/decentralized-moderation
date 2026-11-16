@@ -5,9 +5,7 @@ use crate::{
 use serde_json::{json, Value};
 use swarm_core::moderator::{decode_case, decode_topics, CaseInfo, Uint256};
 use swarm_core::publisher::Draft;
-use swarm_core::{
-    link_checks, selector, verify_guidelines, verify_link, verify_runtime, ModeratorProfile,
-};
+use swarm_core::{selector, ModeratorProfile};
 #[derive(Clone)]
 pub(super) struct Context {
     pub source: Value,
@@ -49,28 +47,14 @@ async fn begin_at(p: &ModeratorProfile, tag: &str) -> Result<Context> {
         pin: json!({"blockHash":hash,"requireCanonical":true}),
         source,
     };
-    let d = &p.deployment;
-    for pin in swarm_core::versioning::runtime_pins(d) {
-        verify_runtime(
-            pin,
-            as_str(&rpc(p, "eth_getCode", json!([pin.address, c.pin])).await?)?,
-        )
-        .map_err(|e| e.0)?;
-    }
-    for l in link_checks(d) {
-        verify_link(
-            &l,
-            &view(p, &c, &l.contract_address, l.signature, "").await?,
-        )
-        .map_err(|e| e.0)?;
-    }
-    verify_guidelines(
-        d,
-        &view(p, &c, &d.moderation.address, "guidelinesVersion()", "").await?,
-        &view(p, &c, &d.moderation.address, "guidelinesHash()", "").await?,
+    crate::versioning::verify_deployment(
+        &p.deployment,
+        &c.pin,
+        |method, args| rpc(p, method, args),
+        None,
+        |error, _| error,
     )
-    .map_err(|e| e.0)?;
-    crate::versioning::verify(p, &c.pin).await?;
+    .await?;
     Ok(c)
 }
 pub(super) async fn finish(p: &ModeratorProfile, c: &Context) -> Result<()> {

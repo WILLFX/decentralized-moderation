@@ -2,7 +2,8 @@
 use crate::{transport::quantity, BrowserResult as Result};
 use js_sys::{Array, Function, Promise, Reflect};
 use serde_json::{json, Value};
-use wasm_bindgen::{JsCast, JsValue};
+use std::rc::Rc;
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 #[path = "wallet/discovery.rs"]
@@ -13,6 +14,105 @@ pub(crate) use discovery::{
 pub(crate) fn provider() -> Result<JsValue> {
     discovery::provider()
 }
+
+#[derive(Default)]
+pub(crate) struct Subscriptions {
+    bound: bool,
+    listeners: Vec<Listener>,
+}
+
+struct Listener {
+    provider: JsValue,
+    remove: Function,
+    event: &'static str,
+    handler: Closure<dyn FnMut(JsValue)>,
+}
+
+impl Listener {
+    fn remove(&self) -> bool {
+        self.remove
+            .call2(
+                &self.provider,
+                &self.event.into(),
+                self.handler.as_ref().unchecked_ref(),
+            )
+            .is_ok()
+    }
+}
+
+impl Subscriptions {
+    /// Call outside an App borrow: providers may invoke callbacks during removal.
+    /// Failed removals retain their closures so JavaScript can still call them.
+    pub(crate) fn clear(&mut self) -> Result<()> {
+        self.bound = false;
+        self.listeners = std::mem::take(&mut self.listeners)
+            .into_iter()
+            .filter(|listener| !listener.remove())
+            .collect();
+        if self.listeners.is_empty() {
+            Ok(())
+        } else {
+            Err("WALLET_EVENT_CLEANUP_FAILED")
+        }
+    }
+
+    /// The caller owns event policy and must permit synchronous provider callbacks.
+    pub(crate) fn install(
+        &mut self,
+        on_event: impl Fn(&'static str, JsValue) + 'static,
+    ) -> Result<()> {
+        if self.bound {
+            return Ok(());
+        }
+        self.clear()?;
+        let provider = provider()?;
+        let on = Reflect::get(&provider, &"on".into())
+            .and_then(|value| value.dyn_into::<Function>())
+            .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?;
+        // Validate cleanup support before registering any callback.
+        let remove = Reflect::get(&provider, &"removeListener".into())
+            .and_then(|value| value.dyn_into::<Function>())
+            .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?;
+        let on_event = Rc::new(on_event);
+        let listeners: Vec<Listener> = ["accountsChanged", "chainChanged", "disconnect"]
+            .into_iter()
+            .map(|event| {
+                let on_event = on_event.clone();
+                Listener {
+                    provider: provider.clone(),
+                    remove: remove.clone(),
+                    event,
+                    handler: Closure::<dyn FnMut(JsValue)>::new(move |value| {
+                        on_event(event, value)
+                    }),
+                }
+            })
+            .collect();
+        match crate::registration::install_handlers(
+            listeners,
+            |listener| {
+                on.call2(
+                    &listener.provider,
+                    &listener.event.into(),
+                    listener.handler.as_ref().unchecked_ref(),
+                )
+                .is_ok()
+            },
+            Listener::remove,
+        ) {
+            Ok(listeners) => {
+                self.listeners = listeners;
+                self.bound = true;
+                Ok(())
+            }
+            Err(retained) => {
+                self.listeners = retained;
+                Err("WALLET_EVENT_REGISTRATION_FAILED")
+            }
+        }
+    }
+}
+
 async fn request(method: &str, params: Value) -> Result<JsValue> {
     let p = provider()?;
     let f = Reflect::get(&p, &"request".into())

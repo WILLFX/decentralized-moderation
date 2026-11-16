@@ -2,7 +2,7 @@
 //! Lock invalidates pending asynchronous work. Callers must await each mutation.
 //! Lock drops secrets and derived keys; browser/Rust allocator copies cannot be
 //! guaranteed to be erased immediately. Raw WebCrypto buffers are cleared.
-use super::BrowserResult;
+use crate::BrowserResult;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::{cell::RefCell, rc::Rc};
 use swarm_core::recovery::{self, Cipher, Envelope, Kdf, Payload, VoteContext, VoteRecord};

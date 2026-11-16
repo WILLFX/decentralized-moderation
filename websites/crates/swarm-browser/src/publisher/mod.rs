@@ -1,31 +1,17 @@
 //! Publisher UI: exact metadata bytes, pinned reads and explicit wallet actions.
-#[path = "publisher/archive.rs"]
 mod archive;
-#[path = "publisher/authoring.rs"]
 mod authoring;
-#[path = "publisher/content.rs"]
 mod content;
-#[path = "publisher/history.rs"]
 mod history;
-#[path = "publisher/io.rs"]
 mod io;
-#[path = "publisher/journey.rs"]
 mod journey;
-#[path = "publisher/ledger.rs"]
 mod ledger;
-#[path = "publisher/presentation.rs"]
 mod presentation;
-#[path = "publisher/progress.rs"]
 mod progress;
-#[path = "publisher/publications.rs"]
 mod publications;
-#[path = "publisher/recovery.rs"]
 mod recovery;
-#[path = "publisher/setup.rs"]
 mod setup;
-#[path = "publisher/transfers.rs"]
 mod transfers;
-#[path = "publisher/validation.rs"]
 mod validation;
 use crate::{
     transport::{as_str, rpc},
@@ -41,16 +27,134 @@ use swarm_core::{
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{Element, HtmlInputElement};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    PrepareArchive,
+    VerifyArchive,
+    CommitArchive,
+    HistoryPrevious,
+    HistoryNext,
+    PublicationPrevious,
+    PublicationNext,
+    LoadProfile,
+    SelectVersion,
+    FetchProfile,
+    UseProfile,
+    SelectContent,
+    ApplyBee,
+    UploadContent,
+    CheckContent,
+    DownloadContent,
+    Connect,
+    ReadFunds,
+    UseMinimum,
+    UseMimeType,
+    CheckApprovalReceipt,
+    CheckSubmissionReceipt,
+    PreviewDraft,
+    LoadGuidelines,
+    UploadMetadata,
+    Approve,
+    Submit,
+    ReadCase,
+    ReadOwned,
+    Refund,
+    CheckReceipt,
+    ReadHistory,
+    ExportDraft,
+    ImportDraft,
+    ExportHistory,
+    SaveHistory,
+    ImportHistory,
+    OpenPublication,
+}
+
+impl Action {
+    fn is_archive(self) -> bool {
+        matches!(
+            self,
+            Self::PrepareArchive | Self::VerifyArchive | Self::CommitArchive
+        )
+    }
+    fn is_content(self) -> bool {
+        matches!(
+            self,
+            Self::SelectContent
+                | Self::ApplyBee
+                | Self::UploadContent
+                | Self::CheckContent
+                | Self::DownloadContent
+        )
+    }
+    fn is_authoring_file(self) -> bool {
+        matches!(self, Self::ExportDraft | Self::ImportDraft)
+    }
+    fn writes_history(self) -> bool {
+        matches!(
+            self,
+            Self::Approve
+                | Self::Submit
+                | Self::Refund
+                | Self::CheckReceipt
+                | Self::CheckApprovalReceipt
+                | Self::CheckSubmissionReceipt
+                | Self::OpenPublication
+                | Self::ImportHistory
+                | Self::SaveHistory
+                | Self::CommitArchive
+        )
+    }
+    fn working_message(self) -> &'static str {
+        match self {
+            Self::Approve
+            | Self::Submit
+            | Self::Refund
+            | Self::CheckReceipt
+            | Self::ReadHistory
+            | Self::OpenPublication => "Working… Check the saved request and wallet status below.",
+            Self::Connect => "Working… Review the open wallet request in wallet.",
+            _ => "Working… Wait for this check to finish.",
+        }
+    }
+    fn success_message(self) -> &'static str {
+        match self {
+            Self::ReadFunds => "Current minimum fee, token balance and allowance refreshed below. Your chosen fee was kept.",
+            Self::UseMinimum => "The chosen fee now equals the current minimum. Review its readable amount and exact base units below.",
+            Self::LoadGuidelines => "Pinned guidelines verified. Open the guidelines text and review it with the exact metadata before acknowledging.",
+            Self::Connect => "Wallet account connected on the selected chain. Continue with the publisher prerequisites.",
+            _ => "Action finished. Read its result and the next step below.",
+        }
+    }
+}
+
+struct Outcome {
+    message: String,
+    notice: Option<String>,
+}
+
+struct ActionFailure {
+    code: &'static str,
+    message: Option<String>,
+}
+
+impl From<&'static str> for ActionFailure {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            message: None,
+        }
+    }
+}
+
+type ActionResult<T = Outcome> = std::result::Result<T, ActionFailure>;
+
 #[derive(Default)]
 struct App {
     journey: journey::State,
-    events_bound: bool,
-    wallet_listeners: Vec<WalletListener>,
+    wallet_subscriptions: wallet::Subscriptions,
 
-    history_faults: std::collections::BTreeSet<String>,
-    history_write_lock: bool,
-    history_bases: std::collections::BTreeMap<String, Vec<Value>>,
-    history_cache: std::collections::BTreeMap<String, Vec<Value>>,
+    journal: Rc<history::Journal>,
     profile: Option<ModeratorProfile>,
     upload: Option<Value>,
     account: Option<String>,
@@ -59,7 +163,6 @@ struct App {
     guidelines: bool,
     epoch: u64,
     busy: bool,
-    pending_wallet: Option<presentation::PendingIntent>,
     recovery_target: Option<String>,
     authoring_storage_blocked: bool,
     publication_target: Option<String>,
@@ -74,14 +177,11 @@ struct App {
     history_page: usize,
     publication_page: usize,
 }
-struct WalletListener {
-    provider: JsValue,
-    remove: js_sys::Function,
-    event: &'static str,
-    handler: Closure<dyn FnMut(JsValue)>,
-}
 fn doc() -> web_sys::Document {
     web_sys::window().unwrap().document().unwrap()
+}
+fn journal(a: &Rc<RefCell<App>>) -> Rc<history::Journal> {
+    a.borrow().journal.clone()
 }
 fn el(id: &str) -> Element {
     doc().get_element_by_id(id).unwrap()
@@ -142,11 +242,7 @@ fn invalidate(a: &Rc<RefCell<App>>) {
 }
 fn invalidate_review(a: &Rc<RefCell<App>>) {
     let mut s = a.borrow_mut();
-    if let Some(pending) = s.pending_wallet.as_mut() {
-        if pending.record["state"] == "requesting" {
-            pending.context_changed = true;
-        }
-    }
+    s.journal.context_changed();
     s.archive_candidate = None;
     s.history_page = 0;
     s.publication_page = 0;
@@ -199,7 +295,7 @@ fn context(a: &Rc<RefCell<App>>) -> Result<(ModeratorProfile, String, u64)> {
         s.epoch,
     ))
 }
-fn bind(a: &Rc<RefCell<App>>, id: &str, action: &'static str, event: &str) {
+fn bind(a: &Rc<RefCell<App>>, id: &str, action: Action, event: &str) {
     let state = a.clone();
     let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| dispatch(state.clone(), action));
     el(id)
@@ -207,159 +303,87 @@ fn bind(a: &Rc<RefCell<App>>, id: &str, action: &'static str, event: &str) {
         .unwrap();
     cb.forget();
 }
-fn dispatch(a: Rc<RefCell<App>>, action: &'static str) {
+fn dispatch(a: Rc<RefCell<App>>, action: Action) {
     if a.borrow().busy {
         return;
     }
     let navigation_revision = a.borrow().journey.revision;
     let feedback = presentation::task_feedback(action, a.borrow().journey.view);
     {
-        let mut s = a.borrow_mut();
-        s.journey.notice_view = s.journey.view;
+        let mut state = a.borrow_mut();
+        state.journey.notice_view = state.journey.view;
     }
     presentation::busy(&a, true);
     progress::render(&a);
     text("notice", "Working… Wait for this action to finish.");
-    text(
-        feedback,
-        if ["connect", "approve", "submit", "refund"].contains(&action) {
-            "Working… Review the open wallet request in wallet."
-        } else {
-            "Working… Wait for this check to finish."
-        },
-    );
-    if [
-        "approve",
-        "submit",
-        "refund",
-        "receipt",
-        "history",
-        "publication",
-    ]
-    .contains(&action)
-    {
-        text(
-            feedback,
-            "Working… Check the saved request and wallet status below.",
-        );
-    }
+    text(feedback, action.working_message());
     spawn_local(async move {
-        let r = history::coordinated(&a, action).await;
-        let succeeded = r.is_ok();
+        let result = history::coordinated(&a, action).await;
+        let succeeded = result.is_ok();
+        let wallet_selection_required =
+            matches!(&result, Err(error) if error.code == "WALLET_SELECTION_REQUIRED");
         presentation::busy(&a, false);
-        if let Err(e) = r {
-            let recovery_action = [
-                "approve",
-                "submit",
-                "refund",
-                "receipt",
-                "history",
-                "savehistory",
-                "importhistory",
-                "exporthistory",
-                "publication",
-            ]
-            .contains(&action);
-            let authoring_action = ["exportdraft", "importdraft"].contains(&action);
-            let content_action = [
-                "contentfile",
-                "applybee",
-                "uploadcontent",
-                "checkcontent",
-                "downloadcontent",
-            ]
-            .contains(&action);
-            let message = if action == "importhistory" && e == "FILE_REQUIRED" {
-                "Choose a saved public history JSON file before merging. Existing requests have been kept.\nDetails: FILE_REQUIRED".into()
-            } else if ["preparearchive", "verifyarchive", "commitarchive"].contains(&action) {
-                presentation::error(e)
-            } else if content_action {
-                if e == "CONTENT_UPLOAD_UNVERIFIED" {
-                    el("content-feedback").text_content().unwrap_or_default()
+        match result {
+            Err(error) => {
+                let code = error.code;
+                let message = if action == Action::ImportHistory && code == "FILE_REQUIRED" {
+                    "Choose a saved public history JSON file before merging. Existing requests have been kept.\nDetails: FILE_REQUIRED".into()
+                } else if action.is_content() {
+                    error.message.unwrap_or_else(|| content::help(code))
+                } else if action.is_authoring_file() {
+                    format!("The authoring file could not be saved or loaded. Your current text has been kept. Check the selected file and try saving a draft file again.\nDetails: {code}")
+                } else if action.is_archive()
+                    || matches!(
+                        action,
+                        Action::Approve
+                            | Action::Submit
+                            | Action::Refund
+                            | Action::CheckReceipt
+                            | Action::ReadHistory
+                            | Action::SaveHistory
+                            | Action::ImportHistory
+                            | Action::ExportHistory
+                            | Action::OpenPublication
+                    )
+                {
+                    presentation::error(code)
                 } else {
-                    content::help(e)
+                    code.to_owned()
+                };
+                let message = progress::explain(&a, code, &message);
+                text("notice", &message);
+                text(feedback, &message);
+                if a.borrow().journey.revision == navigation_revision {
+                    validation::action_error(action, code);
                 }
-            } else if authoring_action {
-                format!("The authoring file could not be saved or loaded. Your current text has been kept. Check the selected file and try saving a draft file again.\nDetails: {e}")
-            } else if recovery_action {
-                presentation::error(e)
-            } else {
-                e.to_owned()
-            };
-            let message = progress::explain(&a, e, &message);
-            text("notice", &message);
-            text(feedback, &message);
-            if a.borrow().journey.revision == navigation_revision {
-                validation::action_error(action, e);
+                if action.is_authoring_file() {
+                    text("authoring-note", &message);
+                }
             }
-            if authoring_action {
-                text("authoring-note", &message);
-            }
-        } else {
-            progress::render(&a);
-            let local = if action == "funds" && feedback == "setup-feedback" {
-                let height = a
-                    .borrow()
-                    .funding
-                    .as_ref()
-                    .and_then(|f| {
-                        f.source["number"]
-                            .as_str()
-                            .and_then(|n| crate::transport::quantity(n).ok())
-                    })
-                    .unwrap_or(0);
-                format!(
-                    "{}\nBlock {height} snapshot. Rechecked before payment.",
-                    el("review-cost").text_content().unwrap_or_default()
-                )
-            } else if action == "applybee" && feedback == "bee-feedback" {
-                "Local Bee settings applied. Inspect content again before reviewing.".into()
-            } else if action == "importhistory" {
-                el("transaction").text_content().unwrap_or_default()
-            } else if action == "exporthistory" {
-                "History page download requested. Keep the downloaded file for recovery.".into()
-            } else if ["preparearchive", "verifyarchive", "commitarchive"].contains(&action) {
-                el("archive-feedback").text_content().unwrap_or_default()
-            } else if [
-                "contentfile",
-                "applybee",
-                "uploadcontent",
-                "checkcontent",
-                "downloadcontent",
-            ]
-            .contains(&action)
-            {
-                el("content-feedback").text_content().unwrap_or_default()
-            } else if [
-                "approve",
-                "submit",
-                "refund",
-                "receipt",
-                "approvalreceipt",
-                "submissionreceipt",
-                "history",
-            ]
-            .contains(&action)
-            {
-                el("transaction").text_content().unwrap_or_default()
-            } else if el("notice").text_content().as_deref()
-                != Some("Working… Wait for this action to finish.")
-            {
-                el("notice").text_content().unwrap_or_default()
-            } else {
-                progress::success(action).into()
-            };
-            text(feedback, &local);
-            if el("notice").text_content().as_deref()
-                == Some("Working… Wait for this action to finish.")
-            {
-                text("notice", &local);
-            }
-            if ["approve", "submit", "refund", "receipt", "history"].contains(&action) {
-                text(
-                    feedback,
-                    &el("transaction").text_content().unwrap_or_default(),
-                );
+            Ok(outcome) => {
+                progress::render(&a);
+                let message = if action == Action::ReadFunds && feedback == "setup-feedback" {
+                    let s = a.borrow();
+                    let height = s
+                        .funding
+                        .as_ref()
+                        .and_then(|f| {
+                            f.source["number"]
+                                .as_str()
+                                .and_then(|n| crate::transport::quantity(n).ok())
+                        })
+                        .unwrap_or(0);
+                    format!(
+                        "{}\nBlock {height} snapshot. Rechecked before payment.",
+                        journey::review_cost(&s)
+                    )
+                } else if action == Action::ApplyBee && feedback == "bee-feedback" {
+                    "Local Bee settings applied. Inspect content again before reviewing.".into()
+                } else {
+                    outcome.message
+                };
+                text(feedback, &message);
+                text("notice", outcome.notice.as_deref().unwrap_or(&message));
             }
         }
         presentation::pending(&a);
@@ -373,43 +397,43 @@ fn dispatch(a: Rc<RefCell<App>>, action: &'static str) {
         }
         progress::render(&a);
         let same_workspace = a.borrow().journey.revision == navigation_revision;
-        if action == "draft" && same_workspace {
+        if action == Action::PreviewDraft && same_workspace {
             validation::focus_first();
         }
-        if same_workspace && ["preparearchive", "verifyarchive", "commitarchive"].contains(&action)
-        {
+        if same_workspace && action.is_archive() {
             let _ = el("archive-feedback")
                 .dyn_into::<web_sys::HtmlElement>()
                 .unwrap()
                 .focus();
         }
-        if action == "usemimetype" && same_workspace {
+        if action == Action::UseMimeType && same_workspace {
             let _ = input("contenttype").focus();
         }
         journey::after_action(&a, action, succeeded, navigation_revision);
-        if same_workspace && succeeded && action == "useprofile" && wallet::needs_selection() {
+        if same_workspace && succeeded && action == Action::UseProfile && wallet::needs_selection()
+        {
             let _ = el("wallet-picker")
                 .dyn_into::<web_sys::HtmlElement>()
                 .unwrap()
                 .focus();
         }
-        if same_workspace && action == "connect" && matches!(r, Err("WALLET_SELECTION_REQUIRED")) {
+        if same_workspace && action == Action::Connect && wallet_selection_required {
             let _ = el("wallet-picker")
                 .dyn_into::<web_sys::HtmlElement>()
                 .unwrap()
                 .focus();
         }
         if same_workspace
-            && (succeeded || action != "applybee")
-            && [
-                "applybee",
-                "funds",
-                "history",
-                "savehistory",
-                "importhistory",
-                "exporthistory",
-            ]
-            .contains(&action)
+            && (succeeded || action != Action::ApplyBee)
+            && matches!(
+                action,
+                Action::ApplyBee
+                    | Action::ReadFunds
+                    | Action::ReadHistory
+                    | Action::SaveHistory
+                    | Action::ImportHistory
+                    | Action::ExportHistory
+            )
         {
             journey::open_ancestors(&el(feedback));
             let _ = el(feedback)
@@ -419,43 +443,53 @@ fn dispatch(a: Rc<RefCell<App>>, action: &'static str) {
         }
     });
 }
-async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
+async fn run(a: &Rc<RefCell<App>>, action: Action) -> ActionResult {
+    let mut outcome = Outcome {
+        message: action.success_message().into(),
+        notice: None,
+    };
     match action {
-        "exportdraft" | "importdraft" => authoring::transfer(a, action).await?,
-        "minimum" => progress::minimum(a)?,
-        "preparearchive" => archive::prepare(a)?,
-        "verifyarchive" => archive::verify(a).await?,
-        "commitarchive" => archive::commit(a).await?,
-        "historyprev" | "historynext" => {
+        Action::ExportDraft | Action::ImportDraft => authoring::transfer(a, action).await?,
+        Action::UseMinimum => progress::minimum(a)?,
+        Action::PrepareArchive => outcome.message = archive::prepare(a)?,
+        Action::VerifyArchive => outcome.message = archive::verify(a).await?,
+        Action::CommitArchive => outcome.message = archive::commit(a).await?,
+        Action::HistoryPrevious | Action::HistoryNext => {
             let page = a.borrow().history_page;
-            a.borrow_mut().history_page = if action == "historyprev" {
+            a.borrow_mut().history_page = if action == Action::HistoryPrevious {
                 page.saturating_sub(1)
             } else {
                 page.saturating_add(1)
             };
         }
-        "publicationprev" | "publicationnext" => {
+        Action::PublicationPrevious | Action::PublicationNext => {
             let page = a.borrow().publication_page;
-            a.borrow_mut().publication_page = if action == "publicationprev" {
+            a.borrow_mut().publication_page = if action == Action::PublicationPrevious {
                 page.saturating_sub(1)
             } else {
                 page.saturating_add(1)
             };
         }
-        "usemimetype" => validation::apply_format(a)?,
-        "version" => setup::choose_version(a)?,
-        "approvalreceipt" => progress::check_latest(a, "approve").await?,
-        "submissionreceipt" => progress::check_latest(a, "submit").await?,
-        "exporthistory" | "importhistory" | "savehistory" => transfers::transfer(a, action).await?,
-        "profile" => setup::load(a, false).await?,
-        "fetchprofile" => setup::load(a, true).await?,
-        "useprofile" => setup::accept(a)?,
-        "contentfile" => content::selected(a),
-        "applybee" => content::apply_bee(a)?,
-        "uploadcontent" => content::upload(a).await?,
-        "checkcontent" => content::check(a).await?,
-        "downloadcontent" => content::download(a)?,
-        "connect" => {
+        Action::UseMimeType => outcome.message = validation::apply_format(a)?,
+        Action::SelectVersion => outcome.message = setup::choose_version(a)?,
+        Action::CheckApprovalReceipt => {
+            outcome.message = progress::check_latest(a, "approve").await?
+        }
+        Action::CheckSubmissionReceipt => {
+            outcome.message = progress::check_latest(a, "submit").await?
+        }
+        Action::ExportHistory | Action::ImportHistory | Action::SaveHistory => {
+            outcome.message = transfers::transfer(a, action).await?
+        }
+        Action::LoadProfile => outcome.message = setup::load(a, false).await?,
+        Action::FetchProfile => outcome.message = setup::load(a, true).await?,
+        Action::UseProfile => outcome.message = setup::accept(a)?,
+        Action::SelectContent => outcome.message = content::selected(a),
+        Action::ApplyBee => outcome.message = content::apply_bee(a)?,
+        Action::UploadContent => outcome.message = content::upload(a).await?,
+        Action::CheckContent => outcome.message = content::check(a).await?,
+        Action::DownloadContent => outcome.message = content::download(a)?,
+        Action::Connect => {
             let p = a.borrow().profile.clone().ok_or("PROFILE_REQUIRED")?;
             choose_wallet(a)?;
             install_events(a)?;
@@ -475,10 +509,10 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             text("wallet", &format!("Connected: {account}"));
             a.borrow_mut().account = Some(account);
         }
-        "funds" => {
+        Action::ReadFunds => {
             progress::refresh_funds(a).await?;
         }
-        "guidelines" => {
+        Action::LoadGuidelines => {
             let (p, who, epoch) = context(a)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             let c = io::begin(&p).await?;
@@ -508,10 +542,10 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             text("guidelines", &body);
             a.borrow_mut().guidelines = true;
         }
-        "draft" => {
+        Action::PreviewDraft => {
             invalidate_review(a);
             if !validation::check(a, true) {
-                return Err("AUTHOR_FIELDS_INVALID");
+                return Err("AUTHOR_FIELDS_INVALID".into());
             }
             let mut metadata = authoring_metadata()?;
             // Preserve ECMAScript contextual Unicode lowercase (including final sigma).
@@ -545,16 +579,16 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
                 ),
             );
             a.borrow_mut().draft = Some(draft);
-            text("notice","Review normalized topics and exact metadata; load verified guidelines before acknowledging.");
+            outcome.message = "Review normalized topics and exact metadata; load verified guidelines before acknowledging.".into();
         }
-        "upload" => {
+        Action::UploadMetadata => {
             content::require(a)?;
             let (p, who, epoch) = context(a)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             let (draft, upload) = {
                 let s = a.borrow();
                 if !s.guidelines || !input("ack").checked() {
-                    return Err("GUIDELINES_ACK_REQUIRED");
+                    return Err("GUIDELINES_ACK_REQUIRED".into());
                 }
                 (
                     s.draft.clone().ok_or("DRAFT_REQUIRED")?,
@@ -566,35 +600,41 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             wallet::check(p.deployment.chain_id, &who).await?;
             active(a, epoch)?;
             a.borrow_mut().uploaded = true;
-            text("notice","Uploaded metadata bytes verified. This does not establish persistence or replication.");
+            outcome.message = "Uploaded metadata bytes verified. This does not establish persistence or replication.".into();
         }
-        "approve" | "submit" | "refund" => {
+        Action::Approve | Action::Submit | Action::Refund => {
+            let request = match action {
+                Action::Approve => "approve",
+                Action::Submit => "submit",
+                Action::Refund => "refund",
+                _ => unreachable!(),
+            };
             a.borrow()
                 .profile
                 .as_ref()
                 .ok_or("PROFILE_REQUIRED")?
                 .purpose
-                .check_publication(action)
+                .check_publication(request)
                 .map_err(|e| e.0)?;
-            if action != "refund" {
+            if action != Action::Refund {
                 content::require(a)?;
             }
             a.borrow_mut().funding = None;
             text("funds-feedback","The earlier balance snapshot was cleared for this wallet request. Refresh balances before preparing another payment.");
-            if action == "refund" {
+            if action == Action::Refund {
                 a.borrow_mut().refund_ready = false;
             }
             let (p, who, epoch) = context(a)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             let c = io::begin(&p).await?;
-            if action != "refund" {
+            if action != Action::Refund {
                 crate::versioning::require_active(&p, &c.pin).await?;
             }
-            let (to, data) = if action == "refund" {
+            let (to, data) = if action == Action::Refund {
                 let id = positive(&value("caseid"))?;
                 let (case, owed, _) = io::case(&p, &c, id).await?;
                 if owed == Uint256::ZERO {
-                    return Err("NO_REFUND");
+                    return Err("NO_REFUND".into());
                 }
                 text(
                     "case",
@@ -616,21 +656,21 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
                 let d = {
                     let s = a.borrow();
                     if !s.uploaded {
-                        return Err("METADATA_UPLOAD_REQUIRED");
+                        return Err("METADATA_UPLOAD_REQUIRED".into());
                     }
                     if !s.guidelines || !input("ack").checked() {
-                        return Err("GUIDELINES_ACK_REQUIRED");
+                        return Err("GUIDELINES_ACK_REQUIRED".into());
                     }
                     s.draft.clone().ok_or("DRAFT_REQUIRED")?
                 };
                 let amount = progress::amount(a)?;
                 let (min, balance, allowance) = io::funds(&p, &c, &who).await?;
                 if amount < min {
-                    return Err("FEE_TOO_LOW");
+                    return Err("FEE_TOO_LOW".into());
                 }
-                if action == "approve" {
+                if action == Action::Approve {
                     if allowance >= amount {
-                        return Err("APPROVAL_NOT_NEEDED");
+                        return Err("APPROVAL_NOT_NEEDED".into());
                     }
                     (
                         p.deployment.token.address.clone(),
@@ -639,10 +679,10 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
                     )
                 } else {
                     if balance < amount {
-                        return Err("INSUFFICIENT_BALANCE");
+                        return Err("INSUFFICIENT_BALANCE".into());
                     }
                     if allowance < amount {
-                        return Err("INSUFFICIENT_ALLOWANCE");
+                        return Err("INSUFFICIENT_ALLOWANCE".into());
                     }
                     (
                         p.deployment.moderation.address.clone(),
@@ -653,7 +693,7 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             io::finish(&p, &c).await?;
             wallet::check(p.deployment.chain_id, &who).await?;
             active(a, epoch)?;
-            let intended = if action == "submit" {
+            let intended = if action == Action::Submit {
                 let s = a.borrow();
                 let d = s.draft.as_ref().ok_or("DRAFT_REQUIRED")?;
                 Some(
@@ -662,34 +702,24 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             } else {
                 None
             };
-            if history::has_fault(a, &p, &who) {
-                return Err("HISTORY_SAVE_REQUIRED");
+            if journal(a).has_fault(&p, &who) {
+                return Err("HISTORY_SAVE_REQUIRED".into());
             }
-            let mut records = history::load_current(a, &p, &who)?;
+            let records = journal(a).load_current(&p, &who)?;
             let intent = intended.clone().unwrap_or(Value::Null);
-            let caseid = if action == "refund" {
+            let caseid = if action == Action::Refund {
                 value("caseid")
             } else {
                 String::new()
             };
-            history::guard_family(a, &p, &who, &records, action, &intent, &caseid)?;
+            history::guard_family(a, &p, &who, &records, request, &intent, &caseid)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             active(a, epoch)?;
-            let mut reservation = history::record(&p, &who, action, &to, &data, intent, caseid);
+            let mut reservation = history::record(&p, &who, request, &to, &data, intent, caseid);
             reservation["anchor"] = json!({"number":c.source["number"],"hash":c.source["hash"]});
-            history::ensure_room(a, &p, &who, &reservation)?;
-            records.push(reservation);
-            if let Err(error) = history::save(a, &p, &who, &records) {
-                let reserved = records.pop().ok_or("INVALID_HISTORY")?;
-                history::cancel_unsent(a, &p, &who, &reserved);
-                return Err(error);
-            }
-            a.borrow_mut().recovery_target = Some(recovery::identity(records.last().unwrap()));
-            a.borrow_mut().pending_wallet = Some(presentation::PendingIntent {
-                record: records.last().unwrap().clone(),
-                context_changed: false,
-                display: p.display.clone(),
-            });
+            let mut pending = journal(a).reserve(&p, &who, records, reservation)?;
+            a.borrow_mut().recovery_target = Some(recovery::identity(pending.record()));
+            journal(a).begin_wallet(pending.record(), p.display.clone());
             input("resubmit").set_checked(false);
             presentation::pending(a);
             let _ = el("wallet-request")
@@ -701,65 +731,48 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
             let hash = match result {
                 Ok(hash) => hash,
                 Err(e) => {
-                    records.last_mut().unwrap()["state"] = json!(if e == "WALLET_REJECTED" {
-                        "rejected"
-                    } else {
-                        "unknown"
-                    });
-                    let _ = history::save(a, &p, &who, &records);
-                    if let Some(pending) = a.borrow_mut().pending_wallet.as_mut() {
-                        pending.record = records.last().unwrap().clone();
-                    }
-                    return Err(e);
+                    pending.failed(e);
+                    return Err(e.into());
                 }
             };
-            records.last_mut().unwrap()["state"] = json!("unchecked");
-            records.last_mut().unwrap()["hash"] = json!(hash);
-            let mut journal_saved = history::save(a, &p, &who, &records).is_ok();
-            if let Some(pending) = a.borrow_mut().pending_wallet.as_mut() {
-                pending.record = records.last().unwrap().clone();
-            }
+            let mut journal_saved = pending.broadcast(&hash);
             presentation::pending(a);
             // Preserve public hash even when wallet context changed while the prompt was open.
             input("txhash").set_value(&hash);
-            text("transaction",&format!("{action} broadcast: {hash}. Check receipt; do not resend an uncertain transaction."));
+            outcome.message = format!("{request} broadcast: {hash}. Check receipt; do not resend an uncertain transaction.");
+            text("transaction", &outcome.message);
             // The hash is already retained. A single optional read captures the actual nonce;
             // never predict or force a nonce before opening the wallet.
-            if let Ok(nonce) = recovery::observe(&p, records.last().unwrap()).await {
-                records.last_mut().unwrap()["nonce"] = json!(nonce);
-                journal_saved &= history::save(a, &p, &who, &records).is_ok();
-                if let Some(pending) = a.borrow_mut().pending_wallet.as_mut() {
-                    pending.record = records.last().unwrap().clone();
-                }
+            if let Ok(nonce) = recovery::observe(&p, pending.record()).await {
+                journal_saved &= pending.observed_nonce(nonce);
             }
             if !journal_saved {
-                text(
-                    "notice",
-                    "Broadcast hash retained in memory; save public history before another send.",
+                outcome.notice = Some(
+                    "Broadcast hash retained in memory; save public history before another send."
+                        .into(),
                 );
             }
             if a.borrow().epoch != epoch {
-                text(
-                    "notice",
-                    "Context changed after broadcast. Transaction hash retained.",
-                );
+                outcome.notice =
+                    Some("Context changed after broadcast. Transaction hash retained.".into());
             }
         }
-        "history" => {
+        Action::ReadHistory => {
             let (p, who, epoch) = context(a)?;
             wallet::check(p.deployment.chain_id, &who).await?;
             active(a, epoch)?;
-            let records = history::load_current(a, &p, &who)?;
-            text("transaction",&format!("{} retained records for this context. Read the paged recovery cards below; export saves the displayed page.",records.len()));
+            let records = journal(a).load_current(&p, &who)?;
+            outcome.message = format!("{} retained records for this context. Read the paged recovery cards below; export saves the displayed page.",records.len());
+            text("transaction", &outcome.message);
             presentation::render_history(a)?;
         }
-        "owned" => {
+        Action::ReadOwned => {
             let (p, who, epoch) = context(a)?;
             let cursor = value("cursor")
                 .parse::<u64>()
                 .map_err(|_| "INVALID_CURSOR")?;
             if cursor == 0 {
-                return Err("INVALID_CURSOR");
+                return Err("INVALID_CURSOR".into());
             }
             let c = io::begin(&p).await?;
             let next = Uint256::hex(
@@ -797,15 +810,14 @@ async fn run(a: &Rc<RefCell<App>>, action: &str) -> Result<()> {
                 ),
             );
         }
-        "case" => publications::read_case(a, positive(&value("caseid"))?, None).await?,
-        "publication" => publications::open(a).await?,
-        "receipt" => {
-            let _ = recovery::check(a).await?;
+        Action::ReadCase => publications::read_case(a, positive(&value("caseid"))?, None).await?,
+        Action::OpenPublication => publications::open(a).await?,
+        Action::CheckReceipt => {
+            outcome.message = recovery::check(a).await?.message;
             progress::after_receipt(a).await;
         }
-        _ => return Err("UNKNOWN_ACTION"),
     };
-    Ok(())
+    Ok(outcome)
 }
 fn positive(s: &str) -> Result<Uint256> {
     let n = Uint256::decimal(s).map_err(|e| e.0)?;
@@ -815,7 +827,7 @@ fn positive(s: &str) -> Result<Uint256> {
     Ok(n)
 }
 pub fn start_publisher() -> std::result::Result<(), JsValue> {
-    el("app").set_inner_html(include_str!("publisher/view.html"));
+    el("app").set_inner_html(include_str!("view.html"));
     let a = Rc::new(RefCell::new(App::default()));
     let discovery_app = a.clone();
     let _ = wallet::discover(Rc::new(move || progress::render(&discovery_app)));
@@ -826,45 +838,45 @@ pub fn start_publisher() -> std::result::Result<(), JsValue> {
     presentation::bind_requests(&a)?;
     publications::bind(&a)?;
     for (id, action, event) in [
-        ("preparearchive", "preparearchive", "click"),
-        ("verifyarchive", "verifyarchive", "click"),
-        ("commitarchive", "commitarchive", "click"),
-        ("historyprev", "historyprev", "click"),
-        ("historynext", "historynext", "click"),
-        ("publicationprev", "publicationprev", "click"),
-        ("publicationnext", "publicationnext", "click"),
-        ("profile", "profile", "change"),
-        ("profile-version", "version", "change"),
-        ("loadprofilefile", "profile", "click"),
-        ("fetchprofile", "fetchprofile", "click"),
-        ("useprofile", "useprofile", "click"),
-        ("contentfile", "contentfile", "change"),
-        ("applybee", "applybee", "click"),
-        ("uploadcontent", "uploadcontent", "click"),
-        ("checkcontent", "checkcontent", "click"),
-        ("downloadcontent", "downloadcontent", "click"),
-        ("connect", "connect", "click"),
-        ("readfunds", "funds", "click"),
-        ("paymentfunds", "funds", "click"),
-        ("useminimum", "minimum", "click"),
-        ("usemimetype", "usemimetype", "click"),
-        ("approvalreceipt", "approvalreceipt", "click"),
-        ("submissionreceipt", "submissionreceipt", "click"),
-        ("draft", "draft", "click"),
-        ("loadguidelines", "guidelines", "click"),
-        ("upload", "upload", "click"),
-        ("approve", "approve", "click"),
-        ("submit", "submit", "click"),
-        ("readcase", "case", "click"),
-        ("loadowned", "owned", "click"),
-        ("refund", "refund", "click"),
-        ("receipt", "receipt", "click"),
-        ("history", "history", "click"),
-        ("exportdraft", "exportdraft", "click"),
-        ("importdraft", "importdraft", "click"),
-        ("exporthistory", "exporthistory", "click"),
-        ("savehistory", "savehistory", "click"),
-        ("importhistory", "importhistory", "click"),
+        ("preparearchive", Action::PrepareArchive, "click"),
+        ("verifyarchive", Action::VerifyArchive, "click"),
+        ("commitarchive", Action::CommitArchive, "click"),
+        ("historyprev", Action::HistoryPrevious, "click"),
+        ("historynext", Action::HistoryNext, "click"),
+        ("publicationprev", Action::PublicationPrevious, "click"),
+        ("publicationnext", Action::PublicationNext, "click"),
+        ("profile", Action::LoadProfile, "change"),
+        ("profile-version", Action::SelectVersion, "change"),
+        ("loadprofilefile", Action::LoadProfile, "click"),
+        ("fetchprofile", Action::FetchProfile, "click"),
+        ("useprofile", Action::UseProfile, "click"),
+        ("contentfile", Action::SelectContent, "change"),
+        ("applybee", Action::ApplyBee, "click"),
+        ("uploadcontent", Action::UploadContent, "click"),
+        ("checkcontent", Action::CheckContent, "click"),
+        ("downloadcontent", Action::DownloadContent, "click"),
+        ("connect", Action::Connect, "click"),
+        ("readfunds", Action::ReadFunds, "click"),
+        ("paymentfunds", Action::ReadFunds, "click"),
+        ("useminimum", Action::UseMinimum, "click"),
+        ("usemimetype", Action::UseMimeType, "click"),
+        ("approvalreceipt", Action::CheckApprovalReceipt, "click"),
+        ("submissionreceipt", Action::CheckSubmissionReceipt, "click"),
+        ("draft", Action::PreviewDraft, "click"),
+        ("loadguidelines", Action::LoadGuidelines, "click"),
+        ("upload", Action::UploadMetadata, "click"),
+        ("approve", Action::Approve, "click"),
+        ("submit", Action::Submit, "click"),
+        ("readcase", Action::ReadCase, "click"),
+        ("loadowned", Action::ReadOwned, "click"),
+        ("refund", Action::Refund, "click"),
+        ("receipt", Action::CheckReceipt, "click"),
+        ("history", Action::ReadHistory, "click"),
+        ("exportdraft", Action::ExportDraft, "click"),
+        ("importdraft", Action::ImportDraft, "click"),
+        ("exporthistory", Action::ExportHistory, "click"),
+        ("savehistory", Action::SaveHistory, "click"),
+        ("importhistory", Action::ImportHistory, "click"),
     ] {
         bind(&a, id, action, event);
     }
@@ -1007,8 +1019,8 @@ fn choose_wallet(a: &Rc<RefCell<App>>) -> Result<bool> {
         let mut s = a.borrow_mut();
         s.account = None;
         s.wallet_chain = None;
-        s.events_bound = false;
     }
+    text("wallet", "Not connected.");
     cleanup_events(a)?;
     wallet::select(id)?;
     text("wallet", "Wallet selected. Connect your intended account.");
@@ -1032,83 +1044,24 @@ fn bind_wallet_picker(a: &Rc<RefCell<App>>) -> Result<()> {
     handler.forget();
     Ok(())
 }
-fn remove_wallet_listener(listener: &WalletListener) -> bool {
-    listener
-        .remove
-        .call2(
-            &listener.provider,
-            &listener.event.into(),
-            listener.handler.as_ref().unchecked_ref(),
-        )
-        .is_ok()
-}
 fn cleanup_events(a: &Rc<RefCell<App>>) -> Result<()> {
-    let pending = std::mem::take(&mut a.borrow_mut().wallet_listeners);
-    let retained = pending
-        .into_iter()
-        .filter(|listener| !remove_wallet_listener(listener))
-        .collect();
-    a.borrow_mut().wallet_listeners = retained;
-    if a.borrow().wallet_listeners.is_empty() {
-        Ok(())
-    } else {
-        Err("WALLET_EVENT_CLEANUP_FAILED")
-    }
+    let mut subscriptions = std::mem::take(&mut a.borrow_mut().wallet_subscriptions);
+    let result = subscriptions.clear();
+    a.borrow_mut().wallet_subscriptions = subscriptions;
+    result
 }
 fn install_events(a: &Rc<RefCell<App>>) -> Result<()> {
-    if a.borrow().events_bound {
-        return Ok(());
-    }
-    cleanup_events(a)?;
-    let provider = wallet::provider()?;
-    let on = js_sys::Reflect::get(&provider, &"on".into())
-        .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?
-        .dyn_into::<js_sys::Function>()
-        .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?;
-    let remove = js_sys::Reflect::get(&provider, &"removeListener".into())
-        .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?
-        .dyn_into::<js_sys::Function>()
-        .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?;
-    let mut handlers = Vec::new();
-    for event in ["accountsChanged", "chainChanged", "disconnect"] {
-        let weak = Rc::downgrade(a);
-        let cb = Closure::<dyn FnMut(JsValue)>::new(move |_| {
-            let Some(state) = weak.upgrade() else {
-                return;
-            };
-            invalidate(&state);
-            state.borrow_mut().account = None;
-            text("wallet", "Wallet context changed. Connect again.");
-            progress::render(&state);
-        });
-        handlers.push(WalletListener {
-            provider: provider.clone(),
-            remove: remove.clone(),
-            event,
-            handler: cb,
-        });
-    }
-    match crate::registration::install_handlers(
-        handlers,
-        |listener| {
-            on.call2(
-                &provider,
-                &listener.event.into(),
-                listener.handler.as_ref().unchecked_ref(),
-            )
-            .is_ok()
-        },
-        remove_wallet_listener,
-    ) {
-        Ok(handlers) => {
-            let mut state = a.borrow_mut();
-            state.wallet_listeners = handlers;
-            state.events_bound = true;
-            Ok(())
-        }
-        Err(retained) => {
-            a.borrow_mut().wallet_listeners = retained;
-            Err("WALLET_EVENT_REGISTRATION_FAILED")
-        }
-    }
+    let mut subscriptions = std::mem::take(&mut a.borrow_mut().wallet_subscriptions);
+    let weak = Rc::downgrade(a);
+    let result = subscriptions.install(move |_, _| {
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        invalidate(&state);
+        state.borrow_mut().account = None;
+        text("wallet", "Wallet context changed. Connect again.");
+        progress::render(&state);
+    });
+    a.borrow_mut().wallet_subscriptions = subscriptions;
+    result
 }

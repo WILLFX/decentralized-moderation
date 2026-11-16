@@ -50,10 +50,10 @@ fn batch(records: &[Value]) -> Vec<Value> {
     }
     selected
 }
-pub(super) fn prepare(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) fn prepare(a: &Rc<RefCell<App>>) -> Result<String> {
     a.borrow_mut().archive_candidate = None;
     let (p, who, _) = context(a)?;
-    let s = history::load_store(a, &p, &who)?;
+    let s = journal(a).load_store(&p, &who)?;
     let all = s.eligible();
     let records = batch(&all);
     if records.is_empty() {
@@ -66,10 +66,11 @@ pub(super) fn prepare(a: &Rc<RefCell<App>>) -> Result<()> {
         raw,
         verified: false,
     });
-    text("archive-feedback",&format!("Backup download requested for {} resolved records (one bounded batch). No records have moved. Select the saved file below and verify it. Expected exact-byte fingerprint: {hash}.",records.len()));
-    Ok(())
+    let message = format!("Backup download requested for {} resolved records (one bounded batch). No records have moved. Select the saved file below and verify it. Expected exact-byte fingerprint: {hash}.",records.len());
+    text("archive-feedback", &message);
+    Ok(message)
 }
-pub(super) async fn verify(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) async fn verify(a: &Rc<RefCell<App>>) -> Result<String> {
     let (_, _, epoch) = context(a)?;
     let raw = {
         let mut s = a.borrow_mut();
@@ -97,10 +98,11 @@ pub(super) async fn verify(a: &Rc<RefCell<App>>) -> Result<()> {
         .as_mut()
         .ok_or("ARCHIVE_PREPARE_REQUIRED")?
         .verified = true;
-    text("archive-feedback","The selected saved file exactly matches the prepared backup. No records have moved. Archive explicitly; uncertain requests and saved publication links will remain.");
-    Ok(())
+    let message = "The selected saved file exactly matches the prepared backup. No records have moved. Archive explicitly; uncertain requests and saved publication links will remain.";
+    text("archive-feedback", message);
+    Ok(message.into())
 }
-pub(super) async fn commit(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) async fn commit(a: &Rc<RefCell<App>>) -> Result<String> {
     if !a
         .borrow()
         .archive_candidate
@@ -116,16 +118,17 @@ pub(super) async fn commit(a: &Rc<RefCell<App>>) -> Result<()> {
     let raw = a.borrow().archive_candidate.as_ref().unwrap().raw.clone();
     let value: Value = serde_json::from_str(&raw).map_err(|_| "INVALID_HISTORY")?;
     let records = value["records"].as_array().ok_or("INVALID_HISTORY")?;
-    let mut store = history::load_store(a, &p, &who)?;
+    let mut store = journal(a).load_store(&p, &who)?;
     store.archive(records)?;
-    history::persist(a, &p, &who, store)?;
+    journal(a).persist(&p, &who, store)?;
     a.borrow_mut().archive_candidate = None;
-    text("archive-feedback",&format!("Archived {} resolved transaction records locally after verifying their backup. Their full records remain in history and My publications. Active uncertain requests were retained. No transaction was sent.",records.len()));
-    Ok(())
+    let message = format!("Archived {} resolved transaction records locally after verifying their backup. Their full records remain in history and My publications. Active uncertain requests were retained. No transaction was sent.",records.len());
+    text("archive-feedback", &message);
+    Ok(message)
 }
 pub(super) fn room(a: &Rc<RefCell<App>>) -> bool {
     context(a)
-        .and_then(|(p, who, _)| history::load_store(a, &p, &who))
+        .and_then(|(p, who, _)| journal(a).load_store(&p, &who))
         .is_ok_and(|s| s.room(&json!("x".repeat(4096))).is_ok())
 }
 fn enable(id: &str, yes: bool) {
@@ -141,13 +144,13 @@ pub(super) fn render(a: &Rc<RefCell<App>>) {
     let candidate = s.archive_candidate.is_some();
     let verified = s.archive_candidate.as_ref().is_some_and(|c| c.verified);
     drop(s);
-    let store = context(a).and_then(|(p, who, _)| history::load_store(a, &p, &who));
+    let store = context(a).and_then(|(p, who, _)| journal(a).load_store(&p, &who));
     let eligible = store.as_ref().is_ok_and(|s| !s.eligible().is_empty());
     if let Ok(store) = store {
         let active = store.active();
         let bytes = serde_json::to_vec(&active).map(|v| v.len()).unwrap_or(0);
         let total = serde_json::to_vec(&store).map(|v| v.len()).unwrap_or(0);
-        let uncertain = active.iter().filter(|r| !ledger::resolved(r)).count();
+        let uncertain = active.iter().filter(|r| !history::resolved(r)).count();
         let note = if room(a) {
             "Space is reserved for returned hashes and receipt updates."
         } else if eligible {

@@ -53,7 +53,7 @@ pub(super) fn bind(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsValue> {
             return;
         };
         state.borrow_mut().publication_target = Some(key);
-        dispatch(state.clone(), "publication");
+        dispatch(state.clone(), Action::OpenPublication);
     });
     el("publication-list")
         .add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
@@ -62,7 +62,7 @@ pub(super) fn bind(a: &Rc<RefCell<App>>) -> std::result::Result<(), JsValue> {
 }
 pub(super) fn render(a: &Rc<RefCell<App>>) -> Result<()> {
     let (p, who, _) = context(a)?;
-    let records = history::load_current(a, &p, &who)?;
+    let records = journal(a).load_current(&p, &who)?;
     el("publication-list").set_text_content(None);
     let mut count = 0;
     let submissions = records
@@ -140,9 +140,7 @@ pub(super) fn render(a: &Rc<RefCell<App>>) -> Result<()> {
             }
             card.append_child(&button).unwrap();
         }
-        if !["confirmed", "failed", "cancelled", "rejected"]
-            .contains(&r["state"].as_str().unwrap_or(""))
-        {
+        if !history::resolved(r) {
             let recovery = doc().create_element("button").unwrap();
             recovery.set_class_name("secondary");
             recovery.set_attribute("type", "button").unwrap();
@@ -181,7 +179,7 @@ pub(super) async fn open(a: &Rc<RefCell<App>>) -> Result<()> {
         .publication_target
         .clone()
         .ok_or("SAVED_REQUEST_NOT_FOUND")?;
-    let records = history::load_current(a, &p, &who)?;
+    let records = journal(a).load_current(&p, &who)?;
     let record = records
         .iter()
         .find(|r| recovery::identity(r) == key && r["action"] == "submit")
@@ -195,7 +193,10 @@ pub(super) async fn open(a: &Rc<RefCell<App>>) -> Result<()> {
         .ok_or("INVALID_RECEIPT_HASH")?;
     input("txhash").set_value(hash);
     a.borrow_mut().recovery_target = Some(key);
-    let id = recovery::check(a).await?.ok_or("SUBMISSION_NOT_VERIFIED")?;
+    let id = recovery::check(a)
+        .await?
+        .submission
+        .ok_or("SUBMISSION_NOT_VERIFIED")?;
     active(a, epoch)?;
     read_case(a, id, Some(&record["intent"])).await
 }
@@ -388,7 +389,7 @@ fn draw_status(case: &CaseInfo, height: u64, recovery: Option<&OutcomeRecovery>)
     } else if case.challenges == 0 {
         "\nOriginal-hash recovery ended without a saved hash. An explicit expiry call can make the case unresolved and its fee refundable; no refund is yet inferred.".into()
     } else {
-        format!("\nOriginal-hash recovery ended without a saved hash. An explicit expiry call can finalize the last completed outcome: {}. The case has not finalized merely because the boundary passed.", crate::moderator_view::choice(case.action_type, case.preliminary))
+        format!("\nOriginal-hash recovery ended without a saved hash. An explicit expiry call can finalize the last completed outcome: {}. The case has not finalized merely because the boundary passed.", crate::moderator::view::choice(case.action_type, case.preliminary))
     }
 }
 pub(super) async fn read_case(
@@ -457,14 +458,14 @@ pub(super) async fn read_case(
             format!(
                 "\nPhase deadline: {} ({} remaining at this read)",
                 time(d),
-                crate::moderator_view::duration(d.saturating_sub(now))
+                crate::moderator::view::duration(d.saturating_sub(now))
             )
         })
         .unwrap_or_default();
     let decision = if case.preliminary == 0 {
         "No outcome drawn"
     } else {
-        crate::moderator_view::choice(case.action_type, case.preliminary)
+        crate::moderator::view::choice(case.action_type, case.preliminary)
     };
     let next = if owed != Uint256::ZERO {
         "A submission refund is available. The refund control pays the original submitter; it does not pay another connected account."
@@ -488,7 +489,7 @@ pub(super) async fn read_case(
     let height = crate::transport::quantity(as_str(&ctx.source["number"])?)?;
     let refund = crate::token_amounts::describe(owed, p.display.as_ref());
     let body=format!("Case {id}\n{}\n{phase}{when}{draw}{completed}\n{} outcome: {decision}\nCurrent index membership: {listed} of {} submitted topics listed.\nRefund owed: {refund}; recipient {}.\n{next}\nSource: block {height}, {}. Refresh for current evidence.\nContent: {}\nMetadata: {}",
-        crate::moderator_view::question(&case),if case.phase==5 {"Final"} else {"Preliminary"},case.topic_count,case.submitter,time(now),case.content_hash,case.meta_hash);
+        crate::moderator::view::question(&case),if case.phase==5 {"Final"} else {"Preliminary"},case.topic_count,case.submitter,time(now),case.content_hash,case.meta_hash);
     let publication_key = if expected.is_some() {
         a.borrow().publication_target.clone()
     } else {

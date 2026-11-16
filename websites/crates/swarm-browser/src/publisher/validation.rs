@@ -29,7 +29,7 @@ pub(super) fn restore_category(value: &str) {
         select.set_value(value);
     }
 }
-pub(super) fn apply_format(a: &Rc<RefCell<App>>) -> Result<()> {
+pub(super) fn apply_format(a: &Rc<RefCell<App>>) -> Result<String> {
     let format = value("mimechoice");
     if format.is_empty() {
         return Err("MIME_FORMAT_REQUIRED");
@@ -39,8 +39,8 @@ pub(super) fn apply_format(a: &Rc<RefCell<App>>) -> Result<()> {
     field("contenttype", None);
     authoring::save_tab(a);
     refresh(a);
-    text("notice", "Content type changed by your selection. Preview exact metadata and repeat its review and upload before payment.");
-    Ok(())
+    let message = "Content type changed by your selection. Preview exact metadata and repeat its review and upload before payment.";
+    Ok(message.into())
 }
 pub(super) fn message(code: &str) -> &'static str {
     match code {
@@ -173,22 +173,22 @@ pub(super) fn fee(a: &Rc<RefCell<App>>) {
     };
     field("fee", error.as_deref());
 }
-pub(super) fn action_error(action: &str, code: &str) {
+pub(super) fn action_error(action: Action, code: &str) {
     let (id,help)=match code {
-        "FILE_SIZE_LIMIT" if action=="profile" =>("profile","Choose a publisher profile no larger than 64 KiB. No replacement was accepted."),
+        "FILE_SIZE_LIMIT" if action==Action::LoadProfile =>("profile","Choose a publisher profile no larger than 64 KiB. No replacement was accepted."),
         "PROFILE_FINGERPRINT_REQUIRED"=>("profilepin","Enter the expected 64-digit Keccak-256 fingerprint from the trusted deployment source before loading a URL."),
         "PROFILE_FINGERPRINT_MISMATCH"=>("profilepin","These profile bytes do not match the expected fingerprint. No profile was accepted. Check the source and expected fingerprint; do not accept a replacement hash from an untrusted response."),
-        "PUBLIC_PROFILE_URL_REQUIRED"|"INVALID_ACCESS_URL" if action=="fetchprofile"=>("profileurl","Use a public HTTPS profile URL, or loopback HTTP for your own local service. Credentials, query strings and fragments are not accepted here."),
-        "INVALID_BATCH" if action=="profile"||action=="fetchprofile" =>(if action=="fetchprofile"{"profileurl"}else{"profile"},"This profile contains an invalid postage batch. Obtain a corrected profile or one without upload settings, then apply your own Bee settings after review."),
+        "PUBLIC_PROFILE_URL_REQUIRED"|"INVALID_ACCESS_URL" if action==Action::FetchProfile=>("profileurl","Use a public HTTPS profile URL, or loopback HTTP for your own local service. Credentials, query strings and fragments are not accepted here."),
+        "INVALID_BATCH" if matches!(action, Action::LoadProfile | Action::FetchProfile) =>(if action==Action::FetchProfile{"profileurl"}else{"profile"},"This profile contains an invalid postage batch. Obtain a corrected profile or one without upload settings, then apply your own Bee settings after review."),
         "INVALID_BATCH"=>("beebatch","Enter a nonzero 64-digit postage batch ID from your Bee node. Do not enter a URL or a transaction hash."),
         "INVALID_UPLOAD_AUTHORIZATION"=>("beeauth","Use a single-line authorization value or leave it empty. This local access setting is never saved into authoring files."),
-        "INVALID_GATEWAY_URL"|"INVALID_ACCESS_URL" if action=="applybee"=>("beeendpoint","Enter your Bee API base URL: HTTPS, or loopback HTTP. Do not include credentials, a query, or a /bytes/reference suffix."),
+        "INVALID_GATEWAY_URL"|"INVALID_ACCESS_URL" if action==Action::ApplyBee=>("beeendpoint","Enter your Bee API base URL: HTTPS, or loopback HTTP. Do not include credentials, a query, or a /bytes/reference suffix."),
         "SEPARATE_CONTENT_ORIGIN_REQUIRED"=>("contentgateway","Choose a gateway with a different scheme/host/port origin from this publisher."),
-        "INVALID_ACCESS_URL"|"INVALID_GATEWAY_URL"|"CONTENT_ENDPOINT_REQUIRED" if action=="opencontent"||action=="checkcontent" =>("contentgateway","Enter a content gateway base URL using HTTPS, or loopback HTTP. Do not include credentials, a query or a fragment. Opening content also requires a different origin from this publisher."),
+        "INVALID_ACCESS_URL"|"INVALID_GATEWAY_URL"|"CONTENT_ENDPOINT_REQUIRED" if action==Action::CheckContent =>("contentgateway","Enter a content gateway base URL using HTTPS, or loopback HTTP. Do not include credentials, a query or a fragment. Opening content also requires a different origin from this publisher."),
         "MIME_FORMAT_REQUIRED"=>("contenttype","Choose a common file format above, then apply it. You can also enter its MIME type here."),
         "FILE_SIZE_LIMIT"|"CONTENT_FILE_REQUIRED"=>("contentfile","Choose an unencrypted raw file no larger than 256 KiB for this uploader. Larger files and collections use the linked external upload workflow."),
         "INVALID_REFERENCE"=>("reference",message("REFERENCE")),
-        "INVALID_CONFIG"|"CONFIG_TOO_LARGE"|"PUBLIC_PROFILE_CONTAINS_ACCESS_SETTINGS"=>(if action=="fetchprofile"{"profileurl"}else{"profile"},"This is not an acceptable publisher profile for this route. Check the selected source. Private upload authorization or RPC query settings belong in a local file, not a fetched public setup profile."),
+        "INVALID_CONFIG"|"CONFIG_TOO_LARGE"|"PUBLIC_PROFILE_CONTAINS_ACCESS_SETTINGS"=>(if action==Action::FetchProfile{"profileurl"}else{"profile"},"This is not an acceptable publisher profile for this route. Check the selected source. Private upload authorization or RPC query settings belong in a local file, not a fetched public setup profile."),
         _=>return,
     };
     field(id, Some(help));

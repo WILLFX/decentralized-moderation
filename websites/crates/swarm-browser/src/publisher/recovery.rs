@@ -61,7 +61,7 @@ pub(super) fn classify(record: &Value, tx: &Value, original: Option<&Value>) -> 
         return Ok(Outcome::Original);
     }
     if record["hash"].is_null() {
-        if !["requesting", "unknown"].contains(&record["state"].as_str().unwrap_or("")) {
+        if !history::uncertain_without_hash(record) {
             return Err("NOT_UNCERTAIN_REQUEST");
         }
         let anchor = record
@@ -224,14 +224,19 @@ pub(super) fn target(
     }
     Ok(index)
 }
-pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<Option<Uint256>> {
+pub(super) struct ReceiptOutcome {
+    pub(super) submission: Option<Uint256>,
+    pub(super) message: String,
+}
+
+pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<ReceiptOutcome> {
     let (p, who, epoch) = context(a)?;
     let hash = value("txhash");
     if Uint256::hex(&hash).map_err(|_| "INVALID_RECEIPT_HASH")? == Uint256::ZERO {
         return Err("INVALID_RECEIPT_HASH");
     }
     let c = io::begin(&p).await?;
-    let mut records = history::load_current(a, &p, &who)?;
+    let mut records = journal(a).load_current(&p, &who)?;
     let selected = a.borrow().recovery_target.clone();
     let selected = selected
         .as_ref()
@@ -258,9 +263,13 @@ pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<Option<Uint256>> {
         io::finish(&p, &c).await?;
         wallet::check(p.deployment.chain_id, &who).await?;
         active(a, epoch)?;
-        history::save(a, &p, &who, &records)?;
-        text("transaction","This hash is pending or unavailable to the selected RPC. No request was cleared. Keep the saved request; check wallet activity for its original, replacement or cancellation hash. Do not resend an uncertain request.");
-        return Ok(None);
+        journal(a).save(&p, &who, &records)?;
+        let message = "This hash is pending or unavailable to the selected RPC. No request was cleared. Keep the saved request; check wallet activity for its original, replacement or cancellation hash. Do not resend an uncertain request.";
+        text("transaction", message);
+        return Ok(ReceiptOutcome {
+            submission: None,
+            message: message.into(),
+        });
     }
     if !same(&receipt["transactionHash"], &json!(hash), 32)
         || !same(&receipt["from"], &json!(who), 20)
@@ -334,20 +343,19 @@ pub(super) async fn check(a: &Rc<RefCell<App>>) -> Result<Option<Uint256>> {
         record["caseEvidence"] = json!({"caseId":id.to_decimal(),"transactionHash":hash,"blockNumber":receipt["blockNumber"],"blockHash":receipt["blockHash"]});
     }
     let updated = record.clone();
-    history::save_checked(a, &p, &who, &records, &updated)?;
+    journal(a).save_checked(&p, &who, &records, &updated)?;
     if a.borrow().recovery_target.as_deref() == Some(identity(&updated).as_str()) {
         text(
             "selected-request",
             &presentation::summary(&updated, p.display.as_ref()),
         );
     }
-    if let Some(pending) = a.borrow_mut().pending_wallet.as_mut() {
-        if identity(&pending.record) == identity(&updated) {
-            pending.record = updated;
-        }
-    }
+    journal(a).update_pending(&updated);
     text("transaction", &message);
-    Ok(submission)
+    Ok(ReceiptOutcome {
+        submission,
+        message,
+    })
 }
 #[cfg(test)]
 #[path = "recovery_tests.rs"]

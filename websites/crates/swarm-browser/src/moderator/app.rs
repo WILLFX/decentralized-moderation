@@ -1,15 +1,12 @@
-use crate::{
-    deployment::verification, registration::install_handlers, state::WalletState,
-    transport::quantity,
-};
-use js_sys::{Function, Reflect};
+use super::{evidence::verify_deployment, state::WalletState};
+use crate::transport::quantity;
 use std::{cell::RefCell, rc::Rc};
 use swarm_core::{parse_profile, ModeratorProfile};
 use wasm_bindgen::{closure::Closure, prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{Element, HtmlInputElement};
 
-use crate::wallet::{account, provider, read as wallet_request};
+use crate::wallet::{account, read as wallet_request, Subscriptions};
 #[path = "controls.rs"]
 mod controls;
 type Result<T> = std::result::Result<T, &'static str>;
@@ -20,17 +17,9 @@ struct App {
     candidate: Option<ModeratorProfile>,
     wallet: WalletState,
     busy: bool,
-    wallet_events_bound: bool,
-    wallet_listeners: Vec<WalletListener>,
-    vault: crate::vault::VoteVault,
+    wallet_subscriptions: Subscriptions,
+    vault: crate::moderator::vault::VoteVault,
     controls: controls::State,
-}
-
-struct WalletListener {
-    provider: JsValue,
-    remove: Function,
-    event: &'static str,
-    handler: Closure<dyn FnMut(JsValue)>,
 }
 
 fn document() -> web_sys::Document {
@@ -48,7 +37,7 @@ fn notice(value: &str) {
 }
 
 pub fn start() -> std::result::Result<(), JsValue> {
-    element("app").set_inner_html(include_str!("moderator/view.html"));
+    element("app").set_inner_html(include_str!("view.html"));
     let app = Rc::new(RefCell::new(App::default()));
     let discovery_app = app.clone();
     let _ = crate::wallet::discover(Rc::new(move || controls::render(&discovery_app.borrow())));
@@ -269,7 +258,7 @@ fn clear_wallet_guidance() {
     let _ = element("wallet-recovery-route").set_attribute("hidden", "");
 }
 fn show_wallet_guidance(code: &str) -> bool {
-    let Some(message) = crate::moderator_view::wallet_guidance(code) else {
+    let Some(message) = crate::moderator::view::wallet_guidance(code) else {
         return false;
     };
     text("wallet-guidance", message);
@@ -295,7 +284,6 @@ fn choose_wallet(app: &Rc<RefCell<App>>) -> Result<bool> {
         s.vault.lock();
         s.controls.clear_context();
         s.controls.journey_cancelled();
-        s.wallet_events_bound = false;
     }
     controls::clear_dom();
     text("verification", "Not checked for this wallet selection.");
@@ -441,142 +429,86 @@ fn bind_connect(app: Rc<RefCell<App>>) {
     handler.forget();
 }
 
-/// Remove a partial subscription set before attempting another registration.
-/// Retain callbacks when a provider refuses removal, then fail connection closed.
 fn cleanup_wallet_events(app: &Rc<RefCell<App>>) -> Result<()> {
-    let pending = std::mem::take(&mut app.borrow_mut().wallet_listeners);
-    let mut retained = Vec::new();
-    for listener in pending {
-        if !remove_listener(&listener) {
-            retained.push(listener);
-        }
-    }
-    app.borrow_mut().wallet_listeners = retained;
-    if !app.borrow().wallet_listeners.is_empty() {
-        return Err("WALLET_EVENT_CLEANUP_FAILED: reload this page before connecting.");
-    }
-    Ok(())
+    let mut subscriptions = std::mem::take(&mut app.borrow_mut().wallet_subscriptions);
+    let result = subscriptions.clear();
+    app.borrow_mut().wallet_subscriptions = subscriptions;
+    result.map_err(wallet_event_error)
 }
 
-fn remove_listener(listener: &WalletListener) -> bool {
-    listener
-        .remove
-        .call2(
-            &listener.provider,
-            &listener.event.into(),
-            listener.handler.as_ref().unchecked_ref(),
-        )
-        .is_ok()
+fn wallet_event_error(code: &'static str) -> &'static str {
+    match code {
+        "WALLET_EVENT_CLEANUP_FAILED" => {
+            "WALLET_EVENT_CLEANUP_FAILED: reload this page before connecting."
+        }
+        "WALLET_EVENT_REGISTRATION_FAILED" => {
+            "WALLET_EVENT_REGISTRATION_FAILED: connection was not accepted; retry or reload this page."
+        }
+        _ => code,
+    }
 }
 
 fn bind_wallet_events(app: &Rc<RefCell<App>>) -> Result<()> {
-    if app.borrow().wallet_events_bound {
-        return Ok(());
-    }
-    cleanup_wallet_events(app)?;
-    let p = provider()?;
-    let on = Reflect::get(&p, &"on".into())
-        .and_then(|v| v.dyn_into::<Function>())
-        .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?;
-    // Validate cleanup support before registering any callback.
-    let remove = Reflect::get(&p, &"removeListener".into())
-        .and_then(|v| v.dyn_into::<Function>())
-        .map_err(|_| "WALLET_EVENTS_UNAVAILABLE")?;
-    let mut listeners = Vec::new();
-    for event in ["accountsChanged", "chainChanged", "disconnect"] {
-        let weak_app = Rc::downgrade(app);
-        let handler = Closure::<dyn FnMut(JsValue)>::new(move |value| {
-            let Some(app) = weak_app.upgrade() else {
-                return;
-            };
-            let changed = {
-                let mut s = app.borrow_mut();
-                match event {
-                    "accountsChanged" => s.wallet.account_changed(account(&value).ok()),
-                    "chainChanged" => s
-                        .wallet
-                        .chain_changed(value.as_string().and_then(|v| quantity(&v).ok())),
-                    _ => {
-                        s.wallet.invalidate();
-                        true
-                    }
+    // Provider calls may synchronously invoke the role callback.
+    let mut subscriptions = std::mem::take(&mut app.borrow_mut().wallet_subscriptions);
+    let weak_app = Rc::downgrade(app);
+    let result = subscriptions.install(move |event, value| {
+        let Some(app) = weak_app.upgrade() else {
+            return;
+        };
+        let changed = {
+            let mut s = app.borrow_mut();
+            match event {
+                "accountsChanged" => s.wallet.account_changed(account(&value).ok()),
+                "chainChanged" => s
+                    .wallet
+                    .chain_changed(value.as_string().and_then(|v| quantity(&v).ok())),
+                _ => {
+                    s.wallet.invalidate();
+                    true
                 }
-            };
-            if changed {
-                {
-                    let mut s = app.borrow_mut();
-                    s.vault.lock();
-                    s.controls.clear_context();
-                    if !s.busy {
-                        s.controls.journey_cancelled();
-                    }
-                }
-                controls::clear_dom();
-                update_wallet(&app.borrow());
-                text(
-                    "verification",
-                    "Previous evidence cleared after wallet context changed.",
-                );
-                notice(
-                    "Wallet context changed. Reconnect the intended account before checking again.",
-                );
             }
-        });
-        listeners.push(WalletListener {
-            provider: p.clone(),
-            remove: remove.clone(),
-            event,
-            handler,
-        });
-    }
-    let installed = install_handlers(
-        listeners,
-        |listener| {
-            on.call2(
-                &listener.provider,
-                &listener.event.into(),
-                listener.handler.as_ref().unchecked_ref(),
-            )
-            .is_ok()
-        },
-        remove_listener,
-    );
-    match installed {
-        Ok(listeners) => {
-            let mut state = app.borrow_mut();
-            state.wallet_listeners = listeners;
-            state.wallet_events_bound = true;
-            Ok(())
+        };
+        if changed {
+            {
+                let mut s = app.borrow_mut();
+                s.vault.lock();
+                s.controls.clear_context();
+                if !s.busy {
+                    s.controls.journey_cancelled();
+                }
+            }
+            controls::clear_dom();
+            update_wallet(&app.borrow());
+            text(
+                "verification",
+                "Previous evidence cleared after wallet context changed.",
+            );
+            notice("Wallet context changed. Reconnect the intended account before checking again.");
         }
-        Err(retained) => {
-            app.borrow_mut().wallet_listeners = retained;
-            Err("WALLET_EVENT_REGISTRATION_FAILED: connection was not accepted; retry or reload this page.")
-        }
-    }
+    });
+    app.borrow_mut().wallet_subscriptions = subscriptions;
+    result.map_err(wallet_event_error)
 }
 fn bind_refresh(app: Rc<RefCell<App>>) {
     let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
         if app.borrow().busy {
             return;
         }
-        let (profile, voter, epoch) = {
+        let (profile, epoch) = {
             let s = app.borrow();
             if !s.wallet.connected {
                 notice("Connect the intended wallet account first.");
                 return;
             }
-            (
-                s.profile.clone().unwrap(),
-                s.wallet.account.clone().unwrap(),
-                s.wallet.epoch,
-            )
+            (s.profile.clone().unwrap(), s.wallet.epoch)
         };
         let app = app.clone();
         busy(&app, true);
         text("verification", "Checking pinned contract state…");
         notice("Reading the configured RPC. No transaction is sent.");
         spawn_local(async move {
-            let result = verification(&profile, &voter).await;
+            let result = verify_deployment(&profile).await;
             if app.borrow().wallet.epoch != epoch || !app.borrow().wallet.connected {
                 text(
                     "verification",
@@ -584,7 +516,14 @@ fn bind_refresh(app: Rc<RefCell<App>>) {
                 );
             } else {
                 match result {
-                    Ok(report) => {
+                    Ok(source) => {
+                        let d = &profile.deployment;
+                        let checks = if d.persistent.is_some() {
+                            "Runtime, shared authority and selected version pins match."
+                        } else {
+                            "Four runtime hashes and six contract links match."
+                        };
+                        let report = format!("Deployment verified at block {}.\n{checks}\nPinned guidelines version {} and hash match the contract.\nNext: open My work or select a case from the review queue. Load its review documents to read the pinned guidelines.", source.number, d.guidelines.version);
                         text("verification", &report);
                         notice("Deployment verified. Open My work or choose a case from the review queue.");
                     }

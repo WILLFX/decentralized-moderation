@@ -210,3 +210,63 @@ fn runtime_links_and_guidelines_reject_another_deployment() {
         "DEPLOYMENT_MISMATCH_GUIDELINES"
     );
 }
+
+#[test]
+fn moderator_raw_limit_does_not_limit_defaults_added_after_decoding() {
+    let mut value = profile();
+    let prefix = "https://rpc.example/";
+    value["rpcUrl"] = json!(prefix);
+    let padding = 65_536 - value.to_string().len();
+    value["rpcUrl"] = json!(format!("{prefix}{}", "a".repeat(padding)));
+    let raw = value.to_string();
+    assert_eq!(raw.len(), 65_536);
+    let decoded = parse_profile(&raw).unwrap();
+    assert!(serde_json::to_vec(&decoded).unwrap().len() > 65_536);
+    assert_eq!(
+        parse_profile(&(raw + " ")).unwrap_err().0,
+        "CONFIG_TOO_LARGE"
+    );
+}
+
+#[test]
+fn moderator_unknown_fields_remain_ignored_but_duplicate_known_fields_fail() {
+    let mut value = profile();
+    value["extension"] = json!({"future": true});
+    value["deployment"]["extension"] = json!(true);
+    assert!(parse_profile(&value.to_string()).is_ok());
+    let duplicate = value
+        .to_string()
+        .replacen('{', "{\"rpcUrl\":\"https://other.example/\",", 1);
+    assert_eq!(
+        parse_profile(&duplicate).unwrap_err().0,
+        "INVALID_CONFIG_JSON"
+    );
+}
+
+#[test]
+fn moderator_semantic_errors_keep_their_original_precedence() {
+    let mut value = profile();
+    value["guidelinesUrl"] = json!("http://remote.example/guidelines");
+    value["deployment"]["moderation"]["codeHash"] = json!(format!("0x{}", "00".repeat(32)));
+    value["rpcUrl"] = json!("file:///rpc");
+    value["timing"]["maxHeadLagSeconds"] = json!(0);
+    assert_eq!(
+        parse_profile(&value.to_string()).unwrap_err().0,
+        "INVALID_ACCESS_URL"
+    );
+    value["guidelinesUrl"] = json!("./MODERATION_GUIDELINES.md");
+    assert_eq!(
+        parse_profile(&value.to_string()).unwrap_err().0,
+        "INVALID_DEPLOYMENT"
+    );
+    value["deployment"] = profile()["deployment"].clone();
+    assert_eq!(
+        parse_profile(&value.to_string()).unwrap_err().0,
+        "INVALID_ACCESS_URL"
+    );
+    value["rpcUrl"] = profile()["rpcUrl"].clone();
+    assert_eq!(
+        parse_profile(&value.to_string()).unwrap_err().0,
+        "TIMING_PROFILE_REQUIRED"
+    );
+}

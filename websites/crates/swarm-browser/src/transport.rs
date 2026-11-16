@@ -161,6 +161,22 @@ pub(crate) fn as_str(value: &Value) -> Result<&str> {
     value.as_str().ok_or("INVALID_RPC_RESULT")
 }
 
+pub(crate) fn parse_block(value: &Value) -> Result<swarm_core::moderator::SourceBlock> {
+    let hash = as_str(&value["hash"])?;
+    if hash.len() != 66
+        || !hash.starts_with("0x")
+        || !hash[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        || hash[2..].bytes().all(|b| b == b'0')
+    {
+        return Err("INVALID_BLOCK_HASH");
+    }
+    Ok(swarm_core::moderator::SourceBlock {
+        number: quantity(as_str(&value["number"])?)?,
+        timestamp: quantity(as_str(&value["timestamp"])?)?,
+        hash: hash.to_ascii_lowercase(),
+    })
+}
+
 pub(crate) fn quantity(raw: &str) -> Result<u64> {
     let s = raw.strip_prefix("0x").ok_or("INVALID_RPC_QUANTITY")?;
     if s.is_empty()
@@ -170,4 +186,36 @@ pub(crate) fn quantity(raw: &str) -> Result<u64> {
         return Err("INVALID_RPC_QUANTITY");
     }
     u64::from_str_radix(s, 16).map_err(|_| "INVALID_RPC_QUANTITY")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_parser_preserves_numeric_fields_and_normalizes_only_hash_case() {
+        let hash = format!("0x{}", "AB".repeat(32));
+        let raw =
+            json!({"hash":hash,"number":"0xA","timestamp":"0xffffffffffffffff","unused":true});
+        let block = parse_block(&raw).unwrap();
+        assert_eq!(block.hash, hash.to_ascii_lowercase());
+        assert_eq!(block.number, 10);
+        assert_eq!(block.timestamp, u64::MAX);
+    }
+    #[test]
+    fn block_parser_keeps_hash_number_timestamp_validation_order() {
+        // Repair one field at a time: later failures must not mask earlier ones.
+        let mut raw = json!({"hash":null,"number":"0x00","timestamp":null});
+        assert_eq!(parse_block(&raw), Err("INVALID_RPC_RESULT"));
+        raw["hash"] = json!("0x01");
+        assert_eq!(parse_block(&raw), Err("INVALID_BLOCK_HASH"));
+        raw["hash"] = json!(format!("0x{}", "00".repeat(32)));
+        assert_eq!(parse_block(&raw), Err("INVALID_BLOCK_HASH"));
+        raw["hash"] = json!(format!("0x{}", "ab".repeat(32)));
+        assert_eq!(parse_block(&raw), Err("INVALID_RPC_QUANTITY"));
+        raw["number"] = json!("0x1");
+        assert_eq!(parse_block(&raw), Err("INVALID_RPC_RESULT"));
+        raw["timestamp"] = json!("0x02");
+        assert_eq!(parse_block(&raw), Err("INVALID_RPC_QUANTITY"));
+    }
 }

@@ -384,7 +384,7 @@ pub(crate) async fn reconcile(
     )
     .await?;
     let chain = rpc(p, "eth_chainId", json!([])).await?;
-    crate::workflow::canonical_receipt_status(
+    crate::moderator::workflow::canonical_receipt_status(
         receipt,
         hash,
         &canonical,

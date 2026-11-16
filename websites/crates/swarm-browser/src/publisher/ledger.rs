@@ -27,9 +27,6 @@ impl Default for Ledger {
         }
     }
 }
-pub(super) fn resolved(r: &Value) -> bool {
-    ["confirmed", "failed", "cancelled", "rejected"].contains(&r["state"].as_str().unwrap_or(""))
-}
 pub(super) fn fingerprint(r: &Value) -> String {
     swarm_core::keccak256_hex(serde_json::to_string(r).unwrap().as_bytes())
 }
@@ -71,7 +68,7 @@ impl Ledger {
                 .iter()
                 .find(|r| recovery::identity(r) == *id)
                 .ok_or("INVALID_HISTORY_ARCHIVE")?;
-            if !resolved(r) || fingerprint(r) != *hash {
+            if !history::resolved(r) || fingerprint(r) != *hash {
                 return Err("INVALID_HISTORY_ARCHIVE");
             }
         }
@@ -98,21 +95,21 @@ impl Ledger {
     pub fn eligible(&self) -> Vec<Value> {
         self.records
             .iter()
-            .filter(|r| resolved(r) && !self.is_archived(r))
+            .filter(|r| history::resolved(r) && !self.is_archived(r))
             .cloned()
             .collect()
     }
     // A fresh receipt that changes an archived record requires a new verified backup.
     pub fn reconcile(&mut self) {
         self.archived.retain(|id, hash| {
-            self.records
-                .iter()
-                .any(|r| recovery::identity(r) == *id && resolved(r) && fingerprint(r) == *hash)
+            self.records.iter().any(|r| {
+                recovery::identity(r) == *id && history::resolved(r) && fingerprint(r) == *hash
+            })
         });
     }
     pub fn room(&self, extra: &Value) -> Result<()> {
         let active = self.active();
-        let unsettled = active.iter().filter(|r| !resolved(r)).count();
+        let unsettled = active.iter().filter(|r| !history::resolved(r)).count();
         let growth = (unsettled + 1) * UPDATE_RESERVE;
         let extra = serde_json::to_vec(extra)
             .map_err(|_| "INVALID_HISTORY")?
@@ -144,7 +141,7 @@ impl Ledger {
                 .iter()
                 .find(|r| recovery::identity(r) == id)
                 .ok_or("ARCHIVE_SNAPSHOT_CHANGED")?;
-            if current != old || !resolved(current) || self.is_archived(current) {
+            if current != old || !history::resolved(current) || self.is_archived(current) {
                 return Err("ARCHIVE_SNAPSHOT_CHANGED");
             }
         }

@@ -1,8 +1,6 @@
 //! Browser adapters and explicit workflows for the separate Swarm websites.
-mod moderator_view;
+mod moderator;
 mod registration;
-mod saved_vote;
-mod state;
 
 pub(crate) type BrowserResult<T> = std::result::Result<T, &'static str>;
 
@@ -10,24 +8,16 @@ pub(crate) type BrowserResult<T> = std::result::Result<T, &'static str>;
 mod token_amounts;
 
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod app;
-#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod deployment;
-#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod evidence;
+mod coordination;
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
 mod transport;
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod vault;
-#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
 mod wallet;
-#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod workflow;
 #[cfg(all(target_arch = "wasm32", feature = "interop-tests"))]
-pub use vault::{decrypt_recovery_for_test, encrypt_recovery_for_test};
+pub use moderator::vault::{decrypt_recovery_for_test, encrypt_recovery_for_test};
 
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-pub use app::start;
+pub use moderator::start;
 
 // Native builds run state tests without pretending browser APIs are available.
 #[cfg(not(any(target_arch = "wasm32", feature = "browser-check")))]
@@ -36,18 +26,18 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod publisher_app;
+mod publisher;
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-pub use publisher_app::start_publisher;
+pub use publisher::start_publisher;
 #[cfg(not(any(target_arch = "wasm32", feature = "browser-check")))]
 pub fn start_publisher() -> Result<(), wasm_bindgen::JsValue> {
     Ok(())
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-mod search_app;
+mod search;
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-pub use search_app::start_search;
+pub use search::start_search;
 #[cfg(not(any(target_arch = "wasm32", feature = "browser-check")))]
 pub fn start_search() -> Result<(), wasm_bindgen::JsValue> {
     Ok(())
@@ -58,11 +48,7 @@ pub fn start_search() -> Result<(), wasm_bindgen::JsValue> {
     feature = "interop-tests",
     any(target_arch = "wasm32", feature = "browser-check")
 ))]
-pub use vault::VoteVault;
-
-#[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
-#[path = "moderator/requests.rs"]
-mod moderator_requests;
+pub use moderator::vault::VoteVault;
 
 #[cfg(any(target_arch = "wasm32", feature = "browser-check"))]
 mod versioning;

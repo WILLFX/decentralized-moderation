@@ -154,8 +154,13 @@ pub fn parse_profile(text: &str) -> Result<ModeratorProfile> {
     if text.len() > MAX_CONFIG_BYTES {
         return Err(CoreError("CONFIG_TOO_LARGE"));
     }
-    let mut profile: ModeratorProfile =
+    let profile: ModeratorProfile =
         serde_json::from_str(text).map_err(|_| CoreError("INVALID_CONFIG_JSON"))?;
+    validate_profile(profile)
+}
+
+/// Validate and normalize a decoded profile. Callers enforce their input-format size limits.
+pub fn validate_profile(mut profile: ModeratorProfile) -> Result<ModeratorProfile> {
     if profile.guidelines_url != guidelines_url() {
         profile.guidelines_url = access_url(&profile.guidelines_url)?;
     }

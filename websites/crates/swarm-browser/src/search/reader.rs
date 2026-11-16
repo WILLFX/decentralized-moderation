@@ -1,6 +1,6 @@
 //! Pinned read-only search transport. Each call checks cancellation before and after IO.
 use crate::{
-    transport::{as_str, quantity, rpc},
+    transport::{as_str, parse_block, quantity, rpc},
     BrowserResult as Result,
 };
 use serde_json::{json, Value};
@@ -62,40 +62,14 @@ impl Reader {
             pin: json!({"blockHash":source.hash,"requireCanonical":true}),
             source,
         };
-        let d = &self.profile.deployment;
-        for p in swarm_core::versioning::runtime_pins(d) {
-            let code = self.rpc("eth_getCode", json!([p.address, c.pin])).await?;
-            let code = as_str(&code)?;
-            if code.len() > 131074 {
-                return Err("INVALID_RUNTIME_LENGTH");
-            }
-            verify_runtime(p, code).map_err(|e| e.0)?;
-        }
-        for link in link_checks(d) {
-            verify_link(
-                &link,
-                &self
-                    .call(&c, &link.contract_address, link.signature, "")
-                    .await?,
-            )
-            .map_err(|e| e.0)?;
-        }
-        verify_guidelines(
-            d,
-            &self
-                .call(&c, &d.moderation.address, "guidelinesVersion()", "")
-                .await?,
-            &self
-                .call(&c, &d.moderation.address, "guidelinesHash()", "")
-                .await?,
+        crate::versioning::verify_deployment(
+            &self.profile.deployment,
+            &c.pin,
+            |method, args| self.rpc(method, args),
+            Some(131074),
+            |error, _| error,
         )
-        .map_err(|e| e.0)?;
-        for check in swarm_core::versioning::word_checks(d).map_err(|e| e.0)? {
-            let raw = self
-                .call(&c, &check.contract, check.signature, &check.args)
-                .await?;
-            swarm_core::versioning::verify_word(&check, &raw).map_err(|e| e.0)?;
-        }
+        .await?;
         Ok(c)
     }
     pub async fn version_at(&self, c: &Context, address: &str) -> Result<ModeratorProfile> {
@@ -157,19 +131,4 @@ impl Reader {
             Ok(())
         }
     }
-}
-fn parse_block(v: &Value) -> Result<SourceBlock> {
-    let hash = as_str(&v["hash"])?;
-    if hash.len() != 66
-        || !hash.starts_with("0x")
-        || !hash[2..].bytes().all(|b| b.is_ascii_hexdigit())
-        || hash[2..].bytes().all(|b| b == b'0')
-    {
-        return Err("INVALID_BLOCK_HASH");
-    }
-    Ok(SourceBlock {
-        number: quantity(as_str(&v["number"])?)?,
-        timestamp: quantity(as_str(&v["timestamp"])?)?,
-        hash: hash.to_ascii_lowercase(),
-    })
 }

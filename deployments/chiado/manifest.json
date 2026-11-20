@@ -1,7 +1,7 @@
 {
   "name": "Decentralized Moderation testnet MVP",
-  "publishedDate": "2026-11-10",
-  "sourceRevision": "7f2438fb09017744af724b54996e4552414076a6",
+  "publishedDate": "2026-11-20",
+  "sourceRevision": "02a4fac064f2a451acb362c33d48d2dc66c5abb9",
   "sourceRepository": "https://github.com/WILLFX/decentralized-moderation",
   "moderationChainId": 10200,
   "swarmNetworkId": 10,
@@ -10,13 +10,13 @@
   "sites": [
     {
       "role": "moderator",
-      "swarmReference": "6b4978dcef078eab26a00c42926e22dee398ccd08783bc61a8db044c6e9d951d",
-      "archiveSha256": "aa14c2e3c692510241fa909d63e2883c8a72a597061b7839878d2eb6bc8094f5",
+      "swarmReference": "55f21fb925092abc537c82656dbeafcfe905eae6c816532e94a17b8ff39a609b",
+      "archiveSha256": "0a332d8f33af700cfdb45b8d4c964b707ac7df7fee6ee39f7fd33b7fa3e01020",
       "assets": [
         {
           "name": "index.html",
-          "sha256": "b466dbe08e0f2d3c1b09314117cafc82f80759c2b89ba809c026faa79d25d21f",
-          "bytes": 29020
+          "sha256": "4246990d89c43ecda1b84d385838378fca26e50d94e506ab97d8e0d5dab27258",
+          "bytes": 29885
         },
         {
           "name": "MODERATION_GUIDELINES.md",
@@ -30,25 +30,25 @@
         },
         {
           "name": "swarm_moderator_bg.wasm.gz",
-          "sha256": "0f8274537b70f318ab99542367659f0eafefe234bfe37d88f534b277c81bcc07",
-          "bytes": 442425
+          "sha256": "761cae6ad6de21d8fe6e9d29d8ffe28eefd34a9463e16c9e392e61ffef72009b",
+          "bytes": 442271
         },
         {
           "name": "asset-hashes.json",
-          "sha256": "f2d620337721fe98260c2e528bb6492132ed8179f956396eef83c88a430d9984",
+          "sha256": "12de88bea7cc9c8f4db3e376fdd48a519001a3903e227c6b498b4d55ab522d41",
           "bytes": 377
         }
       ]
     },
     {
       "role": "publisher",
-      "swarmReference": "7a655e42c811ef90248cf9505bf4bec7362499266df8be68f6f34c97aca509a3",
-      "archiveSha256": "69cf2d9e2d4302345cd70a3dafc44233b35ee6e747809d2aaaf25a9e0459451d",
+      "swarmReference": "6cfb95a4f4f12d2eb77b273a3e3ee67465c4f2c8a662630f505696240119bdb6",
+      "archiveSha256": "d891ab5a7c913ce5ca8fb74da6b86caa097683d5cfc0390eeddcbf4fffdca31e",
       "assets": [
         {
           "name": "index.html",
-          "sha256": "ce5a759dd6acc16fcb8d2112251d5258705721bfc87992e22088d8db132095a7",
-          "bytes": 30145
+          "sha256": "0e19e76662fe2e7dcde3c26468ffb65e602b7c2dfa840a76c8ba4aea4bfb0e1b",
+          "bytes": 31002
         },
         {
           "name": "MODERATION_GUIDELINES.md",
@@ -62,25 +62,25 @@
         },
         {
           "name": "swarm_publisher_bg.wasm.gz",
-          "sha256": "f741b92be3626ad536b586df83954a6c240c83f87083785379c28d77a327ea7d",
-          "bytes": 461535
+          "sha256": "57e35fe1566e35e227581271e31570be5a22e93496cc27c090f5fbfcb9e90408",
+          "bytes": 451301
         },
         {
           "name": "asset-hashes.json",
-          "sha256": "24ccc81db185e766e85000d185471802308569f8d8b832da89208599c7efd720",
+          "sha256": "7586ea9df5bc48ad59b523366b80cc5ecb5196ba08bed634d0d2605bbf5d2014",
           "bytes": 377
         }
       ]
     },
     {
       "role": "search",
-      "swarmReference": "3c2d994f2d76913fa3d4cb448b65ff8ff7834bbbc0be36f14246b05919ff53ec",
-      "archiveSha256": "030603f1022909e4d678a1c47a6086efbaf066c127f62795d67ca1b5ca174c0b",
+      "swarmReference": "cd7ad9d8223a208a275b0bc8bc056c98a14429873cbed2fdf0b09c4e4e1285ec",
+      "archiveSha256": "ec99e5d48501c60fc9d19aa97cb9de7f7a8b4f9cbfb393d0cade76d82e745a48",
       "assets": [
         {
           "name": "index.html",
-          "sha256": "e5a0a8f3347ab6e7f9c3ab26ef39417473b4feabb6ee7ac9de68d9c743a0748b",
-          "bytes": 12906
+          "sha256": "51ac416cf8dfeae13501039e4a10c44dddfab19328a87b897cefaa2897883e46",
+          "bytes": 13928
         },
         {
           "name": "MODERATION_GUIDELINES.md",
@@ -94,12 +94,12 @@
         },
         {
           "name": "swarm_search_bg.wasm.gz",
-          "sha256": "2dde4d518eb17afa5feec47247ad0f874b1327e56daef2326f2ea858438c46f9",
-          "bytes": 345816
+          "sha256": "2196ab3a02693b4aabfa6eed7a3148efee3d92a5b8d206eb3fe195967a4444cc",
+          "bytes": 345379
         },
         {
           "name": "asset-hashes.json",
-          "sha256": "6c59f1277e4fab4fd514c3ff2837b09e31bef62fb44a9a2386de93ba70443376",
+          "sha256": "76289a8bc9f696c188946bda594bbdd396057fc8afe3c101bdfcd7af0be81e07",
           "bytes": 371
         }
       ]

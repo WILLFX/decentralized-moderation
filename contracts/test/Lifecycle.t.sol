@@ -134,6 +134,7 @@ contract LifecycleTest is MockedModerationFixture {
         _wait(REVEAL_WINDOW + 1);
         mod.closeReveal(id);
         _advance(SEED_LAG + 1);
+        _fixtureOutcome(mod, id, APPROVE);
         mod.draw(id);
         _wait(CHALLENGE_WINDOW + 1);
         mod.closeChallenge(id);

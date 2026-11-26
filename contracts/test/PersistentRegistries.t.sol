@@ -3,19 +3,18 @@ pragma solidity ^0.8.28;
 
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
-import {ModerationAuthority} from "../src/persistent/ModerationAuthority.sol";
-import {PersistentModeration} from "../src/persistent/PersistentModeration.sol";
-import {PersistentStakeRegistry} from "../src/persistent/PersistentStakeRegistry.sol";
-import {PersistentIndexRegistry} from "../src/persistent/PersistentIndexRegistry.sol";
+import {StakeRegistry} from "../src/StakeRegistry.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
 
 contract PersistentRegistriesTest is HistoryFixture {
     MockBZZ token;
     ModerationAuthority authority;
-    PersistentStakeRegistry stakes;
-    PersistentIndexRegistry index;
-    PersistentModeration first;
-    PersistentModeration second;
+    StakeRegistry stakes;
+    IndexRegistry index;
+    Moderation first;
+    Moderation second;
     address publisher = address(0x5011);
     address[24] voters;
     uint256 constant FEE = 1200;
@@ -63,11 +62,11 @@ contract PersistentRegistriesTest is HistoryFixture {
         vm.warp(1_000_000);
         token = new MockBZZ();
         authority = new ModerationAuthority(address(this), NOTICE, address(token), 1000);
-        stakes = new PersistentStakeRegistry(authority);
-        index = new PersistentIndexRegistry(authority);
+        stakes = new StakeRegistry(authority);
+        index = new IndexRegistry(authority);
         authority.bindRegistries(address(stakes), address(index));
-        first = new PersistentModeration(config(), authority);
-        second = new PersistentModeration(config(), authority);
+        first = new Moderation(config(), authority);
+        second = new Moderation(config(), authority);
         activate(first);
         for (uint256 i; i < voters.length; ++i) {
             voters[i] = address(uint160(0x1000 + i));
@@ -84,33 +83,33 @@ contract PersistentRegistriesTest is HistoryFixture {
         vm.stopPrank();
     }
 
-    function activate(PersistentModeration m) internal {
+    function activate(Moderation m) internal {
         authority.propose(address(m), address(m).codehash, fingerprint(config()));
         (,,, uint256 activationTime) = authority.proposal();
         vm.warp(activationTime);
         authority.activate();
     }
 
-    function submit(PersistentModeration m, bytes32 content) internal returns (uint256) {
+    function submit(Moderation m, bytes32 content) internal returns (uint256) {
         bytes32[] memory topics = new bytes32[](1);
         topics[0] = keccak256("biology");
         vm.prank(publisher);
         return m.submit(content, keccak256("metadata"), topics, FEE);
     }
 
-    function commit(PersistentModeration m, uint256 id, uint256 voter) internal {
+    function commit(Moderation m, uint256 id, uint256 voter) internal {
         bytes32 hash = m.commitHash(id, m.caseInfo(id).challenges, voters[voter], 1, SALT);
         vm.prank(voters[voter]);
         m.commit(id, hash);
     }
 
-    function readyA(PersistentModeration m, uint256 id) internal {
+    function readyA(Moderation m, uint256 id) internal {
         uint256 target = m.caseInfo(id).seedBlockA;
         if (block.number <= target) vm.roll(target + 1);
         vm.setBlockhash(target, keccak256(abi.encode("A", target)));
     }
 
-    function round(PersistentModeration m, uint256 id, uint256 offset) internal {
+    function round(Moderation m, uint256 id, uint256 offset) internal {
         readyA(m, id);
         for (uint256 i; i < 3; ++i) {
             commit(m, id, offset + i);
@@ -150,7 +149,7 @@ contract PersistentRegistriesTest is HistoryFixture {
         m.draw(id);
     }
 
-    function finalize(PersistentModeration m, uint256 id) internal {
+    function finalize(Moderation m, uint256 id) internal {
         uint256 deadline = m.caseInfo(id).phaseDeadline;
         if (block.timestamp < deadline) vm.warp(deadline);
         m.closeChallenge(id);
@@ -195,7 +194,7 @@ contract PersistentRegistriesTest is HistoryFixture {
         authority.activate();
         Moderation.Config memory c = config();
         c.freezePerLoss++;
-        PersistentModeration different = new PersistentModeration(c, authority);
+        Moderation different = new Moderation(c, authority);
         authority.cancel();
         vm.expectRevert(ModerationAuthority.InvalidVersion.selector);
         authority.propose(address(different), address(different).codehash, fingerprint(config()));
@@ -220,7 +219,7 @@ contract PersistentRegistriesTest is HistoryFixture {
         vm.expectRevert();
         vm.prank(voters[0]);
         stakes.withdraw();
-        vm.expectRevert(PersistentStakeRegistry.InvalidObligation.selector);
+        vm.expectRevert(StakeRegistry.InvalidObligation.selector);
         vm.prank(address(first));
         stakes.settle(oldId, voters[0]);
         finalize(second, newId);
@@ -309,11 +308,25 @@ contract PersistentRegistriesTest is HistoryFixture {
         first.withdrawRefund(id);
         vm.expectRevert();
         first.claim(id, voters[0]);
-        vm.expectRevert(PersistentStakeRegistry.CaseScopeRequired.selector);
         vm.prank(address(first));
-        stakes.settle(voters[0], false, 0);
-        vm.expectRevert(PersistentIndexRegistry.CaseScopeRequired.selector);
+        (bool settled,) = address(stakes).call(abi.encodeWithSignature("settle(address,bool,uint256)", voters[0], false, 0));
+        assertFalse(settled, "unscoped settlement removed");
         vm.prank(address(first));
-        index.removeListing(bytes32(0), bytes32(0));
+        (bool removed,) = address(index).call(abi.encodeWithSignature("removeListing(bytes32,bytes32)", bytes32(0), bytes32(0)));
+        assertFalse(removed, "unscoped index mutation removed");
     }
+    function test_nativeObligationsSupportFiveHundredConcurrentCases() public {
+        token.mint(publisher, 500 * FEE);
+        for (uint256 i; i < 500; ++i) submit(first, bytes32(i + 1));
+        readyA(first, 1);
+        for (uint256 id = 1; id <= 500; ++id) {
+            commit(first, id, 0);
+            assertEq(stakes.obligation(address(first), id, voters[0]), 1);
+        }
+        assertEq(stakes.openVotes(voters[0]), 500);
+        vm.expectRevert(StakeRegistry.HasOpenVotes.selector);
+        vm.prank(voters[0]);
+        stakes.withdraw();
+    }
+
 }

@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test, console, StdInvariant} from "forge-std/Test.sol";
 import {Deploy} from "../script/Deploy.s.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
@@ -24,7 +25,13 @@ contract InvariantTest is StdInvariant, Test {
     function setUp() public {
         token = new MockBZZ();
         Deploy d = new Deploy();
-        Deploy.Stack memory s = d.deploy(d.defaults(address(token)));
+        Deploy.Stack memory s = d.deploy(d.defaults(address(token)), 10e16, address(this), 1);
+        s.authority.bindRegistries(address(s.stakes), address(s.index));
+        s.authority.propose(address(s.moderation), address(s.moderation).codehash, s.moderation.rulesHash());
+        (,,, uint256 ready) = s.authority.proposal();
+        vm.warp(ready);
+        s.authority.activate();
+
         mod = s.moderation;
         stakes = s.stakes;
         index = s.index;

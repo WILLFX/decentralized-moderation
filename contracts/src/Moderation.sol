@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {ModerationAuthority, moderationRulesHash} from "./ModerationAuthority.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
@@ -10,21 +12,14 @@ interface IStakeRegistry {
     function isActive(address a) external view returns (bool);
     function isFrozen(address a) external view returns (bool);
     function stakedCount() external view returns (uint256);
-    function noteCommit(address a) external;
-    function settle(address a, bool incoherent, uint256 duration) external;
+    function authority() external view returns (address);
+    function noteCommit(uint256 id, address voter) external;
+    function settle(uint256 id, address voter) external;
 }
 
 interface IIndexRegistry {
-    function writeEntry(
-        bytes32 claimKey,
-        bytes32 topicKey,
-        uint8 status,
-        bool allTicketsApprove,
-        bool everChallenged,
-        uint32 approve,
-        uint32 reject
-    ) external;
-    function removeListing(bytes32 claimKey, bytes32 topicKey) external;
+    function authority() external view returns (address);
+    function applyOutcome(uint256 id) external;
 }
 
 /// @title Moderation
@@ -146,6 +141,14 @@ contract Moderation is ReentrancyGuard {
 
     // ------------------------------------------------------------ immutables
 
+    ModerationAuthority public immutable authority;
+    bytes32 public immutable rulesHash;
+    mapping(uint256 => address) public removalTargetModeration;
+    event CrossVersionRemovalSubmitted(
+        uint256 indexed caseId, address indexed targetModeration, uint256 indexed targetCaseId
+    );
+    error ConfigurationMismatch();
+
     IERC20 public immutable token;
     IStakeRegistry public immutable stakes;
     IIndexRegistry public immutable index;
@@ -204,8 +207,13 @@ contract Moderation is ReentrancyGuard {
 
     /// @dev A listing may have at most one removal case open at a time, and a
     ///      listing already removed cannot be removed again.
-    mapping(uint256 => uint256) public openRemovalOf;
-    mapping(uint256 => bool) public removed;
+    function openRemovalOf(uint256 id) external view returns (uint256) {
+        (, uint256 removalId) = authority.openRemoval(authority.targetKey(address(this), id));
+        return removalId;
+    }
+    function removed(uint256 id) external view returns (bool) {
+        return authority.removed(authority.targetKey(address(this), id));
+    }
 
     // --------------------------------------------------------------- events
 
@@ -243,8 +251,6 @@ contract Moderation is ReentrancyGuard {
     error ChallengeIntentRequired();
     error ChallengeIntentChanged();
     error NotARemovableListing();
-    error RemovalAlreadyOpen();
-    error AlreadyRemoved();
     error BadFloor();
     error FeeTooLarge();
     error BadGuidelines();
@@ -282,7 +288,7 @@ contract Moderation is ReentrancyGuard {
         bytes32 guidelinesHash;
     }
 
-    constructor(Config memory cfg) {
+    constructor(Config memory cfg, ModerationAuthority authority_) {
         if (cfg.seedLag == 0 || cfg.commitWindow == 0 || cfg.maxWaitForThird == 0) revert BadSchedule();
         token = IERC20(cfg.token);
         stakes = IStakeRegistry(cfg.stakes);
@@ -312,6 +318,10 @@ contract Moderation is ReentrancyGuard {
         if (cfg.guidelinesVersion == 0 || cfg.guidelinesHash == bytes32(0)) revert BadGuidelines();
         guidelinesVersion = cfg.guidelinesVersion;
         guidelinesHash = cfg.guidelinesHash;
+        authority = authority_;
+        rulesHash = moderationRulesHash(cfg);
+        if (cfg.token != authority_.token() || stakes.authority() != address(authority_)
+            || index.authority() != address(authority_)) revert ConfigurationMismatch();
     }
 
     // ------------------------------------------------------------- submit
@@ -351,41 +361,39 @@ contract Moderation is ReentrancyGuard {
     ///      and topics, so the two cannot disagree about what is being removed —
     ///      a removal naming its own topic list could remove an entry from one
     ///      topic and leave it under another.
-    function submitRemoval(uint256 targetCaseId, uint256 fee)
-        external
-        virtual
-        nonReentrant
-        returns (uint256 caseId)
-    {
+    function submitRemoval(uint256 targetId, uint256 fee) external nonReentrant returns (uint256 id) {
+        return _submitRemoval(address(this), targetId, fee);
+    }
+
+    function submitRemoval(address target, uint256 targetId, uint256 fee) external nonReentrant returns (uint256 id) {
+        return _submitRemoval(target, targetId, fee);
+    }
+
+    function _submitRemoval(address target, uint256 targetId, uint256 fee) internal returns (uint256 id) {
         if (fee < feeMin) revert FeeTooLow();
-
-        Case storage t = cases[targetCaseId];
-        if (
-            t.phase != uint8(Phase.FINALIZED) || t.actionType != ACTION_LIST
-                || t.preliminary != uint8(Outcome.APPROVE)
-        ) revert NotARemovableListing();
-        if (removed[targetCaseId]) revert AlreadyRemoved();
-        if (openRemovalOf[targetCaseId] != 0) revert RemovalAlreadyOpen();
-
-        caseId = nextCaseId++;
-        Case storage c = cases[caseId];
-
+        authority.requireCase(target, targetId, false);
+        Moderation.Case memory t = Moderation(target).caseInfo(targetId);
+        if (t.phase != uint8(Phase.FINALIZED) || t.actionType != ACTION_LIST || t.preliminary != uint8(Outcome.APPROVE))
+        {
+            revert NotARemovableListing();
+        }
+        id = nextCaseId++;
+        Case storage c = cases[id];
         c.contentHash = t.contentHash;
         c.metaHash = t.metaHash;
         c.claimKey = t.claimKey;
         c.submitter = msg.sender;
         c.topicCount = t.topicCount;
         c.actionType = ACTION_REMOVE;
-        c.targetCaseId = targetCaseId;
-        caseTopics[caseId] = caseTopics[targetCaseId];
-
-        openRemovalOf[targetCaseId] = caseId;
-
-        _open(caseId, fee);
-        emit RemovalSubmitted(caseId, targetCaseId, msg.sender);
+        c.targetCaseId = targetId;
+        removalTargetModeration[id] = target;
+        caseTopics[id] = Moderation(target).topicsOf(targetId);
+        _open(id, fee);
+        emit RemovalSubmitted(id, targetId, msg.sender);
+        emit CrossVersionRemovalSubmitted(id, target, targetId);
     }
 
-    function _open(uint256 caseId, uint256 fee) internal virtual {
+    function _open(uint256 caseId, uint256 fee) internal {
         Case storage c = cases[caseId];
 
         // `pot` is a uint128 and `fee` is not, so an unchecked cast would credit a
@@ -401,6 +409,7 @@ contract Moderation is ReentrancyGuard {
         c.seedBlockA = uint40(block.number + seedLag);
         _schedulePair(caseId);
         address(token).safeTransferFrom(msg.sender, address(this), fee);
+        authority.registerCase(caseId, removalTargetModeration[caseId], c.targetCaseId);
     }
 
     function _schedulePair(uint256 caseId) internal {
@@ -459,7 +468,7 @@ contract Moderation is ReentrancyGuard {
         votes[caseId][msg.sender] =
             Vote({commitment: h, committee: committee, round: c.challenges, revealed: 0, settled: false});
 
-        _noteCommit(caseId, msg.sender);
+        stakes.noteCommit(caseId, msg.sender);
 
         uint32 n;
         if (committee == 1) {
@@ -724,7 +733,7 @@ contract Moderation is ReentrancyGuard {
         if (against == uint8(Outcome.APPROVE)) ++c.pooledApprove;
         else ++c.pooledReject;
 
-        _noteCommit(caseId, msg.sender);
+        stakes.noteCommit(caseId, msg.sender);
         c.everChallenged = true;
         ++c.challenges;
 
@@ -759,62 +768,26 @@ contract Moderation is ReentrancyGuard {
         c.finalizedAt = uint40(block.timestamp);
 
         _applyOutcome(caseId);
-        _completeCase(caseId);
+        authority.completeCase(caseId);
         emit Finalized(caseId, c.preliminary);
     }
 
-    // Registry adapters preserve the state machine and disclosure/settlement rules.
-    function _noteCommit(uint256, address voter) internal virtual {
-        stakes.noteCommit(voter);
-    }
-
-    function _settleVote(uint256, address voter, bool frozen) internal virtual {
-        stakes.settle(voter, frozen, freezePerLoss);
-    }
-
-    function _applyOutcome(uint256 caseId) internal virtual {
-        Case storage c = cases[caseId];
-        bytes32[MAX_TOPICS] storage t = caseTopics[caseId];
-
-        if (c.actionType == ACTION_REMOVE) {
-            // §8 — the fee is paid whichever way this goes, so nothing is
-            // refunded here. A speculative removal costs its submitter every
-            // time, which is what stops removal being free censorship.
-            openRemovalOf[c.targetCaseId] = 0;
-            if (c.preliminary == uint8(Outcome.APPROVE)) {
-                removed[c.targetCaseId] = true;
-                for (uint256 i; i < c.topicCount; ++i) {
-                    index.removeListing(c.claimKey, t[i]);
-                }
-                emit Removed(c.targetCaseId, caseId);
-            }
-        } else if (c.preliminary == uint8(Outcome.APPROVE)) {
-            for (uint256 i; i < c.topicCount; ++i) {
-                index.writeEntry(
-                    c.claimKey,
-                    t[i],
-                    uint8(Outcome.APPROVE),
-                    c.ticketsApprove == 3,
-                    c.everChallenged,
-                    c.pooledApprove,
-                    c.pooledReject
-                );
-            }
+    function _applyOutcome(uint256 id) internal {
+        index.applyOutcome(id);
+        if (cases[id].actionType == ACTION_REMOVE && cases[id].preliminary == uint8(Outcome.APPROVE)) {
+            emit Removed(cases[id].targetCaseId, id);
         }
     }
 
-    function _completeCase(uint256) internal virtual {}
-
     function _toUnresolved(uint256 caseId) internal {
         Case storage c = cases[caseId];
-        if (c.actionType == ACTION_REMOVE) openRemovalOf[c.targetCaseId] = 0;
         uint8 previousPhase = c.phase;
         c.phase = uint8(Phase.UNRESOLVED);
         emit PhaseChanged(caseId, previousPhase, c.phase);
         c.finalizedAt = uint40(block.timestamp);
         refundOwed[caseId] += c.pot;
         c.pot = 0;
-        _completeCase(caseId);
+        authority.completeCase(caseId);
         emit Unresolved(caseId);
     }
 
@@ -860,7 +833,7 @@ contract Moderation is ReentrancyGuard {
         // resolved case; the first clause is what carries the unresolved one.
         bool frozen = vt.revealed == uint8(Outcome.NONE)
             || (resolved && vt.revealed != c.preliminary);
-        _settleVote(caseId, m, frozen);
+        stakes.settle(caseId, m);
 
         if (!resolved) {
             emit Claimed(caseId, m, 0, frozen);
@@ -1001,11 +974,6 @@ contract Moderation is ReentrancyGuard {
         return _eligible(caseId, m, committee);
     }
 
-    function _committeeOf(uint8 phase) internal pure returns (uint8) {
-        if (phase == uint8(Phase.COMMIT_A)) return 1;
-        if (phase == uint8(Phase.COMMIT_B)) return 2;
-        return 0;
-    }
 
     // ------------------------------------------------------------- views
 

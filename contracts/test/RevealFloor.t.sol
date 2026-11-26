@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
@@ -50,7 +51,7 @@ contract RevealFloorTest is HistoryFixture {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+        mod = _newModeration(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
             1, keccak256("g")));
         for (uint256 i; i < mods.length; ++i) {
@@ -135,10 +136,11 @@ contract RevealFloorTest is HistoryFixture {
     // ----------------------------------------------------- the floor itself
 
     function test_constructorRejectsAFloorOfZero() public {
+        ModerationAuthority a = stakes.authority();
         vm.expectRevert(Moderation.BadFloor.selector);
         new Moderation(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, 0,
-            1, keccak256("g")));
+            1, keccak256("g")), a);
     }
 
     function test_bothCommitteesAtTheFloorResolvesNormally() public {
@@ -341,6 +343,7 @@ contract RevealFloorTest is HistoryFixture {
         // staffed from moderators who did not vote in round 0
         _round(id, 1, 3, FLOOR, 9, FLOOR, APPROVE);
         _advance(SEED_LAG + 1);
+        _fixtureOutcome(mod, id, APPROVE);
         mod.draw(id);
 
         Moderation.Case memory c = mod.caseInfo(id);

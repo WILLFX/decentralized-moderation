@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
@@ -49,7 +50,7 @@ contract RemovalTest is HistoryFixture {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(Moderation.Config(address(token),
+        mod = _newModeration(Moderation.Config(address(token),
             address(stakes),
             address(index),
             COMMIT_WINDOW,
@@ -206,7 +207,7 @@ contract RemovalTest is HistoryFixture {
         mod.submitRemoval(listing, FEE);
 
         vm.prank(remover);
-        vm.expectRevert(Moderation.RemovalAlreadyOpen.selector);
+        vm.expectRevert(ModerationAuthority.RemovalUnavailable.selector);
         mod.submitRemoval(listing, FEE);
     }
 
@@ -217,7 +218,7 @@ contract RemovalTest is HistoryFixture {
         _runToFinal(rem, APPROVE, 4);
 
         vm.prank(remover);
-        vm.expectRevert(Moderation.AlreadyRemoved.selector);
+        vm.expectRevert(ModerationAuthority.RemovalUnavailable.selector);
         mod.submitRemoval(listing, FEE);
     }
 
@@ -245,7 +246,7 @@ contract RemovalTest is HistoryFixture {
         mod.submitRemoval(open, FEE); // still mid-lifecycle
 
         vm.prank(remover);
-        vm.expectRevert(Moderation.NotARemovableListing.selector);
+        vm.expectRevert(ModerationAuthority.UnknownCase.selector);
         mod.submitRemoval(9999, FEE); // never existed
     }
 

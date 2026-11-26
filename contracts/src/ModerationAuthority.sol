@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Moderation} from "../Moderation.sol";
+import {Moderation} from "./Moderation.sol";
 
-interface IPersistentVersion {
+interface IModerationVersion {
     function authority() external view returns (address);
     function stakes() external view returns (address);
     function index() external view returns (address);
@@ -11,11 +11,11 @@ interface IPersistentVersion {
     function rulesHash() external view returns (bytes32);
 }
 
-interface IPersistentRegistry {
+interface IAuthorityRegistry {
     function authority() external view returns (address);
 }
 
-interface IPersistentCustody is IPersistentRegistry {
+interface IAuthorityCustody is IAuthorityRegistry {
     function token() external view returns (address);
     function stakeAmount() external view returns (uint256);
 }
@@ -98,10 +98,10 @@ contract ModerationAuthority {
             revert BadConfiguration();
         }
         if (
-            IPersistentCustody(stakes_).authority() != address(this)
-                || IPersistentRegistry(index_).authority() != address(this)
-                || IPersistentCustody(stakes_).token() != token
-                || IPersistentCustody(stakes_).stakeAmount() != stakeAmount
+            IAuthorityCustody(stakes_).authority() != address(this)
+                || IAuthorityRegistry(index_).authority() != address(this)
+                || IAuthorityCustody(stakes_).token() != token
+                || IAuthorityCustody(stakes_).stakeAmount() != stakeAmount
         ) revert BadConfiguration();
         stakes = stakes_;
         index = index_;
@@ -142,7 +142,7 @@ contract ModerationAuthority {
             stakes == address(0) || candidate.code.length == 0 || runtimeHash == bytes32(0)
                 || candidate.codehash != runtimeHash
         ) revert InvalidVersion();
-        IPersistentVersion c = IPersistentVersion(candidate);
+        IModerationVersion c = IModerationVersion(candidate);
         if (
             c.authority() != address(this) || c.stakes() != stakes || c.index() != index || c.token() != token
                 || expectedRulesHash == bytes32(0) || c.rulesHash() != expectedRulesHash
@@ -206,4 +206,23 @@ contract ModerationAuthority {
         }
         emit CaseCompleted(msg.sender, id);
     }
+
 }
+
+function moderationRulesHash(Moderation.Config memory cfg) pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                cfg.token,
+                cfg.commitWindow,
+                cfg.revealWindow,
+                cfg.challengeWindow,
+                cfg.maxWaitForThird,
+                cfg.freezePerLoss,
+                cfg.seedLag,
+                cfg.feeMin,
+                cfg.minRevealsPerCommittee,
+                cfg.guidelinesVersion,
+                cfg.guidelinesHash
+            )
+        );
+    }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Deploy} from "../script/Deploy.s.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
@@ -38,7 +39,13 @@ contract IntegrationTest is HistoryFixture {
     function setUp() public {
         token = new MockBZZ();
         deployer = new Deploy();
-        s = deployer.deploy(deployer.defaults(address(token)));
+        s = deployer.deploy(deployer.defaults(address(token)), STAKE, address(this), 1);
+
+        s.authority.bindRegistries(address(s.stakes), address(s.index));
+        s.authority.propose(address(s.moderation), address(s.moderation).codehash, s.moderation.rulesHash());
+        (,,, uint256 ready) = s.authority.proposal();
+        vm.warp(ready);
+        s.authority.activate();
 
         for (uint256 i; i < mods.length; ++i) {
             mods[i] = address(uint160(0x10000 + i));
@@ -97,21 +104,22 @@ contract IntegrationTest is HistoryFixture {
 
     function test_deployVerifiesEveryLinkBothWays() public view {
         deployer.verify(s);
-        assertEq(s.stakes.moderation(), address(s.moderation));
-        assertEq(s.index.moderation(), address(s.moderation));
+        assertEq(address(s.stakes.authority()), address(s.authority));
+        assertEq(address(s.index.authority()), address(s.authority));
         assertEq(address(s.moderation.stakes()), address(s.stakes));
         assertEq(address(s.moderation.index()), address(s.index));
     }
 
     function test_verifyCatchesAnUnlinkedStack() public {
         Deploy.Stack memory broken;
-        broken.stakes = new StakeRegistry(address(token), STAKE);
-        broken.index = new IndexRegistry();
+        broken.authority = new ModerationAuthority(address(this), 1, address(token), STAKE);
+        broken.stakes = new StakeRegistry(broken.authority);
+        broken.index = new IndexRegistry(broken.authority);
         broken.moderation = new Moderation(Moderation.Config(address(token), address(broken.stakes), address(broken.index),
-            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1, 1, keccak256("g")));
+            15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, FEE, 1, 1, keccak256("g")), broken.authority);
         // deployed, never linked — this is the state that otherwise fails at the
         // first commit, long after anyone is watching
-        vm.expectRevert(abi.encodeWithSelector(Deploy.NotLinked.selector, "stakes->moderation"));
+        vm.expectRevert(abi.encodeWithSelector(Deploy.NotLinked.selector, "authority->stakes"));
         deployer.verify(broken);
     }
 
@@ -137,23 +145,23 @@ contract IntegrationTest is HistoryFixture {
     /// @dev Both halves of the pin are rejected at zero. A zero hash would pin every
     ///      case to no document at all, which is the state this exists to end.
     function test_aDeploymentWithoutGuidelinesIsRefused() public {
-        Deploy.Params memory p = deployer.defaults(address(token));
+        Moderation.Config memory p = deployer.defaults(address(token));
 
         p.guidelinesVersion = 0;
         vm.expectRevert(abi.encodeWithSelector(Deploy.BadParams.selector, "guidelinesVersion"));
-        deployer.deploy(p);
+        deployer.deploy(p, STAKE, address(this), 1);
 
         p = deployer.defaults(address(token));
         p.guidelinesHash = bytes32(0);
         vm.expectRevert(abi.encodeWithSelector(Deploy.BadParams.selector, "guidelinesHash"));
-        deployer.deploy(p);
+        deployer.deploy(p, STAKE, address(this), 1);
     }
 
     /// @dev The guard that makes the pin evidence rather than a tautology: a hash that
     ///      is not the document is refused, so nothing can be deployed claiming to
     ///      judge against a text it does not carry.
     function test_aDeploymentWhoseGuidelinesHashIsNotTheDocumentIsRefused() public {
-        Deploy.Params memory p = deployer.defaults(address(token));
+        Moderation.Config memory p = deployer.defaults(address(token));
         p.guidelinesHash = keccak256("a different document entirely");
 
         vm.expectRevert(
@@ -161,7 +169,7 @@ contract IntegrationTest is HistoryFixture {
                 Deploy.BadParams.selector, "guidelinesHash does not match MODERATION_GUIDELINES.md"
             )
         );
-        deployer.deploy(p);
+        deployer.deploy(p, STAKE, address(this), 1);
     }
 
     /// @dev With 64 staked, `eligBits` is non-zero and eligibility actually

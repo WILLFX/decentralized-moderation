@@ -5,14 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
+import {MockStakes, MockIndex, MockRegistry} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice Exposes `shareOf` over a planted tally, so the `winners == 0` branch
 ///         and the single-winner case can be checked without steering a real draw
 ///         to a low-probability outcome.
 contract ShareHarness is Moderation {
     constructor(address t, address s, address i)
-        Moderation(Moderation.Config(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g")))
+        Moderation(Moderation.Config(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g")), MockRegistry(s).authority())
     {}
 
     function plant(uint256 caseId, uint32 a, uint32 r, uint8 preliminary, uint128 pot) external {
@@ -64,7 +64,7 @@ contract SettlementTest is HistoryFixture {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+        mod = _newModeration(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, FEE, FLOOR,
             1, keccak256("g")));
         for (uint256 i; i < mods.length; ++i) {
@@ -475,7 +475,7 @@ contract SettlementTest is HistoryFixture {
     ///      under which the smallest non-zero reward is silently dropped and the
     ///      moderator is marked settled having been paid nothing.
     function test_aOneWeiShareIsStillPaid() public {
-        Moderation m2 = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+        Moderation m2 = _newModeration(Moderation.Config(address(token), address(stakes), address(index),
             COMMIT_WINDOW, REVEAL_WINDOW, CHALLENGE_WINDOW, MAX_WAIT, FREEZE, SEED_LAG, 1, FLOOR,
             1, keccak256("g")));
         vm.prank(submitter);

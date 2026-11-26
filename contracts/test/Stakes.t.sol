@@ -2,11 +2,21 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
+import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
 
+/// Isolated custody arithmetic. Production case authorization is exercised separately.
+contract StakeAccountingHarness is StakeRegistry {
+    constructor(ModerationAuthority a) StakeRegistry(a) {}
+    function noteCommit(address voter) external { ++mods[voter].openVotes; }
+    function settle(address voter, bool frozen, uint256 duration) external { _settle(voter, frozen, duration); }
+}
+
 contract StakesTest is Test {
-    StakeRegistry reg;
+    StakeAccountingHarness reg;
+    ModerationAuthority authority;
     MockBZZ token;
 
     address constant CASES = address(0xCA5E5);
@@ -20,8 +30,9 @@ contract StakesTest is Test {
 
     function setUp() public {
         token = new MockBZZ();
-        reg = new StakeRegistry(address(token), STAKE);
-        reg.setModeration(CASES);
+        authority = new ModerationAuthority(address(this), 1, address(token), STAKE);
+        reg = new StakeAccountingHarness(authority);
+        authority.bindRegistries(address(reg), address(new IndexRegistry(authority)));
 
         for (uint256 i; i < 2; ++i) {
             address a = i == 0 ? alice : bob;
@@ -198,21 +209,19 @@ contract StakesTest is Test {
     function test_onlyModerationMayFreeze() public {
         _stake(alice);
         vm.prank(bob);
-        vm.expectRevert(StakeRegistry.NotModeration.selector);
-        reg.settle(alice, true, FREEZE);
-
+        vm.expectRevert(ModerationAuthority.UnknownCase.selector);
+        reg.settle(1, alice);
         vm.prank(bob);
-        vm.expectRevert(StakeRegistry.NotModeration.selector);
-        reg.noteCommit(alice);
+        vm.expectRevert(ModerationAuthority.UnknownCase.selector);
+        reg.noteCommit(1, alice);
     }
 
     function test_moderationLinkIsSetOnce() public {
-        vm.expectRevert(StakeRegistry.AlreadySet.selector);
-        reg.setModeration(address(0xDEAD));
-
-        StakeRegistry fresh = new StakeRegistry(address(token), STAKE);
+        vm.expectRevert(ModerationAuthority.AlreadyBound.selector);
+        authority.bindRegistries(address(reg), address(0xDEAD));
+        ModerationAuthority fresh = new ModerationAuthority(address(this), 1, address(token), STAKE);
         vm.prank(bob);
-        vm.expectRevert(StakeRegistry.NotDeployer.selector);
-        fresh.setModeration(address(0xDEAD));
+        vm.expectRevert(ModerationAuthority.NotAuthorizer.selector);
+        fresh.bindRegistries(address(reg), address(0xDEAD));
     }
 }

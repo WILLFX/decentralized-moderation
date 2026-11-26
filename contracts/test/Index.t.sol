@@ -2,10 +2,21 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
+import {MockBZZ} from "./mocks/MockBZZ.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
 
+/// Isolated index storage algorithms. Public outcome authorization is tested separately.
+contract IndexStorageHarness is IndexRegistry {
+    constructor(ModerationAuthority a) IndexRegistry(a) {}
+    function writeEntry(bytes32 claim, bytes32 topic, uint8 status, bool unanimous, bool challenged, uint32 approve, uint32 reject) external {
+        _writeEntry(claim, topic, status, unanimous, challenged, approve, reject);
+    }
+    function removeListing(bytes32 claim, bytes32 topic) external { _removeListing(claim, topic); }
+}
+
 contract IndexTest is Test {
-    IndexRegistry idx;
+    IndexStorageHarness idx;
 
     address constant CASES = address(0xCA5E5);
     bytes32 constant BIO = keccak256("biology");
@@ -15,8 +26,7 @@ contract IndexTest is Test {
     uint8 constant REJECT = 2;
 
     function setUp() public {
-        idx = new IndexRegistry();
-        idx.setModeration(CASES);
+        idx = new IndexStorageHarness(new ModerationAuthority(address(this), 1, address(new MockBZZ()), 1000));
     }
 
     function _write(bytes32 claim, bytes32 topic, uint8 status, bool unanimous, bool challenged)
@@ -169,11 +179,11 @@ contract IndexTest is Test {
     }
 
     function test_onlyModerationMayWrite() public {
-        vm.expectRevert(IndexRegistry.NotModeration.selector);
-        idx.writeEntry(keccak256("a"), BIO, APPROVE, true, false, 1, 0);
-
-        vm.expectRevert(IndexRegistry.NotModeration.selector);
-        idx.removeListing(keccak256("a"), BIO);
+        vm.expectRevert(ModerationAuthority.UnknownCase.selector);
+        idx.applyOutcome(1);
+        vm.prank(CASES);
+        vm.expectRevert(ModerationAuthority.UnknownCase.selector);
+        idx.applyOutcome(1);
     }
 
     function test_rejectsBadInput() public {

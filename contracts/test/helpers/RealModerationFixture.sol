@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {HistoryFixture} from "./HistoryFixture.sol";
 import {Moderation} from "../../src/Moderation.sol";
+import {ModerationAuthority} from "../../src/ModerationAuthority.sol";
 import {StakeRegistry} from "../../src/StakeRegistry.sol";
 import {IndexRegistry} from "../../src/IndexRegistry.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
@@ -25,14 +26,13 @@ abstract contract RealModerationFixture is HistoryFixture {
 
     function _deploy(uint256 maximumWait) internal {
         vm.roll(100);
-        vm.warp(1_000_000);
+        vm.warp(999_999);
         token = new MockBZZ();
-        stakes = new StakeRegistry(address(token), 1000);
-        index = new IndexRegistry();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+        stakes = new StakeRegistry(new ModerationAuthority(address(this), 1, address(token), 1000));
+        index = new IndexRegistry(stakes.authority());
+        stakes.authority().bindRegistries(address(stakes), address(index));
+        mod = _newModeration(Moderation.Config(address(token), address(stakes), address(index),
             900, 1800, 3600, maximumWait, 8 days, 2, FEE, 3, 1, keccak256("guidelines")));
-        stakes.setModeration(address(mod));
-        index.setModeration(address(mod));
         for (uint256 i; i < members.length; ++i) {
             members[i] = address(uint160(0x1000 + i));
             token.mint(members[i], 1000);

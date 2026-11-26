@@ -2,16 +2,17 @@
 pragma solidity ^0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
+import {MockStakes, MockIndex, MockRegistry} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice Exposes the draw over an arbitrary tally, without walking a case to
 ///         it. `_decide` reads the pooled counts off the case, so the harness
 ///         plants them and calls through.
 contract DrawHarness is Moderation {
     constructor(address t, address s, address i)
-        Moderation(Moderation.Config(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g")))
+        Moderation(Moderation.Config(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g")), MockRegistry(s).authority())
     {}
 
     function plant(uint256 caseId, uint32 a, uint32 r, uint8 round) external {
@@ -29,7 +30,13 @@ contract DrawTest is Test {
     uint8 constant REJECT = 2;
 
     function setUp() public {
-        d = new DrawHarness(address(new MockBZZ()), address(new MockStakes()), address(new MockIndex()));
+        MockBZZ token = new MockBZZ();
+        ModerationAuthority a = new ModerationAuthority(address(this), 1, address(token), 1000);
+        MockStakes stakes = new MockStakes();
+        MockIndex index = new MockIndex();
+        stakes.configure(a);
+        index.configure(a);
+        d = new DrawHarness(address(token), address(stakes), address(index));
     }
 
     function _decide(uint32 a, uint32 r, bytes32 e, uint8 round) internal returns (uint8 v, uint8 t) {

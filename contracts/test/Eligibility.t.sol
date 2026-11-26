@@ -3,19 +3,21 @@ pragma solidity ^0.8.28;
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 
 import {Test, console} from "forge-std/Test.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {Moderation} from "../src/Moderation.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
-import {MockStakes, MockIndex} from "./helpers/MockedModerationFixture.sol";
+import {MockStakes, MockIndex, MockRegistry} from "./helpers/MockedModerationFixture.sol";
 
 /// @notice Answers `stakedCount` and nothing else. `_eligBits` reads only that, so
 ///         a registry of 65,536 costs one constructor argument rather than 65,536
 ///         calls to a real mock — which is the difference between a test that runs
 ///         and a test nobody runs.
-contract FixedCount {
+contract FixedCount is MockRegistry {
     uint256 public stakedCount;
 
-    constructor(uint256 n) {
+    constructor(uint256 n, ModerationAuthority a) {
         stakedCount = n;
+        authority = a;
     }
 
     function isActive(address) external pure returns (bool) {
@@ -43,7 +45,7 @@ contract FixedCount {
 ///         not checked somewhere.
 contract BitsHarness is Moderation {
     constructor(address t, address s, address i)
-        Moderation(Moderation.Config(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g")))
+        Moderation(Moderation.Config(t, s, i, 15 minutes, 30 minutes, 1 hours, 1 hours, 8 days, 2, 1, 1, 1, keccak256("g")), MockRegistry(s).authority())
     {}
 
     function eligBits() external view returns (uint8) {
@@ -109,7 +111,7 @@ contract EligibilityTest is HistoryFixture {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+        mod = _newModeration(Moderation.Config(address(token), address(stakes), address(index),
             15 minutes, REVEAL_WINDOW, 1 hours, MAX_WAIT, 8 days, SEED_LAG, FEE, 1,
             1, keccak256("g")));
         for (uint256 i; i < STAKED; ++i) {
@@ -159,7 +161,7 @@ contract EligibilityTest is HistoryFixture {
 
         for (uint256 k; k < sizes.length; ++k) {
             BitsHarness h = new BitsHarness(
-                address(token), address(new FixedCount(sizes[k])), address(index)
+                address(token), address(new FixedCount(sizes[k], stakes.authority())), address(index)
             );
             assertEq(
                 h.eligBits(),
@@ -177,7 +179,7 @@ contract EligibilityTest is HistoryFixture {
         uint256[11] memory sizes = [uint256(16), 31, 32, 63, 64, 100, 511, 512, 1000, 1024, 65536];
         for (uint256 k; k < sizes.length; ++k) {
             BitsHarness h = new BitsHarness(
-                address(token), address(new FixedCount(sizes[k])), address(index)
+                address(token), address(new FixedCount(sizes[k], stakes.authority())), address(index)
             );
             uint256 expected = sizes[k] >> h.eligBits();
             assertGe(expected, 16, string.concat("too narrow at ", vm.toString(sizes[k])));
@@ -410,11 +412,13 @@ contract EligibilityTest is HistoryFixture {
         blk = _readyB(mod, id);
         _advance(SEED_LAG + 1);
         for (uint256 i; i < mods.length && mod.caseInfo(id).commitsB < 1; ++i) {
+            if (mod.voteOf(id, mods[i]).commitment != bytes32(0)) continue;
             if (!mod.isEligible(id, mods[i])) continue;
             bytes32 h = mod.commitHash(id, 0, mods[i], APPROVE, bytes32("s"));
             vm.prank(mods[i]);
             mod.commit(id, h);
         }
+        assertEq(mod.caseInfo(id).commitsB, 1, "committee B has a fresh voter");
         _wait(MAX_WAIT + 1);
         mod.closeCommitB(id);
 

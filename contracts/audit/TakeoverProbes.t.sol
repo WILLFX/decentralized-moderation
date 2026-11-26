@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {HistoryFixture} from "../test/helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {MockBZZ} from "../test/mocks/MockBZZ.sol";
@@ -30,17 +31,16 @@ contract TakeoverProbes is HistoryFixture {
 
     function setUp() public {
         token = new MockBZZ();
-        stakes = new StakeRegistry(address(token), STAKE);
-        index = new IndexRegistry();
-        mod = new Moderation(Moderation.Config({
+        stakes = new StakeRegistry(new ModerationAuthority(address(this), 1, address(token), STAKE));
+        index = new IndexRegistry(stakes.authority());
+        stakes.authority().bindRegistries(address(stakes), address(index));
+        mod = _newModeration(Moderation.Config({
             token: address(token), stakes: address(stakes), index: address(index),
             commitWindow: 15 minutes, revealWindow: REVEAL, challengeWindow: WAIT,
             maxWaitForThird: WAIT, freezePerLoss: FREEZE, seedLag: 2,
             feeMin: FEE, minRevealsPerCommittee: 3,
             guidelinesVersion: 1, guidelinesHash: keccak256("audit-fixture")
         }));
-        stakes.setModeration(address(mod));
-        index.setModeration(address(mod));
         for (uint256 i; i < members.length; ++i) {
             members[i] = address(uint160(0x1000 + i));
             token.mint(members[i], STAKE);

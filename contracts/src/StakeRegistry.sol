@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Moderation} from "./Moderation.sol";
+import {ModerationAuthority} from "./ModerationAuthority.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -37,8 +40,9 @@ contract StakeRegistry {
     IERC20 public immutable token;
     uint256 public immutable stakeAmount;
 
-    address public moderation;
-    address public immutable deployer;
+    ModerationAuthority public immutable authority;
+    mapping(address => mapping(uint256 => mapping(address => uint8))) public obligation;
+    error InvalidObligation();
 
     mapping(address => Moderator) internal mods;
     uint256 public stakedCount;
@@ -47,31 +51,15 @@ contract StakeRegistry {
     event Withdrawn(address indexed m);
     event Frozen(address indexed m, uint256 duration, uint40 until);
 
-    error NotModeration();
     error AlreadyStaked();
     error NotStaked();
     error IsFrozen();
     error HasOpenVotes();
-    error AlreadySet();
-    error NotDeployer();
 
-    constructor(address _token, uint256 _stakeAmount) {
-        token = IERC20(_token);
-        stakeAmount = _stakeAmount;
-        deployer = msg.sender;
-    }
-
-    /// @dev `Moderation` needs this registry's address at construction, so the
-    ///      link can only be closed afterwards. Once.
-    function setModeration(address m) external virtual {
-        if (msg.sender != deployer) revert NotDeployer();
-        if (moderation != address(0)) revert AlreadySet();
-        moderation = m;
-    }
-
-    modifier onlyModeration() {
-        if (msg.sender != moderation) revert NotModeration();
-        _;
+    constructor(ModerationAuthority authority_) {
+        authority = authority_;
+        token = IERC20(authority_.token());
+        stakeAmount = authority_.stakeAmount();
     }
 
     // ------------------------------------------------------------- staking
@@ -107,20 +95,33 @@ contract StakeRegistry {
 
     // ---------------------------------------------------------- from cases
 
-    function noteCommit(address m) external virtual onlyModeration {
-        ++mods[m].openVotes;
+    function noteCommit(uint256 id, address voter) external {
+        authority.requireCase(msg.sender, id, true);
+        Moderation.Vote memory v = Moderation(msg.sender).voteOf(id, voter);
+        if (
+            obligation[msg.sender][id][voter] != 0 || v.commitment == bytes32(0) || v.settled || !mods[voter].staked
+                || mods[voter].frozenUntil > block.timestamp
+        ) {
+            revert InvalidObligation();
+        }
+        obligation[msg.sender][id][voter] = 1;
+        ++mods[voter].openVotes;
     }
 
-    /// @dev One call per settled vote. `incoherent`: the freeze, added to the
-    ///      total. Otherwise the vote simply closes.
-    ///
-    ///      `incoherent` covers a vote that was revealed and lost AND a commitment
-    ///      that was never revealed at all — `Moderation.claim` decides which, and
-    ///      charges them the same duration on purpose so that withholding is not
-    ///      cheaper than being wrong. This contract does not distinguish them and
-    ///      should not: it holds the penalty, not the reason for it.
-    function settle(address m, bool incoherent, uint256 duration) external virtual onlyModeration {
-        _settle(m, incoherent, duration);
+    /// @dev Reads the registered case and settled vote. Non-reveal always freezes;
+    /// a revealed vote freezes only when it differs from the completed outcome.
+    function settle(uint256 id, address voter) external {
+        authority.requireCase(msg.sender, id, false);
+        Moderation.Case memory c = Moderation(msg.sender).caseInfo(id);
+        Moderation.Vote memory v = Moderation(msg.sender).voteOf(id, voter);
+        bool resolved = c.phase == uint8(Moderation.Phase.FINALIZED);
+        if (
+            (!resolved && c.phase != uint8(Moderation.Phase.UNRESOLVED)) || obligation[msg.sender][id][voter] != 1
+                || !v.settled || v.commitment == bytes32(0) || mods[voter].openVotes == 0
+        ) revert InvalidObligation();
+        obligation[msg.sender][id][voter] = 2;
+        bool frozen = v.revealed == 0 || (resolved && v.revealed != c.preliminary);
+        _settle(voter, frozen, Moderation(msg.sender).freezePerLoss());
     }
 
     function _settle(address m, bool incoherent, uint256 duration) internal {

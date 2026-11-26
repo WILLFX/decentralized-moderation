@@ -3,11 +3,18 @@ pragma solidity ^0.8.28;
 
 import {HistoryFixture} from "./HistoryFixture.sol";
 import {Moderation} from "../../src/Moderation.sol";
+import {ModerationAuthority} from "../../src/ModerationAuthority.sol";
 import {MockBZZ} from "../mocks/MockBZZ.sol";
 
 /// @notice Stake custody reduced to what `specs/protocol.md` §2 asks for: a
 ///         stake, and a total frozen time. No bond, no liabilities, no claims.
-contract MockStakes {
+abstract contract MockRegistry {
+    ModerationAuthority public authority;
+    function configure(ModerationAuthority a) external { authority = a; }
+    function token() external view returns (address) { return authority.token(); }
+    function stakeAmount() external view returns (uint256) { return authority.stakeAmount(); }
+}
+contract MockStakes is MockRegistry {
     mapping(address => bool) public active;
     mapping(address => uint256) public frozenUntil;
     mapping(address => uint256) public totalFrozen;
@@ -28,18 +35,25 @@ contract MockStakes {
 
     mapping(address => uint32) public openVotes;
 
-    function noteCommit(address a) external {
+    function noteCommit(uint256, address a) external {
         ++openVotes[a];
     }
 
     /// @dev §2 — durations are ADDITIVE to a total, not extensions from now, so
     ///      the same losses cost the same whatever order they settle in.
-    function settle(address a, bool incoherent, uint256 duration) external {
+    function settle(address a, bool incoherent, uint256 duration) public {
         if (openVotes[a] != 0) --openVotes[a];
         if (!incoherent) return;
         totalFrozen[a] += duration;
         uint256 base = frozenUntil[a] > block.timestamp ? frozenUntil[a] : block.timestamp;
         frozenUntil[a] = base + duration;
+    }
+
+    function settle(uint256 id, address voter) external {
+        Moderation m = Moderation(msg.sender);
+        Moderation.Case memory c = m.caseInfo(id);
+        Moderation.Vote memory v = m.voteOf(id, voter);
+        settle(voter, v.revealed == 0 || (c.phase == uint8(Moderation.Phase.FINALIZED) && v.revealed != c.preliminary), m.freezePerLoss());
     }
 
     function freeze(address a, uint256 duration) external {
@@ -49,7 +63,7 @@ contract MockStakes {
     }
 }
 
-contract MockIndex {
+contract MockIndex is MockRegistry {
     struct Entry {
         bool written;
         bool allTicketsApprove;
@@ -59,20 +73,20 @@ contract MockIndex {
     mapping(bytes32 => Entry) public entries;
     uint256 public writes;
 
-    function writeEntry(bytes32 claimKey, bytes32, uint8, bool allTicketsApprove, bool everChallenged, uint32, uint32)
-        external
-    {
-        entries[claimKey] = Entry(true, allTicketsApprove, everChallenged);
-        ++writes;
+    function applyOutcome(uint256 id) external {
+        Moderation m = Moderation(msg.sender);
+        Moderation.Case memory c = m.caseInfo(id);
+        if (c.preliminary != 1) return;
+        for (uint256 i; i < c.topicCount; ++i) {
+            if (c.actionType == 1) { gone[c.claimKey] = true; ++removals; }
+            else { entries[c.claimKey] = Entry(true, c.ticketsApprove == 3, c.everChallenged); ++writes; }
+        }
     }
 
     mapping(bytes32 => bool) public gone;
     uint256 public removals;
 
-    function removeListing(bytes32 claimKey, bytes32) external {
-        gone[claimKey] = true;
-        ++removals;
-    }
+
 }
 
 /// @dev Common floor-one setup; each suite selects its original moderator count.
@@ -128,7 +142,7 @@ abstract contract MockedModerationFixture is HistoryFixture {
         token = new MockBZZ();
         stakes = new MockStakes();
         index = new MockIndex();
-        mod = new Moderation(
+        mod = _newModeration(
             Moderation.Config(
                 address(token),
                 address(stakes),

@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
+import {Moderation} from "../src/Moderation.sol";
 import {Deploy} from "../script/Deploy.s.sol";
 import {DeployChiado} from "../script/DeployChiado.s.sol";
 import {ChiadoTestToken} from "../src/testnet/ChiadoTestToken.sol";
@@ -37,32 +39,34 @@ contract ChiadoDeploymentTest is Test {
         DeployChiado script = new DeployChiado();
         vm.chainId(1);
         vm.expectRevert(abi.encodeWithSelector(DeployChiado.ChiadoRequired.selector, 1));
-        script.runChiado(DEPLOYER);
+        script.runChiado(DEPLOYER, DEPLOYER, 600);
+        Moderation.Config memory params = script.defaults(address(1));
         vm.expectRevert(abi.encodeWithSelector(DeployChiado.ChiadoRequired.selector, 1));
-        script.run();
-        Deploy.Params memory params = script.defaults(address(1));
+        script.run(params, 10e16, DEPLOYER, 600);
         vm.expectRevert(abi.encodeWithSelector(DeployChiado.ChiadoRequired.selector, 1));
-        script.deploy(params);
+        script.deploy(params, 10e16, DEPLOYER, 600);
     }
 
     function test_scriptRefusesZeroDeployer() public {
         vm.chainId(10200);
         DeployChiado script = new DeployChiado();
         vm.expectRevert(DeployChiado.ZeroDeployer.selector);
-        script.runChiado(address(0));
-        vm.setEnv("CHIADO_DEPLOYER", vm.toString(address(0)));
-        vm.expectRevert(DeployChiado.ZeroDeployer.selector);
-        script.run();
+        script.runChiado(address(0), DEPLOYER, 600);
+        vm.expectRevert(ModerationAuthority.BadConfiguration.selector);
+        script.runChiado(DEPLOYER, address(0), 600);
     }
 
     function test_scriptDeploysLinkedStackAndSupportsActualStakeTransfer() public {
         vm.chainId(10200);
         vm.deal(DEPLOYER, 1 ether);
         DeployChiado script = new DeployChiado();
-        (Deploy.Stack memory stack, ChiadoTestToken token) = script.runChiado(DEPLOYER);
+        (Deploy.Stack memory stack, ChiadoTestToken token) = script.runChiado(DEPLOYER, REVIEWER, 600);
+        assertEq(stack.authority.active(), address(0), "deployment cannot bypass activation");
+        vm.prank(REVIEWER);
+        stack.authority.bindRegistries(address(stack.stakes), address(stack.index));
         script.verify(stack);
-        assertEq(stack.stakes.deployer(), DEPLOYER);
-        assertEq(stack.index.deployer(), DEPLOYER);
+        assertEq(stack.authority.authorizer(), REVIEWER);
+        assertEq(stack.authority.noticePeriod(), 600);
         assertEq(address(stack.moderation.token()), address(token));
         assertEq(stack.stakes.stakeAmount(), 10e16);
         assertEq(token.balanceOf(DEPLOYER), 1000e16);

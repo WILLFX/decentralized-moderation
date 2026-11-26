@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {HistoryFixture} from "./helpers/HistoryFixture.sol";
 import {Moderation} from "../src/Moderation.sol";
+import {ModerationAuthority} from "../src/ModerationAuthority.sol";
 import {StakeRegistry} from "../src/StakeRegistry.sol";
 import {IndexRegistry} from "../src/IndexRegistry.sol";
 import {MockBZZ} from "./mocks/MockBZZ.sol";
@@ -21,12 +22,11 @@ contract N4EligibilityTest is HistoryFixture {
         vm.roll(100);
         vm.warp(1_000_000);
         token = new MockBZZ();
-        stakes = new StakeRegistry(address(token), 1000);
-        index = new IndexRegistry();
-        mod = new Moderation(Moderation.Config(address(token), address(stakes), address(index),
+        stakes = new StakeRegistry(new ModerationAuthority(address(this), 1, address(token), 1000));
+        index = new IndexRegistry(stakes.authority());
+        stakes.authority().bindRegistries(address(stakes), address(index));
+        mod = _newModeration(Moderation.Config(address(token), address(stakes), address(index),
             900, 1800, 3600, 3600, 8 days, 2, FEE, 3, 1, keccak256("guidelines")));
-        stakes.setModeration(address(mod));
-        index.setModeration(address(mod));
         _stakeMembers(0, 64);
         token.mint(PUBLISHER, 10 * FEE);
         vm.prank(PUBLISHER);

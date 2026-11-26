@@ -48,9 +48,9 @@ count are shared; withdrawal still requires no outstanding votes and no freeze.
 The scoped settlement method reads the terminal case and recorded vote from the
 originating version. It applies that version's fixed freeze duration.
 
-`PersistentModeration` inherits the existing state machine and uses registry
-adapters for opening, obligations, terminal index effects and completion. It does
-not replace voting, eligibility, reveal, challenge-intent or settlement rules.
+`Moderation` implements the state machine and calls the authority and registries
+directly for opening, obligations, terminal index effects and completion. Voting,
+eligibility, reveal, challenge-intent and settlement rules remain unchanged.
 Each proposal pins the version's declared token, timing, freeze duration, seed lag,
 fee minimum, reveal minimum and guidelines identity through its configuration
 fingerprint. Activation rechecks that fingerprint and retains it per version.
@@ -81,7 +81,7 @@ slot; only finalized approval marks the target removed.
 
 ## Configuration and client boundary
 
-`contracts/script/DeployPersistent.s.sol` prepares a new authority, two registries
+`contracts/script/Deploy.s.sol` prepares a new authority, two registries
 and a moderation version from explicit configuration. It leaves them inactive.
 The configured authorizer must call `bindRegistries`, then `propose`; anyone can
 call `activate` after the delay. `propose` takes the candidate address, runtime

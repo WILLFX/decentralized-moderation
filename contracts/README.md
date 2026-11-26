@@ -9,6 +9,7 @@ stack; [operator guidance](../docs/OPERATORS.md) explains another deployment.
 | `src/Moderation.sol` | Submission, paired-group voting, outcome draws, challenges, fee custody and settlement |
 | `src/StakeRegistry.sol` | Fixed stakes, outstanding votes and additive frozen time |
 | `src/IndexRegistry.sol` | Entry facts and paged topic membership |
+| `src/ModerationAuthority.sol` | Delayed version authorization, registered cases and removal ownership |
 | `src/testnet/ChiadoTestToken.sol` | Chiado-only TEST token with a public faucet |
 
 ## Build and commands
@@ -40,10 +41,13 @@ FOUNDRY_TEST=audit FOUNDRY_OUT=out-audit FOUNDRY_CACHE_PATH=cache-audit forge te
 
 ## Deploy and link
 
-`script/Deploy.s.sol` takes a `Params` structure, creates both registries and
-`Moderation`, then sets their one-time links. Its `verify` method checks links in
-both directions and agreement on the token. `script/DeployChiado.s.sol` adds the
-TEST faucet token, enforces chain ID 10200 and takes a public deploying address.
+`script/Deploy.s.sol` takes a `Moderation.Config`, stake amount, authorizer and
+notice period. It creates the authority, both registries and `Moderation`, leaving
+the family inactive. The authorizer binds the registries and proposes the reviewed
+version; anyone can activate it after the notice period. `verify` checks the bound
+connections. `script/DeployChiado.s.sol` adds the TEST faucet token and enforces
+chain ID 10200. Its `runChiado(deployer, authorizer, noticePeriod)` takes public
+addresses; it does not assume the deployer controls governance.
 A dry script run simulates; broadcasting/signing is a separate operator action.
 
 The root `MODERATION_GUIDELINES.md` supplies the immutable guideline hash. Do not
@@ -69,8 +73,8 @@ Arithmetic, exact-call binding and client ABI behavior must agree across compone
 
 ## Persistent-registry contracts
 
-`src/persistent/` adds delayed replacement authorization and case-scoped completion
-rights while retaining the existing moderation state machine. See the
+The canonical contracts in `src/` include delayed replacement authorization and
+case-scoped completion rights. See the
 [persistent-registry interface](../specs/persistent-registries.md) for permissions,
 configuration and the client boundary. The current Chiado release uses this family.
 Earlier fixed-link deployments remain separate sources, with their own case and

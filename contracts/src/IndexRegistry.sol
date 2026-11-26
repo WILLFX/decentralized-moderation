@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Moderation} from "./Moderation.sol";
+import {ModerationAuthority} from "./ModerationAuthority.sol";
+
 /// @title IndexRegistry
 /// @notice The topic → entry index of `specs/protocol.md` §7 — what a reader
 ///         actually consults.
@@ -35,8 +38,17 @@ contract IndexRegistry {
         uint40 finalizedAt;
     }
 
-    address public immutable deployer;
-    address public moderation;
+    struct Origin {
+        address moderation;
+        uint256 caseId;
+        uint32 guidelinesVersion;
+        bytes32 guidelinesHash;
+    }
+    ModerationAuthority public immutable authority;
+    mapping(bytes32 => Origin) public originOf;
+    mapping(address => mapping(uint256 => bool)) public applied;
+    event OutcomeApplied(address indexed moderation, uint256 indexed caseId, uint8 actionType);
+    error InvalidOutcome();
 
     mapping(bytes32 => Entry) internal entries;
 
@@ -55,27 +67,13 @@ contract IndexRegistry {
     event ListingAdded(bytes32 indexed topicKey, bytes32 indexed entryKey);
     event ListingRemoved(bytes32 indexed topicKey, bytes32 indexed entryKey);
 
-    error NotModeration();
-    error NotDeployer();
-    error AlreadySet();
     error ZeroTopicKey();
     error BadStatus();
     error NoSuchEntry();
     error BadPage();
 
-    constructor() {
-        deployer = msg.sender;
-    }
-
-    function setModeration(address m) external virtual {
-        if (msg.sender != deployer) revert NotDeployer();
-        if (moderation != address(0)) revert AlreadySet();
-        moderation = m;
-    }
-
-    modifier onlyModeration() {
-        if (msg.sender != moderation) revert NotModeration();
-        _;
+    constructor(ModerationAuthority authority_) {
+        authority = authority_;
     }
 
     /// @dev An entry is per (claim, topic): the same content filed under two
@@ -85,18 +83,6 @@ contract IndexRegistry {
     }
 
     // --------------------------------------------------------------- writes
-
-    function writeEntry(
-        bytes32 claimKey,
-        bytes32 topicKey,
-        uint8 status,
-        bool allTicketsApprove,
-        bool everChallenged,
-        uint32 approve,
-        uint32 reject
-    ) external virtual onlyModeration {
-        _writeEntry(claimKey, topicKey, status, allTicketsApprove, everChallenged, approve, reject);
-    }
 
     function _writeEntry(bytes32 claimKey, bytes32 topicKey, uint8 status,
         bool allTicketsApprove, bool everChallenged, uint32 approve, uint32 reject) internal {
@@ -123,12 +109,7 @@ contract IndexRegistry {
         emit EntryWritten(k, topicKey, status, allTicketsApprove, everChallenged);
     }
 
-    /// @dev §8 — a successful removal case takes the entry out. Approve on a
-    ///      removal means remove, so `Moderation` calls this rather than
-    ///      `writeEntry` when a removal finalizes as Approve.
-    function removeListing(bytes32 claimKey, bytes32 topicKey) external virtual onlyModeration {
-        _removeListing(claimKey, topicKey);
-    }
+    /// @dev An approved removal takes the entry out; its origin remains recorded.
 
     function _removeListing(bytes32 claimKey, bytes32 topicKey) internal {
         bytes32 k = entryKeyOf(claimKey, topicKey);
@@ -190,5 +171,34 @@ contract IndexRegistry {
         for (uint256 i; i < n; ++i) {
             page[i] = l[offset + i];
         }
+    }
+
+    function applyOutcome(uint256 id) external {
+        authority.requireCase(msg.sender, id, true);
+        Moderation m = Moderation(msg.sender);
+        Moderation.Case memory c = m.caseInfo(id);
+        if (c.phase != uint8(Moderation.Phase.FINALIZED) || applied[msg.sender][id]) revert InvalidOutcome();
+        applied[msg.sender][id] = true;
+        bytes32[5] memory topics = m.topicsOf(id);
+        if (c.preliminary == 1) {
+            for (uint256 i; i < c.topicCount; ++i) {
+                if (c.actionType == 1) {
+                    _removeListing(c.claimKey, topics[i]);
+                } else {
+                    _writeEntry(
+                        c.claimKey,
+                        topics[i],
+                        1,
+                        c.ticketsApprove == 3,
+                        c.everChallenged,
+                        c.pooledApprove,
+                        c.pooledReject
+                    );
+                    originOf[entryKeyOf(c.claimKey, topics[i])] =
+                        Origin(msg.sender, id, m.guidelinesVersion(), m.guidelinesHash());
+                }
+            }
+        }
+        emit OutcomeApplied(msg.sender, id, c.actionType);
     }
 }

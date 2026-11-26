@@ -1,43 +1,37 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Moderation} from "../src/Moderation.sol";
 import {Deploy} from "./Deploy.s.sol";
 import {ChiadoTestToken} from "../src/testnet/ChiadoTestToken.sol";
 
-/// @notice Deploys a valueless test token and the reviewed stack on Chiado.
-/// @dev Defaults and link verification are inherited unchanged. Every deployment
-///      entry point checks Chiado. The default run() creates the faucet token.
-///      run() reads public CHIADO_DEPLOYER; runChiado(address) takes that address
-///      explicitly for automation. Neither path reads a key; signing is external.
+/// @notice Chiado-only deployment with explicit governance. The family starts inactive.
 contract DeployChiado is Deploy {
     error ChiadoRequired(uint256 chainId);
     error ZeroDeployer();
-
     function requireChiado() internal view {
         if (block.chainid != 10200) revert ChiadoRequired(block.chainid);
     }
-
-    function deploy(Params memory params) public override returns (Stack memory) {
+    function run(Moderation.Config memory cfg, uint256 stakeAmount, address authorizer, uint256 noticePeriod)
+        public override returns (Stack memory)
+    {
         requireChiado();
-        return super.deploy(params);
+        return super.run(cfg, stakeAmount, authorizer, noticePeriod);
     }
-
-    function run() external override returns (Stack memory stack) {
+    function deploy(Moderation.Config memory cfg, uint256 stakeAmount, address authorizer, uint256 noticePeriod)
+        public override returns (Stack memory)
+    {
         requireChiado();
-        (stack,) = deployChiado(vm.envAddress("CHIADO_DEPLOYER"));
+        return super.deploy(cfg, stakeAmount, authorizer, noticePeriod);
     }
-
-    function runChiado(address deployer) external returns (Stack memory stack, ChiadoTestToken testToken) {
-        return deployChiado(deployer);
-    }
-
-    function deployChiado(address deployer) internal returns (Stack memory stack, ChiadoTestToken testToken) {
+    function runChiado(address deployer, address authorizer, uint256 noticePeriod)
+        external returns (Stack memory stack, ChiadoTestToken testToken)
+    {
         requireChiado();
         if (deployer == address(0)) revert ZeroDeployer();
-
         vm.startBroadcast(deployer);
         testToken = new ChiadoTestToken(deployer);
-        stack = deploy(defaults(address(testToken)));
+        stack = deploy(defaults(address(testToken)), 10e16, authorizer, noticePeriod);
         vm.stopBroadcast();
     }
 }

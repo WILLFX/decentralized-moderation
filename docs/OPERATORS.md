@@ -39,7 +39,7 @@ The current websites support moderation deployments on Gnosis (100) and Chiado
 The current release uses a persistent registry family: one authority, a stake
 registry, a topic index and an initial moderation version. Supply an existing
 token, stake amount, authorization account and notice period to
-`contracts/script/DeployPersistent.s.sol`. Its four creations remain inactive.
+`contracts/script/Deploy.s.sol`. Its four creations remain inactive.
 The authorizer then binds the registries and proposes the exact version's runtime
 and configuration hashes. Anyone can activate that proposal after its notice.
 The authorization account can be a Safe; its owners approve the authorizer calls.
